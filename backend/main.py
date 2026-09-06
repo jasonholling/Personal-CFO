@@ -8,6 +8,7 @@ import json
 from datetime import datetime
 from projection_engine import run_retirement_projection, run_education_projection
 from task_engine import sync_auto_tasks
+from cfo_briefing_engine import build_cfo_briefing
 from quicken_importer import parse_quicken_networth_csv, get_net_worth_summary
 from db import init_db, get_db
 import auth
@@ -556,6 +557,29 @@ def get_emergency_fund():
         raise HTTPException(status_code=400, detail="Planning inputs not set yet")
     from net_worth_engine import emergency_fund_check
     return emergency_fund_check(accounts, dict(inputs_row).get("current_monthly_expenses", 0))
+
+@app.get("/api/cfo-briefing")
+def get_cfo_briefing():
+    """A read-only, prioritized summary of the existing household plan."""
+    conn = get_db()
+    inputs_row = conn.execute("SELECT * FROM planning_inputs WHERE id=1").fetchone()
+    accounts = [dict(r) for r in conn.execute("SELECT * FROM accounts").fetchall()]
+    snapshots = [dict(r) for r in conn.execute(
+        "SELECT id, snapshot_date, total_assets, liabilities, net_worth, note FROM snapshots ORDER BY snapshot_date DESC LIMIT 1"
+    ).fetchall()]
+    tasks = [dict(r) for r in conn.execute(
+        "SELECT * FROM tasks WHERE completed=0 ORDER BY created_at DESC LIMIT 24"
+    ).fetchall()]
+    conn.close()
+    inputs = dict(inputs_row) if inputs_row else {}
+    try:
+        retirement = run_retirement_projection(inputs, accounts, ret_ages=[60])
+        education = run_education_projection(inputs, accounts)
+    except (KeyError, ValueError, ZeroDivisionError):
+        # Empty or partially completed setup should still receive useful
+        # data-quality guidance instead of an unusable dashboard error.
+        retirement, education = {}, {}
+    return build_cfo_briefing(accounts, inputs, snapshots, tasks, retirement, education)
 
 @app.get("/api/rental/analysis")
 def get_rental_analysis():

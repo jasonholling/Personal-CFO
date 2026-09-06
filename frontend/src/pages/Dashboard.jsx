@@ -35,11 +35,13 @@ export default function Dashboard({ onNavigate }) {
   const [snapping, setSnapping] = useState(false)
   const [note, setNote] = useState('')
   const [emergencyFund, setEmergencyFund] = useState(null)
+  const [briefing, setBriefing] = useState(null)
 
   useEffect(() => {
     axios.get('/api/net-worth').then(r => setNw(r.data)).catch(() => {})
     axios.get('/api/snapshots').then(r => setSnapshots(r.data)).catch(() => {})
     axios.get('/api/emergency-fund').then(r => setEmergencyFund(r.data)).catch(() => {})
+    axios.get('/api/cfo-briefing').then(r => setBriefing(r.data)).catch(() => {})
   }, [])
 
   const takeSnapshot = async () => {
@@ -48,6 +50,8 @@ export default function Dashboard({ onNavigate }) {
       await axios.post('/api/snapshot', { note: note || 'Monthly update' })
       const r = await axios.get('/api/snapshots')
       setSnapshots(r.data)
+      const updatedBriefing = await axios.get('/api/cfo-briefing')
+      setBriefing(updatedBriefing.data)
       setNote('')
     } finally {
       setSnapping(false)
@@ -88,6 +92,36 @@ export default function Dashboard({ onNavigate }) {
         </div>
       ) : (
         <>
+          {briefing && (
+            <div className="card" style={{ marginBottom: 24, border: '1px solid rgba(79,156,249,0.3)', background: 'linear-gradient(135deg, rgba(79,156,249,0.10), var(--bg2) 62%)' }}>
+              <div style={{ display:'flex', justifyContent:'space-between', gap:16, alignItems:'flex-start', marginBottom: briefing.priorities?.length ? 16 : 0 }}>
+                <div>
+                  <div className="label" style={{ color:'var(--accent)', marginBottom:6 }}>CFO BRIEFING</div>
+                  <div style={{ fontSize:18, fontWeight:650 }}>Your highest-value next moves</div>
+                  <div style={{ color:'var(--text2)', fontSize:12, marginTop:4 }}>
+                    {briefing.data_health?.planning_ready ? 'Based on your current household inputs and projections.' : 'Complete the missing inputs below to turn this into a fully personalized plan.'}
+                  </div>
+                </div>
+                <div style={{ textAlign:'right', color:'var(--text2)', fontSize:11, whiteSpace:'nowrap' }}>
+                  {briefing.data_health?.open_task_count || 0} open actions
+                  <div style={{ marginTop:3 }}>{briefing.data_health?.snapshot_age_days == null ? 'No snapshot yet' : `Snapshot ${briefing.data_health.snapshot_age_days}d ago`}</div>
+                </div>
+              </div>
+              {briefing.priorities?.length > 0 ? briefing.priorities.map((item, index) => (
+                <button key={`${item.title}-${index}`} onClick={() => onNavigate(item.destination)} style={{ width:'100%', display:'flex', alignItems:'center', gap:12, textAlign:'left', padding:'11px 0', background:'transparent', border:'none', borderTop: index ? '1px solid var(--border)' : 'none', color:'var(--text)', cursor:'pointer' }}>
+                  <span style={{ width:22, height:22, flexShrink:0, borderRadius:11, background:'rgba(79,156,249,0.16)', color:'var(--accent)', display:'grid', placeItems:'center', fontSize:11, fontWeight:700 }}>{index + 1}</span>
+                  <span style={{ flex:1 }}>
+                    <span style={{ display:'block', fontSize:13, fontWeight:600 }}>{item.title}</span>
+                    <span style={{ display:'block', color:'var(--text2)', fontSize:12, marginTop:2, lineHeight:1.4 }}>{item.detail}</span>
+                  </span>
+                  {item.amount != null && <span style={{ color:'var(--amber)', fontWeight:650, fontSize:13, whiteSpace:'nowrap' }}>{fmt(item.amount)}</span>}
+                  <span style={{ color:'var(--text3)' }}>→</span>
+                </button>
+              )) : (
+                <div style={{ color:'var(--green)', fontSize:13 }}>✓ No material gaps surfaced by the current assumptions. Keep the annual plan and monthly snapshot current.</div>
+              )}
+            </div>
+          )}
           {emergencyFund?.has_data && emergencyFund.status === 'underfunded' && (
             <div
               style={{ padding: '12px 16px', background: 'rgba(251,191,36,0.08)', border: '1px solid rgba(251,191,36,0.2)', borderRadius: 8, marginBottom: 24, fontSize: 13, color: 'var(--amber)', fontWeight: 500, cursor: 'pointer' }}

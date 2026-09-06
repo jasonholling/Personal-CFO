@@ -131,6 +131,22 @@ class TestNetWorth:
         assert r["investment"] == 0
 
 
+class TestCfoBriefing:
+    def test_briefing_is_available_with_a_fresh_install(self, client):
+        r = client.get("/api/cfo-briefing")
+        assert r.status_code == 200
+        body = r.json()
+        assert "priorities" in body
+        assert body["data_health"]["account_count"] == 0
+
+    def test_briefing_uses_existing_calculations(self, client, sample_inputs, sample_accounts):
+        _seed_planning_inputs(client, {**sample_inputs, "current_monthly_expenses": 10_000})
+        _seed_accounts(client, sample_accounts)
+        body = client.get("/api/cfo-briefing").json()
+        assert body["emergency_fund"]["has_data"] is True
+        assert body["data_health"]["account_count"] == len(sample_accounts)
+
+
 class TestProjectionsRequirePlanningInputs:
     def test_retirement_projection_200_with_default_row(self, client):
         # db.init_db() always seeds a planning_inputs row (id=1) with zeroed
