@@ -261,7 +261,7 @@ class TestTasksCrud:
 
 
 class TestQuickenImport:
-    def test_import_valid_csv(self, client):
+    def test_import_without_a_local_mapping_is_rejected(self, client):
         csv_content = (
             "Net Worth Summary\n---\n"
             'Checking,First National Checking,"1,000.00"\n'
@@ -270,8 +270,7 @@ class TestQuickenImport:
             "/api/import/quicken",
             files={"file": ("networth.csv", csv_content, "text/csv")},
         )
-        assert r.status_code == 200
-        assert r.json()["accounts_created"] == 1
+        assert r.status_code == 400
 
     def test_import_csv_with_no_matching_accounts_400s(self, client):
         csv_content = "Net Worth Summary\n---\nSomething,Totally Unmapped Account,0.00\n"
@@ -830,3 +829,43 @@ class TestAuthEndpoints:
     def test_webauthn_login_verify_rejects_garbage(self, client):
         r = client.post("/api/auth/webauthn/login-verify", json={"credential": {"not": "real"}})
         assert r.status_code == 401
+
+
+class TestCfoOperatingSystem:
+    def test_plan_confidence_and_runway(self, client, sample_inputs, sample_accounts):
+        _seed_planning_inputs(client, sample_inputs)
+        _seed_accounts(client, sample_accounts)
+        confidence = client.get("/api/plan-confidence")
+        assert confidence.status_code == 200
+        assert confidence.json()["checks"]
+        runway = client.get("/api/financial-runway")
+        assert runway.status_code == 200
+        assert runway.json()["account_count"] == len(sample_accounts)
+
+    def test_life_event_crud(self, client):
+        created = client.post("/api/life-events", json={"name":"Career pause","event_type":"career","event_year":2030,"one_time_cash_delta":-1000,"monthly_cash_flow_delta":-100,"duration_months":12})
+        assert created.status_code == 200
+        event_id = created.json()["id"]
+        listed = client.get("/api/life-events")
+        assert listed.status_code == 200
+        assert listed.json()["events"][0]["id"] == event_id
+        assert client.delete(f"/api/life-events/{event_id}").status_code == 200
+
+    def test_estate_documents_and_assumption_review(self, client):
+        document = {"document_type":"Will","status":"complete","reviewed_on":"2026-01-01","next_review_on":"2027-01-01","location_hint":"Home safe","notes":""}
+        assert client.put("/api/estate-documents/Will", json=document).status_code == 200
+        documents = client.get("/api/estate-documents")
+        assert documents.status_code == 200
+        assert documents.json()[0]["status"] == "complete"
+        created = client.post("/api/assumption-reviews", json={"label":"Base","assumptions":{"inflation_rate":.025}})
+        assert created.status_code == 200
+        reviews = client.get("/api/assumption-reviews")
+        assert reviews.status_code == 200
+        assert reviews.json()[0]["assumptions"]["inflation_rate"] == .025
+
+    def test_calendar_export_contains_open_tasks(self, client):
+        assert client.post("/api/tasks/sync").status_code == 200
+        response = client.get("/api/calendar/export")
+        assert response.status_code == 200
+        assert response.headers["content-type"].startswith("text/calendar")
+        assert "BEGIN:VEVENT" in response.text

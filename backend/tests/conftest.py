@@ -87,6 +87,10 @@ def temp_db(tmp_path, monkeypatch):
     db_module.init_db()
     db_module.init_tasks_table()
     db_module.init_cash_flow_table()
+    db_module.init_surplus_allocation_table()
+    db_module.init_saved_scenarios_table()
+    db_module.init_life_events_table()
+    db_module.init_cfo_operating_tables()
     yield db_path
 
 

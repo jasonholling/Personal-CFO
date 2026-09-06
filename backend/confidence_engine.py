@@ -19,7 +19,7 @@ def plan_confidence(accounts: List[Dict], inputs: Dict, cash_flow: Dict) -> Dict
     """Return specific evidence and limitations rather than a magic score."""
     checks = []
     latest_update = max((_days_since(a.get("updated_at")) for a in accounts), default=None)
-    stale = [a for a in accounts if (_days_since(a.get("updated_at")) or 10_000) > 35]
+    stale = [a for a in accounts if (_days_since(a.get("updated_at")) if _days_since(a.get("updated_at")) is not None else 10_000) > 35]
     checks.append({
         "key": "balances", "label": "Account balances",
         "status": "ready" if accounts and not stale else "attention",
