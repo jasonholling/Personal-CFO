@@ -67,6 +67,7 @@ export default function WhatIf({ onNavigate, onAssumptionsChange }) {
   const [loading, setLoading] = useState(true)
   const [computing, setComputing] = useState(false)
   const [computeError, setComputeError] = useState(false)
+  const [settingsReady, setSettingsReady] = useState(false)
   // Latest-request-wins guard: a fast run of slider changes fires a new
   // POST for each one with no cancellation, so a slow earlier response
   // could land after a faster later one and overwrite the display for
@@ -131,6 +132,7 @@ export default function WhatIf({ onNavigate, onAssumptionsChange }) {
       setBaseline(next)
       setPreReturn(next.preReturn); setPostReturn(next.postReturn); setInflation(next.inflation)
       setIncome(next.income); setHealthcare(next.healthcare); setBridgeIncome(next.bridgeIncome)
+      setSettingsReady(true)
     }).catch(() => {})
   }
 
@@ -180,8 +182,8 @@ export default function WhatIf({ onNavigate, onAssumptionsChange }) {
   }, [retAge, salaryGrowthPct, preReturn, postReturn, inflation, pensionMult, ssMult, healthcare, income, bridgeIncome, onAssumptionsChange])
 
   useEffect(() => {
-    if (!loading) recompute()
-  }, [retAge, salaryGrowthPct, preReturn, postReturn, inflation, pensionMult, ssMult, healthcare, income, bridgeIncome])
+    if (!loading && settingsReady) recompute()
+  }, [loading, settingsReady, recompute])
 
   const reset = () => {
     setRetAge(NEUTRAL_DEFAULTS.retAge); setSalaryGrowthPct(NEUTRAL_DEFAULTS.salaryGrowthPct)

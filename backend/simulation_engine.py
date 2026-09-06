@@ -82,10 +82,11 @@ def _run_single(
     post_life_events: List[Dict] = None,
     justin_ss_annual: float = JUSTIN_SPOUSAL_ANNUAL,
     justin_ss_age: float = JUSTIN_SPOUSAL_AGE,
+    retirement_end_age: int = 99,
 ) -> Tuple[bool, List[float], List[float]]:
     """
     Run a single retirement simulation.
-    Returns (survived_to_99, yearly_total_balances, yearly_pretax_balances)
+    Returns success through the configured horizon and annual bucket balances.
 
     post_life_events: withdrawal-phase life events already classified by
     _split_life_events() (i.e. only the "post" half) — the caller derives
@@ -111,7 +112,7 @@ def _run_single(
     "success" (external audit 2026-09-06, same root cause as
     projection_engine.py's on_track fix).
     """
-    mort_age   = 99
+    mort_age   = max(ret_age + 1, min(110, int(retirement_end_age or 99)))
     retire_yrs = mort_age - ret_age
     retirement_year = CURRENT_YEAR + max(0, ret_age - jason_age)
 
@@ -129,7 +130,7 @@ def _run_single(
 
     for yr in range(retire_yrs):
         age      = ret_age + yr
-        ret      = annual_returns[yr] if yr < len(annual_returns) else random.gauss(PORT_MEAN, PORT_STD)
+        ret      = annual_returns[yr] if yr < len(annual_returns) else random.gauss(post_ret, PORT_STD)
         inf_mult = inflation_mults[yr] if inflation_mults and yr < len(inflation_mults) else 1.0
         eff_inf  = inflation * inf_mult
 
@@ -142,15 +143,15 @@ def _run_single(
         # the age-55 branch below still owns the bridge-job/kids-at-home
         # phasing, but no longer needs its own separate hc_pre/hc_post
         # copies since it can just reuse these.
-        healthcare_pre  = (phase_inputs or {}).get("healthcare_pre", 0)
-        healthcare_post = (phase_inputs or {}).get("healthcare_post", 0)
+        healthcare_pre  = (phase_inputs or {}).get("healthcare_pre", 0) * ((1 + inflation) ** max(0, ret_age - jason_age))
+        healthcare_post = (phase_inputs or {}).get("healthcare_post", 0) * ((1 + inflation) ** max(0, ret_age - jason_age))
         hc_this_year = healthcare_pre if age < 65 else healthcare_post
         if phase_inputs and ret_age == 55:
             bridge_years  = phase_inputs.get("bridge_years", 0)
             kids_years    = phase_inputs.get("kids_years", 0)
-            kids_cost     = phase_inputs.get("kids_annual_cost", 0)
-            bridge_income = phase_inputs.get("bridge_income", 0)
-            hc_kids       = phase_inputs.get("healthcare_kids", 0)
+            kids_cost     = phase_inputs.get("kids_annual_cost", 0) * ((1 + inflation) ** max(0, ret_age - jason_age))
+            bridge_income = phase_inputs.get("bridge_income", 0) * ((1 + inflation) ** max(0, ret_age - jason_age))
+            hc_kids       = phase_inputs.get("healthcare_kids", 0) * ((1 + inflation) ** max(0, ret_age - jason_age))
             if yr < bridge_years:
                 hc_this_year = 0
                 year_need = max(0, income_at_ret*(1+eff_inf)**yr + kids_cost*(1+eff_inf)**yr - bridge_income*(1+eff_inf)**yr)
@@ -194,7 +195,9 @@ def _run_single(
 
         # RMD
         rmd = _rmd(pretax, age, _rmd_start)
-        remaining = net_need
+        remaining = net_need + max(0, -taxable)
+        taxable = max(0, taxable)
+        taxable += max(0, fixed - year_need)
 
         if rmd > 0:
             actual_rmd = min(rmd, pretax)
@@ -251,10 +254,8 @@ def run_swr_analysis(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_t
     """Find the safe withdrawal rate at target success rate (default 95%).
 
     life_events: threaded through to run_retirement_projection below so
-    pre-retirement events affect the starting portfolio; this function's
-    own binary-search loop does not separately model withdrawal-phase
-    events (unlike run_monte_carlo/run_stress_tests) — a known scope
-    limitation, not an oversight.
+    pre-retirement events affect the starting portfolio; withdrawal-phase
+    events also adjust each trial's available cash and spending.
 
     surplus_allocations: threaded through to run_retirement_projection
     below for the starting portfolio only — this feature has no
@@ -291,12 +292,16 @@ def run_swr_analysis(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_t
     hsa_at_ret     = _scenario["hsa_at_retirement"]
     portfolio = pretax_at_ret + roth_at_ret + taxable_at_ret + hsa_at_ret
 
-    retire_yrs = 99 - ret_age
+    end_age = max(ret_age + 1, min(110, int(inputs.get("retirement_end_age") or 99)))
+    retire_yrs = end_age - ret_age
     N          = 1000
     _rmd_start = rmd_start_age(jason_age)
 
     # Pre-generate random returns for reproducibility
-    all_returns = [[random.gauss(PORT_MEAN, PORT_STD) for _ in range(retire_yrs)] for _ in range(N)]
+    all_returns = [[random.gauss(post_ret, PORT_STD) for _ in range(retire_yrs)] for _ in range(N)]
+
+    retirement_year = CURRENT_YEAR + years_to_ret
+    _, post_events = _split_life_events(life_events, retirement_year)
 
     def success_at_withdrawal(annual_withdrawal_today):
         """How many of N simulations survive with this portfolio withdrawal?"""
@@ -329,7 +334,10 @@ def run_swr_analysis(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_t
 
                 # RMD
                 rmd = _rmd(pretax, age, _rmd_start)
-                remaining = portfolio_draw
+                event_cash, event_monthly = _post_retirement_year_effects(post_events, retirement_year + yr)
+                taxable += event_cash
+                remaining = max(0, portfolio_draw - event_monthly) + max(0, -taxable)
+                taxable = max(0, taxable) + max(0, event_monthly - portfolio_draw)
 
                 if rmd > 0:
                     actual_rmd = min(rmd, pretax)
@@ -384,7 +392,7 @@ def run_swr_analysis(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_t
             hi = mid
 
     safe_withdrawal = lo
-    safe_withdrawal_rate = safe_withdrawal / portfolio
+    safe_withdrawal_rate = safe_withdrawal / portfolio if portfolio > 0 else 0
 
     # Guaranteed income steady-state (once all income sources active)
     # Show pension + SS as they'll be in the first full year all sources are running
@@ -404,7 +412,7 @@ def run_swr_analysis(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_t
 
     total_safe_spend    = safe_withdrawal + guaranteed_day_one
     income_target       = (income_today + healthcare_pre) * ((1+inflation)**years_to_ret)
-    cushion_pct         = round((total_safe_spend / income_target - 1) * 100, 1)
+    cushion_pct         = round((total_safe_spend / income_target - 1) * 100, 1) if income_target > 0 else 0
 
     return {
         "portfolio_at_retirement":   round(portfolio),
@@ -479,7 +487,8 @@ def run_monte_carlo(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_ti
     taxable_at_ret = _scenario["taxable_at_retirement"]
     hsa_at_ret     = _scenario["hsa_at_retirement"]
 
-    retire_yrs = 99 - ret_age
+    end_age = max(ret_age + 1, min(110, int(inputs.get("retirement_end_age") or 99)))
+    retire_yrs = end_age - ret_age
     N = 1000
 
     # Withdrawal-phase life events, split once outside the N-run loop —
@@ -508,7 +517,7 @@ def run_monte_carlo(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_ti
     }
 
     for _ in range(N):
-        returns = [random.gauss(PORT_MEAN, PORT_STD) for _ in range(retire_yrs)]
+        returns = [random.gauss(post_ret, PORT_STD) for _ in range(retire_yrs)]
         survived, balances, *_ = _run_single(
             pretax_at_ret, roth_at_ret, taxable_at_ret, hsa_at_ret,
             ret_age, jason_age, justin_age,
@@ -518,6 +527,7 @@ def run_monte_carlo(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_ti
             post_life_events=post_life_events,
             justin_ss_annual=justin_ss_annual,
             justin_ss_age=justin_ss_age,
+            retirement_end_age=end_age,
         )
         if survived: successes += 1
         all_balances.append(balances)
@@ -525,7 +535,7 @@ def run_monte_carlo(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_ti
     success_rate = round(successes / N * 100, 1)
 
     # Percentile bands — every 2 years for chart
-    ages = list(range(ret_age, 99))
+    ages = list(range(ret_age, end_age))
     p10, p25, p50, p75, p90 = [], [], [], [], []
     for yr in range(retire_yrs):
         vals = sorted(b[yr] if yr < len(b) else 0 for b in all_balances)
@@ -544,7 +554,7 @@ def run_monte_carlo(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_ti
 
     # Median depletion age
     median_run = sorted(all_balances, key=lambda b: b[-1])[N//2]
-    depletion_age = 99
+    depletion_age = end_age
     for i, bal in enumerate(median_run):
         if bal <= 0:
             depletion_age = ret_age + i
@@ -553,6 +563,7 @@ def run_monte_carlo(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_ti
     return {
         "success_rate": success_rate,
         "retirement_age": ret_age,
+        "retirement_end_age": end_age,
         "ss_timing": ss_timing,
         "portfolio_at_retirement": round(pretax_at_ret + roth_at_ret + taxable_at_ret + hsa_at_ret),
         "median_final_balance": round(sorted(b[-1] for b in all_balances)[N//2]),
@@ -601,7 +612,8 @@ def run_stress_tests(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_t
     taxable_at_ret = _scenario["taxable_at_retirement"]
     hsa_at_ret     = _scenario["hsa_at_retirement"]
 
-    retire_yrs = 99 - ret_age
+    end_age = max(ret_age + 1, min(110, int(inputs.get("retirement_end_age") or 99)))
+    retire_yrs = end_age - ret_age
 
     # Withdrawal-phase life events, split once — the pre-retirement half
     # is already folded into the bucket values above.
@@ -628,10 +640,11 @@ def run_stress_tests(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_t
         post_life_events=post_life_events,
         justin_ss_annual=justin_ss_annual,
         justin_ss_age=justin_ss_age,
+        retirement_end_age=end_age,
     )
 
     results = {"base": {
-        "label": "Base Case (6% every year)",
+        "label": f"Base Case ({post_ret * 100:g}% every year)",
         "survived": base_survived,
         "final_balance": base_bals[-1],
         "chart": [{"age": ret_age+i, "balance": b} for i, b in enumerate(base_bals) if i%2==0],
@@ -676,7 +689,7 @@ def run_stress_tests(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_t
 
         # For early sequence risk — sort worst returns to front
         if key == "early_sequence":
-            normal_returns = [random.gauss(PORT_MEAN, PORT_STD) for _ in range(retire_yrs - len(overrides))]
+            normal_returns = [random.gauss(post_ret, PORT_STD) for _ in range(retire_yrs - len(overrides))]
             normal_returns.sort()  # worst first after the override years
             seq_returns = [overrides.get(yr, normal_returns[max(0, yr-len(overrides))]) for yr in range(retire_yrs)]
             returns = seq_returns
@@ -709,10 +722,11 @@ def run_stress_tests(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_t
             post_life_events=post_life_events,
             justin_ss_annual=run_justin_ss,
             justin_ss_age=justin_ss_age,
+            retirement_end_age=end_age,
         )
 
         # Find depletion age
-        dep_age = 99
+        dep_age = end_age
         for i, b in enumerate(bals):
             if b <= 0:
                 dep_age = ret_age + i
@@ -732,6 +746,7 @@ def run_stress_tests(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_t
 
     return {
         "retirement_age": ret_age,
+        "retirement_end_age": end_age,
         "ss_timing": ss_timing,
         "scenarios": results,
     }
@@ -752,7 +767,7 @@ def run_roth_conversion_analysis(inputs: Dict, accounts: List[Dict], ret_age: in
     jason_age    = inputs["jason_age"]
     justin_age   = inputs["justin_age"]
     pension_annual = pension_for_age(inputs, ret_age)
-    jason_ss     = inputs.get("jason_social_security", 0)
+    jason_ss     = inputs.get("jason_social_security" if ss_timing == "early" else "jason_ss_delayed", 0)
     justin_ss    = inputs.get("justin_social_security", 0)
     jason_ss_age = 62 if ss_timing == "early" else 67
     # Read the spouse's own claiming age instead of hardcoding 67 — and,
@@ -903,13 +918,14 @@ def run_tax_efficiency_simulation(inputs: Dict, accounts: List[Dict], ret_age: i
     taxable_start = _s["taxable_at_retirement"]
     hsa_start     = _s["hsa_at_retirement"]
 
-    retire_yrs = 99 - ret_age
+    end_age = max(ret_age + 1, min(110, int(inputs.get("retirement_end_age") or 99)))
+    retire_yrs = end_age - ret_age
     N = 1000
     TAX_PRETAX   = 0.22
     TAX_TAXABLE  = 0.15
     TAX_ROTH     = 0.00
 
-    all_returns = [[random.gauss(PORT_MEAN, PORT_STD) for _ in range(retire_yrs)] for _ in range(N)]
+    all_returns = [[random.gauss(post_ret, PORT_STD) for _ in range(retire_yrs)] for _ in range(N)]
     _rmd_start = rmd_start_age(jason_age)
 
     def run_strategy(strategy):
@@ -1022,6 +1038,7 @@ def run_tax_efficiency_simulation(inputs: Dict, accounts: List[Dict], ret_age: i
 
     return {
         "retirement_age": ret_age,
+        "retirement_end_age": end_age,
         "ss_timing":      ss_timing,
         "strategies": {
             "taxable_first": {**taxable_first, "label": "Taxable First", "description": "Draw taxable → pretax → Roth last"},
@@ -1075,7 +1092,8 @@ def run_contribution_sensitivity(inputs: Dict, accounts: List[Dict], ret_age: in
     # Base retirement projection for comparison
     base_result = run_retirement_projection(inputs, accounts, ret_ages=[ret_age], life_events=life_events,
                                              surplus_allocations=surplus_allocations)
-    base_scenario = next(s for s in base_result["scenarios"] if s["label"] == f"age_{ret_age}_early")
+    timing = inputs.get("_ss_timing", "early")
+    base_scenario = next(s for s in base_result["scenarios"] if s["label"] == f"age_{ret_age}_{timing}")
     base_surplus   = base_scenario["projected_surplus"]
     base_portfolio = base_scenario["portfolio_at_retirement"]
 

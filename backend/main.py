@@ -1347,6 +1347,8 @@ def _apply_whatif_overrides(inputs: dict, body: dict) -> dict:
     against Settings, only passing along retirement age and SS timing —
     every slider the user had just moved was thrown away)."""
     inputs = dict(inputs)
+    inputs["_salary_growth_pct"] = body.get("salary_growth_pct", 0.0)
+    inputs["_ss_timing"] = body.get("ss_timing", "early")
     pension_mult = body.get("pension_mult", 1.0)
     ss_mult      = body.get("ss_mult", 1.0)
 
@@ -1493,8 +1495,12 @@ def get_retirement_sensitivity():
 
     return {"sensitivity": results, "jason_current_age": jason_age}
 
+@app.post("/api/retirement/income-sources")
 @app.get("/api/retirement/income-sources")
-def get_income_sources(ret_age: int = 60, ss_timing: str = "early"):
+def get_income_sources(ret_age: int = 60, ss_timing: str = "early", body: dict = None):
+    if body is not None:
+        ret_age = body.get("ret_age", ret_age)
+        ss_timing = body.get("ss_timing", ss_timing)
     conn = get_db()
     inputs_row = conn.execute("SELECT * FROM planning_inputs ORDER BY id DESC LIMIT 1").fetchone()
     accounts   = [dict(r) for r in conn.execute("SELECT * FROM accounts").fetchall()]
@@ -1507,7 +1513,7 @@ def get_income_sources(ret_age: int = 60, ss_timing: str = "early"):
     # explicitly, since the Monte Carlo/Historical Stress tabs now offer
     # the full 55-67 range and any age outside the default 3 would
     # otherwise silently compute nothing, leaving this chart empty.
-    result = run_retirement_projection(dict(inputs_row), accounts, ret_ages=[ret_age], life_events=life_events, surplus_allocations=surplus_allocations)
+    result = run_retirement_projection(_apply_whatif_overrides(dict(inputs_row), body or {}), accounts, ret_ages=[ret_age], life_events=life_events, surplus_allocations=surplus_allocations)
     scenario = next((s for s in result["scenarios"] if s["label"] == f"age_{ret_age}_{ss_timing}"), None)
     if not scenario: return {"error": "Scenario not found"}
     # Return simplified chart data
@@ -1535,8 +1541,11 @@ def get_tax_efficiency(ret_age: int = 60, ss_timing: str = "early"):
     from simulation_engine import run_tax_efficiency_simulation
     return run_tax_efficiency_simulation(dict(inputs_row), accounts, ret_age, ss_timing, life_events=life_events, surplus_allocations=surplus_allocations)
 
+@app.post("/api/simulation/contribution-sensitivity")
 @app.get("/api/simulation/contribution-sensitivity")
-def get_contribution_sensitivity(ret_age: int = 60):
+def get_contribution_sensitivity(ret_age: int = 60, body: dict = None):
+    if body is not None:
+        ret_age = body.get("ret_age", ret_age)
     conn = get_db()
     inputs_row = conn.execute("SELECT * FROM planning_inputs ORDER BY id DESC LIMIT 1").fetchone()
     accounts   = [dict(r) for r in conn.execute("SELECT * FROM accounts").fetchall()]
@@ -1545,7 +1554,7 @@ def get_contribution_sensitivity(ret_age: int = 60):
     conn.close()
     if not inputs_row: return {"error": "No planning inputs found"}
     from simulation_engine import run_contribution_sensitivity
-    return run_contribution_sensitivity(dict(inputs_row), accounts, ret_age, life_events=life_events, surplus_allocations=surplus_allocations)
+    return run_contribution_sensitivity(_apply_whatif_overrides(dict(inputs_row), body or {}), accounts, ret_age, life_events=life_events, surplus_allocations=surplus_allocations)
 
 @app.get("/api/simulation/survivor-scenario")
 def get_survivor_scenario(ret_age: int = 60, deceased: str = "jason", death_age: int = None,
@@ -1580,8 +1589,12 @@ def get_sequence_risk(ret_age: int = 55, ss_timing: str = "early"):
         "base":            result["scenarios"].get("base"),
     }
 
+@app.post("/api/simulation/roth-conversion")
 @app.get("/api/simulation/roth-conversion")
-def get_roth_conversion(ret_age: int = 60, ss_timing: str = "early"):
+def get_roth_conversion(ret_age: int = 60, ss_timing: str = "early", body: dict = None):
+    if body is not None:
+        ret_age = body.get("ret_age", ret_age)
+        ss_timing = body.get("ss_timing", ss_timing)
     conn = get_db()
     inputs_row = conn.execute("SELECT * FROM planning_inputs ORDER BY id DESC LIMIT 1").fetchone()
     accounts   = [dict(r) for r in conn.execute("SELECT * FROM accounts").fetchall()]
@@ -1590,10 +1603,14 @@ def get_roth_conversion(ret_age: int = 60, ss_timing: str = "early"):
     conn.close()
     if not inputs_row: return {"error": "No planning inputs found"}
     from simulation_engine import run_roth_conversion_analysis
-    return run_roth_conversion_analysis(dict(inputs_row), accounts, ret_age, ss_timing, life_events=life_events, surplus_allocations=surplus_allocations)
+    return run_roth_conversion_analysis(_apply_whatif_overrides(dict(inputs_row), body or {}), accounts, ret_age, ss_timing, life_events=life_events, surplus_allocations=surplus_allocations)
 
+@app.post("/api/simulation/swr")
 @app.get("/api/simulation/swr")
-def get_swr(ret_age: int = 60, ss_timing: str = "early"):
+def get_swr(ret_age: int = 60, ss_timing: str = "early", body: dict = None):
+    if body is not None:
+        ret_age = body.get("ret_age", ret_age)
+        ss_timing = body.get("ss_timing", ss_timing)
     conn = get_db()
     inputs_row = conn.execute("SELECT * FROM planning_inputs ORDER BY id DESC LIMIT 1").fetchone()
     accounts   = [dict(r) for r in conn.execute("SELECT * FROM accounts").fetchall()]
@@ -1602,7 +1619,7 @@ def get_swr(ret_age: int = 60, ss_timing: str = "early"):
     conn.close()
     if not inputs_row: return {"error": "No planning inputs found"}
     from simulation_engine import run_swr_analysis
-    return run_swr_analysis(dict(inputs_row), accounts, ret_age, ss_timing, life_events=life_events, surplus_allocations=surplus_allocations)
+    return run_swr_analysis(_apply_whatif_overrides(dict(inputs_row), body or {}), accounts, ret_age, ss_timing, life_events=life_events, surplus_allocations=surplus_allocations)
 
 @app.get("/api/simulation/stress-tests")
 def get_stress_tests(ret_age: int = 60, ss_timing: str = "early"):

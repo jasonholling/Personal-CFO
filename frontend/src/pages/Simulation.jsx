@@ -50,8 +50,7 @@ const CustomTooltip = ({ active, payload, label, person1Name }) => {
 // saved Settings instead of GET-ing the plain Settings-only figures —
 // previously switching to this tab always discarded whatever the What-If
 // Builder had just been changed to (external audit 2026-09-06). The
-// SWR/income-sources side calls stay Settings-only for now — a narrower,
-// documented scope limit rather than a silent gap.
+// Companion results receive the same overrides, age, and claiming timing.
 export function MonteCarloSection({ retAge, ssTiming, overrides }) {
   const { person1Name, person2Name } = usePersonNames()
   const [data, setData]         = useState(null)
@@ -69,11 +68,11 @@ export function MonteCarloSection({ retAge, ssTiming, overrides }) {
       : axios.get(`/api/simulation/monte-carlo?ret_age=${retAge}&ss_timing=${ssTiming}`)
     Promise.all([
       mcCall,
-      axios.get(`/api/simulation/swr?ret_age=${retAge}&ss_timing=${ssTiming}`),
-      axios.get(`/api/retirement/income-sources?ret_age=${retAge}&ss_timing=${ssTiming}`)
+      axios.post('/api/simulation/swr', { ...overrides, ret_age: retAge, ss_timing: ssTiming }),
+      axios.post('/api/retirement/income-sources', { ...overrides, ret_age: retAge, ss_timing: ssTiming })
     ]).then(([mc, sw, inc]) => {
       setData(mc.data)
-      setSwr({ ...sw.data, success_rate: mc.data.success_rate })
+      setSwr(sw.data)
       setIncSrc(inc.data)
       setLoading(false)
     }).catch(() => setLoading(false))
@@ -108,7 +107,7 @@ export function MonteCarloSection({ retAge, ssTiming, overrides }) {
             {rate}%
           </div>
           <div style={{ fontSize:12, color:'var(--text2)', marginTop:4 }}>
-            {data.simulations.toLocaleString()} simulations to age 99
+            {data.simulations.toLocaleString()} simulations to age {data.retirement_end_age ?? 99}
           </div>
           <div style={{ marginTop:12 }}>
             <div className="progress-bar-track" style={{ height:8 }}>
@@ -123,11 +122,11 @@ export function MonteCarloSection({ retAge, ssTiming, overrides }) {
         <div className="card">
           <div className="label">Safe Spending Power</div>
           {swr ? (<>
-            <div className="number-lg" style={{ color: swr.success_rate >= 95 ? GREEN : swr.success_rate >= 85 ? AMBER : RED, marginTop:8 }}>
-              {swr.success_rate}%
+            <div className="number-lg" style={{ color: data.success_rate >= 95 ? GREEN : data.success_rate >= 85 ? AMBER : RED, marginTop:8 }}>
+              {data.success_rate}%
             </div>
             <div style={{ fontSize:12, color:'var(--text2)', marginTop:4 }}>
-              of 1,000 scenarios fund your planned lifestyle to age 99
+              of 1,000 scenarios fund your planned lifestyle to age {data.retirement_end_age ?? 99}
             </div>
             {retAge === 55 ? (
               <div style={{ marginTop:12, fontSize:12, lineHeight:1.7 }}>
@@ -147,8 +146,8 @@ export function MonteCarloSection({ retAge, ssTiming, overrides }) {
                 <div style={{ height:1, background:'var(--border)', margin:'6px 0' }} />
                 <div style={{ display:'flex', justifyContent:'space-between', fontWeight:600 }}>
                   <span>Plan confidence</span>
-                  <span style={{ color: swr.success_rate >= 95 ? GREEN : AMBER }}>
-                    {swr.success_rate >= 95 ? '✓ On track' : '⚠ Review needed'}
+                  <span style={{ color: data.success_rate >= 95 ? GREEN : AMBER }}>
+                    {data.success_rate >= 95 ? '✓ On track' : '⚠ Review needed'}
                   </span>
                 </div>
               </div>
@@ -169,7 +168,7 @@ export function MonteCarloSection({ retAge, ssTiming, overrides }) {
                 <div style={{ height:1, background:'var(--border)', margin:'6px 0' }} />
                 <div style={{ display:'flex', justifyContent:'space-between', fontWeight:600 }}>
                   <span>Cushion</span>
-                  <span style={{ color: swr.success_rate >= 95 ? GREEN : AMBER }}>
+                  <span style={{ color: data.success_rate >= 95 ? GREEN : AMBER }}>
                     {swr.cushion_pct > 0 ? '+' : ''}{swr.cushion_pct}%
                   </span>
                 </div>
@@ -271,8 +270,7 @@ export function MonteCarloSection({ retAge, ssTiming, overrides }) {
 
 // ── Stress tests section ──────────────────────────────────────────────────────
 // `overrides`: see MonteCarloSection's comment above — same What-If
-// Builder wiring, same documented scope (roth-conversion/contribution-
-// sensitivity stay Settings-only).
+// Builder wiring, including Roth and contribution comparisons.
 export function StressTestSection({ retAge, ssTiming, overrides }) {
   const { person1Name } = usePersonNames()
   const [data, setData]       = useState(null)
@@ -291,8 +289,8 @@ export function StressTestSection({ retAge, ssTiming, overrides }) {
       : axios.get(`/api/simulation/stress-tests?ret_age=${retAge}&ss_timing=${ssTiming}`)
     Promise.all([
       stCall,
-      axios.get(`/api/simulation/roth-conversion?ret_age=${retAge}&ss_timing=${ssTiming}`),
-      axios.get(`/api/simulation/contribution-sensitivity?ret_age=${retAge}`)
+      axios.post('/api/simulation/roth-conversion', { ...overrides, ret_age: retAge, ss_timing: ssTiming }),
+      axios.post('/api/simulation/contribution-sensitivity', { ...overrides, ret_age: retAge, ss_timing: ssTiming })
     ]).then(([st, rc, cs]) => {
       setData(st.data)
       setRoth(rc.data)
@@ -522,7 +520,7 @@ export function StressTestSection({ retAge, ssTiming, overrides }) {
           </ResponsiveContainer>
           <div style={{ marginTop:12, padding:'10px 14px', background:'var(--bg3)', borderRadius:8, fontSize:12, color:'var(--text2)' }}>
             {current.survived
-              ? `✓ Portfolio survives to age 99 even under this scenario. Final balance of ${fmtK(current.final_balance)} remains.`
+              ? `✓ Portfolio survives to age ${data.retirement_end_age ?? 99} even under this scenario. Final balance of ${fmtK(current.final_balance)} remains.`
               : `⚠ Portfolio depletes at age ${current.depletion_age}. Consider increasing safe withdrawal buffer or reducing early retirement spend.`
             }
           </div>

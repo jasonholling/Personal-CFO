@@ -215,7 +215,9 @@ export default function StressTestWhatIf({ onNavigate }) {
         </div>
       )}
 
-      {tab === 'whatif'      && <WhatIf onNavigate={onNavigate} onAssumptionsChange={setWhatIfAssumptions} />}
+      <div hidden={tab !== 'whatif'}>
+        <WhatIf onNavigate={onNavigate} onAssumptionsChange={setWhatIfAssumptions} />
+      </div>
       {tab === 'monte_carlo' && <MonteCarloSection retAge={retAge} ssTiming={ssTiming} overrides={whatIfAssumptions} />}
       {tab === 'stress'      && <StressTestSection retAge={retAge} ssTiming={ssTiming} overrides={whatIfAssumptions} />}
       {tab === 'survivor'    && <SurvivorScenarioSection retAge={retAge} />}

@@ -507,17 +507,17 @@ class TestLifeEventsInRetirementProjection:
     def test_recurring_monthly_delta_during_retirement_with_finite_duration(self, sample_inputs, sample_accounts):
         """ret_age=60 => retirement_year = CURRENT_YEAR+10. A monthly delta
         starting 1 year into retirement with a 30-month (2.5yr) duration
-        should adjust income_need for the 3 years it's active
-        (CURRENT_YEAR+11, +12, +13) and stop by CURRENT_YEAR+14 — i.e. the
-        duration ends partway through what would be its 4th active year."""
+        should adjust income_need for two full years and six months of
+        the third year, then stop by CURRENT_YEAR+14."""
         event_year = CURRENT_YEAR + 11
         events = [{"event_year": event_year, "one_time_cash_delta": 0,
                    "monthly_cash_flow_delta": 1000, "duration_months": 30}]
         result = run_retirement_projection(sample_inputs, sample_accounts, ret_ages=[60], life_events=events)
         scenario = next(s for s in result["scenarios"] if s["ss_timing"] == "early")
         by_year = {y["year"]: y for y in scenario["yearly_detail"]}
-        for active_year in (event_year, event_year + 1, event_year + 2):
+        for active_year in (event_year, event_year + 1):
             assert by_year[active_year]["life_event_monthly_adjustment"] == 12000
+        assert by_year[event_year + 2]["life_event_monthly_adjustment"] == 6000
         assert by_year[event_year + 3]["life_event_monthly_adjustment"] == 0
         assert by_year[event_year - 1]["life_event_monthly_adjustment"] == 0
 
