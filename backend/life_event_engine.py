@@ -1,10 +1,23 @@
 """Account-level estimates for deliberate life-event scenarios.
 
-These calculations are an overlay: they never change household accounts or the
-base retirement projection.  They express the opportunity cost/value of an
-event in future retirement dollars using the plan's stated pre-retirement
-return.  That makes the result useful without pretending to know transactions,
-tax lots, or an exact event date.
+summarize_life_events() below is an isolated, single-event overlay: it never
+changes household accounts, and its own math here doesn't touch the base
+retirement projection. It expresses the opportunity cost/value of an event in
+future retirement dollars using the plan's stated pre-retirement return, which
+makes it useful as a quick per-event lens without pretending to know
+transactions, tax lots, or an exact event date.
+
+IMPORTANT: this is no longer the whole story. The real retirement-projection
+and simulation endpoints in main.py now fetch these same life_events rows
+(filtered to included_in_projection=1) and feed them into
+projection_engine.run_retirement_projection() / simulation_engine.py's Monte
+Carlo and stress-test runs, where they genuinely move portfolio_at_retirement,
+yearly_detail, and simulation outcomes — see _split_life_events(),
+_pre_retirement_taxable_add(), and _post_retirement_year_effects() in
+projection_engine.py for that math. summarize_life_events() itself was left
+alone (still the isolated estimate) because it's still a useful single-event
+view, including for an event a user has toggled OFF the real projection via
+included_in_projection — this overlay keeps showing what it *would* be worth.
 """
 from datetime import date
 from typing import Dict, List

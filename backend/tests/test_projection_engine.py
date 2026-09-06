@@ -17,6 +17,7 @@ from projection_engine import (
     _fv, _fv_annuity, _fv_growing_annuity, _pv_annuity,
     PARENT_RETIREMENT_AGE_ASSUMPTION,
     BOND_MAX_GROWTH_YEARS,
+    CURRENT_YEAR,
 )
 
 
@@ -254,6 +255,131 @@ class TestRunRetirementProjection:
         rmd_years = [y for y in scenario["yearly_detail"] if y["rmd"] > 0]
         assert rmd_years, "expected at least one year with a nonzero RMD in this fixture"
         assert all(y["estimated_tax"] > 0 for y in rmd_years)
+
+
+class TestLifeEventsInRetirementProjection:
+    """Life events (from the life_events table) are now wired into the real
+    projection, not just life_event_engine.py's isolated overlay estimate."""
+
+    def test_default_no_events_is_unchanged(self, sample_inputs, sample_accounts):
+        no_kwarg  = run_retirement_projection(sample_inputs, sample_accounts, ret_ages=[60])
+        explicit_none = run_retirement_projection(sample_inputs, sample_accounts, ret_ages=[60], life_events=None)
+        explicit_empty = run_retirement_projection(sample_inputs, sample_accounts, ret_ages=[60], life_events=[])
+        a = next(s for s in no_kwarg["scenarios"] if s["ss_timing"] == "early")
+        b = next(s for s in explicit_none["scenarios"] if s["ss_timing"] == "early")
+        c = next(s for s in explicit_empty["scenarios"] if s["ss_timing"] == "early")
+        assert a["portfolio_at_retirement"] == b["portfolio_at_retirement"] == c["portfolio_at_retirement"]
+
+    def test_one_time_event_before_retirement_compounds_into_taxable(self, sample_inputs, sample_accounts):
+        """jason_age=50, ret_age=60 => retirement_year = CURRENT_YEAR+10.
+        event_year=CURRENT_YEAR+2 is 8 years before retirement, so the
+        one-time delta should compound at the pre-retirement rate for
+        those 8 years and land entirely in portfolio_at_retirement."""
+        pre_ret = sample_inputs["expected_return_pre_retirement"]
+        event_year = CURRENT_YEAR + 2
+        events = [{"event_year": event_year, "one_time_cash_delta": 10000,
+                   "monthly_cash_flow_delta": 0, "duration_months": 0}]
+        baseline = run_retirement_projection(sample_inputs, sample_accounts, ret_ages=[60])
+        with_event = run_retirement_projection(sample_inputs, sample_accounts, ret_ages=[60], life_events=events)
+        b = next(s for s in baseline["scenarios"] if s["ss_timing"] == "early")
+        w = next(s for s in with_event["scenarios"] if s["ss_timing"] == "early")
+        expected_delta = 10000 * ((1 + pre_ret) ** 8)
+        assert abs((w["portfolio_at_retirement"] - b["portfolio_at_retirement"]) - expected_delta) <= 1
+
+    def test_one_time_event_at_retirement_or_later_lands_in_yearly_detail(self, sample_inputs, sample_accounts):
+        """ret_age=60 => retirement_year = CURRENT_YEAR+10. An event dated
+        2 years into retirement should show up as life_event_cash in that
+        exact yearly_detail row and nowhere else, and should NOT move
+        portfolio_at_retirement (it happens after retirement starts)."""
+        event_year = CURRENT_YEAR + 12  # yr index 2 of the withdrawal phase
+        events = [{"event_year": event_year, "one_time_cash_delta": 5000,
+                   "monthly_cash_flow_delta": 0, "duration_months": 0}]
+        baseline = run_retirement_projection(sample_inputs, sample_accounts, ret_ages=[60])
+        with_event = run_retirement_projection(sample_inputs, sample_accounts, ret_ages=[60], life_events=events)
+        b = next(s for s in baseline["scenarios"] if s["ss_timing"] == "early")
+        w = next(s for s in with_event["scenarios"] if s["ss_timing"] == "early")
+        assert w["portfolio_at_retirement"] == b["portfolio_at_retirement"]
+        matching = [y for y in w["yearly_detail"] if y["year"] == event_year]
+        assert len(matching) == 1
+        assert matching[0]["life_event_cash"] == 5000
+        other_years = [y for y in w["yearly_detail"] if y["year"] != event_year]
+        assert all(y["life_event_cash"] == 0 for y in other_years)
+
+    def test_recurring_monthly_delta_before_retirement(self, sample_inputs, sample_accounts):
+        """jason_age=50, ret_age=65 => retirement_year = CURRENT_YEAR+15.
+        A monthly delta starting CURRENT_YEAR+1 with duration_months=0 runs
+        as a contribution annuity all the way to retirement."""
+        pre_ret = sample_inputs["expected_return_pre_retirement"]
+        event_year = CURRENT_YEAR + 1
+        events = [{"event_year": event_year, "one_time_cash_delta": 0,
+                   "monthly_cash_flow_delta": 200, "duration_months": 0}]
+        baseline = run_retirement_projection(sample_inputs, sample_accounts, ret_ages=[65])
+        with_event = run_retirement_projection(sample_inputs, sample_accounts, ret_ages=[65], life_events=events)
+        b = next(s for s in baseline["scenarios"] if s["ss_timing"] == "early")
+        w = next(s for s in with_event["scenarios"] if s["ss_timing"] == "early")
+        contrib_years = (CURRENT_YEAR + 15) - event_year  # 14
+        expected_delta = 200 * 12 * (((1 + pre_ret) ** contrib_years - 1) / pre_ret)
+        assert abs((w["portfolio_at_retirement"] - b["portfolio_at_retirement"]) - expected_delta) <= 1
+
+    def test_recurring_monthly_delta_during_retirement_with_finite_duration(self, sample_inputs, sample_accounts):
+        """ret_age=60 => retirement_year = CURRENT_YEAR+10. A monthly delta
+        starting 1 year into retirement with a 30-month (2.5yr) duration
+        should adjust income_need for the 3 years it's active
+        (CURRENT_YEAR+11, +12, +13) and stop by CURRENT_YEAR+14 — i.e. the
+        duration ends partway through what would be its 4th active year."""
+        event_year = CURRENT_YEAR + 11
+        events = [{"event_year": event_year, "one_time_cash_delta": 0,
+                   "monthly_cash_flow_delta": 1000, "duration_months": 30}]
+        result = run_retirement_projection(sample_inputs, sample_accounts, ret_ages=[60], life_events=events)
+        scenario = next(s for s in result["scenarios"] if s["ss_timing"] == "early")
+        by_year = {y["year"]: y for y in scenario["yearly_detail"]}
+        for active_year in (event_year, event_year + 1, event_year + 2):
+            assert by_year[active_year]["life_event_monthly_adjustment"] == 12000
+        assert by_year[event_year + 3]["life_event_monthly_adjustment"] == 0
+        assert by_year[event_year - 1]["life_event_monthly_adjustment"] == 0
+
+    def test_negative_one_time_event_reduces_portfolio(self, sample_inputs, sample_accounts):
+        events = [{"event_year": CURRENT_YEAR + 2, "one_time_cash_delta": -20000,
+                   "monthly_cash_flow_delta": 0, "duration_months": 0}]
+        baseline = run_retirement_projection(sample_inputs, sample_accounts, ret_ages=[60])
+        with_event = run_retirement_projection(sample_inputs, sample_accounts, ret_ages=[60], life_events=events)
+        b = next(s for s in baseline["scenarios"] if s["ss_timing"] == "early")
+        w = next(s for s in with_event["scenarios"] if s["ss_timing"] == "early")
+        assert w["portfolio_at_retirement"] < b["portfolio_at_retirement"]
+
+    def test_generic_across_every_retirement_age_not_just_55(self, sample_inputs, sample_accounts):
+        """Regression guard: life events used to only be prototyped against
+        the age-55 bridge scenario; confirm the pre-retirement compounding
+        applies identically for every age in the 55-67 sweep."""
+        events = [{"event_year": CURRENT_YEAR + 1, "one_time_cash_delta": 15000,
+                   "monthly_cash_flow_delta": 0, "duration_months": 0}]
+        for age in range(55, 68):
+            baseline = run_retirement_projection(sample_inputs, sample_accounts, ret_ages=[age])
+            with_event = run_retirement_projection(sample_inputs, sample_accounts, ret_ages=[age], life_events=events)
+            b = next(s for s in baseline["scenarios"] if s["ss_timing"] == "early")
+            w = next(s for s in with_event["scenarios"] if s["ss_timing"] == "early")
+            assert w["portfolio_at_retirement"] > b["portfolio_at_retirement"], age
+
+
+class TestAssetSaleAndRsuBridgeAt55:
+    """Not life-events related — the asset1/asset2 sale bridge and RSU
+    accumulation branches at ret_age=55 (existing precedent for
+    "one-time cash event before retirement", the closest prior art the
+    life-events feature above generalizes)."""
+
+    def test_asset_sales_and_rsu_increase_taxable_at_retirement(self, sample_inputs, sample_accounts):
+        inputs = {
+            **sample_inputs,
+            "jason_age": 45,
+            "annual_rsu_value": 20000,
+            "asset1_sale_age": 50, "asset1_sale_net": 300000, "asset1_appreciation": 0.03,
+            "asset2_sale_age": 52, "asset2_sale_net": 150000,
+        }
+        with_sales = run_retirement_projection(inputs, sample_accounts, ret_ages=[55])
+        baseline   = run_retirement_projection(sample_inputs, sample_accounts, ret_ages=[55])
+        w = next(s for s in with_sales["scenarios"] if s["ss_timing"] == "early")
+        b = next(s for s in baseline["scenarios"] if s["ss_timing"] == "early")
+        assert w["taxable_at_retirement"] > b["taxable_at_retirement"]
 
 
 class TestRunEducationProjection:

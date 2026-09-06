@@ -304,6 +304,14 @@ def init_life_events_table():
         );
         CREATE INDEX IF NOT EXISTS idx_life_events_event_year ON life_events(event_year);
     """)
+    # Migrate: add included_in_projection if this table predates it (same
+    # PRAGMA table_info + ALTER TABLE pattern used above for accounts/
+    # planning_inputs). Defaults to 1 (on) so existing rows keep affecting
+    # the projection/simulation the same way they did before this flag
+    # existed — the user opts a specific event OUT, not back in.
+    life_events_cols = [r[1] for r in conn.execute("PRAGMA table_info(life_events)").fetchall()]
+    if "included_in_projection" not in life_events_cols:
+        conn.execute("ALTER TABLE life_events ADD COLUMN included_in_projection INTEGER NOT NULL DEFAULT 1")
     conn.execute("PRAGMA optimize")
     conn.commit(); conn.close()
 

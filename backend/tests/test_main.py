@@ -4,6 +4,7 @@ temp db (see conftest.py's `client`/`temp_db` fixtures — never the real
 cfo.db).
 """
 import auth
+from projection_engine import CURRENT_YEAR
 
 
 def _seed_planning_inputs(client, sample_inputs):
@@ -311,6 +312,7 @@ class TestSimulationEndpoints:
         assert r.status_code == 200
         assert "success_rate" in r.json()
 
+
     def test_swr(self, client, sample_inputs, sample_accounts):
         self._seed(client, sample_inputs, sample_accounts)
         r = client.get("/api/simulation/swr?ret_age=60&ss_timing=early")
@@ -383,6 +385,12 @@ class TestSimulationEndpoints:
         assert r.status_code == 200
         assert "scenarios" in r.json()
 
+    def test_whatif_pension_and_ss_multipliers(self, client, sample_inputs, sample_accounts):
+        self._seed(client, sample_inputs, sample_accounts)
+        r = client.post("/api/projections/whatif", json={"pension_mult": 1.1, "ss_mult": 0.9})
+        assert r.status_code == 200
+        assert "scenarios" in r.json()
+
     def test_whatif_with_default_row_and_no_overrides(self, client):
         r = client.post("/api/projections/whatif", json={})
         assert r.status_code == 200
@@ -411,6 +419,71 @@ class TestSimulationEndpoints:
         r = client.get("/api/projections/retirement")
         ages = {s["retirement_age"] for s in r.json()["scenarios"]}
         assert ages == set(range(55, 68))
+
+
+class TestLifeEventsAffectRealProjectionAndSimulation:
+    """End-to-end: a life event actually moves the numbers on
+    /api/projections/retirement and /api/simulation/monte-carlo — and
+    toggling it off via included_in_projection removes that effect, while
+    the isolated overlay (GET /api/life-events) is unaffected either way."""
+
+    def _seed(self, client, sample_inputs, sample_accounts):
+        _seed_planning_inputs(client, sample_inputs)
+        _seed_accounts(client, sample_accounts)
+
+    def _portfolio_at_60(self, client):
+        r = client.get("/api/projections/retirement")
+        scenario = next(s for s in r.json()["scenarios"] if s["label"] == "age_60_early")
+        return scenario["portfolio_at_retirement"]
+
+    def test_included_event_moves_real_retirement_projection(self, client, sample_inputs, sample_accounts):
+        self._seed(client, sample_inputs, sample_accounts)
+        baseline = self._portfolio_at_60(client)
+        client.post("/api/life-events", json={
+            "name": "Inheritance", "event_type": "windfall", "event_year": CURRENT_YEAR + 1,
+            "one_time_cash_delta": 100000, "monthly_cash_flow_delta": 0, "duration_months": 0,
+        })
+        with_event = self._portfolio_at_60(client)
+        assert with_event > baseline
+
+    def test_toggled_off_event_does_not_move_real_retirement_projection(self, client, sample_inputs, sample_accounts):
+        self._seed(client, sample_inputs, sample_accounts)
+        baseline = self._portfolio_at_60(client)
+        created = client.post("/api/life-events", json={
+            "name": "Inheritance (maybe)", "event_type": "windfall", "event_year": CURRENT_YEAR + 1,
+            "one_time_cash_delta": 100000, "monthly_cash_flow_delta": 0, "duration_months": 0,
+        })
+        event_id = created.json()["id"]
+        client.patch(f"/api/life-events/{event_id}/toggle", json={"included_in_projection": False})
+        after_toggle_off = self._portfolio_at_60(client)
+        assert after_toggle_off == baseline
+        # Turning it back on restores the effect.
+        client.patch(f"/api/life-events/{event_id}/toggle", json={"included_in_projection": True})
+        after_toggle_on = self._portfolio_at_60(client)
+        assert after_toggle_on > baseline
+
+    def test_toggled_off_event_still_shows_in_isolated_overlay(self, client, sample_inputs, sample_accounts):
+        self._seed(client, sample_inputs, sample_accounts)
+        created = client.post("/api/life-events", json={
+            "name": "Inheritance (maybe)", "event_type": "windfall", "event_year": CURRENT_YEAR + 1,
+            "one_time_cash_delta": 100000, "monthly_cash_flow_delta": 0, "duration_months": 0,
+        })
+        event_id = created.json()["id"]
+        client.patch(f"/api/life-events/{event_id}/toggle", json={"included_in_projection": False})
+        overlay = client.get("/api/life-events")
+        event = next(e for e in overlay.json()["events"] if e["id"] == event_id)
+        assert event["included_in_projection"] is False
+        assert event["retirement_impact"] != 0
+
+    def test_included_event_moves_monte_carlo(self, client, sample_inputs, sample_accounts):
+        self._seed(client, sample_inputs, sample_accounts)
+        baseline = client.get("/api/simulation/monte-carlo?ret_age=60&ss_timing=early").json()
+        client.post("/api/life-events", json={
+            "name": "Big windfall", "event_type": "windfall", "event_year": CURRENT_YEAR + 1,
+            "one_time_cash_delta": 500000, "monthly_cash_flow_delta": 0, "duration_months": 0,
+        })
+        with_event = client.get("/api/simulation/monte-carlo?ret_age=60&ss_timing=early").json()
+        assert with_event["portfolio_at_retirement"] > baseline["portfolio_at_retirement"]
 
 
 class TestDebtRecommendationEndpoints:
@@ -848,11 +921,47 @@ class TestCfoOperatingSystem:
     def test_life_event_crud(self, client):
         created = client.post("/api/life-events", json={"name":"Career pause","event_type":"career","event_year":2030,"one_time_cash_delta":-1000,"monthly_cash_flow_delta":-100,"duration_months":12})
         assert created.status_code == 200
+        assert created.json()["included_in_projection"] is True  # default on
         event_id = created.json()["id"]
         listed = client.get("/api/life-events")
         assert listed.status_code == 200
         assert listed.json()["events"][0]["id"] == event_id
+        assert listed.json()["events"][0]["included_in_projection"] is True
         assert client.delete(f"/api/life-events/{event_id}").status_code == 200
+
+    def test_life_event_toggle_flips_by_default(self, client):
+        created = client.post("/api/life-events", json={"name":"Sabbatical","event_type":"sabbatical","event_year":2030,"one_time_cash_delta":0,"monthly_cash_flow_delta":-500,"duration_months":6})
+        event_id = created.json()["id"]
+        toggled = client.patch(f"/api/life-events/{event_id}/toggle")
+        assert toggled.status_code == 200
+        assert toggled.json()["included_in_projection"] == 0
+        toggled_back = client.patch(f"/api/life-events/{event_id}/toggle")
+        assert toggled_back.json()["included_in_projection"] == 1
+
+    def test_life_event_toggle_can_set_explicit_value(self, client):
+        created = client.post("/api/life-events", json={"name":"Windfall","event_type":"windfall","event_year":2031,"one_time_cash_delta":10000,"monthly_cash_flow_delta":0,"duration_months":0})
+        event_id = created.json()["id"]
+        r = client.patch(f"/api/life-events/{event_id}/toggle", json={"included_in_projection": False})
+        assert r.status_code == 200
+        assert r.json()["included_in_projection"] == 0
+        r2 = client.patch(f"/api/life-events/{event_id}/toggle", json={"included_in_projection": True})
+        assert r2.json()["included_in_projection"] == 1
+
+    def test_life_event_toggle_404_for_missing_event(self, client):
+        r = client.patch("/api/life-events/999999/toggle")
+        assert r.status_code == 404
+
+    def test_life_event_overlay_shows_toggled_off_events_too(self, client):
+        """summarize_life_events() (GET /api/life-events) keeps showing every
+        event regardless of included_in_projection, with the flag's current
+        value included on each summary."""
+        created = client.post("/api/life-events", json={"name":"Toggle test","event_type":"other","event_year":2030,"one_time_cash_delta":5000,"monthly_cash_flow_delta":0,"duration_months":0})
+        event_id = created.json()["id"]
+        client.patch(f"/api/life-events/{event_id}/toggle", json={"included_in_projection": False})
+        listed = client.get("/api/life-events")
+        event = next(e for e in listed.json()["events"] if e["id"] == event_id)
+        assert event["included_in_projection"] is False
+        assert "retirement_impact" in event  # isolated overlay estimate still computed
 
     def test_estate_documents_and_assumption_review(self, client):
         document = {"document_type":"Will","status":"complete","reviewed_on":"2026-01-01","next_review_on":"2027-01-01","location_hint":"Home safe","notes":""}

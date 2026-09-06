@@ -64,6 +64,13 @@ ROTH_401K_BALANCE_DEFAULT    = 0
 ANNUAL_401K_PRETAX_DEFAULT   = 0
 ANNUAL_401K_ROTH_DEFAULT     = 0
 
+# The "today" year assumed everywhere life events / the yearly withdrawal
+# loop below need a calendar year — must stay in sync with the yearly
+# loop's own "year" field formula (CURRENT_YEAR + yr + years_to_retire),
+# which was already hardcoded to 2026 before life events existed. Kept as
+# one named constant instead of two literals so the two can't drift apart.
+CURRENT_YEAR = 2026
+
 
 def _fv(pv, r, n):
     if n <= 0: return pv
@@ -121,6 +128,79 @@ def _rmd(balance, age, start_age=73):
     factor = RMD_TABLE.get(age, RMD_TABLE[99])
     return balance / factor
 
+def _split_life_events(life_events: List[Dict], retirement_year: int):
+    """Classify each life event as pre- or post-retirement given a calendar
+    retirement_year, normalizing each into a plain dict of
+    event_year/one_time/monthly/duration_months. Shared by
+    run_retirement_projection (pre-retirement events compound into
+    taxable_at_ret) and simulation_engine.py's own year-by-year loops
+    (Monte Carlo / stress tests), which need the post-retirement list
+    applied directly during their withdrawal phase since they don't
+    re-derive buckets from run_retirement_projection on every simulated
+    year. Callers are expected to have already filtered out any event
+    whose included_in_projection flag is off.
+
+    Note: classification is by event_year alone. An event that starts
+    pre-retirement but whose duration_months extends past the retirement
+    transition only gets modeled through retirement (the pre-retirement
+    annuity below is capped at retirement_year) — it does not resume as a
+    withdrawal-phase adjustment afterward. That's a known simplification,
+    not an oversight."""
+    pre, post = [], []
+    for event in (life_events or []):
+        event_year = int(event["event_year"])
+        one_time = float(event.get("one_time_cash_delta") or 0)
+        monthly  = float(event.get("monthly_cash_flow_delta") or 0)
+        duration_months = max(0, int(event.get("duration_months") or 0))
+        rec = {"event_year": event_year, "one_time": one_time,
+               "monthly": monthly, "duration_months": duration_months}
+        (pre if event_year < retirement_year else post).append(rec)
+    return pre, post
+
+
+def _pre_retirement_taxable_add(pre_events: List[Dict], pre_ret: float, retirement_year: int) -> float:
+    """Future-value a list of pre-retirement life events into the taxable
+    bucket at retirement — the one-time delta compounds from event_year to
+    retirement_year (same treatment as the existing asset1/asset2-sale
+    bridge logic), and a recurring monthly delta compounds as an annuity
+    from event start through whichever comes first: retirement, or the end
+    of its duration_months (0 meaning "runs through retirement")."""
+    total = 0.0
+    for ev in pre_events:
+        yrs_to_grow = retirement_year - ev["event_year"]
+        total += ev["one_time"] * ((1 + pre_ret) ** yrs_to_grow)
+        if ev["monthly"]:
+            annual_delta = ev["monthly"] * 12
+            contrib_end_year = (retirement_year if ev["duration_months"] == 0
+                                 else min(retirement_year, ev["event_year"] + ev["duration_months"] / 12))
+            contrib_years = contrib_end_year - ev["event_year"]
+            if contrib_years > 0:
+                fv_at_stop = _fv_annuity(annual_delta, pre_ret, contrib_years)
+                total += _fv(fv_at_stop, pre_ret, retirement_year - contrib_end_year)
+    return total
+
+
+def _post_retirement_year_effects(post_events: List[Dict], calendar_year: int):
+    """For a single withdrawal-phase calendar year, returns
+    (one_time_cash, monthly_adjustment_annual): the one-time_cash_delta of
+    any event landing exactly in this year (added to the taxable bucket,
+    same treatment as rmd_reinvested), and the annualized monthly delta of
+    any event active during this year (positive reduces that year's need,
+    negative increases it) — active meaning duration_months==0 (runs
+    through the rest of retirement) or the year falls before the event's
+    duration_months elapse."""
+    one_time_cash = 0.0
+    monthly_adj = 0.0
+    for ev in post_events:
+        if calendar_year < ev["event_year"]:
+            continue
+        if ev["event_year"] == calendar_year:
+            one_time_cash += ev["one_time"]
+        if ev["duration_months"] == 0 or calendar_year < ev["event_year"] + ev["duration_months"] / 12:
+            monthly_adj += ev["monthly"] * 12
+    return one_time_cash, monthly_adj
+
+
 def pension_for_age(inputs: Dict, age: int) -> float:
     """Pension is defined at 55/60/65 in Settings; interpolate linearly between
     those anchor points for any other retirement age (e.g. a sensitivity sweep
@@ -137,12 +217,18 @@ def pension_for_age(inputs: Dict, age: int) -> float:
 
 
 def run_retirement_projection(inputs: Dict, accounts: List[Dict], ret_ages: List[int] = None,
-                               salary_growth_pct: float = 0.0) -> Dict:
+                               salary_growth_pct: float = 0.0, life_events: List[Dict] = None) -> Dict:
     """salary_growth_pct: assumed annual raise rate applied to the 401k
     contribution base (annual_401k_pretax/roth, both derived from salary)
     every year until retirement, compounding — e.g. 0.03 for 3%/yr raises.
     Defaults to 0 (flat contributions, the historical behavior) so every
-    other caller is unaffected; only the What-If tool currently sets it."""
+    other caller is unaffected; only the What-If tool currently sets it.
+
+    life_events: rows from the life_events table (already filtered by the
+    caller to only the ones with included_in_projection true). Defaults to
+    None/empty so every existing caller that doesn't pass this is
+    completely unaffected. See _split_life_events/_pre_retirement_taxable_add/
+    _post_retirement_year_effects above for the actual math."""
     jason_age  = inputs["jason_age"]
     justin_age = inputs["justin_age"]
     inflation  = inputs["inflation_rate"]
@@ -201,6 +287,13 @@ def run_retirement_projection(inputs: Dict, accounts: List[Dict], ret_ages: List
         years_to_retire = max(0, ret_age - jason_age)
         pension_annual  = pension_for_age(inputs, ret_age)
 
+        # Life events split by calendar year relative to this ret_age's
+        # retirement year — independent of ss_label, so computed once here
+        # rather than inside the ss_label loop below.
+        retirement_year_for_events = CURRENT_YEAR + years_to_retire
+        pre_life_events, post_life_events = _split_life_events(life_events, retirement_year_for_events)
+        life_events_taxable_add = _pre_retirement_taxable_add(pre_life_events, pre_ret, retirement_year_for_events)
+
         for ss_label, jason_ss_annual, jason_ss_age in [
             ("early",   jason_ss_early,   62),
             ("delayed", jason_ss_delayed, 67),
@@ -253,6 +346,10 @@ def run_retirement_projection(inputs: Dict, accounts: List[Dict], ret_ages: List
                     yrs_asset2    = max(0, asset2_sale_age - jason_age)
                     yrs_to_grow    = years_to_retire - yrs_asset2
                     taxable_at_ret += asset2_sale_net * ((1 + pre_ret) ** yrs_to_grow)
+
+            # Life events dated before retirement (compounded above) —
+            # generic for every ret_age, not just the age-55 bridge case.
+            taxable_at_ret += life_events_taxable_add
 
             portfolio_at_ret = pretax_at_ret + roth_at_ret + taxable_at_ret + hsa_at_ret
 
@@ -338,6 +435,7 @@ def run_retirement_projection(inputs: Dict, accounts: List[Dict], ret_ages: List
             yearly = []
             for yr in range(retire_years):
                 age = ret_age + yr
+                calendar_year = CURRENT_YEAR + yr + years_to_retire
 
                 # Income need this year (includes healthcare, phased for age 55)
                 if ret_age == 55:
@@ -367,6 +465,17 @@ def run_retirement_projection(inputs: Dict, accounts: List[Dict], ret_ages: List
                     healthcare_this_year = healthcare_pre if age < 65 else healthcare_post
                     healthcare_inflated  = healthcare_this_year * ((1 + inflation) ** yr)
                     year_need = income_at_ret * ((1 + inflation) ** yr) + healthcare_inflated
+
+                # Life events landing in the withdrawal phase — generic
+                # across every ret_age, not just 55. A recurring monthly
+                # delta adjusts this year's need directly (positive delta
+                # is extra income, so it reduces need); a one-time delta
+                # lands in the taxable bucket below instead of the income
+                # need, same as rmd_reinvested's treatment.
+                life_event_cash_this_year, life_event_monthly_this_year = _post_retirement_year_effects(
+                    post_life_events, calendar_year
+                )
+                year_need -= life_event_monthly_this_year
 
                 # Fixed income sources
                 year_pen = pension_annual  # frozen pension, no COLA
@@ -404,6 +513,13 @@ def run_retirement_projection(inputs: Dict, accounts: List[Dict], ret_ages: List
                 withdrawal_roth    = 0.0
                 rmd_reinvested     = 0.0
                 pretax_tax_owed    = 0.0
+
+                # Life-event one-time cash arriving exactly this year lands
+                # in the taxable bucket up front — same treatment as
+                # rmd_reinvested below, available for this year's
+                # withdrawal waterfall or just left to compound.
+                if life_event_cash_this_year:
+                    taxable += life_event_cash_this_year
 
                 remaining_need = net_need
 
@@ -470,12 +586,14 @@ def run_retirement_projection(inputs: Dict, accounts: List[Dict], ret_ages: List
                 yearly.append({
                     "jason_age":        age,
                     "justin_age":       age - (jason_age - justin_age),
-                    "year":             2026 + yr + years_to_retire,
+                    "year":             calendar_year,
                     "income_need":      round(year_need),
                     "healthcare_cost":   round(healthcare_inflated),
                     "pension":          round(year_pen),
                     "social_security":  round(year_jss + year_uss),
                     "bridge_income":    round(bridge_income * ((1+inflation)**yr)) if ret_age == 55 and yr < bridge_years else 0,
+                    "life_event_cash":              round(life_event_cash_this_year),
+                    "life_event_monthly_adjustment": round(life_event_monthly_this_year),
                     "rmd":              round(rmd),
                     "rmd_reinvested":   round(rmd_reinvested),
                     "estimated_tax":    round(pretax_tax_owed),  # approximate — see comment above

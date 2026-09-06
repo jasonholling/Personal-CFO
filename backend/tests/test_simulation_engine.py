@@ -22,6 +22,7 @@ from simulation_engine import (
     run_contribution_sensitivity,
     run_survivor_scenario,
 )
+from projection_engine import CURRENT_YEAR
 
 # Every age the Retirement Sensitivity / Simulation pages let you pick,
 # not just the three Settings anchor points.
@@ -155,3 +156,57 @@ class TestRunSurvivorScenario:
     def test_default_death_age_is_ten_years_after_retirement(self, sample_inputs, sample_accounts):
         result = run_survivor_scenario(sample_inputs, sample_accounts, ret_age=60, deceased="jason", death_age=None)
         assert result["has_data"] is True
+
+
+class TestLifeEventsInSimulation:
+    """life_events threaded through simulation_engine.py: pre-retirement
+    events affect the starting bucket balances (via run_retirement_projection),
+    and withdrawal-phase events are applied directly inside Monte Carlo /
+    stress-test's own year-by-year loop (_run_single)."""
+
+    def test_monte_carlo_default_no_events_unchanged(self, sample_inputs, sample_accounts):
+        no_kwarg = run_monte_carlo(sample_inputs, sample_accounts, ret_age=60, ss_timing="early")
+        explicit_none = run_monte_carlo(sample_inputs, sample_accounts, ret_age=60, ss_timing="early", life_events=None)
+        assert no_kwarg["portfolio_at_retirement"] == explicit_none["portfolio_at_retirement"]
+        assert no_kwarg["success_rate"] == explicit_none["success_rate"]
+
+    def test_monte_carlo_pre_retirement_one_time_event_increases_starting_portfolio(self, sample_inputs, sample_accounts):
+        events = [{"event_year": CURRENT_YEAR + 1, "one_time_cash_delta": 50000,
+                   "monthly_cash_flow_delta": 0, "duration_months": 0}]
+        baseline = run_monte_carlo(sample_inputs, sample_accounts, ret_age=60, ss_timing="early")
+        with_event = run_monte_carlo(sample_inputs, sample_accounts, ret_age=60, ss_timing="early", life_events=events)
+        assert with_event["portfolio_at_retirement"] > baseline["portfolio_at_retirement"]
+
+    def test_monte_carlo_post_retirement_one_time_event_improves_success_rate(self, sample_inputs, sample_accounts):
+        """A large enough post-retirement windfall should never make the
+        median final balance worse."""
+        events = [{"event_year": CURRENT_YEAR + 15, "one_time_cash_delta": 2_000_000,
+                   "monthly_cash_flow_delta": 0, "duration_months": 0}]
+        baseline = run_monte_carlo(sample_inputs, sample_accounts, ret_age=60, ss_timing="early")
+        with_event = run_monte_carlo(sample_inputs, sample_accounts, ret_age=60, ss_timing="early", life_events=events)
+        assert with_event["median_final_balance"] >= baseline["median_final_balance"]
+
+    def test_stress_tests_default_no_events_unchanged(self, sample_inputs, sample_accounts):
+        no_kwarg = run_stress_tests(sample_inputs, sample_accounts, ret_age=60, ss_timing="early")
+        explicit_none = run_stress_tests(sample_inputs, sample_accounts, ret_age=60, ss_timing="early", life_events=None)
+        assert no_kwarg["scenarios"]["base"]["final_balance"] == explicit_none["scenarios"]["base"]["final_balance"]
+
+    def test_stress_tests_post_retirement_windfall_improves_base_case(self, sample_inputs, sample_accounts):
+        events = [{"event_year": CURRENT_YEAR + 12, "one_time_cash_delta": 1_000_000,
+                   "monthly_cash_flow_delta": 0, "duration_months": 0}]
+        baseline = run_stress_tests(sample_inputs, sample_accounts, ret_age=60, ss_timing="early")
+        with_event = run_stress_tests(sample_inputs, sample_accounts, ret_age=60, ss_timing="early", life_events=events)
+        assert with_event["scenarios"]["base"]["final_balance"] > baseline["scenarios"]["base"]["final_balance"]
+
+    def test_other_public_entry_points_accept_life_events_without_error(self, sample_inputs, sample_accounts):
+        """These functions only thread life_events through to
+        run_retirement_projection() for the starting-bucket effect, not a
+        bespoke withdrawal-phase model (see their docstrings) — this just
+        confirms the parameter is accepted end-to-end and doesn't crash."""
+        events = [{"event_year": CURRENT_YEAR + 1, "one_time_cash_delta": 10000,
+                   "monthly_cash_flow_delta": 0, "duration_months": 0}]
+        assert run_swr_analysis(sample_inputs, sample_accounts, ret_age=60, ss_timing="early", life_events=events) is not None
+        assert run_roth_conversion_analysis(sample_inputs, sample_accounts, ret_age=60, ss_timing="early", life_events=events) is not None
+        assert run_tax_efficiency_simulation(sample_inputs, sample_accounts, ret_age=60, ss_timing="early", life_events=events) is not None
+        assert run_contribution_sensitivity(sample_inputs, sample_accounts, ret_age=60, life_events=events) is not None
+        assert run_survivor_scenario(sample_inputs, sample_accounts, ret_age=60, deceased="jason", death_age=70, life_events=events) is not None

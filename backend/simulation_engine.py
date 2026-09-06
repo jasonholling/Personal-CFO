@@ -10,8 +10,9 @@ from typing import List, Dict, Tuple
 from projection_engine import (
     JASON_SS_EARLY_DEFAULT as JASON_SS_EARLY,
     JASON_SS_DELAYED_DEFAULT as JASON_SS_DELAYED,
-    JUSTIN_SPOUSAL_ANNUAL, JUSTIN_SPOUSAL_AGE,
-    _fv, _fv_annuity, _fv_annuity_monthly, _rmd, pension_for_age, rmd_start_age
+    JUSTIN_SPOUSAL_ANNUAL, JUSTIN_SPOUSAL_AGE, CURRENT_YEAR,
+    _fv, _fv_annuity, _fv_annuity_monthly, _rmd, pension_for_age, rmd_start_age,
+    _split_life_events, _post_retirement_year_effects
 )
 
 # Historical return parameters (annual, nominal)
@@ -78,13 +79,21 @@ def _run_single(
     annual_returns: List[float],
     inflation_mults: List[float] = None,
     phase_inputs: dict = None,
+    post_life_events: List[Dict] = None,
 ) -> Tuple[bool, List[float], List[float]]:
     """
     Run a single retirement simulation.
     Returns (survived_to_99, yearly_total_balances, yearly_pretax_balances)
+
+    post_life_events: withdrawal-phase life events already classified by
+    _split_life_events() (i.e. only the "post" half) — the caller derives
+    these once outside the N-run Monte Carlo loop rather than re-splitting
+    life_events on every single simulated run. Defaults to None/no-op so
+    every existing call site is unaffected.
     """
     mort_age   = 99
     retire_yrs = mort_age - ret_age
+    retirement_year = CURRENT_YEAR + max(0, ret_age - jason_age)
 
     pretax  = pretax_start
     roth    = roth_start
@@ -128,6 +137,15 @@ def _run_single(
                 year_need = income_at_ret*(1+eff_inf)**yr + hc_post*(1+eff_inf)**yr
         else:
             year_need = income_at_ret * ((1 + eff_inf) ** yr) + hc_this_year * ((1 + eff_inf) ** yr)
+
+        # Life events active in the withdrawal phase — same treatment as
+        # projection_engine.run_retirement_projection's yearly loop: a
+        # recurring monthly delta adjusts year_need directly, a one-time
+        # delta lands in taxable below instead.
+        calendar_year = retirement_year + yr
+        life_event_cash, life_event_monthly = _post_retirement_year_effects(post_life_events or [], calendar_year)
+        year_need -= life_event_monthly
+
         year_pen  = pension_annual  # frozen pension, no COLA
         year_jss  = (jason_ss_annual * ((1 + eff_inf) ** max(0, age - jason_ss_age))
                      if age >= jason_ss_age else 0)
@@ -135,6 +153,9 @@ def _run_single(
                      if age >= JUSTIN_SPOUSAL_AGE else 0)
         fixed     = year_pen + year_jss + year_uss
         net_need  = max(0, year_need - fixed)
+
+        if life_event_cash:
+            taxable += life_event_cash
 
         # RMD
         rmd = _rmd(pretax, age, _rmd_start)
@@ -181,8 +202,15 @@ def _run_single(
     return survived, balances, pretax_bals, roth_bals, taxable_bals
 
 
-def run_swr_analysis(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_timing: str = "early", target_success: float = 0.95) -> Dict:
-    """Find the safe withdrawal rate at target success rate (default 95%)."""
+def run_swr_analysis(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_timing: str = "early",
+                      target_success: float = 0.95, life_events: List[Dict] = None) -> Dict:
+    """Find the safe withdrawal rate at target success rate (default 95%).
+
+    life_events: threaded through to run_retirement_projection below so
+    pre-retirement events affect the starting portfolio; this function's
+    own binary-search loop does not separately model withdrawal-phase
+    events (unlike run_monte_carlo/run_stress_tests) — a known scope
+    limitation, not an oversight."""
     random.seed(42)
 
     jason_age    = inputs["jason_age"]
@@ -205,7 +233,7 @@ def run_swr_analysis(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_t
     # Get portfolio at retirement from projection engine — pass ret_age explicitly
     # so this works for any age, not just the default 55/60/65 anchors.
     from projection_engine import run_retirement_projection
-    _proj     = run_retirement_projection(inputs, accounts, ret_ages=[ret_age])
+    _proj     = run_retirement_projection(inputs, accounts, ret_ages=[ret_age], life_events=life_events)
     _scenario = next((s for s in _proj["scenarios"] if s["label"] == f"age_{ret_age}_{ss_timing}"), None)
     pretax_at_ret  = _scenario["pretax_at_retirement"]
     roth_at_ret    = _scenario["roth_at_retirement"]
@@ -333,8 +361,15 @@ def run_swr_analysis(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_t
     }
 
 
-def run_monte_carlo(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_timing: str = "early") -> Dict:
-    """Run 1000 Monte Carlo simulations."""
+def run_monte_carlo(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_timing: str = "early",
+                     life_events: List[Dict] = None) -> Dict:
+    """Run 1000 Monte Carlo simulations.
+
+    life_events: optional list of life_events rows (already filtered to
+    included_in_projection=true by the caller). Pre-retirement events
+    affect the starting bucket balances via run_retirement_projection
+    below; withdrawal-phase events are applied inside each simulated run
+    via _run_single. Defaults to None/no-op."""
     random.seed(42)  # reproducible
 
     jason_age  = inputs["jason_age"]
@@ -357,7 +392,7 @@ def run_monte_carlo(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_ti
     # Pull bucket values from projection_engine — pass ret_age explicitly so
     # this works for any age, not just the default 55/60/65 anchors.
     from projection_engine import (run_retirement_projection)
-    _proj = run_retirement_projection(inputs, accounts, ret_ages=[ret_age])
+    _proj = run_retirement_projection(inputs, accounts, ret_ages=[ret_age], life_events=life_events)
     _scenario = next((s for s in _proj["scenarios"] if s["label"] == f"age_{ret_age}_{ss_timing}"), None)
     pretax_at_ret  = _scenario["pretax_at_retirement"]
     roth_at_ret    = _scenario["roth_at_retirement"]
@@ -366,6 +401,12 @@ def run_monte_carlo(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_ti
 
     retire_yrs = 99 - ret_age
     N = 1000
+
+    # Withdrawal-phase life events, split once outside the N-run loop —
+    # the pre-retirement half was already folded into the bucket values
+    # above via run_retirement_projection.
+    retirement_year = CURRENT_YEAR + years_to_ret
+    _, post_life_events = _split_life_events(life_events, retirement_year)
 
     successes = 0
     all_balances = []
@@ -387,6 +428,7 @@ def run_monte_carlo(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_ti
             pension_annual, jason_ss_annual, jason_ss_age,
             income_at_ret, inflation, post_ret, returns,
             phase_inputs=_phase,
+            post_life_events=post_life_events,
         )
         if survived: successes += 1
         all_balances.append(balances)
@@ -431,8 +473,12 @@ def run_monte_carlo(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_ti
     }
 
 
-def run_stress_tests(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_timing: str = "early") -> Dict:
-    """Run deterministic stress test scenarios."""
+def run_stress_tests(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_timing: str = "early",
+                      life_events: List[Dict] = None) -> Dict:
+    """Run deterministic stress test scenarios.
+
+    life_events: see run_monte_carlo — same optional, defaults-to-no-op
+    wiring."""
     jason_age  = inputs["jason_age"]
     justin_age = inputs["justin_age"]
     inflation  = inputs["inflation_rate"]
@@ -451,7 +497,7 @@ def run_stress_tests(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_t
     income_at_ret   = income_today * ((1 + inflation) ** years_to_ret)
 
     from projection_engine import run_retirement_projection
-    _proj = run_retirement_projection(inputs, accounts, ret_ages=[ret_age])
+    _proj = run_retirement_projection(inputs, accounts, ret_ages=[ret_age], life_events=life_events)
     _scenario = next(s for s in _proj["scenarios"] if s["label"] == f"age_{ret_age}_{ss_timing}")
     pretax_at_ret  = _scenario["pretax_at_retirement"]
     roth_at_ret    = _scenario["roth_at_retirement"]
@@ -459,6 +505,11 @@ def run_stress_tests(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_t
     hsa_at_ret     = _scenario["hsa_at_retirement"]
 
     retire_yrs = 99 - ret_age
+
+    # Withdrawal-phase life events, split once — the pre-retirement half
+    # is already folded into the bucket values above.
+    retirement_year = CURRENT_YEAR + years_to_ret
+    _, post_life_events = _split_life_events(life_events, retirement_year)
 
     # Base case — deterministic at post_ret every year
     base_returns = [post_ret] * retire_yrs
@@ -477,6 +528,7 @@ def run_stress_tests(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_t
         pension_annual, jason_ss_annual, jason_ss_age,
         income_at_ret, inflation, post_ret, base_returns,
         phase_inputs=_phase_base,
+        post_life_events=post_life_events,
     )
 
     results = {"base": {
@@ -513,7 +565,7 @@ def run_stress_tests(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_t
 
         # Re-project buckets if bridge years changed
         if bridge_override is not None and ret_age == 55:
-            _proj2 = run_retirement_projection(sim_inputs, accounts, ret_ages=[ret_age])
+            _proj2 = run_retirement_projection(sim_inputs, accounts, ret_ages=[ret_age], life_events=life_events)
             _s2 = next(s for s in _proj2["scenarios"] if s["label"] == f"age_{ret_age}_{ss_timing}")
             sim_pretax  = _s2["pretax_at_retirement"]
             sim_roth    = _s2["roth_at_retirement"]
@@ -547,6 +599,7 @@ def run_stress_tests(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_t
             pension_annual, run_ss, jason_ss_age,
             income_at_ret, inflation, post_ret, returns, inf_mults,
             phase_inputs=_phase_st,
+            post_life_events=post_life_events,
         )
 
         # Find depletion age
@@ -574,7 +627,8 @@ def run_stress_tests(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_t
         "scenarios": results,
     }
 
-def run_roth_conversion_analysis(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_timing: str = "early") -> Dict:
+def run_roth_conversion_analysis(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_timing: str = "early",
+                                  life_events: List[Dict] = None) -> Dict:
     """
     Find optimal annual Roth conversion amount between retirement and RMD age.
     Goal: fill the 22% bracket each year to minimize lifetime taxes.
@@ -602,7 +656,7 @@ def run_roth_conversion_analysis(inputs: Dict, accounts: List[Dict], ret_age: in
     RMD_START_AGE   = rmd_start_age(jason_age)
 
     from projection_engine import run_retirement_projection
-    _proj = run_retirement_projection(inputs, accounts, ret_ages=[ret_age])
+    _proj = run_retirement_projection(inputs, accounts, ret_ages=[ret_age], life_events=life_events)
     _s = next(s for s in _proj["scenarios"] if s["label"] == f"age_{ret_age}_{ss_timing}")
 
     years_to_ret  = max(0, ret_age - jason_age)
@@ -691,7 +745,8 @@ def run_roth_conversion_analysis(inputs: Dict, accounts: List[Dict], ret_age: in
         "rmd_start_age":          RMD_START_AGE,
     }
 
-def run_tax_efficiency_simulation(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_timing: str = "early") -> Dict:
+def run_tax_efficiency_simulation(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_timing: str = "early",
+                                   life_events: List[Dict] = None) -> Dict:
     """
     Run 1000 market scenarios for 3 draw order strategies.
     Simplified tax: flat 22% on pretax withdrawals, 0% on Roth, 15% on taxable gains.
@@ -714,7 +769,7 @@ def run_tax_efficiency_simulation(inputs: Dict, accounts: List[Dict], ret_age: i
     justin_ss_age   = inputs.get("justin_ss_age", JUSTIN_SPOUSAL_AGE)
 
     from projection_engine import run_retirement_projection
-    _proj = run_retirement_projection(inputs, accounts, ret_ages=[ret_age])
+    _proj = run_retirement_projection(inputs, accounts, ret_ages=[ret_age], life_events=life_events)
     _s = next(s for s in _proj["scenarios"] if s["label"] == f"age_{ret_age}_{ss_timing}")
     pretax_start  = _s["pretax_at_retirement"]
     roth_start    = _s["roth_at_retirement"]
@@ -850,7 +905,8 @@ def run_tax_efficiency_simulation(inputs: Dict, accounts: List[Dict], ret_age: i
     }
 
 
-def run_contribution_sensitivity(inputs: Dict, accounts: List[Dict], ret_age: int = 60) -> Dict:
+def run_contribution_sensitivity(inputs: Dict, accounts: List[Dict], ret_age: int = 60,
+                                  life_events: List[Dict] = None) -> Dict:
     """
     Compare retirement outcomes at different contribution rates for remaining working years.
     Extra contributions above 6% go to Roth. Employer stays fixed at 9%.
@@ -884,7 +940,7 @@ def run_contribution_sensitivity(inputs: Dict, accounts: List[Dict], ret_age: in
     ]
 
     # Base retirement projection for comparison
-    base_result = run_retirement_projection(inputs, accounts, ret_ages=[ret_age])
+    base_result = run_retirement_projection(inputs, accounts, ret_ages=[ret_age], life_events=life_events)
     base_scenario = next(s for s in base_result["scenarios"] if s["label"] == f"age_{ret_age}_early")
     base_surplus   = base_scenario["projected_surplus"]
     base_portfolio = base_scenario["portfolio_at_retirement"]
@@ -941,7 +997,8 @@ def run_contribution_sensitivity(inputs: Dict, accounts: List[Dict], ret_age: in
 
 def run_survivor_scenario(inputs: Dict, accounts: List[Dict], ret_age: int = 60,
                            deceased: str = "jason", death_age: int = None,
-                           survivor_need_factor: float = 0.75) -> Dict:
+                           survivor_need_factor: float = 0.75,
+                           life_events: List[Dict] = None) -> Dict:
     """Stress-tests the plan assuming one spouse dies during retirement:
     the deceased's life insurance payout is added to the portfolio, Social
     Security switches to the survivor benefit (the higher of the two, not
@@ -969,7 +1026,7 @@ def run_survivor_scenario(inputs: Dict, accounts: List[Dict], ret_age: int = 60,
     if death_age is None:
         death_age = ret_age + 10
 
-    _proj = run_retirement_projection(inputs, accounts, ret_ages=[ret_age])
+    _proj = run_retirement_projection(inputs, accounts, ret_ages=[ret_age], life_events=life_events)
     _scenario = next((s for s in _proj["scenarios"] if s["label"] == f"age_{ret_age}_early"), None)
     if not _scenario:
         return {"has_data": False}
