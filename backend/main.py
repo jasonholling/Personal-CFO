@@ -231,6 +231,26 @@ def get_accounts():
     conn.close()
     return [dict(r) for r in rows]
 
+@app.get("/api/accounts/freshness")
+def get_account_freshness():
+    """Expose balance freshness without changing account data."""
+    conn = get_db()
+    accounts = [dict(r) for r in conn.execute("SELECT id, name, account_type, updated_at FROM accounts").fetchall()]
+    conn.close()
+    now = datetime.now()
+    stale = []
+    for account in accounts:
+        try:
+            updated = datetime.fromisoformat(account["updated_at"])
+            age_days = max(0, (now - updated).days)
+        except (TypeError, ValueError):
+            age_days = None
+        account["age_days"] = age_days
+        if age_days is None or age_days > 35:
+            stale.append(account)
+    return {"account_count": len(accounts), "stale_count": len(stale), "stale_accounts": stale,
+            "fresh": len(stale) == 0}
+
 @app.post("/api/accounts")
 def create_account(account: Account):
     conn = get_db()

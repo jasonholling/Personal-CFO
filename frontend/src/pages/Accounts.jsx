@@ -63,6 +63,7 @@ export default function Accounts() {
   const OWNERS = ownerOptions(personNames)
   const [accounts, setAccounts] = useState([])
   const [netWorth, setNetWorth] = useState(null)
+  const [freshness, setFreshness] = useState(null)
   const [form, setForm] = useState(EMPTY)
   const [editing, setEditing] = useState(null)
   const [showForm, setShowForm] = useState(false)
@@ -76,6 +77,7 @@ export default function Accounts() {
   const load = () => Promise.all([
     axios.get('/api/accounts').then(r => setAccounts(r.data)),
     axios.get('/api/net-worth').then(r => setNetWorth(r.data)),
+    axios.get('/api/accounts/freshness').then(r => setFreshness(r.data)),
   ])
   useEffect(() => { load() }, [])
 
@@ -143,6 +145,11 @@ export default function Accounts() {
           {showForm ? 'Cancel' : '+ Add Account'}
         </button>
       </div>
+
+      {freshness?.stale_count > 0 && <div className="card" style={{ marginBottom:20, borderLeft:'3px solid var(--amber)' }}>
+        <div style={{ fontWeight:650, marginBottom:4 }}>Balance refresh needed</div>
+        <div style={{ color:'var(--text2)', fontSize:13 }}>{freshness.stale_count} account{freshness.stale_count === 1 ? '' : 's'} ha{freshness.stale_count === 1 ? 's' : 've'} not been updated in over 35 days. Refresh through Quicken import or edit the balance before relying on projections.</div>
+      </div>}
 
       <QuickenImport onImportComplete={load} />
 
