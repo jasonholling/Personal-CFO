@@ -173,6 +173,11 @@ class CashFlowItem(BaseModel):
     essential: bool = False
     notes: Optional[str] = None
 
+class SurplusAllocation(BaseModel):
+    goal: str
+    monthly_amount: float = 0
+    notes: Optional[str] = None
+
 class PlanningInputs(BaseModel):
     model_config = {"extra": "allow"}
     person1_name: str = "Person 1"
@@ -308,6 +313,29 @@ def delete_cash_flow_item(item_id: int):
     conn.commit()
     conn.close()
     return {"deleted": item_id}
+
+@app.get("/api/surplus-allocations")
+def get_surplus_allocations():
+    conn = get_db()
+    rows = [dict(r) for r in conn.execute("SELECT * FROM surplus_allocations ORDER BY goal").fetchall()]
+    cash_rows = [dict(r) for r in conn.execute("SELECT * FROM cash_flow_items").fetchall()]
+    conn.close()
+    summary = summarize_cash_flow(cash_rows)
+    assigned = round(sum(row["monthly_amount"] for row in rows))
+    return {"allocations": rows, "monthly_surplus": summary["monthly_surplus"], "assigned": assigned,
+            "unassigned": round(summary["monthly_surplus"] - assigned)}
+
+@app.put("/api/surplus-allocations/{goal}")
+def save_surplus_allocation(goal: str, allocation: SurplusAllocation):
+    if not goal.strip() or allocation.monthly_amount < 0:
+        raise HTTPException(status_code=400, detail="Enter a goal and a non-negative monthly amount")
+    conn = get_db()
+    conn.execute("INSERT INTO surplus_allocations (goal, monthly_amount, notes) VALUES (?,?,?) ON CONFLICT(goal) DO UPDATE SET monthly_amount=excluded.monthly_amount, notes=excluded.notes, updated_at=datetime('now')",
+                 (goal.strip(), allocation.monthly_amount, allocation.notes))
+    conn.commit()
+    row = conn.execute("SELECT * FROM surplus_allocations WHERE goal=?", (goal.strip(),)).fetchone()
+    conn.close()
+    return dict(row)
 
 # Debt Payoff — operates on accounts whose account_type is a debt type
 # (mortgage, credit_card, student_loan, car_loan, personal_loan)

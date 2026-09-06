@@ -244,3 +244,22 @@ def init_cash_flow_table():
     conn.close()
 
 init_cash_flow_table()
+
+def init_surplus_allocation_table():
+    conn = get_db()
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS surplus_allocations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            goal TEXT NOT NULL,
+            monthly_amount REAL NOT NULL DEFAULT 0 CHECK (monthly_amount >= 0),
+            notes TEXT,
+            created_at TEXT DEFAULT (datetime('now')),
+            updated_at TEXT DEFAULT (datetime('now'))
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_surplus_allocations_goal
+        ON surplus_allocations(goal);
+    """)
+    conn.commit()
+    conn.close()
+
+init_surplus_allocation_table()
