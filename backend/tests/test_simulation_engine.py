@@ -21,6 +21,7 @@ from simulation_engine import (
     run_tax_efficiency_simulation,
     run_contribution_sensitivity,
     run_survivor_scenario,
+    _run_single,
 )
 from projection_engine import CURRENT_YEAR
 
@@ -108,6 +109,106 @@ class TestRunContributionSensitivity:
     def test_intermediate_ages_do_not_crash(self, sample_inputs, sample_accounts, age):
         result = run_contribution_sensitivity(sample_inputs, sample_accounts, ret_age=age)
         assert result is not None
+
+
+class TestWithdrawalWaterfallReconciliationFixes:
+    """Regression tests for the external audit 2026-09-06 findings in
+    simulation_engine.py: RMD-age withdrawals silently rationed with no
+    failure signal, and spousal SS hardcoded to 0/wrong-person's-age."""
+
+    def test_run_single_continues_pretax_withdrawal_and_survives_after_rmd_gate(self):
+        """Regression test for the `rmd == 0` gate that blocked ANY further
+        pretax withdrawal once RMD age was reached — even with plenty of
+        pretax balance left and a real remaining need. ret_age=98 (single
+        modeled year) with RMD start age 73 forces an immediate RMD
+        (2,000,000 / 7.3 ≈ 273,973) that's smaller than the $500k spending
+        need, while plenty of pretax balance remains — the fixed code
+        should draw the rest from pretax and report survived=True; the
+        pre-fix code left ~$226k unmet every year with no failure signal."""
+        survived, balances, pretax_bals, roth_bals, taxable_bals = _run_single(
+            pretax_start=2_000_000, roth_start=0, taxable_start=0, hsa_start=0,
+            ret_age=98, jason_age=98, justin_age=98,
+            pension_annual=0, jason_ss_annual=0, jason_ss_age=200,
+            income_at_ret=500000, inflation=0.0, post_ret=0.0,
+            annual_returns=[0.0],
+        )
+        assert survived is True
+        assert pretax_bals[0] == pytest.approx(2_000_000 - 500000, rel=0.01)
+
+    def test_run_single_fails_when_need_genuinely_cannot_be_met(self):
+        """Sanity check the fix didn't overshoot: a plan with far too little
+        to cover the need should still correctly report survived=False."""
+        survived, balances, *_ = _run_single(
+            pretax_start=100_000, roth_start=0, taxable_start=0, hsa_start=0,
+            ret_age=98, jason_age=98, justin_age=98,
+            pension_annual=0, jason_ss_annual=0, jason_ss_age=200,
+            income_at_ret=500000, inflation=0.0, post_ret=0.0,
+            annual_returns=[0.0],
+        )
+        assert survived is False
+
+    def test_run_single_spousal_ss_uses_justins_own_age_not_jasons(self):
+        """Regression test: justin_ss_age used to be compared against
+        Jason's current age directly instead of Justin's own (offset by
+        the couple's age gap). ret_age=95, jason_age=95, justin_age=93 (a
+        2-year gap) with justin_ss_age=95: across 4 modeled years (jason
+        ages 95-98, justin ages 93-96), Justin's benefit should only kick
+        in once JUSTIN turns 95 — at yr index 2 (jason_age=97) — not at
+        yr index 0 (when only Jason has hit 95). All draws come from a
+        large taxable bucket so RMDs/pretax gating can't confound the
+        result, and annual_returns is exactly 4 long (0% each year) so no
+        random fallback returns kick in past this short window."""
+        _, balances, pretax_bals, roth_bals, taxable_bals = _run_single(
+            pretax_start=0, roth_start=0, taxable_start=10_000_000, hsa_start=0,
+            ret_age=95, jason_age=95, justin_age=93,
+            pension_annual=0, jason_ss_annual=0, jason_ss_age=200,
+            income_at_ret=100000, inflation=0.0, post_ret=0.0,
+            annual_returns=[0.0, 0.0, 0.0, 0.0],
+            justin_ss_annual=20000, justin_ss_age=95,
+        )
+        draw_yr0 = 10_000_000 - taxable_bals[0]
+        draw_yr1 = taxable_bals[0] - taxable_bals[1]
+        draw_yr2 = taxable_bals[1] - taxable_bals[2]
+        assert draw_yr0 == pytest.approx(100000, rel=0.01)  # justin_age=93, not active
+        assert draw_yr1 == pytest.approx(100000, rel=0.01)  # justin_age=94, not active
+        assert draw_yr2 == pytest.approx(80000, rel=0.01)   # justin_age=95, active -> 20k less draw needed
+
+    def test_monte_carlo_spousal_ss_changes_outcome(self, sample_inputs, sample_accounts):
+        """Regression test: run_monte_carlo used to hardcode spousal SS to
+        the JUSTIN_SPOUSAL_ANNUAL/AGE fallback constants (both 0) inside
+        _run_single regardless of what Settings actually configured, so
+        changing justin_social_security never affected Monte Carlo output
+        at all. Verify a materially larger configured spousal benefit
+        changes the median final balance."""
+        low = {**sample_inputs, "justin_social_security": 0, "justin_ss_age": 62}
+        high = {**sample_inputs, "justin_social_security": 40000, "justin_ss_age": 62}
+        result_low = run_monte_carlo(low, sample_accounts, ret_age=62, ss_timing="early")
+        result_high = run_monte_carlo(high, sample_accounts, ret_age=62, ss_timing="early")
+        assert result_high["median_final_balance"] > result_low["median_final_balance"]
+
+    def test_stress_tests_ss_reduction_scenario_actually_cuts_justin_too(self, sample_inputs, sample_accounts):
+        """Regression test: the "SS Cut 25%" stress scenario computed
+        scenario_justin_ss but never passed it through to the simulated
+        run, so Justin's spousal benefit silently stayed at its full,
+        un-cut value. With a real justin_social_security configured, the
+        ss_reduction scenario's final balance should be lower than the
+        base case (which runs at the full, un-cut post_ret rate but with
+        full benefits) by a set of years reflecting the cut, not identical
+        to a run where the cut was never applied."""
+        inputs = {**sample_inputs, "justin_social_security": 30000, "justin_ss_age": 62,
+                   "jason_social_security": 0, "jason_ss_delayed": 0}
+        result = run_stress_tests(inputs, sample_accounts, ret_age=62, ss_timing="early")
+        ss_cut = result["scenarios"]["ss_reduction"]
+        # Re-run with justin_social_security already pre-cut by 25% and no
+        # market shock (matches ss_reduction's own overrides={} / same
+        # post_ret-every-year path as "base") to get the expected post-cut
+        # trajectory independently, then compare final balances.
+        inputs_precut = {**inputs, "justin_social_security": 30000 * 0.75}
+        result_precut = run_stress_tests(inputs_precut, sample_accounts, ret_age=62, ss_timing="early")
+        # The ss_reduction scenario itself has no return-override years
+        # (overrides={}), so its trajectory should match a plan that was
+        # simply configured with the already-cut benefit from the start.
+        assert ss_cut["final_balance"] == pytest.approx(result_precut["scenarios"]["base"]["final_balance"], rel=0.01)
 
 
 class TestRunSurvivorScenario:

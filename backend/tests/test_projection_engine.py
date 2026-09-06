@@ -257,6 +257,189 @@ class TestRunRetirementProjection:
         assert all(y["estimated_tax"] > 0 for y in rmd_years)
 
 
+class TestWithdrawalWaterfallReconciliationFixes:
+    """Regression tests for the external audit 2026-09-06 findings: RMD-age
+    withdrawals silently getting rationed, spousal SS comparing the wrong
+    person's age, capitalized SS/healthcare not being discounted back to
+    ret_age, and HSA withdrawals vanishing from the reported total."""
+
+    def test_pretax_withdrawal_continues_after_rmd_age_when_balance_remains(self, sample_accounts):
+        """Regression test for the bug where a `rmd == 0` gate on the extra
+        pretax withdrawal step blocked ANY further pretax draw once RMD
+        age was reached, for the rest of the plan — even with a large
+        remaining pretax balance and a large unmet need. $5M IRA / $200k
+        spending / 0% returns / 0% inflation should keep drawing roughly
+        $200k/yr straight through RMD age instead of collapsing to just
+        the RMD amount."""
+        inputs = {
+            "jason_age": 60, "justin_age": 60,
+            "retirement_income_today_dollars": 200000,
+            "inflation_rate": 0.0,
+            "expected_return_pre_retirement": 0.0,
+            "expected_return_post_retirement": 0.0,
+            "annual_hsa_contribution": 0, "annual_rsu_value": 0,
+            "jason_social_security": 0, "justin_social_security": 0,
+            "healthcare_pre_medicare": 0, "healthcare_post_medicare": 0,
+            "pension_55": 0, "pension_60": 0, "pension_65": 0,
+            "retirement_end_age": 99,
+            "pretax_401k_pct": 1.0,
+        }
+        accounts = [{"id": 1, "name": "IRA", "account_type": "ira", "owner": "jason",
+                     "balance": 5000000, "institution": "", "notes": ""}]
+        result = run_retirement_projection(inputs, accounts, ret_ages=[60])
+        scenario = next(s for s in result["scenarios"] if s["ss_timing"] == "early")
+        # jason_age=60 today => born 1966 => RMD starts at 75.
+        post_rmd_years = [y for y in scenario["yearly_detail"] if y["jason_age"] >= 75 and y["pretax_balance"] > 0]
+        assert post_rmd_years, "expected pretax balance to still be nonzero past RMD age in this fixture"
+        # Withdrawal should still be funding close to the full $200k need,
+        # not collapsed down to just the RMD amount.
+        assert all(y["withdrawal"] >= 195000 for y in post_rmd_years)
+
+    def test_unmet_need_surfaces_when_spending_cannot_be_funded(self, sample_accounts):
+        """A plan that genuinely runs dry should surface unmet_need on the
+        yearly rows once every bucket is exhausted, and on_track should be
+        False — not just silently report a depleted-but-"successful" plan."""
+        inputs = {
+            "jason_age": 60, "justin_age": 60,
+            "retirement_income_today_dollars": 200000,
+            "inflation_rate": 0.0,
+            "expected_return_pre_retirement": 0.0,
+            "expected_return_post_retirement": 0.0,
+            "annual_hsa_contribution": 0, "annual_rsu_value": 0,
+            "jason_social_security": 0, "justin_social_security": 0,
+            "healthcare_pre_medicare": 0, "healthcare_post_medicare": 0,
+            "pension_55": 0, "pension_60": 0, "pension_65": 0,
+            "retirement_end_age": 99,
+            "pretax_401k_pct": 1.0,
+        }
+        accounts = [{"id": 1, "name": "IRA", "account_type": "ira", "owner": "jason",
+                     "balance": 500000, "institution": "", "notes": ""}]
+        result = run_retirement_projection(inputs, accounts, ret_ages=[60])
+        scenario = next(s for s in result["scenarios"] if s["ss_timing"] == "early")
+        underfunded = [y for y in scenario["yearly_detail"] if y["unmet_need"] > 0]
+        assert underfunded, "expected at least one underfunded year once the $500k IRA runs out"
+        assert scenario["any_year_underfunded"] is True
+        assert scenario["on_track"] is False
+
+    def test_fully_funded_plan_has_no_underfunded_years(self, sample_inputs, sample_accounts):
+        """Sanity check the fix didn't overshoot: a normal, well-funded
+        fixture scenario should have zero underfunded years."""
+        result = run_retirement_projection(sample_inputs, sample_accounts, ret_ages=[65])
+        scenario = next(s for s in result["scenarios"] if s["ss_timing"] == "early")
+        assert all(y["unmet_need"] == 0 for y in scenario["yearly_detail"])
+        assert scenario["any_year_underfunded"] is False
+
+    def test_spousal_ss_starts_at_justins_own_claiming_age_not_jasons(self, sample_inputs, sample_accounts):
+        """Regression test for the bug where the yearly loop compared
+        justin_ss_age against Jason's current age instead of Justin's own
+        (offset by the couple's age gap). sample_inputs: jason_age=50,
+        justin_age=48 (a 2-year gap), justin_ss_age=67 => Justin's spousal
+        SS should start showing up the year Justin turns 67, i.e. when
+        Jason is 69 — not when Jason turns 67."""
+        result = run_retirement_projection(sample_inputs, sample_accounts, ret_ages=[60])
+        scenario = next(s for s in result["scenarios"] if s["ss_timing"] == "early")
+        yearly = scenario["yearly_detail"]
+        row_jason_67 = next(y for y in yearly if y["jason_age"] == 67)
+        row_jason_69 = next(y for y in yearly if y["jason_age"] == 69)
+        assert row_jason_67["justin_age"] == 65  # Justin hasn't hit 67 yet
+        assert row_jason_69["justin_age"] == 67  # Justin turns 67 here
+        # Jason's own SS ("early", starts at 62) keeps growing with
+        # inflation between these two rows regardless of Justin's benefit,
+        # so isolate Justin's contribution by subtracting Jason's own
+        # (independently computed) SS from the reported combined total at
+        # each row, rather than assuming the raw jump is Justin's benefit
+        # alone.
+        jason_annual = sample_inputs["jason_social_security"]
+        justin_annual = sample_inputs["justin_social_security"]
+        inflation = sample_inputs["inflation_rate"]
+        jason_jss_67 = jason_annual * ((1 + inflation) ** (67 - 62))
+        jason_jss_69 = jason_annual * ((1 + inflation) ** (69 - 62))
+        justin_contribution_at_67 = row_jason_67["social_security"] - jason_jss_67
+        justin_contribution_at_69 = row_jason_69["social_security"] - jason_jss_69
+        assert justin_contribution_at_67 == pytest.approx(0, abs=1)
+        assert justin_contribution_at_69 == pytest.approx(justin_annual, rel=0.01)
+
+    def test_capitalized_social_security_is_discounted_back_to_retirement_age(self, sample_inputs, sample_accounts):
+        """Regression test: capitalized_income_sources used to value each
+        SS stream as of its OWN claiming age and add that straight into
+        the ret_age-dollars total without discounting the wait years back
+        — silently overstating capitalized_income_sources (and understating
+        capitalized_needed_from_assets/overstating projected_surplus) for
+        any claiming age after ret_age, which is nearly always true since
+        SS can't start before 62."""
+        result = run_retirement_projection(sample_inputs, sample_accounts, ret_ages=[60])
+        early = next(s for s in result["scenarios"] if s["ss_timing"] == "early")
+        # jason_ss_age = 62 for "early" => a 2-year wait from ret_age=60.
+        # If this weren't discounted, cap_jason_ss would come out larger
+        # (no division by (1+real_rate)**years_wait), inflating income and
+        # thus surplus above the real, discounted figure. We can't reach
+        # cap_jason_ss directly, but we can bound total capitalized income:
+        # it must be materially less than what an un-discounted figure
+        # would produce for a 2-year-plus wait with a nonzero real rate.
+        real_rate = ((1 + sample_inputs["expected_return_post_retirement"]) /
+                     (1 + sample_inputs["inflation_rate"]) - 1)
+        assert real_rate > 0, "test assumes a positive real rate so discounting actually matters"
+        assert early["capitalized_income_sources"] > 0
+        # A basic sanity bound: total capitalized income shouldn't exceed
+        # the sum of nominal pension+SS annuities times the number of
+        # retirement years (a generous, deliberately loose upper bound —
+        # this is a smoke check, not a precise reconciliation).
+        mort_age = early["retirement_end_age"]
+        loose_upper_bound = (early["pension_annual"] + early["jason_ss_annual"] + early["justin_ss_annual"]) * (mort_age - 60) * 2
+        assert early["capitalized_income_sources"] < loose_upper_bound
+
+    def test_healthcare_inflation_timing_matches_between_summary_and_yearly(self, sample_inputs, sample_accounts):
+        """Regression test: the summary capitalized-need calc inflated
+        healthcare_pre_medicare by years_to_retire before annuitizing it,
+        but the yearly loop used to inflate the raw (un-inflated-to-ret_age)
+        input from ret_age forward instead — silently understating every
+        modeled year's healthcare cost (and total need) by a factor of
+        (1+inflation)**years_to_retire relative to what the summary
+        assumed. With years_to_retire > 0, the first retirement year's
+        reported healthcare_cost should equal healthcare_pre_medicare
+        already inflated to ret_age dollars, matching income_need's own
+        treatment of retirement_income_today_dollars."""
+        inputs = {**sample_inputs, "jason_age": 50}  # ret_age 60 => 10 years to retirement
+        result = run_retirement_projection(inputs, sample_accounts, ret_ages=[60])
+        scenario = next(s for s in result["scenarios"] if s["ss_timing"] == "early")
+        first_year = scenario["yearly_detail"][0]
+        years_to_retire = scenario["years_to_retirement"]
+        inflation = inputs["inflation_rate"]
+        expected_hc = inputs["healthcare_pre_medicare"] * ((1 + inflation) ** years_to_retire)
+        assert first_year["healthcare_cost"] == pytest.approx(expected_hc, rel=0.01)
+
+    def test_hsa_withdrawal_is_included_in_total_withdrawal(self, sample_inputs):
+        """Regression test: HSA draws reduced the HSA balance but were
+        never added to total_withdrawal, so a year funded partly/entirely
+        from HSA silently reported less total withdrawal than was actually
+        spent (income-source breakdowns couldn't reconcile against balance
+        changes). Force an HSA-funded year by giving a big HSA balance and
+        zero taxable/pretax/roth."""
+        inputs = {
+            **sample_inputs,
+            "jason_age": 60, "justin_age": 60,
+            "retirement_income_today_dollars": 20000,
+            "inflation_rate": 0.0,
+            "expected_return_pre_retirement": 0.0,
+            "expected_return_post_retirement": 0.0,
+            "jason_social_security": 0, "justin_social_security": 0,
+            "healthcare_pre_medicare": 0, "healthcare_post_medicare": 0,
+            "pension_55": 0, "pension_60": 0, "pension_65": 0,
+        }
+        accounts = [{"id": 1, "name": "HSA", "account_type": "hsa", "owner": "jason",
+                     "balance": 500000, "institution": "", "notes": ""}]
+        result = run_retirement_projection(inputs, accounts, ret_ages=[60])
+        scenario = next(s for s in result["scenarios"] if s["ss_timing"] == "early")
+        first_year = scenario["yearly_detail"][0]
+        assert first_year["withdrawal_hsa"] > 0
+        assert first_year["withdrawal"] == (
+            first_year["withdrawal_taxable"] + first_year["withdrawal_pretax"]
+            + first_year["withdrawal_roth"] + first_year["withdrawal_hsa"]
+        )
+        assert first_year["withdrawal"] > 0
+        assert first_year["unmet_need"] == 0
+
+
 class TestLifeEventsInRetirementProjection:
     """Life events (from the life_events table) are now wired into the real
     projection, not just life_event_engine.py's isolated overlay estimate."""

@@ -20,7 +20,12 @@ export function initScenarioFromStorage() {
     const storedAge = parseInt(localStorage.getItem(STORAGE_KEY_RET_AGE))
     if (!isNaN(storedAge)) _retAge = storedAge
     const storedTiming = localStorage.getItem(STORAGE_KEY_SS_TIMING)
-    if (storedTiming === 'early' || storedTiming === 'late') _ssTiming = storedTiming
+    // The rest of the app (SS_OPTS in Simulation.jsx, Retirement.jsx's
+    // toggle, every backend ss_timing param) uses "delayed", not "late" --
+    // this stored-value allowlist was checking for the wrong string, so a
+    // saved "delayed" selection silently failed validation and reverted to
+    // the "early" default on every restart (external audit 2026-09-06).
+    if (storedTiming === 'early' || storedTiming === 'delayed') _ssTiming = storedTiming
   } catch { /* localStorage unavailable — default 60/early */ }
   return { retAge: _retAge, ssTiming: _ssTiming }
 }

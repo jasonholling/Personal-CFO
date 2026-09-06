@@ -378,6 +378,26 @@ class TestSimulationEndpoints:
         assert r.status_code == 200
         assert "success_rate" in r.json()
 
+    def test_monte_carlo_post_with_whatif_overrides(self, client, sample_inputs, sample_accounts):
+        """Regression test (external audit 2026-09-06): the What-If
+        Builder's modified assumptions used to be silently discarded when
+        switching to the Monte Carlo tab. The new POST variant should
+        apply the same override fields as /api/projections/whatif and
+        produce a materially different result than the plain GET."""
+        self._seed(client, sample_inputs, sample_accounts)
+        baseline = client.get("/api/simulation/monte-carlo?ret_age=60&ss_timing=early").json()
+        overridden = client.post("/api/simulation/monte-carlo", json={
+            "ret_age": 60, "ss_timing": "early",
+            "income_target": 500000,  # a much higher spending target should hurt success_rate
+        }).json()
+        assert overridden["success_rate"] <= baseline["success_rate"]
+
+    def test_monte_carlo_post_with_no_overrides_matches_get(self, client, sample_inputs, sample_accounts):
+        self._seed(client, sample_inputs, sample_accounts)
+        get_result = client.get("/api/simulation/monte-carlo?ret_age=60&ss_timing=early").json()
+        post_result = client.post("/api/simulation/monte-carlo", json={"ret_age": 60, "ss_timing": "early"}).json()
+        assert post_result["success_rate"] == get_result["success_rate"]
+
 
     def test_swr(self, client, sample_inputs, sample_accounts):
         self._seed(client, sample_inputs, sample_accounts)
@@ -394,6 +414,22 @@ class TestSimulationEndpoints:
         self._seed(client, sample_inputs, sample_accounts)
         r = client.get("/api/simulation/stress-tests?ret_age=55&ss_timing=early")
         assert r.status_code == 200
+
+    def test_stress_tests_post_with_whatif_overrides(self, client, sample_inputs, sample_accounts):
+        """Same What-If-carries-through fix as Monte Carlo above, applied
+        to Historical Stress."""
+        self._seed(client, sample_inputs, sample_accounts)
+        r = client.post("/api/simulation/stress-tests", json={
+            "ret_age": 55, "ss_timing": "early", "healthcare_pre": 90000,
+        })
+        assert r.status_code == 200
+        assert "base" in r.json()["scenarios"]
+
+    def test_stress_tests_post_with_no_overrides_matches_get(self, client, sample_inputs, sample_accounts):
+        self._seed(client, sample_inputs, sample_accounts)
+        get_result = client.get("/api/simulation/stress-tests?ret_age=55&ss_timing=early").json()
+        post_result = client.post("/api/simulation/stress-tests", json={"ret_age": 55, "ss_timing": "early"}).json()
+        assert post_result["scenarios"]["base"]["final_balance"] == get_result["scenarios"]["base"]["final_balance"]
 
     def test_sequence_risk(self, client, sample_inputs, sample_accounts):
         """Regression test for the endpoint that 500'd at every age due to

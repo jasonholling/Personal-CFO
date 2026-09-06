@@ -80,6 +80,8 @@ def _run_single(
     inflation_mults: List[float] = None,
     phase_inputs: dict = None,
     post_life_events: List[Dict] = None,
+    justin_ss_annual: float = JUSTIN_SPOUSAL_ANNUAL,
+    justin_ss_age: float = JUSTIN_SPOUSAL_AGE,
 ) -> Tuple[bool, List[float], List[float]]:
     """
     Run a single retirement simulation.
@@ -90,6 +92,24 @@ def _run_single(
     these once outside the N-run Monte Carlo loop rather than re-splitting
     life_events on every single simulated run. Defaults to None/no-op so
     every existing call site is unaffected.
+
+    justin_ss_annual/justin_ss_age: default to the module-level fallback
+    constants (both 0) only for backward compatibility with any caller that
+    doesn't pass real values — run_monte_carlo/run_stress_tests now always
+    pass the actual configured Settings values (see their own docstrings);
+    previously these were silently hardcoded to the JUSTIN_SPOUSAL_ANNUAL/
+    JUSTIN_SPOUSAL_AGE fallback constants (both 0) regardless of what was
+    actually configured in Settings, so spousal Social Security never
+    showed up in Monte Carlo/Historical Stress at all (external audit
+    2026-09-06).
+
+    `survived` (the first tuple element) now also requires that no
+    simulated year came up short on funding its spending need — previously
+    it only checked whether the final balance was positive, so a run that
+    silently rationed spending down to whatever a blocked withdrawal step
+    allowed (see the RMD-gate fix below) could still be counted a
+    "success" (external audit 2026-09-06, same root cause as
+    projection_engine.py's on_track fix).
     """
     mort_age   = 99
     retire_yrs = mort_age - ret_age
@@ -105,6 +125,7 @@ def _run_single(
     roth_bals      = []
     taxable_bals   = []
     _rmd_start     = rmd_start_age(jason_age)
+    any_unmet_need = False
 
     for yr in range(retire_yrs):
         age      = ret_age + yr
@@ -156,8 +177,15 @@ def _run_single(
         year_pen  = pension_annual  # frozen pension, no COLA
         year_jss  = (jason_ss_annual * ((1 + eff_inf) ** max(0, age - jason_ss_age))
                      if age >= jason_ss_age else 0)
-        year_uss  = (JUSTIN_SPOUSAL_ANNUAL * ((1 + eff_inf) ** max(0, age - JUSTIN_SPOUSAL_AGE))
-                     if age >= JUSTIN_SPOUSAL_AGE else 0)
+        # justin_ss_age is JUSTIN's own claiming age, so it has to be
+        # compared against Justin's own current age, not Jason's `age` —
+        # comparing it against `age` directly started/stopped the benefit
+        # off by the couple's age gap whenever jason_age != justin_age
+        # (external audit 2026-09-06, same bug as
+        # projection_engine.run_retirement_projection's yearly loop).
+        justin_age_this_year = age - (jason_age - justin_age)
+        year_uss  = (justin_ss_annual * ((1 + eff_inf) ** max(0, justin_age_this_year - justin_ss_age))
+                     if justin_age_this_year >= justin_ss_age else 0)
         fixed     = year_pen + year_jss + year_uss
         net_need  = max(0, year_need - fixed)
 
@@ -181,7 +209,12 @@ def _run_single(
             draw = min(remaining, taxable)
             taxable -= draw; remaining -= draw
 
-        if remaining > 0 and pretax > 0 and rmd == 0:
+        # Further pretax withdrawal used to be gated on `rmd == 0`, blocking
+        # any additional draw for the rest of the plan once RMD age was
+        # reached even with plenty of pretax balance and a large unmet
+        # need left — external audit 2026-09-06, same bug as
+        # projection_engine.py's withdrawal waterfall (see its comment).
+        if remaining > 0 and pretax > 0:
             draw = min(remaining, pretax)
             pretax -= draw; remaining -= draw
 
@@ -192,6 +225,9 @@ def _run_single(
         if remaining > 0 and roth > 0:
             draw = min(remaining, roth)
             roth -= draw; remaining -= draw
+
+        if remaining > 0:
+            any_unmet_need = True
 
         # Grow at this year's return
         pretax  = max(0, pretax  * (1 + ret))
@@ -205,7 +241,7 @@ def _run_single(
         roth_bals.append(round(roth))
         taxable_bals.append(round(taxable))
 
-    survived = balances[-1] > 0 if balances else False
+    survived = (balances[-1] > 0 if balances else False) and not any_unmet_need
     return survived, balances, pretax_bals, roth_bals, taxable_bals
 
 
@@ -279,7 +315,13 @@ def run_swr_analysis(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_t
                 # Guaranteed income this year
                 year_pen = pension_annual
                 year_jss = jason_ss_annual * ((1+inflation)**max(0,age-jason_ss_age)) if age >= jason_ss_age else 0
-                year_uss = justin_ss * ((1+inflation)**max(0,age-justin_ss_age)) if age >= justin_ss_age else 0
+                # justin_ss_age is Justin's own claiming age — compare it to
+                # Justin's own current age (age offset by the couple's age
+                # gap), not Jason's `age` directly (external audit
+                # 2026-09-06, same bug fixed in _run_single/
+                # run_retirement_projection).
+                justin_age_this_year = age - (jason_age - justin_age)
+                year_uss = justin_ss * ((1+inflation)**max(0,justin_age_this_year-justin_ss_age)) if justin_age_this_year >= justin_ss_age else 0
                 guaranteed = year_pen + year_jss + year_uss
 
                 # Portfolio withdrawal needed (inflation-adjusted, on top of guaranteed)
@@ -300,16 +342,25 @@ def run_swr_analysis(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_t
 
                 if remaining > 0 and taxable > 0:
                     draw = min(remaining, taxable); taxable -= draw; remaining -= draw
-                if remaining > 0 and pretax > 0 and rmd == 0:
+                # Previously gated on `rmd == 0`, blocking any further
+                # pretax withdrawal for the rest of the plan once RMD age
+                # was reached — external audit 2026-09-06, same bug as
+                # projection_engine.py/_run_single (see their comments).
+                if remaining > 0 and pretax > 0:
                     draw = min(remaining, pretax); pretax -= draw; remaining -= draw
                 if remaining > 0 and hsa > 0:
                     draw = min(remaining, hsa); hsa -= draw; remaining -= draw
                 if remaining > 0 and roth > 0:
                     draw = min(remaining, roth); roth -= draw; remaining -= draw
 
-                # Only fail if portfolio is fully depleted
+                # Fail if the portfolio is fully depleted, OR if spending
+                # need went unmet this year even though buckets still held
+                # money (rationing) — previously only the full-depletion
+                # case counted as failure, so the success rate never
+                # reflected a plan quietly failing to fund its stated
+                # withdrawal (external audit 2026-09-06).
                 total = pretax + roth + taxable + hsa
-                if total <= 0 and remaining > 0:
+                if remaining > 0:
                     survived = False
                     break
 
@@ -407,6 +458,14 @@ def run_monte_carlo(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_ti
     jason_ss_delayed = inputs.get("jason_ss_delayed", JASON_SS_DELAYED)
     jason_ss_annual = jason_ss_early if ss_timing == "early" else jason_ss_delayed
     jason_ss_age    = 62 if ss_timing == "early" else 67
+    # Previously hardcoded to the JUSTIN_SPOUSAL_ANNUAL/JUSTIN_SPOUSAL_AGE
+    # fallback constants (both 0) inside _run_single regardless of what was
+    # actually configured — Monte Carlo never reflected a real spousal SS
+    # benefit no matter what Settings said (external audit 2026-09-06).
+    # Read the same way run_retirement_projection/run_swr_analysis already
+    # do.
+    justin_ss_annual = inputs.get("justin_social_security", JUSTIN_SPOUSAL_ANNUAL)
+    justin_ss_age    = inputs.get("justin_ss_age", JUSTIN_SPOUSAL_AGE)
     income_at_ret   = income_today * ((1 + inflation) ** years_to_ret)
 
     # Pull bucket values from projection_engine — pass ret_age explicitly so
@@ -457,6 +516,8 @@ def run_monte_carlo(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_ti
             income_at_ret, inflation, post_ret, returns,
             phase_inputs=_phase,
             post_life_events=post_life_events,
+            justin_ss_annual=justin_ss_annual,
+            justin_ss_age=justin_ss_age,
         )
         if survived: successes += 1
         all_balances.append(balances)
@@ -525,6 +586,10 @@ def run_stress_tests(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_t
     jason_ss_delayed = inputs.get("jason_ss_delayed", JASON_SS_DELAYED)
     jason_ss_annual = jason_ss_early if ss_timing == "early" else jason_ss_delayed
     jason_ss_age    = 62 if ss_timing == "early" else 67
+    # See run_monte_carlo's identical comment — previously hardcoded to 0
+    # inside _run_single regardless of Settings (external audit 2026-09-06).
+    justin_ss_annual = inputs.get("justin_social_security", JUSTIN_SPOUSAL_ANNUAL)
+    justin_ss_age    = inputs.get("justin_ss_age", JUSTIN_SPOUSAL_AGE)
     income_at_ret   = income_today * ((1 + inflation) ** years_to_ret)
 
     from projection_engine import run_retirement_projection
@@ -554,18 +619,20 @@ def run_stress_tests(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_t
         "healthcare_pre":   inputs.get("healthcare_pre_medicare", 0),
         "healthcare_post":  inputs.get("healthcare_post_medicare", 0),
     }  # always populated -- see _run_single's comment on the in-between-age fix
-    _, base_bals, *_ = _run_single(
+    base_survived, base_bals, *_ = _run_single(
         pretax_at_ret, roth_at_ret, taxable_at_ret, hsa_at_ret,
         ret_age, jason_age, justin_age,
         pension_annual, jason_ss_annual, jason_ss_age,
         income_at_ret, inflation, post_ret, base_returns,
         phase_inputs=_phase_base,
         post_life_events=post_life_events,
+        justin_ss_annual=justin_ss_annual,
+        justin_ss_age=justin_ss_age,
     )
 
     results = {"base": {
         "label": "Base Case (6% every year)",
-        "survived": base_bals[-1] > 0,
+        "survived": base_survived,
         "final_balance": base_bals[-1],
         "chart": [{"age": ret_age+i, "balance": b} for i, b in enumerate(base_bals) if i%2==0],
     }}
@@ -614,8 +681,15 @@ def run_stress_tests(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_t
             seq_returns = [overrides.get(yr, normal_returns[max(0, yr-len(overrides))]) for yr in range(retire_yrs)]
             returns = seq_returns
 
-        # Use scenario SS for ss_reduction scenario
+        # Use scenario SS for ss_reduction scenario — previously only
+        # Jason's benefit was ever actually reduced and passed through;
+        # scenario_justin_ss was computed above but never used, so the "SS
+        # Cut 25%" stress scenario silently left Justin's spousal benefit
+        # at its full, un-cut value (external audit 2026-09-06, same
+        # hardcoded/unwired-spousal-SS root cause as run_monte_carlo's fix
+        # above).
         run_ss = scenario_ss if scenario.get("ss_reduction") else jason_ss_annual
+        run_justin_ss = scenario_justin_ss if scenario.get("ss_reduction") else justin_ss_annual
 
         _phase_st = {
             "bridge_years":     sim_inputs.get("bridge_years_55", inputs.get("bridge_years_55", 0)),
@@ -626,13 +700,15 @@ def run_stress_tests(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_t
             "healthcare_pre":   inputs.get("healthcare_pre_medicare", 0),
             "healthcare_post":  inputs.get("healthcare_post_medicare", 0),
         }  # always populated -- see _run_single's comment on the in-between-age fix
-        _, bals, ptx, rth, txb = _run_single(
+        scen_survived, bals, ptx, rth, txb = _run_single(
             sim_pretax, sim_roth, sim_taxable, sim_hsa,
             ret_age, jason_age, justin_age,
             pension_annual, run_ss, jason_ss_age,
             income_at_ret, inflation, post_ret, returns, inf_mults,
             phase_inputs=_phase_st,
             post_life_events=post_life_events,
+            justin_ss_annual=run_justin_ss,
+            justin_ss_age=justin_ss_age,
         )
 
         # Find depletion age
@@ -645,7 +721,7 @@ def run_stress_tests(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_t
         results[key] = {
             "label": scenario["label"],
             "description": scenario["description"],
-            "survived": bals[-1] > 0,
+            "survived": scen_survived,
             "final_balance": bals[-1],
             "depletion_age": dep_age,
             "lowest_balance": min(bals),
@@ -674,10 +750,16 @@ def run_roth_conversion_analysis(inputs: Dict, accounts: List[Dict], ret_age: in
     post_ret     = inputs["expected_return_post_retirement"]
     income_today = inputs["retirement_income_today_dollars"]
     jason_age    = inputs["jason_age"]
+    justin_age   = inputs["justin_age"]
     pension_annual = pension_for_age(inputs, ret_age)
     jason_ss     = inputs.get("jason_social_security", 0)
     justin_ss    = inputs.get("justin_social_security", 0)
     jason_ss_age = 62 if ss_timing == "early" else 67
+    # Read the spouse's own claiming age instead of hardcoding 67 — and,
+    # below, compare it against the spouse's own current age rather than
+    # Jason's `age` directly (external audit 2026-09-06, same bug as
+    # elsewhere in this file).
+    justin_ss_age = inputs.get("justin_ss_age", JUSTIN_SPOUSAL_AGE)
 
     # Derived from the canonical 2026 MFJ bracket table in
     # retirement_tools_engine.py instead of a local hardcoded copy — this
@@ -714,7 +796,8 @@ def run_roth_conversion_analysis(inputs: Dict, accounts: List[Dict], ret_age: in
         income_need   = income_today * ((1 + inflation) ** years_to_ret)
         year_pen      = pension_annual
         year_jss      = jason_ss * ((1+inflation)**max(0,age-jason_ss_age)) if age >= jason_ss_age else 0
-        year_uss      = justin_ss * ((1+inflation)**max(0,age-67)) if age >= 67 else 0
+        justin_age_this_year = age - (jason_age - justin_age)
+        year_uss      = justin_ss * ((1+inflation)**max(0,justin_age_this_year-justin_ss_age)) if justin_age_this_year >= justin_ss_age else 0
         guaranteed    = year_pen + year_jss + year_uss
         portfolio_draw = max(0, income_need - guaranteed)
 
@@ -796,6 +879,7 @@ def run_tax_efficiency_simulation(inputs: Dict, accounts: List[Dict], ret_age: i
     random.seed(42)
 
     jason_age    = inputs["jason_age"]
+    justin_age   = inputs["justin_age"]
     inflation    = inputs["inflation_rate"]
     post_ret     = inputs["expected_return_post_retirement"]
     income_today = inputs["retirement_income_today_dollars"]
@@ -847,7 +931,8 @@ def run_tax_efficiency_simulation(inputs: Dict, accounts: List[Dict], ret_age: i
                 year_need  = income_today * ((1+inflation)**yr) + hc * ((1+inflation)**yr)
                 year_pen   = pension_annual
                 year_jss   = jason_ss_annual * ((1+inflation)**max(0,age-jason_ss_age)) if age >= jason_ss_age else 0
-                year_uss   = justin_ss * ((1+inflation)**max(0,age-justin_ss_age)) if age >= justin_ss_age else 0
+                justin_age_this_year = age - (jason_age - justin_age)
+                year_uss   = justin_ss * ((1+inflation)**max(0,justin_age_this_year-justin_ss_age)) if justin_age_this_year >= justin_ss_age else 0
                 guaranteed = year_pen + year_jss + year_uss
                 net_need   = max(0, year_need - guaranteed)
 

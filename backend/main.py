@@ -1337,36 +1337,16 @@ def generate_annual_report():
 
 # ── Simulation endpoints ───────────────────────────────────────────────────────
 
-@app.get("/api/simulation/monte-carlo")
-def get_monte_carlo(ret_age: int = 60, ss_timing: str = "early"):
-    conn = get_db()
-    inputs_row = conn.execute("SELECT * FROM planning_inputs WHERE id=1").fetchone()
-    accounts   = [dict(r) for r in conn.execute("SELECT * FROM accounts").fetchall()]
-    life_events = _get_active_life_events(conn)
-    surplus_allocations = _get_relevant_surplus_allocations(conn)
-    conn.close()
-    if not inputs_row:
-        raise HTTPException(status_code=400, detail="Planning inputs not set yet")
-    from simulation_engine import run_monte_carlo
-    return run_monte_carlo(dict(inputs_row), accounts, ret_age, ss_timing, life_events=life_events, surplus_allocations=surplus_allocations)
-
-@app.post("/api/projections/whatif")
-def get_whatif(body: dict):
-    """Run retirement projection with modified assumptions."""
-    conn = get_db()
-    inputs_row = conn.execute("SELECT * FROM planning_inputs ORDER BY id DESC LIMIT 1").fetchone()
-    accounts   = [dict(r) for r in conn.execute("SELECT * FROM accounts").fetchall()]
-    life_events = _get_active_life_events(conn)
-    surplus_allocations = _get_relevant_surplus_allocations(conn)
-    conn.close()
-    if not inputs_row: return {"error": "No planning inputs found"}
-
-    from projection_engine import run_retirement_projection
-    inputs = dict(inputs_row)
-
-    # Apply what-if overrides
-    ret_age      = body.get("ret_age", 60)
-    salary_growth_pct = body.get("salary_growth_pct", 0.0)
+def _apply_whatif_overrides(inputs: dict, body: dict) -> dict:
+    """Shared by /api/projections/whatif and the What-If-aware Monte Carlo/
+    Stress Test POST endpoints below — same override fields, same
+    semantics, so the What-If Builder's modified assumptions actually
+    carry into whichever tab you switch to next instead of being silently
+    discarded in favor of saved Settings (external audit 2026-09-06:
+    switching from What-If to Monte Carlo/Historical Stress used to re-run
+    against Settings, only passing along retirement age and SS timing —
+    every slider the user had just moved was thrown away)."""
+    inputs = dict(inputs)
     pension_mult = body.get("pension_mult", 1.0)
     ss_mult      = body.get("ss_mult", 1.0)
 
@@ -1385,6 +1365,61 @@ def get_whatif(body: dict):
         inputs["jason_social_security"] = inputs.get("jason_social_security", 0) * ss_mult
         inputs["jason_ss_delayed"]      = inputs.get("jason_ss_delayed", 0) * ss_mult
         inputs["justin_social_security"]= inputs.get("justin_social_security", 0) * ss_mult
+    return inputs
+
+@app.get("/api/simulation/monte-carlo")
+def get_monte_carlo(ret_age: int = 60, ss_timing: str = "early"):
+    conn = get_db()
+    inputs_row = conn.execute("SELECT * FROM planning_inputs WHERE id=1").fetchone()
+    accounts   = [dict(r) for r in conn.execute("SELECT * FROM accounts").fetchall()]
+    life_events = _get_active_life_events(conn)
+    surplus_allocations = _get_relevant_surplus_allocations(conn)
+    conn.close()
+    if not inputs_row:
+        raise HTTPException(status_code=400, detail="Planning inputs not set yet")
+    from simulation_engine import run_monte_carlo
+    return run_monte_carlo(dict(inputs_row), accounts, ret_age, ss_timing, life_events=life_events, surplus_allocations=surplus_allocations)
+
+@app.post("/api/simulation/monte-carlo")
+def post_monte_carlo(body: dict):
+    """What-If-aware variant of the GET endpoint above — accepts the same
+    override fields as /api/projections/whatif (pre_return, post_return,
+    inflation, healthcare_pre, income_target, bridge_income, pension_mult,
+    ss_mult) so the Monte Carlo tab can actually reflect the scenario just
+    built in the What-If Builder instead of silently re-running against
+    saved Settings (external audit 2026-09-06 — see StressTestWhatIf.jsx)."""
+    ret_age    = body.get("ret_age", 60)
+    ss_timing  = body.get("ss_timing", "early")
+    conn = get_db()
+    inputs_row = conn.execute("SELECT * FROM planning_inputs WHERE id=1").fetchone()
+    accounts   = [dict(r) for r in conn.execute("SELECT * FROM accounts").fetchall()]
+    life_events = _get_active_life_events(conn)
+    surplus_allocations = _get_relevant_surplus_allocations(conn)
+    conn.close()
+    if not inputs_row:
+        raise HTTPException(status_code=400, detail="Planning inputs not set yet")
+    inputs = _apply_whatif_overrides(dict(inputs_row), body)
+    from simulation_engine import run_monte_carlo
+    return run_monte_carlo(inputs, accounts, ret_age, ss_timing, life_events=life_events, surplus_allocations=surplus_allocations)
+
+@app.post("/api/projections/whatif")
+def get_whatif(body: dict):
+    """Run retirement projection with modified assumptions."""
+    conn = get_db()
+    inputs_row = conn.execute("SELECT * FROM planning_inputs ORDER BY id DESC LIMIT 1").fetchone()
+    accounts   = [dict(r) for r in conn.execute("SELECT * FROM accounts").fetchall()]
+    life_events = _get_active_life_events(conn)
+    surplus_allocations = _get_relevant_surplus_allocations(conn)
+    conn.close()
+    if not inputs_row: return {"error": "No planning inputs found"}
+
+    from projection_engine import run_retirement_projection
+
+    # Apply what-if overrides (shared with the Monte Carlo/Stress Test
+    # POST endpoints below — see _apply_whatif_overrides).
+    ret_age      = body.get("ret_age", 60)
+    salary_growth_pct = body.get("salary_growth_pct", 0.0)
+    inputs = _apply_whatif_overrides(dict(inputs_row), body)
 
     # Always include the 55/60/65 baseline ages (the "Surplus Across All
     # Retirement Ages" panel shows those three fixed cards regardless of
@@ -1581,3 +1616,22 @@ def get_stress_tests(ret_age: int = 60, ss_timing: str = "early"):
         raise HTTPException(status_code=400, detail="Planning inputs not set yet")
     from simulation_engine import run_stress_tests
     return run_stress_tests(dict(inputs_row), accounts, ret_age, ss_timing, life_events=life_events, surplus_allocations=surplus_allocations)
+
+@app.post("/api/simulation/stress-tests")
+def post_stress_tests(body: dict):
+    """What-If-aware variant of the GET endpoint above — see
+    post_monte_carlo's docstring; same override fields, same reason
+    (external audit 2026-09-06)."""
+    ret_age    = body.get("ret_age", 60)
+    ss_timing  = body.get("ss_timing", "early")
+    conn = get_db()
+    inputs_row = conn.execute("SELECT * FROM planning_inputs WHERE id=1").fetchone()
+    accounts   = [dict(r) for r in conn.execute("SELECT * FROM accounts").fetchall()]
+    life_events = _get_active_life_events(conn)
+    surplus_allocations = _get_relevant_surplus_allocations(conn)
+    conn.close()
+    if not inputs_row:
+        raise HTTPException(status_code=400, detail="Planning inputs not set yet")
+    inputs = _apply_whatif_overrides(dict(inputs_row), body)
+    from simulation_engine import run_stress_tests
+    return run_stress_tests(inputs, accounts, ret_age, ss_timing, life_events=life_events, surplus_allocations=surplus_allocations)

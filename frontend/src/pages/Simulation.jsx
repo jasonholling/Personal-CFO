@@ -43,20 +43,32 @@ const CustomTooltip = ({ active, payload, label, person1Name }) => {
 }
 
 // ── Monte Carlo section ───────────────────────────────────────────────────────
-export function MonteCarloSection({ retAge, ssTiming }) {
+// `overrides`: the What-If Builder's current modified assumptions (see
+// StressTestWhatIf.jsx), or null/undefined when running standalone (e.g.
+// no such caller today, but keeps this component safe to reuse). When
+// present, Monte Carlo is POSTed with those overrides layered on top of
+// saved Settings instead of GET-ing the plain Settings-only figures —
+// previously switching to this tab always discarded whatever the What-If
+// Builder had just been changed to (external audit 2026-09-06). The
+// SWR/income-sources side calls stay Settings-only for now — a narrower,
+// documented scope limit rather than a silent gap.
+export function MonteCarloSection({ retAge, ssTiming, overrides }) {
   const { person1Name, person2Name } = usePersonNames()
   const [data, setData]         = useState(null)
   const [swr, setSwr]           = useState(null)
   const [incSrc, setIncSrc]     = useState(null)
   const [loading, setLoading]   = useState(false)
 
-  useEffect(() => { setData(null); setSwr(null); setIncSrc(null) }, [retAge, ssTiming])
+  useEffect(() => { setData(null); setSwr(null); setIncSrc(null) }, [retAge, ssTiming, overrides])
 
   const run = () => {
     setLoading(true)
     setData(null); setSwr(null); setIncSrc(null)
+    const mcCall = overrides
+      ? axios.post('/api/simulation/monte-carlo', { ...overrides, ret_age: retAge, ss_timing: ssTiming })
+      : axios.get(`/api/simulation/monte-carlo?ret_age=${retAge}&ss_timing=${ssTiming}`)
     Promise.all([
-      axios.get(`/api/simulation/monte-carlo?ret_age=${retAge}&ss_timing=${ssTiming}`),
+      mcCall,
       axios.get(`/api/simulation/swr?ret_age=${retAge}&ss_timing=${ssTiming}`),
       axios.get(`/api/retirement/income-sources?ret_age=${retAge}&ss_timing=${ssTiming}`)
     ]).then(([mc, sw, inc]) => {
@@ -258,21 +270,27 @@ export function MonteCarloSection({ retAge, ssTiming }) {
 }
 
 // ── Stress tests section ──────────────────────────────────────────────────────
-export function StressTestSection({ retAge, ssTiming }) {
+// `overrides`: see MonteCarloSection's comment above — same What-If
+// Builder wiring, same documented scope (roth-conversion/contribution-
+// sensitivity stay Settings-only).
+export function StressTestSection({ retAge, ssTiming, overrides }) {
   const { person1Name } = usePersonNames()
   const [data, setData]       = useState(null)
   const [roth, setRoth]       = useState(null)
   const [contrib, setContrib] = useState(null)
   const [loading, setLoading] = useState(false)
 
-  useEffect(() => { setData(null); setRoth(null); setContrib(null) }, [retAge, ssTiming])
+  useEffect(() => { setData(null); setRoth(null); setContrib(null) }, [retAge, ssTiming, overrides])
   const [active, setActive]   = useState('crash_2008')
 
   const run = () => {
     setLoading(true)
     setData(null); setRoth(null); setContrib(null)
+    const stCall = overrides
+      ? axios.post('/api/simulation/stress-tests', { ...overrides, ret_age: retAge, ss_timing: ssTiming })
+      : axios.get(`/api/simulation/stress-tests?ret_age=${retAge}&ss_timing=${ssTiming}`)
     Promise.all([
-      axios.get(`/api/simulation/stress-tests?ret_age=${retAge}&ss_timing=${ssTiming}`),
+      stCall,
       axios.get(`/api/simulation/roth-conversion?ret_age=${retAge}&ss_timing=${ssTiming}`),
       axios.get(`/api/simulation/contribution-sensitivity?ret_age=${retAge}`)
     ]).then(([st, rc, cs]) => {

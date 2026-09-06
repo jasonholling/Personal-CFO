@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import axios from 'axios'
 import { useScenario } from '../hooks/useScenario'
 import { isPrivacyMode, MASK_CURRENCY } from '../utils/privacy'
@@ -61,11 +61,19 @@ function SliderRow({ label, hint, value, min, max, step, format, onChange, delta
   )
 }
 
-export default function WhatIf({ onNavigate }) {
+export default function WhatIf({ onNavigate, onAssumptionsChange }) {
   const [base, setBase]       = useState(null)
   const [result, setResult]   = useState(null)
   const [loading, setLoading] = useState(true)
   const [computing, setComputing] = useState(false)
+  const [computeError, setComputeError] = useState(false)
+  // Latest-request-wins guard: a fast run of slider changes fires a new
+  // POST for each one with no cancellation, so a slow earlier response
+  // could land after a faster later one and overwrite the display for
+  // whatever the CURRENT slider position actually is (external audit
+  // 2026-09-06). Bump this on every request; only apply a response if it's
+  // still the most recent one when it resolves.
+  const requestIdRef = useRef(0)
 
   // Toggleable assumptions
   const { retAge, setRetAge } = useScenario()
@@ -79,6 +87,22 @@ export default function WhatIf({ onNavigate }) {
   const [income,      setIncome]      = useState(120000)
   const [bridgeIncome, setBridgeIncome] = useState(45000)
 
+  // The actual saved baseline pulled from Settings, captured separately
+  // from the live slider state above so "Reset to Base" and the
+  // "Modified" indicator can compare against what your Settings REALLY
+  // say instead of a hardcoded guess (external audit 2026-09-06: reset()
+  // and isChanged used to hardcode $120,000/$24,000/$45,000/etc regardless
+  // of your actual saved values, so anyone whose real numbers differ saw
+  // an incorrect "Modified" badge from page load and "Reset to Base"
+  // didn't actually restore their base). retAge/salaryGrowthPct/
+  // pensionMult/ssMult have no "current" value in Settings to pull -- those
+  // stay pure hypotheticals with sensible neutral defaults, same as before.
+  const NEUTRAL_DEFAULTS = { retAge: 60, salaryGrowthPct: 0.0, pensionMult: 1.0, ssMult: 1.0 }
+  const [baseline, setBaseline] = useState({
+    preReturn: 7.0, postReturn: 6.0, inflation: 2.0,
+    healthcare: 24000, income: 120000, bridgeIncome: 45000,
+  })
+
   // Pre-fill the assumption sliders from your real Settings instead of
   // generic hardcoded defaults — still editable, this is a what-if tool.
   // Reusable (not just on mount) so "Use My Current Settings" below can
@@ -89,16 +113,24 @@ export default function WhatIf({ onNavigate }) {
   const pullCurrentSettings = () => {
     axios.get('/api/planning-inputs').then(r => {
       const d = r.data
+      // Check presence, not truthiness -- a real, legitimate 0 (e.g. $0
+      // bridge income, a 0% rate) must be respected instead of silently
+      // falling back to the hardcoded default (external audit 2026-09-06).
+      const has = (k) => d && d[k] !== undefined && d[k] !== null
+      const next = { ...baseline }
       // Rounded to the slider's own precision (1 decimal, step 0.5) — a
       // bare *100 on a stored fraction like 0.07 lands on 7.000000000000001
       // in floating point, which then rendered raw ("pre-ret return
       // 7.000000000000001%") in the "Changes from base" summary below.
-      if (d.expected_return_pre_retirement)  setPreReturn(Math.round(d.expected_return_pre_retirement * 1000) / 10)
-      if (d.expected_return_post_retirement) setPostReturn(Math.round(d.expected_return_post_retirement * 1000) / 10)
-      if (d.inflation_rate)                  setInflation(Math.round(d.inflation_rate * 1000) / 10)
-      if (d.retirement_income_today_dollars) setIncome(d.retirement_income_today_dollars)
-      if (d.healthcare_pre_medicare)         setHealthcare(d.healthcare_pre_medicare)
-      if (d.bridge_income_55)                setBridgeIncome(d.bridge_income_55)
+      if (has('expected_return_pre_retirement'))  next.preReturn = Math.round(d.expected_return_pre_retirement * 1000) / 10
+      if (has('expected_return_post_retirement')) next.postReturn = Math.round(d.expected_return_post_retirement * 1000) / 10
+      if (has('inflation_rate'))                  next.inflation = Math.round(d.inflation_rate * 1000) / 10
+      if (has('retirement_income_today_dollars')) next.income = d.retirement_income_today_dollars
+      if (has('healthcare_pre_medicare'))         next.healthcare = d.healthcare_pre_medicare
+      if (has('bridge_income_55'))                next.bridgeIncome = d.bridge_income_55
+      setBaseline(next)
+      setPreReturn(next.preReturn); setPostReturn(next.postReturn); setInflation(next.inflation)
+      setIncome(next.income); setHealthcare(next.healthcare); setBridgeIncome(next.bridgeIncome)
     }).catch(() => {})
   }
 
@@ -117,7 +149,9 @@ export default function WhatIf({ onNavigate }) {
   // Recompute when any assumption changes
   const recompute = useCallback(() => {
     setComputing(true)
-    axios.post('/api/projections/whatif', {
+    setComputeError(false)
+    const thisRequestId = ++requestIdRef.current
+    const body = {
       ret_age:      retAge,
       salary_growth_pct: salaryGrowthPct / 100,
       pre_return:   preReturn / 100,
@@ -128,20 +162,33 @@ export default function WhatIf({ onNavigate }) {
       healthcare_pre: healthcare,
       income_target:  income,
       bridge_income:  bridgeIncome,
-    }).then(r => {
+    }
+    // Surface these current assumptions to the parent (StressTestWhatIf)
+    // so switching to the Monte Carlo/Historical Stress tab can carry the
+    // same overrides into those API calls instead of silently discarding
+    // them (external audit 2026-09-06).
+    onAssumptionsChange?.(body)
+    axios.post('/api/projections/whatif', body).then(r => {
+      if (thisRequestId !== requestIdRef.current) return // a newer request already superseded this one
       setResult(r.data)
       setComputing(false)
-    }).catch(() => setComputing(false))
-  }, [retAge, salaryGrowthPct, preReturn, postReturn, inflation, pensionMult, ssMult, healthcare, income, bridgeIncome])
+    }).catch(() => {
+      if (thisRequestId !== requestIdRef.current) return
+      setComputing(false)
+      setComputeError(true)
+    })
+  }, [retAge, salaryGrowthPct, preReturn, postReturn, inflation, pensionMult, ssMult, healthcare, income, bridgeIncome, onAssumptionsChange])
 
   useEffect(() => {
     if (!loading) recompute()
   }, [retAge, salaryGrowthPct, preReturn, postReturn, inflation, pensionMult, ssMult, healthcare, income, bridgeIncome])
 
   const reset = () => {
-    setRetAge(60); setSalaryGrowthPct(0.0); setPreReturn(7.0); setPostReturn(6.0)
-    setInflation(2.0); setPensionMult(1.0); setSsMult(1.0)
-    setHealthcare(24000); setIncome(120000); setBridgeIncome(45000)
+    setRetAge(NEUTRAL_DEFAULTS.retAge); setSalaryGrowthPct(NEUTRAL_DEFAULTS.salaryGrowthPct)
+    setPensionMult(NEUTRAL_DEFAULTS.pensionMult); setSsMult(NEUTRAL_DEFAULTS.ssMult)
+    setPreReturn(baseline.preReturn); setPostReturn(baseline.postReturn)
+    setInflation(baseline.inflation); setHealthcare(baseline.healthcare)
+    setIncome(baseline.income); setBridgeIncome(baseline.bridgeIncome)
   }
 
   const getSurplusDelta = (scenarioId) => {
@@ -152,9 +199,10 @@ export default function WhatIf({ onNavigate }) {
     return r.projected_surplus - b.projected_surplus
   }
 
-  const isChanged = salaryGrowthPct !== 0.0 || preReturn !== 7.0 || postReturn !== 6.0 ||
-    inflation !== 2.0 || pensionMult !== 1.0 || ssMult !== 1.0 ||
-    healthcare !== 24000 || income !== 120000 || bridgeIncome !== 45000
+  const isChanged = salaryGrowthPct !== NEUTRAL_DEFAULTS.salaryGrowthPct || preReturn !== baseline.preReturn ||
+    postReturn !== baseline.postReturn || inflation !== baseline.inflation ||
+    pensionMult !== NEUTRAL_DEFAULTS.pensionMult || ssMult !== NEUTRAL_DEFAULTS.ssMult ||
+    healthcare !== baseline.healthcare || income !== baseline.income || bridgeIncome !== baseline.bridgeIncome
 
   if (loading) return <div className="loading">Loading base projections...</div>
 
@@ -264,6 +312,16 @@ export default function WhatIf({ onNavigate }) {
               Recalculating...
             </div>
           )}
+          {computeError && (
+            <div style={{ padding:'8px 12px', background:'rgba(248,113,113,0.1)', borderRadius:8, fontSize:12, color:RED, marginBottom:16 }}>
+              Couldn't recalculate for the current settings — the numbers below are from your last successful change, not the sliders as they are now. Try adjusting a slider again.
+            </div>
+          )}
+          {computeError && (
+            <div style={{ padding:'8px 12px', background:'rgba(248,113,113,0.1)', borderRadius:8, fontSize:12, color:RED, marginBottom:16 }}>
+              ⚠ Couldn't recalculate — showing the last successful result. Adjust a slider to retry.
+            </div>
+          )}
 
           {/* Impact summary for selected retirement age */}
           {result && (
@@ -345,15 +403,18 @@ export default function WhatIf({ onNavigate }) {
 
                 {isChanged && (
                   <div style={{ marginTop:16, padding:'10px 14px', background:'var(--bg3)', borderRadius:8, fontSize:12, color:'var(--text2)' }}>
+                    {/* Compares against the real pulled-from-Settings baseline,
+                        not hardcoded literals -- same fix as isChanged/reset
+                        above (external audit 2026-09-06). */}
                     💡 Changes from base: {[
-                      preReturn !== 7.0 && `pre-ret return ${preReturn.toFixed(1)}%`,
-                      postReturn !== 6.0 && `post-ret return ${postReturn.toFixed(1)}%`,
-                      inflation !== 2.0 && `inflation ${inflation.toFixed(1)}%`,
-                      pensionMult !== 1.0 && `pension ${Math.round(pensionMult*100)}%`,
-                      ssMult !== 1.0 && `SS ${Math.round(ssMult*100)}%`,
-                      healthcare !== 24000 && `healthcare $${(healthcare/1000).toFixed(0)}k`,
-                      income !== 120000 && `income target $${(income/1000).toFixed(0)}k`,
-                      salaryGrowthPct !== 0.0 && `salary growth ${salaryGrowthPct.toFixed(1)}%/yr`,
+                      preReturn !== baseline.preReturn && `pre-ret return ${preReturn.toFixed(1)}%`,
+                      postReturn !== baseline.postReturn && `post-ret return ${postReturn.toFixed(1)}%`,
+                      inflation !== baseline.inflation && `inflation ${inflation.toFixed(1)}%`,
+                      pensionMult !== NEUTRAL_DEFAULTS.pensionMult && `pension ${Math.round(pensionMult*100)}%`,
+                      ssMult !== NEUTRAL_DEFAULTS.ssMult && `SS ${Math.round(ssMult*100)}%`,
+                      healthcare !== baseline.healthcare && `healthcare $${(healthcare/1000).toFixed(0)}k`,
+                      income !== baseline.income && `income target $${(income/1000).toFixed(0)}k`,
+                      salaryGrowthPct !== NEUTRAL_DEFAULTS.salaryGrowthPct && `salary growth ${salaryGrowthPct.toFixed(1)}%/yr`,
                     ].filter(Boolean).join(' · ')}
                   </div>
                 )}

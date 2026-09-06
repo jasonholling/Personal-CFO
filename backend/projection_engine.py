@@ -489,6 +489,25 @@ def run_retirement_projection(inputs: Dict, accounts: List[Dict], ret_ages: List
             bridge_years         = inputs.get("bridge_years_55", 0)
             kids_years           = inputs.get("kids_years_at_home_55", 0)
 
+            # These four inputs are today's-dollars estimates, exactly like
+            # retirement_income_today_dollars — income_at_ret above already
+            # inflates that one by years_to_retire before the yearly loop
+            # inflates it further year over year. The yearly loop below used
+            # to skip this first step for healthcare/kids/bridge, inflating
+            # them only from ret_age forward — silently understating them by
+            # a factor of (1+inflation)**years_to_retire relative to what
+            # the capitalized-need math above (which does include this
+            # factor — see p1_need/p2_need/cap_hc_pre/cap_hc_post) assumed,
+            # so the two summary vs. year-by-year figures didn't reconcile
+            # (external audit 2026-09-06). Inflating here, once, up front —
+            # same treatment as income_at_ret — keeps both halves of this
+            # function agreeing on what "today's dollars" means.
+            healthcare_pre_at_ret   = healthcare_pre   * ((1 + inflation) ** years_to_retire)
+            healthcare_post_at_ret  = healthcare_post  * ((1 + inflation) ** years_to_retire)
+            healthcare_kids_at_ret  = healthcare_kids  * ((1 + inflation) ** years_to_retire)
+            kids_annual_cost_at_ret = kids_annual_cost * ((1 + inflation) ** years_to_retire)
+            bridge_income_at_ret    = bridge_income    * ((1 + inflation) ** years_to_retire)
+
             if ret_age == 55:
                 # Phase 1 (55-60): bridge job covers healthcare, net draw = base+kids - bridge
                 p1_years   = bridge_years
@@ -515,19 +534,43 @@ def run_retirement_projection(inputs: Dict, accounts: List[Dict], ret_ages: List
                 healthcare_gap_yrs = max(0, 65 - ret_age)
                 cap_income_only  = _pv_annuity(income_at_ret, real_rate, retire_years)
                 cap_hc_pre       = _pv_annuity(healthcare_pre  * ((1 + inflation) ** years_to_retire), real_rate, healthcare_gap_yrs)
-                cap_hc_post      = _pv_annuity(healthcare_post * ((1 + inflation) ** years_to_retire), real_rate, retire_years - healthcare_gap_yrs)
+                # cap_hc_post covers ages 65+ — for any ret_age < 65 that
+                # annuity doesn't start on day one of retirement, so
+                # _pv_annuity's result (valued the instant before its own
+                # first payment, i.e. at age 65) has to be discounted back
+                # healthcare_gap_yrs more years to land in ret_age dollars
+                # like every other capitalized figure here — previously
+                # missing, silently overstating total_cap_need by treating
+                # a future annuity as if it started immediately (external
+                # audit 2026-09-06, same root cause as the SS discounting
+                # fixed below).
+                cap_hc_post_at_65 = _pv_annuity(healthcare_post * ((1 + inflation) ** years_to_retire), real_rate, retire_years - healthcare_gap_yrs)
+                cap_hc_post      = cap_hc_post_at_65 / ((1 + real_rate) ** healthcare_gap_yrs)
                 total_cap_need   = cap_income_only + cap_hc_pre + cap_hc_post
 
             cap_pension = _pv_annuity(pension_annual, post_ret, mort_age - ret_age)  # frozen pension, no COLA, nominal rate
 
+            # cap_jason_ss/cap_justin_ss: _pv_annuity values an annuity the
+            # instant before its first payment — i.e. at the claiming age,
+            # not at ret_age. Every other multi-phase capitalized figure in
+            # this function (cap_p2/p3/p4 above, cap_hc_post just above)
+            # divides by (1 + real_rate) ** (years until that phase starts)
+            # to bring it back to ret_age dollars; these two SS figures were
+            # missing that discount entirely, so any claiming age after
+            # ret_age (which is most of them — SS can't start before 62)
+            # had its capitalized value substantially overstated, inflating
+            # total_cap_income and understating cap_needed_from_assets/
+            # overstating projected_surplus (external audit 2026-09-06).
             years_ss_wait_jason  = max(0, jason_ss_age - ret_age)
             jason_ss_inflated    = jason_ss_annual * ((1 + inflation) ** years_ss_wait_jason)
-            cap_jason_ss         = _pv_annuity(jason_ss_inflated, real_rate, mort_age - max(ret_age, jason_ss_age))
+            cap_jason_ss_at_claim = _pv_annuity(jason_ss_inflated, real_rate, mort_age - max(ret_age, jason_ss_age))
+            cap_jason_ss         = cap_jason_ss_at_claim / ((1 + real_rate) ** years_ss_wait_jason)
 
             justin_ret_age       = ret_age - (jason_age - justin_age)
             years_ss_wait_justin = max(0, justin_ss_age - justin_ret_age)
             justin_ss_inflated   = justin_ss_annual * ((1 + inflation) ** years_ss_wait_justin)
-            cap_justin_ss        = _pv_annuity(justin_ss_inflated, real_rate, mort_age - max(ret_age, justin_ss_age))
+            cap_justin_ss_at_claim = _pv_annuity(justin_ss_inflated, real_rate, mort_age - max(ret_age, justin_ss_age))
+            cap_justin_ss        = cap_justin_ss_at_claim / ((1 + real_rate) ** years_ss_wait_justin)
 
             total_cap_income       = cap_pension + cap_jason_ss + cap_justin_ss
             cap_needed_from_assets = max(0, total_cap_need - total_cap_income)
@@ -535,10 +578,6 @@ def run_retirement_projection(inputs: Dict, accounts: List[Dict], ret_ages: List
             pct_funded             = min(100, round(
                 (portfolio_at_ret / cap_needed_from_assets * 100) if cap_needed_from_assets > 0 else 100
             ))
-
-            # ── Healthcare costs ─────────────────────────────────────────────
-            healthcare_pre  = inputs.get("healthcare_pre_medicare", 0)
-            healthcare_post = inputs.get("healthcare_post_medicare", 0)
 
             # ── Year-by-year with buckets and RMDs ───────────────────────────
             pretax  = pretax_at_ret
@@ -563,25 +602,25 @@ def run_retirement_projection(inputs: Dict, accounts: List[Dict], ret_ages: List
                     if bridge_active:
                         # Phase 1: bridge job covers healthcare, net of bridge income
                         healthcare_this_year = 0
-                        kids_cost = kids_annual_cost * ((1 + inflation) ** yr)
-                        bridge    = bridge_income    * ((1 + inflation) ** yr)
+                        kids_cost = kids_annual_cost_at_ret * ((1 + inflation) ** yr)
+                        bridge    = bridge_income_at_ret    * ((1 + inflation) ** yr)
                         year_need = max(0, income_at_ret * ((1 + inflation) ** yr) + kids_cost - bridge)
                     elif kids_still_home and age < 65:
                         # Phase 2: retired, kids home, family healthcare
-                        healthcare_this_year = healthcare_kids
-                        kids_cost = kids_annual_cost * ((1 + inflation) ** yr)
-                        year_need = income_at_ret * ((1 + inflation) ** yr) + kids_cost + healthcare_kids * ((1 + inflation) ** yr)
+                        healthcare_this_year = healthcare_kids_at_ret
+                        kids_cost = kids_annual_cost_at_ret * ((1 + inflation) ** yr)
+                        year_need = income_at_ret * ((1 + inflation) ** yr) + kids_cost + healthcare_kids_at_ret * ((1 + inflation) ** yr)
                     elif age < 65:
                         # Phase 3: empty nest, pre-Medicare
-                        healthcare_this_year = healthcare_pre
-                        year_need = income_at_ret * ((1 + inflation) ** yr) + healthcare_pre * ((1 + inflation) ** yr)
+                        healthcare_this_year = healthcare_pre_at_ret
+                        year_need = income_at_ret * ((1 + inflation) ** yr) + healthcare_pre_at_ret * ((1 + inflation) ** yr)
                     else:
                         # Phase 4: Medicare
-                        healthcare_this_year = healthcare_post
-                        year_need = income_at_ret * ((1 + inflation) ** yr) + healthcare_post * ((1 + inflation) ** yr)
+                        healthcare_this_year = healthcare_post_at_ret
+                        year_need = income_at_ret * ((1 + inflation) ** yr) + healthcare_post_at_ret * ((1 + inflation) ** yr)
                     healthcare_inflated = healthcare_this_year * ((1 + inflation) ** yr)
                 else:
-                    healthcare_this_year = healthcare_pre if age < 65 else healthcare_post
+                    healthcare_this_year = healthcare_pre_at_ret if age < 65 else healthcare_post_at_ret
                     healthcare_inflated  = healthcare_this_year * ((1 + inflation) ** yr)
                     year_need = income_at_ret * ((1 + inflation) ** yr) + healthcare_inflated
 
@@ -600,8 +639,18 @@ def run_retirement_projection(inputs: Dict, accounts: List[Dict], ret_ages: List
                 year_pen = pension_annual  # frozen pension, no COLA
                 year_jss = (jason_ss_annual * ((1 + inflation) ** max(0, age - jason_ss_age))
                             if age >= jason_ss_age else 0)
-                year_uss = (justin_ss_annual * ((1 + inflation) ** max(0, age - justin_ss_age))
-                            if age >= justin_ss_age else 0)
+                # `age` above is Jason's age this year (age = ret_age + yr).
+                # justin_ss_age is JUSTIN's own claiming age, so it must be
+                # compared against Justin's own current age, not Jason's —
+                # comparing it against `age` directly (as this used to)
+                # started/stopped Justin's spousal benefit off by the
+                # couple's age gap whenever jason_age != justin_age
+                # (external audit 2026-09-06). justin_age_this_year matches
+                # the same "justin_age" figure already recorded per-row
+                # below (age - (jason_age - justin_age)).
+                justin_age_this_year = age - (jason_age - justin_age)
+                year_uss = (justin_ss_annual * ((1 + inflation) ** max(0, justin_age_this_year - justin_ss_age))
+                            if justin_age_this_year >= justin_ss_age else 0)
                 fixed_income = year_pen + year_jss + year_uss
 
                 # RMD on pre-tax bucket
@@ -669,8 +718,18 @@ def run_retirement_projection(inputs: Dict, accounts: List[Dict], ret_ages: List
 
                 # 3. Draw more from pretax if needed — gross up the
                 # withdrawal so its after-tax proceeds (not the gross
-                # amount) cover the remaining need.
-                if remaining_need > 0 and pretax > 0 and rmd == 0:
+                # amount) cover the remaining need. This used to be gated
+                # on `rmd == 0`, meaning once RMD age was reached (rmd > 0
+                # every year for the rest of the plan), no further pretax
+                # withdrawal was ever allowed again no matter how large the
+                # remaining need or the remaining pretax balance — a real
+                # bug caught by external audit 2026-09-06: a big unmet need
+                # was silently rationed away instead of drawn from a pretax
+                # balance that still had plenty left. The RMD itself was
+                # already withdrawn in step 1 above (and already reduced
+                # `pretax`), so there's no double-counting risk in drawing
+                # more from what remains.
+                if remaining_need > 0 and pretax > 0:
                     gross_needed = remaining_need / (1 - pretax_tax_rate) if pretax_tax_rate < 1 else remaining_need
                     draw = min(gross_needed, pretax)
                     pretax -= draw
@@ -680,9 +739,11 @@ def run_retirement_projection(inputs: Dict, accounts: List[Dict], ret_ages: List
                     remaining_need -= (draw - draw_tax)
 
                 # 4. Draw from HSA (tax-free for medical, eventually anything)
+                withdrawal_hsa = 0.0
                 if remaining_need > 0 and hsa > 0:
                     draw = min(remaining_need, hsa)
                     hsa -= draw
+                    withdrawal_hsa = draw
                     remaining_need -= draw
 
                 # 5. Roth last resort
@@ -692,7 +753,17 @@ def run_retirement_projection(inputs: Dict, accounts: List[Dict], ret_ages: List
                     withdrawal_roth += draw
                     remaining_need -= draw
 
-                total_withdrawal = withdrawal_taxable + withdrawal_pretax + withdrawal_roth
+                # Whatever's left after every bucket has been tried is
+                # genuine unmet spending need — the plan literally could
+                # not fund it this year. Previously this was silently
+                # dropped on the floor: the success/on_track check only
+                # ever looked at whether money remained, never whether the
+                # year's spending need was actually met (external audit
+                # 2026-09-06). Surfaced per-year below and rolled into
+                # on_track/percent_funded at the scenario level.
+                unmet_need = remaining_need
+
+                total_withdrawal = withdrawal_taxable + withdrawal_pretax + withdrawal_roth + withdrawal_hsa
 
                 # Grow remaining balances
                 pretax  = max(0, pretax  * (1 + post_ret))
@@ -719,7 +790,9 @@ def run_retirement_projection(inputs: Dict, accounts: List[Dict], ret_ages: List
                     "withdrawal_pretax":round(withdrawal_pretax),
                     "withdrawal_taxable":round(withdrawal_taxable),
                     "withdrawal_roth":  round(withdrawal_roth),
+                    "withdrawal_hsa":   round(withdrawal_hsa),
                     "withdrawal":       round(total_withdrawal),
+                    "unmet_need":       round(unmet_need),
                     "pretax_balance":   round(pretax),
                     "roth_balance":     round(roth),
                     "taxable_balance":  round(taxable),
@@ -753,7 +826,16 @@ def run_retirement_projection(inputs: Dict, accounts: List[Dict], ret_ages: List
                 "hsa_at_retirement":             round(hsa_at_ret),
                 "current_investable_assets":     round(pretax_start + roth_start + taxable_start + hsa_start),
                 "projected_surplus":             round(surplus),
-                "on_track":                      surplus >= 0,
+                # on_track used to check only the capitalized-need surplus,
+                # which can be positive even while the year-by-year
+                # withdrawal waterfall was silently unable to fund actual
+                # spending in some years (external audit 2026-09-06 — see
+                # the withdrawal waterfall's unmet_need comment above). A
+                # plan isn't really "on track" if any modeled year came up
+                # short on spending, regardless of what the headline
+                # capitalized comparison says.
+                "any_year_underfunded":          any(y["unmet_need"] > 0 for y in yearly),
+                "on_track":                      surplus >= 0 and not any(y["unmet_need"] > 0 for y in yearly),
                 "percent_funded":                pct_funded,
                 "retirement_end_age":            mort_age,
                 "state_income_tax_rate":         inputs.get("state_income_tax_rate", 0),

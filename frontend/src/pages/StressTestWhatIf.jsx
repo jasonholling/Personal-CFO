@@ -148,6 +148,12 @@ function SurvivorScenarioSection({ retAge }) {
 export default function StressTestWhatIf({ onNavigate }) {
   const { retAge, ssTiming, setRetAge, setSsTiming } = useScenario()
   const [tab, setTab] = useState('whatif')
+  // The What-If Builder reports its current slider state up here as it
+  // changes, so switching to Monte Carlo/Historical Stress can pass the
+  // same modified assumptions into those runs instead of silently
+  // discarding them in favor of saved Settings (external audit
+  // 2026-09-06). null until the What-If tab has computed at least once.
+  const [whatIfAssumptions, setWhatIfAssumptions] = useState(null)
 
   return (
     <div>
@@ -171,6 +177,12 @@ export default function StressTestWhatIf({ onNavigate }) {
           >{t.label}</button>
         ))}
       </div>
+
+      {(tab === 'monte_carlo' || tab === 'stress') && whatIfAssumptions && (
+        <div style={{ padding:'10px 14px', background:'rgba(79,156,249,0.08)', border:'1px solid rgba(79,156,249,0.2)', borderRadius:8, marginBottom:20, fontSize:12, color:'var(--text2)' }}>
+          Reflecting the assumptions currently set in the What-If Builder tab (returns, inflation, healthcare, income target, bridge income, pension/SS multipliers) — not just saved Settings.
+        </div>
+      )}
 
       {/* What-If Builder has its own full 55-67 retirement-age slider, and
           Survivor Scenario has its own controls, so the coarse retAge/
@@ -203,9 +215,9 @@ export default function StressTestWhatIf({ onNavigate }) {
         </div>
       )}
 
-      {tab === 'whatif'      && <WhatIf onNavigate={onNavigate} />}
-      {tab === 'monte_carlo' && <MonteCarloSection retAge={retAge} ssTiming={ssTiming} />}
-      {tab === 'stress'      && <StressTestSection retAge={retAge} ssTiming={ssTiming} />}
+      {tab === 'whatif'      && <WhatIf onNavigate={onNavigate} onAssumptionsChange={setWhatIfAssumptions} />}
+      {tab === 'monte_carlo' && <MonteCarloSection retAge={retAge} ssTiming={ssTiming} overrides={whatIfAssumptions} />}
+      {tab === 'stress'      && <StressTestSection retAge={retAge} ssTiming={ssTiming} overrides={whatIfAssumptions} />}
       {tab === 'survivor'    && <SurvivorScenarioSection retAge={retAge} />}
     </div>
   )

@@ -22,7 +22,17 @@ const CustomTooltip = ({ active, payload, label, person1Name }) => {
   )
 }
 
-const RET_AGES = [55, 56, 57, 58, 59, 60, 65]
+// Full 55-67 range, matching what /api/projections/retirement now actually
+// returns (previously just [55,56,57,58,59,60,65] — that stale subset used
+// to silently snap any age outside it, e.g. 62, down to the nearest one in
+// the list (60) via nearestOf below, even though the backend has supported
+// every individual age for a while (external audit 2026-09-06). nearestOf
+// is still applied as a defensive no-op — sharedRetAge should always
+// already be in this range since every selector on every page sources it
+// from the same 55-67 buttons, but a stale localStorage value from before
+// this fix, or before the backend supported the full range, shouldn't crash
+// the page.
+const RET_AGES = [55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67]
 
 export default function Retirement({ onNavigate }) {
   const { person1Name, person2Name } = usePersonNames()
@@ -30,9 +40,6 @@ export default function Retirement({ onNavigate }) {
   const [loading, setLoading]   = useState(true)
   const [error, setError]       = useState(null)
   const { retAge: sharedRetAge, ssTiming, setRetAge, setSsTiming } = useScenario()
-  // This page only has data for 55/60/65 — other pages (WhatIf, Age
-  // Sensitivity) support any age 55-67, so snap to the nearest one here
-  // rather than failing to find a matching scenario.
   const retAge = nearestOf(sharedRetAge, RET_AGES)
 
   useEffect(() => {
