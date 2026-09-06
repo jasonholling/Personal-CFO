@@ -25,6 +25,7 @@ import GoalsFunding from './pages/GoalsFunding'
 import SurplusPlan from './pages/SurplusPlan'
 import ProtectionScorecard from './pages/ProtectionScorecard'
 import AnnualReview from './pages/AnnualReview'
+import SavedScenarios from './pages/SavedScenarios'
 import { usePrivacyMode } from './hooks/usePrivacyMode'
 import './App.css'
 
@@ -48,6 +49,7 @@ const NAV = [
   { group:'RETIREMENT' },
   { id:'retirement', label:'Retirement Projection', icon:'◎' },
   { id:'stresstest',  label:'Stress Test & What-If', icon:'⊘' },
+  { id:'scenarios', label:'Saved Scenarios', icon:'◫' },
   { id:'roth',       label:'Roth Conversion', icon:'⟳' },
   { id:'tax',        label:'Tax Planning',   icon:'⊛' },
   { id:'rettools',   label:'Retirement Tools', icon:'⊚' },
@@ -89,7 +91,7 @@ export default function App() {
   }
 
   const pages = {
-    dashboard:Dashboard, accounts:Accounts, retirement:RetirementProjection, stresstest:StressTestWhatIf,
+    dashboard:Dashboard, accounts:Accounts, retirement:RetirementProjection, stresstest:StressTestWhatIf, scenarios:SavedScenarios,
     education:Education, kids:Kids, insurance:Insurance,
     risk:Risk, estate:Estate, settings:Settings,
     tax:TaxPlanning, report:Report, networth:NetWorth, roth:RothConversion, debt:Debt,

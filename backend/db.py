@@ -263,3 +263,17 @@ def init_surplus_allocation_table():
     conn.close()
 
 init_surplus_allocation_table()
+
+def init_saved_scenarios_table():
+    conn = get_db()
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS saved_scenarios (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL UNIQUE,
+            retirement_age INTEGER NOT NULL,
+            summary_json TEXT NOT NULL,
+            created_at TEXT DEFAULT (datetime('now'))
+        );
+    """)
+    conn.commit(); conn.close()
+init_saved_scenarios_table()

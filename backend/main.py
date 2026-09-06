@@ -177,6 +177,9 @@ class SurplusAllocation(BaseModel):
     goal: str
     monthly_amount: float = 0
     notes: Optional[str] = None
+class ScenarioSave(BaseModel):
+    name: str
+    retirement_age: int = 60
 
 class PlanningInputs(BaseModel):
     model_config = {"extra": "allow"}
@@ -356,6 +359,20 @@ def save_surplus_allocation(goal: str, allocation: SurplusAllocation):
     row = conn.execute("SELECT * FROM surplus_allocations WHERE goal=?", (goal.strip(),)).fetchone()
     conn.close()
     return dict(row)
+
+@app.get("/api/saved-scenarios")
+def get_saved_scenarios():
+    conn=get_db(); rows=conn.execute("SELECT * FROM saved_scenarios ORDER BY created_at DESC").fetchall(); conn.close()
+    return [{**dict(r), "summary":json.loads(r["summary_json"])} for r in rows]
+
+@app.post("/api/saved-scenarios")
+def save_scenario(body: ScenarioSave):
+    if not body.name.strip() or body.retirement_age < 50 or body.retirement_age > 75: raise HTTPException(status_code=400,detail="Enter a name and retirement age from 50 to 75")
+    conn=get_db(); inputs=conn.execute("SELECT * FROM planning_inputs WHERE id=1").fetchone(); accounts=[dict(r) for r in conn.execute("SELECT * FROM accounts").fetchall()]
+    if not inputs: conn.close(); raise HTTPException(status_code=400,detail="Planning inputs not set")
+    result=run_retirement_projection(dict(inputs),accounts,ret_ages=[body.retirement_age]); scenario=next((s for s in result["scenarios"] if s["ss_timing"]=="early"),None)
+    summary={k:scenario[k] for k in ("retirement_age","percent_funded","portfolio_at_retirement","projected_surplus","on_track")}
+    conn.execute("INSERT INTO saved_scenarios (name,retirement_age,summary_json) VALUES (?,?,?) ON CONFLICT(name) DO UPDATE SET retirement_age=excluded.retirement_age,summary_json=excluded.summary_json,created_at=datetime('now')",(body.name.strip(),body.retirement_age,json.dumps(summary)));conn.commit();conn.close();return summary
 
 # Debt Payoff — operates on accounts whose account_type is a debt type
 # (mortgage, credit_card, student_loan, car_loan, personal_loan)
