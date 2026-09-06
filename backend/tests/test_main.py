@@ -841,6 +841,9 @@ class TestCfoOperatingSystem:
         runway = client.get("/api/financial-runway")
         assert runway.status_code == 200
         assert runway.json()["account_count"] == len(sample_accounts)
+        briefing = client.get("/api/cfo-briefing")
+        assert briefing.status_code == 200
+        assert "priorities" in briefing.json()
 
     def test_life_event_crud(self, client):
         created = client.post("/api/life-events", json={"name":"Career pause","event_type":"career","event_year":2030,"one_time_cash_delta":-1000,"monthly_cash_flow_delta":-100,"duration_months":12})
@@ -869,3 +872,8 @@ class TestCfoOperatingSystem:
         assert response.status_code == 200
         assert response.headers["content-type"].startswith("text/calendar")
         assert "BEGIN:VEVENT" in response.text
+
+    def test_backup_export_is_portable_json(self, client):
+        response = client.get("/api/backup/export")
+        assert response.status_code == 200
+        assert response.json()["format"] == "personal-cfo-backup"
