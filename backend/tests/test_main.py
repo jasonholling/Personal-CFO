@@ -619,6 +619,91 @@ class TestSurplusAllocationsAffectRealProjectionAndSimulation:
         assert goals == {"Emergency reserve", "Retirement contributions"}
 
 
+class TestPerKidEducationSurplusGoalsFeedEducationAndKidsProjections:
+    """The two per-kid education-funding surplus_allocations goals
+    ("Education funding - Abby" / "Education funding - Cooper") must move
+    /api/projections/education and /api/projections/kids for that specific
+    kid only, while staying excluded from /api/projections/retirement (and
+    Monte Carlo) — regression coverage for _get_relevant_surplus_allocations
+    continuing to exclude these two new goals exactly as the old single
+    "Education funding" goal was excluded."""
+
+    def _seed(self, client, sample_inputs, sample_accounts):
+        _seed_planning_inputs(client, sample_inputs)
+        _seed_accounts(client, sample_accounts)
+
+    def _abby_from_education(self, client):
+        r = client.get("/api/projections/education")
+        return next(g for g in r.json()["goals"] if g["child"] == "Abby")
+
+    def _cooper_from_education(self, client):
+        r = client.get("/api/projections/education")
+        return next(g for g in r.json()["goals"] if g["child"] == "Cooper")
+
+    def _abby_from_kids(self, client):
+        r = client.get("/api/projections/kids")
+        return next(k for k in r.json()["kids"] if k["child"] == "Abby")
+
+    def _portfolio_at_60(self, client):
+        r = client.get("/api/projections/retirement")
+        scenario = next(s for s in r.json()["scenarios"] if s["label"] == "age_60_early")
+        return scenario["portfolio_at_retirement"]
+
+    def test_abby_goal_raises_abby_education_projection_only(self, client, sample_inputs, sample_accounts):
+        self._seed(client, sample_inputs, sample_accounts)
+        baseline_abby = self._abby_from_education(client)
+        baseline_cooper = self._cooper_from_education(client)
+        client.put("/api/surplus-allocations/Education funding - Abby", json={
+            "goal": "Education funding - Abby", "monthly_amount": 250, "notes": None,
+        })
+        with_goal_abby = self._abby_from_education(client)
+        with_goal_cooper = self._cooper_from_education(client)
+        assert with_goal_abby["projected_529_at_college"] > baseline_abby["projected_529_at_college"]
+        assert with_goal_cooper["projected_529_at_college"] == baseline_cooper["projected_529_at_college"]
+
+    def test_cooper_goal_raises_cooper_kids_projection_only(self, client, sample_inputs, sample_accounts):
+        self._seed(client, sample_inputs, sample_accounts)
+        baseline = client.get("/api/projections/kids").json()["kids"]
+        baseline_abby = next(k for k in baseline if k["child"] == "Abby")
+        baseline_cooper = next(k for k in baseline if k["child"] == "Cooper")
+        client.put("/api/surplus-allocations/Education funding - Cooper", json={
+            "goal": "Education funding - Cooper", "monthly_amount": 150, "notes": None,
+        })
+        after = client.get("/api/projections/kids").json()["kids"]
+        after_abby = next(k for k in after if k["child"] == "Abby")
+        after_cooper = next(k for k in after if k["child"] == "Cooper")
+        assert after_cooper["529"]["at_18"] > baseline_cooper["529"]["at_18"]
+        assert after_abby["529"]["at_18"] == baseline_abby["529"]["at_18"]
+
+    def test_education_surplus_goals_excluded_from_retirement_projection(self, client, sample_inputs, sample_accounts):
+        """Regression test proving run_retirement_projection's output is
+        completely unaffected by these two new goals having nonzero
+        amounts — _get_relevant_surplus_allocations' explicit goal IN (...)
+        filter must not accidentally pick them up."""
+        self._seed(client, sample_inputs, sample_accounts)
+        baseline = self._portfolio_at_60(client)
+        client.put("/api/surplus-allocations/Education funding - Abby", json={
+            "goal": "Education funding - Abby", "monthly_amount": 1000, "notes": None,
+        })
+        client.put("/api/surplus-allocations/Education funding - Cooper", json={
+            "goal": "Education funding - Cooper", "monthly_amount": 1000, "notes": None,
+        })
+        after = self._portfolio_at_60(client)
+        assert after == baseline
+
+    def test_surplus_allocations_overlay_still_shows_both_new_goals(self, client, sample_inputs, sample_accounts):
+        """GET /api/surplus-allocations (the plain tracking view) must still
+        show these goals regardless of them being excluded from the
+        retirement-projection wiring."""
+        self._seed(client, sample_inputs, sample_accounts)
+        client.put("/api/surplus-allocations/Education funding - Abby", json={
+            "goal": "Education funding - Abby", "monthly_amount": 250, "notes": None,
+        })
+        overlay = client.get("/api/surplus-allocations").json()
+        goals = {row["goal"] for row in overlay["allocations"]}
+        assert "Education funding - Abby" in goals
+
+
 class TestDebtRecommendationEndpoints:
     def test_recommendation_with_no_debt(self, client):
         r = client.get("/api/debts/recommendation")

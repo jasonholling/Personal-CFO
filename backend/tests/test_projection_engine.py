@@ -772,6 +772,95 @@ class TestRunKidsProjection:
         assert abby_real["529"]["at_22"] < abby_zero["529"]["at_22"]
 
 
+class TestSurplus529ContributionsInEducationAndKidsProjections:
+    """The per-kid "Education funding - Abby"/"Education funding - Cooper"
+    surplus_allocations goals feed run_education_projection/
+    run_kids_projection as an EXTRA monthly 529 contribution for that
+    specific kid, on top of the flat abby_529_monthly/cooper_529_monthly
+    planning-input rate — not replacing it, and with zero effect on the
+    other kid."""
+
+    def test_default_no_surplus_is_unchanged(self, sample_inputs, sample_accounts):
+        no_kwarg      = run_education_projection(sample_inputs, sample_accounts)
+        explicit_none = run_education_projection(sample_inputs, sample_accounts, surplus_529_monthly=None)
+        explicit_empty = run_education_projection(sample_inputs, sample_accounts, surplus_529_monthly={})
+        a = next(g for g in no_kwarg["goals"] if g["child"] == "Abby")
+        b = next(g for g in explicit_none["goals"] if g["child"] == "Abby")
+        c = next(g for g in explicit_empty["goals"] if g["child"] == "Abby")
+        assert a["projected_529_at_college"] == b["projected_529_at_college"] == c["projected_529_at_college"]
+
+    def test_education_projection_surplus_adds_on_top_of_base_rate_for_that_kid_only(self, sample_inputs, sample_accounts):
+        baseline   = run_education_projection(sample_inputs, sample_accounts)
+        with_surplus = run_education_projection(sample_inputs, sample_accounts, surplus_529_monthly={"abby": 200})
+        b_abby = next(g for g in baseline["goals"] if g["child"] == "Abby")
+        w_abby = next(g for g in with_surplus["goals"] if g["child"] == "Abby")
+        b_cooper = next(g for g in baseline["goals"] if g["child"] == "Cooper")
+        w_cooper = next(g for g in with_surplus["goals"] if g["child"] == "Cooper")
+        # monthly_contribution reflects base ($100 in the fixture) + $200 surplus.
+        assert w_abby["monthly_contribution"] == b_abby["monthly_contribution"] + 200
+        assert w_abby["projected_529_at_college"] > b_abby["projected_529_at_college"]
+        # Cooper is completely untouched by Abby's surplus goal.
+        assert w_cooper["monthly_contribution"] == b_cooper["monthly_contribution"]
+        assert w_cooper["projected_529_at_college"] == b_cooper["projected_529_at_college"]
+
+    def test_education_projection_surplus_is_per_kid_independent(self, sample_inputs, sample_accounts):
+        baseline = run_education_projection(sample_inputs, sample_accounts)
+        both = run_education_projection(sample_inputs, sample_accounts, surplus_529_monthly={"abby": 150, "cooper": 75})
+        b_abby, b_cooper = (next(g for g in baseline["goals"] if g["child"] == c) for c in ("Abby", "Cooper"))
+        w_abby, w_cooper = (next(g for g in both["goals"] if g["child"] == c) for c in ("Abby", "Cooper"))
+        assert w_abby["monthly_contribution"] == b_abby["monthly_contribution"] + 150
+        assert w_cooper["monthly_contribution"] == b_cooper["monthly_contribution"] + 75
+        assert w_abby["projected_529_at_college"] > b_abby["projected_529_at_college"]
+        assert w_cooper["projected_529_at_college"] > b_cooper["projected_529_at_college"]
+
+    def test_kids_projection_surplus_raises_529_balance_for_that_kid_only(self, sample_inputs, sample_accounts):
+        baseline = run_kids_projection(sample_accounts, sample_inputs)
+        with_surplus = run_kids_projection(sample_accounts, sample_inputs, surplus_529_monthly={"cooper": 400})
+        b_abby = next(k for k in baseline["kids"] if k["child"] == "Abby")
+        w_abby = next(k for k in with_surplus["kids"] if k["child"] == "Abby")
+        b_cooper = next(k for k in baseline["kids"] if k["child"] == "Cooper")
+        w_cooper = next(k for k in with_surplus["kids"] if k["child"] == "Cooper")
+        # Abby unaffected by Cooper's surplus goal.
+        assert w_abby["529"]["at_18"] == b_abby["529"]["at_18"]
+        assert w_abby["roth"]["529_rollover"] == b_abby["roth"]["529_rollover"]
+        # Cooper's 529 balance at 18 rises with the added surplus contribution.
+        assert w_cooper["529"]["at_18"] > b_cooper["529"]["at_18"]
+
+    def test_larger_surplus_529_balance_produces_larger_roth_rollover_still_capped_at_35k(self, sample_inputs, sample_accounts):
+        """The core behavior the user asked to confirm: a bigger 529 balance
+        (here, from an added surplus contribution rather than a bigger
+        starting account balance) must flow through the EXISTING SECURE 2.0
+        529-to-Roth-IRA rollover mechanic unchanged — producing a
+        correspondingly larger rollover into the Roth (still capped at
+        $35,000), which then keeps compounding to 60. Uses a kid close to
+        college with a big enough gap between college cost and the 529
+        balance that the rollover isn't already pinned at the cap in the
+        baseline case, so the increase is actually observable."""
+        custom = {**sample_inputs, "kid1_age": 17, "unl_annual_cost": 3000, "abby_529_monthly": 50}
+        accounts = sample_accounts + [
+            {"id": 93, "name": "Abby 529", "account_type": "529", "owner": "abby", "balance": 20000, "institution": "", "notes": ""},
+        ]
+        baseline = run_kids_projection(accounts, custom)
+        with_surplus = run_kids_projection(accounts, custom, surplus_529_monthly={"abby": 500})
+        b_abby = next(k for k in baseline["kids"] if k["child"] == "Abby")
+        w_abby = next(k for k in with_surplus["kids"] if k["child"] == "Abby")
+        assert b_abby["roth"]["529_rollover"] < 35000  # not already capped, so the increase is visible
+        assert w_abby["roth"]["529_rollover"] > b_abby["roth"]["529_rollover"]
+        assert w_abby["roth"]["529_rollover"] <= 35000
+        # The larger rollover at 22 keeps compounding through 60, same
+        # mechanic, just starting from a bigger number.
+        assert w_abby["roth"]["at_60"] > b_abby["roth"]["at_60"]
+
+    def test_roth_rollover_stays_capped_at_35000_even_with_a_huge_surplus_contribution(self, sample_inputs, sample_accounts):
+        custom = {**sample_inputs, "kid1_age": 17, "unl_annual_cost": 1000}
+        accounts = sample_accounts + [
+            {"id": 92, "name": "Abby 529", "account_type": "529", "owner": "abby", "balance": 100000, "institution": "", "notes": ""},
+        ]
+        result = run_kids_projection(accounts, custom, surplus_529_monthly={"abby": 5000})
+        abby = next(k for k in result["kids"] if k["child"] == "Abby")
+        assert abby["roth"]["529_rollover"] == 35000
+
+
 class TestRunInsuranceAnalysis:
     def test_returns_jason_and_justin_sections(self, sample_inputs, sample_accounts):
         result = run_insurance_analysis(sample_inputs, sample_accounts)

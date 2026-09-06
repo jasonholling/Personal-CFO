@@ -203,19 +203,37 @@ def _pre_retirement_taxable_add(pre_events: List[Dict], pre_ret: float, retireme
 #     SAME pretax_401k_pct/roth_pct ratio already used elsewhere in
 #     run_retirement_projection for the existing 401k contributions.
 #   - "Taxable investing" lands in the taxable bucket.
-# The other five goals are deliberately excluded — they are cash reserves,
-# debt paydown, a separate 529/education engine, a tax set-aside, or an
-# undefined catch-all, none of which are dollars invested toward retirement:
-#   - "Emergency reserve"            — cash reserve, not invested
-#   - "High-interest debt payoff"    — pays down debt, doesn't grow assets
-#   - "Education funding"            — modeled by run_education_projection,
-#                                       would double-count if also added here
-#   - "Tax reserve"                  — set aside to pay taxes, not invested
-#   - "Other goal"                   — undefined catch-all, no assumption
+# The other goals are deliberately excluded — they are cash reserves,
+# debt paydown, per-kid 529 education goals (a separate engine), a tax
+# set-aside, or an undefined catch-all, none of which are dollars invested
+# toward retirement:
+#   - "Emergency reserve"                 — cash reserve, not invested
+#   - "High-interest debt payoff"         — pays down debt, doesn't grow assets
+#   - "Education funding - Abby"/"Cooper" — modeled by run_education_projection/
+#                                            run_kids_projection (as an extra
+#                                            monthly 529 contribution for that
+#                                            specific kid — see main.py's
+#                                            _get_kids_surplus_529_monthly),
+#                                            would double-count if also added
+#                                            here
+#   - "Tax reserve"                       — set aside to pay taxes, not invested
+#   - "Other goal"                        — undefined catch-all, no assumption
 # This is a judgment call, not an oversight — a future reader adding a new
 # goal to the fixed list should decide explicitly whether it belongs here.
 SURPLUS_GOAL_RETIREMENT_CONTRIB = "Retirement contributions"
 SURPLUS_GOAL_TAXABLE_INVESTING  = "Taxable investing"
+
+# Per-kid education-funding goals — replaced the single shared "Education
+# funding" goal 2026-09-06 so a household can direct surplus specifically
+# to one kid's 529 ("abby's will go to abby, cooper will go to cooper")
+# rather than a pooled amount split by some formula. The stored `goal`
+# string is this stable key, NOT the kid's configurable display name
+# (kid1_name/kid2_name in planning_inputs) — a rename in Settings must
+# never orphan an existing surplus_allocations row. See
+# main.py._get_kids_surplus_529_monthly for how these feed
+# run_education_projection/run_kids_projection's surplus_529_monthly param.
+SURPLUS_GOAL_EDUCATION_ABBY   = "Education funding - Abby"
+SURPLUS_GOAL_EDUCATION_COOPER = "Education funding - Cooper"
 
 
 def _surplus_allocations_at_retirement(surplus_allocations: List[Dict], pre_ret: float,
@@ -746,13 +764,22 @@ def run_retirement_projection(inputs: Dict, accounts: List[Dict], ret_ages: List
 
 
 def run_education_projection(inputs: Dict, accounts: List[Dict],
-                              continue_contributions_during_college: bool = False) -> Dict:
+                              continue_contributions_during_college: bool = False,
+                              surplus_529_monthly: Dict[str, float] = None) -> Dict:
+    """surplus_529_monthly: optional {"abby": amount, "cooper": amount} —
+    extra monthly 529 contributions directed via the "Assign Surplus" page's
+    per-kid education-funding goals (see SURPLUS_GOAL_EDUCATION_ABBY/COOPER
+    above and main.py._get_kids_surplus_529_monthly). Added ON TOP OF the
+    flat abby_529_monthly/cooper_529_monthly planning-input rate, not in
+    place of it. Defaults to None/empty so every existing caller that
+    doesn't pass this is completely unaffected."""
     edu_return = 0.07
+    surplus_529_monthly = surplus_529_monthly or {}
 
     abby_balance   = sum(a["balance"] for a in accounts if a["account_type"]=="529" and a["owner"]=="abby")
     cooper_balance = sum(a["balance"] for a in accounts if a["account_type"]=="529" and a["owner"]=="cooper")
-    abby_monthly   = inputs.get("abby_529_monthly",   ABBY_MONTHLY_529_DEFAULT)
-    cooper_monthly = inputs.get("cooper_529_monthly", COOPER_MONTHLY_529_DEFAULT)
+    abby_monthly   = inputs.get("abby_529_monthly",   ABBY_MONTHLY_529_DEFAULT) + float(surplus_529_monthly.get("abby", 0) or 0)
+    cooper_monthly = inputs.get("cooper_529_monthly", COOPER_MONTHLY_529_DEFAULT) + float(surplus_529_monthly.get("cooper", 0) or 0)
     kid1_age = inputs.get("kid1_age", 0)
     kid2_age = inputs.get("kid2_age", 0)
 
@@ -892,13 +919,25 @@ def run_education_projection(inputs: Dict, accounts: List[Dict],
     return {"goals": goals}
 
 
-def run_kids_projection(accounts: List[Dict], inputs: Dict = None) -> Dict:
+def run_kids_projection(accounts: List[Dict], inputs: Dict = None,
+                         surplus_529_monthly: Dict[str, float] = None) -> Dict:
+    """surplus_529_monthly: optional {"abby": amount, "cooper": amount} —
+    same extra per-kid 529 contribution as run_education_projection's
+    parameter of the same name (see that docstring and
+    SURPLUS_GOAL_EDUCATION_ABBY/COOPER above). Added on top of the flat
+    abby_529_monthly/cooper_529_monthly rate; everything downstream
+    (proj_529_at_18, the age-22 college drawdown, and the existing
+    SECURE 2.0 529-to-Roth-IRA rollover capped at $35,000) operates on the
+    resulting bal_529/proj_529_at_18 unchanged — a bigger 529 balance from
+    added surplus simply produces a correspondingly larger (still capped)
+    rollover, with no changes needed to that math itself."""
     edu_return  = 0.07
     roth_return = 0.07
     if inputs is None: inputs = {}
+    surplus_529_monthly = surplus_529_monthly or {}
 
-    abby_529_mo   = inputs.get("abby_529_monthly",       ABBY_MONTHLY_529_DEFAULT)
-    cooper_529_mo = inputs.get("cooper_529_monthly",     COOPER_MONTHLY_529_DEFAULT)
+    abby_529_mo   = inputs.get("abby_529_monthly",       ABBY_MONTHLY_529_DEFAULT) + float(surplus_529_monthly.get("abby", 0) or 0)
+    cooper_529_mo = inputs.get("cooper_529_monthly",     COOPER_MONTHLY_529_DEFAULT) + float(surplus_529_monthly.get("cooper", 0) or 0)
     kids_roth_mo  = inputs.get("kids_roth_monthly",      KIDS_ROTH_MONTHLY_DEFAULT)
     kids_cust_mo  = inputs.get("kids_custodial_monthly", KIDS_CUST_MONTHLY_DEFAULT)
 

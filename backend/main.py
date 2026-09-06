@@ -546,6 +546,31 @@ def _get_relevant_surplus_allocations(conn) -> List[dict]:
         "SELECT * FROM surplus_allocations WHERE goal IN ('Retirement contributions', 'Taxable investing')"
     ).fetchall()]
 
+
+def _get_kids_surplus_529_monthly(conn) -> Dict[str, float]:
+    """The two per-kid education-funding surplus_allocations goals
+    ("Education funding - Abby" / "Education funding - Cooper") — money
+    the household has explicitly earmarked (in Surplus Plan) for one
+    specific kid's 529, on top of whatever flat abby_529_monthly/
+    cooper_529_monthly rate lives in planning_inputs. Returns
+    {"abby": amount, "cooper": amount}, each 0.0 if that goal has no row
+    or a non-positive monthly_amount.
+
+    Deliberately NOT part of _get_relevant_surplus_allocations' filter
+    above — this money is invested toward college, not retirement (see
+    projection_engine.py's module comment) — but IS exactly what should
+    feed run_education_projection/run_kids_projection's surplus_529_monthly
+    param, additively, mirroring how _get_debt_payoff_surplus_monthly feeds
+    the debt-payoff routes below."""
+    rows = {r["goal"]: r["monthly_amount"] for r in conn.execute(
+        "SELECT goal, monthly_amount FROM surplus_allocations WHERE goal IN "
+        "('Education funding - Abby', 'Education funding - Cooper')"
+    ).fetchall()}
+    return {
+        "abby":   max(0.0, float(rows.get("Education funding - Abby", 0) or 0)),
+        "cooper": max(0.0, float(rows.get("Education funding - Cooper", 0) or 0)),
+    }
+
 @app.get("/api/life-events")
 def get_life_events():
     # NOTE: this used to be a pure overlay that never touched the base
@@ -1030,11 +1055,12 @@ def get_cfo_briefing():
     cash_flow_items = [dict(r) for r in conn.execute("SELECT * FROM cash_flow_items").fetchall()]
     life_events = _get_active_life_events(conn)
     surplus_allocations = _get_relevant_surplus_allocations(conn)
+    surplus_529 = _get_kids_surplus_529_monthly(conn)
     conn.close()
     inputs = dict(inputs_row) if inputs_row else {}
     try:
         retirement = run_retirement_projection(inputs, accounts, ret_ages=[60], life_events=life_events, surplus_allocations=surplus_allocations)
-        education = run_education_projection(inputs, accounts)
+        education = run_education_projection(inputs, accounts, surplus_529_monthly=surplus_529)
     except (KeyError, ValueError, ZeroDivisionError):
         # Empty or partially completed setup should still receive useful
         # data-quality guidance instead of an unusable dashboard error.
@@ -1078,10 +1104,11 @@ def get_education_projections(continue_contributions_during_college: bool = Fals
     conn = get_db()
     inputs_row = conn.execute("SELECT * FROM planning_inputs WHERE id=1").fetchone()
     accounts   = [dict(r) for r in conn.execute("SELECT * FROM accounts").fetchall()]
+    surplus_529 = _get_kids_surplus_529_monthly(conn)
     conn.close()
     if not inputs_row:
         raise HTTPException(status_code=400, detail="Planning inputs not set yet")
-    return run_education_projection(dict(inputs_row), accounts, continue_contributions_during_college)
+    return run_education_projection(dict(inputs_row), accounts, continue_contributions_during_college, surplus_529_monthly=surplus_529)
 
 # Quicken Import
 @app.post("/api/import/quicken")
@@ -1219,13 +1246,14 @@ def sync_tasks():
     accounts   = [dict(r) for r in conn.execute("SELECT * FROM accounts").fetchall()]
     life_events = _get_active_life_events(conn)
     surplus_allocations = _get_relevant_surplus_allocations(conn)
+    surplus_529 = _get_kids_surplus_529_monthly(conn)
     conn.close()
     if not inputs_row:
         return {"inserted": 0, "message": "No planning inputs yet"}
     inputs = dict(inputs_row)
     try:
         projections = run_retirement_projection(inputs, accounts, life_events=life_events, surplus_allocations=surplus_allocations)
-        education   = run_education_projection(inputs, accounts)
+        education   = run_education_projection(inputs, accounts, surplus_529_monthly=surplus_529)
     except Exception:
         projections = {}
         education   = {}
@@ -1239,10 +1267,11 @@ def get_kids_projections():
     conn = get_db()
     accounts   = [dict(r) for r in conn.execute("SELECT * FROM accounts").fetchall()]
     inputs_row = conn.execute("SELECT * FROM planning_inputs WHERE id=1").fetchone()
+    surplus_529 = _get_kids_surplus_529_monthly(conn)
     conn.close()
     from projection_engine import run_kids_projection
     inputs = dict(inputs_row) if inputs_row else {}
-    return run_kids_projection(accounts, inputs)
+    return run_kids_projection(accounts, inputs, surplus_529_monthly=surplus_529)
 
 @app.get("/api/projections/insurance")
 def get_insurance_analysis():
@@ -1265,6 +1294,7 @@ def generate_annual_report():
     accounts   = [dict(r) for r in conn.execute("SELECT * FROM accounts").fetchall()]
     life_events = _get_active_life_events(conn)
     surplus_allocations = _get_relevant_surplus_allocations(conn)
+    surplus_529 = _get_kids_surplus_529_monthly(conn)
     conn.close()
 
     if not inputs_row:
@@ -1286,8 +1316,8 @@ def generate_annual_report():
     data = {
         "net_worth":  nw,
         "retirement": run_retirement_projection(inputs, accounts, life_events=life_events, surplus_allocations=surplus_allocations),
-        "education":  run_education_projection(inputs, accounts),
-        "kids":       run_kids_projection(accounts, inputs),
+        "education":  run_education_projection(inputs, accounts, surplus_529_monthly=surplus_529),
+        "kids":       run_kids_projection(accounts, inputs, surplus_529_monthly=surplus_529),
         "insurance":  run_insurance_analysis(inputs, accounts),
         "names": {
             "person1": inputs.get("person1_name", "Person 1"),
