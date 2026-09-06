@@ -24,6 +24,7 @@ import CashFlow from './pages/CashFlow'
 import GoalsFunding from './pages/GoalsFunding'
 import SurplusPlan from './pages/SurplusPlan'
 import ProtectionScorecard from './pages/ProtectionScorecard'
+import AnnualReview from './pages/AnnualReview'
 import { usePrivacyMode } from './hooks/usePrivacyMode'
 import './App.css'
 
@@ -43,6 +44,7 @@ const NAV = [
   { id:'goals',      label:'Goals & Funding', icon:'◇' },
   { id:'surplus',    label:'Assign Surplus', icon:'+' },
   { id:'annualplan', label:'Annual Action Plan', icon:'✓' },
+  { id:'annualreview', label:'Annual Review', icon:'↻' },
   { group:'RETIREMENT' },
   { id:'retirement', label:'Retirement Projection', icon:'◎' },
   { id:'stresstest',  label:'Stress Test & What-If', icon:'⊘' },
@@ -91,7 +93,7 @@ export default function App() {
     education:Education, kids:Kids, insurance:Insurance,
     risk:Risk, estate:Estate, settings:Settings,
     tax:TaxPlanning, report:Report, networth:NetWorth, roth:RothConversion, debt:Debt,
-    rettools:RetirementTools, allocation:Allocation, annualplan:AnnualPlan, cashflow:CashFlow, goals:GoalsFunding, surplus:SurplusPlan, protection:ProtectionScorecard,
+    rettools:RetirementTools, allocation:Allocation, annualplan:AnnualPlan, annualreview:AnnualReview, cashflow:CashFlow, goals:GoalsFunding, surplus:SurplusPlan, protection:ProtectionScorecard,
   }
   const Page = pages[page]
 
