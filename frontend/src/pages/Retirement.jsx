@@ -82,12 +82,12 @@ export default function Retirement({ onNavigate }) {
 
   // Years portfolio lasts
   const lastYear = s.yearly_detail.findIndex(y => y.portfolio_balance === 0)
-  const portfolioLasts = lastYear === -1 ? 'Beyond age 99' : `Until ${person1Name} age ${s.yearly_detail[lastYear]?.jason_age}`
+  const portfolioLasts = lastYear === -1 ? `Beyond age ${s.retirement_end_age}` : `Until ${person1Name} age ${s.yearly_detail[lastYear]?.jason_age}`
 
   return (
     <div>
       <div style={{ marginBottom:28 }}>
-        <p className="section-sub" style={{ margin:0 }}>Three scenarios · Toggle SS timing · Modeled to age 99</p>
+        <p className="section-sub" style={{ margin:0 }}>Three scenarios · Toggle SS timing · Modeled to age {s.retirement_end_age}</p>
       </div>
 
       {/* Scenario selector */}

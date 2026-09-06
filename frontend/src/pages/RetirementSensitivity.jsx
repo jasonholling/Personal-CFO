@@ -120,10 +120,10 @@ export default function RetirementSensitivity({ onNavigate }) {
             <div style={{ fontSize:24, fontWeight:800, color:ACCENT, marginTop:6 }}>{fmtK(selected.portfolio)}</div>
             <div style={{ fontSize:11, color:'var(--text2)', marginTop:2 }}>at age {selAge}</div>
           </div>
-          <div className="card" style={{ borderTop:`3px solid ${GREEN}` }}>
+          <div className="card" style={{ borderTop:`3px solid ${selected.surplus >= 0 ? GREEN : RED}` }}>
             <div className="label">Projected Surplus</div>
-            <div style={{ fontSize:24, fontWeight:800, color:GREEN, marginTop:6 }}>{fmtK(selected.surplus)}</div>
-            <div style={{ fontSize:11, color:'var(--text2)', marginTop:2 }}>above what assets need to cover</div>
+            <div style={{ fontSize:24, fontWeight:800, color: selected.surplus >= 0 ? GREEN : RED, marginTop:6 }}>{fmtK(selected.surplus)}</div>
+            <div style={{ fontSize:11, color:'var(--text2)', marginTop:2 }}>{selected.surplus >= 0 ? 'above' : 'below'} what assets need to cover</div>
           </div>
           <div className="card" style={{ borderTop:`3px solid ${ORANGE}` }}>
             <div className="label">Monthly Income Yr 1</div>
@@ -270,7 +270,7 @@ export default function RetirementSensitivity({ onNavigate }) {
                 </td>
                 <td style={{ textAlign:'right', padding:'6px 10px', color:'var(--text2)' }}>{s.years_to_retire}yr</td>
                 <td style={{ textAlign:'right', padding:'6px 10px' }}>{fmtK(s.portfolio)}</td>
-                <td style={{ textAlign:'right', padding:'6px 10px', color:GREEN }}>{fmtK(s.surplus)}</td>
+                <td style={{ textAlign:'right', padding:'6px 10px', color: s.surplus >= 0 ? GREEN : RED }}>{fmtK(s.surplus)}</td>
                 <td style={{ textAlign:'right', padding:'6px 10px', color:ORANGE }}>
                   {(() => { const sw = swrData[String(s.ret_age)] || swrData[s.ret_age]; return fmt(sw ? sw.total_safe_spend/12 : 0) })()}
                 </td>

@@ -220,7 +220,7 @@ export default function SideBySide({ onNavigate }) {
                 </div>
                 <div style={{ display:'flex', justifyContent:'space-between' }}>
                   <span style={{ color:'var(--text2)' }}>Projected surplus</span>
-                  <span style={{ fontWeight:600, color:GREEN }}>{fmtK(s.projected_surplus)}</span>
+                  <span style={{ fontWeight:600, color: s.projected_surplus >= 0 ? GREEN : RED }}>{fmtK(s.projected_surplus)}</span>
                 </div>
                 <div style={{ display:'flex', justifyContent:'space-between' }}>
                   <span style={{ color:'var(--text2)' }}>Safe total spend</span>
@@ -255,7 +255,7 @@ export default function SideBySide({ onNavigate }) {
       <div className="card" style={{ marginBottom:24 }}>
         <div className="label" style={{ marginBottom:4 }}>Portfolio Balance Through Retirement</div>
         <div style={{ fontSize:12, color:'var(--text2)', marginBottom:16 }}>
-          Portfolio balance by {person1Name}'s age — each line starts at its retirement date and runs to age 99
+          Portfolio balance by {person1Name}'s age — each line starts at its retirement date and runs to age {scenarios[0]?.retirement_end_age ?? 99}
         </div>
         <ResponsiveContainer width="100%" height={280}>
           <LineChart data={timelineData} margin={{ top:0, right:0, bottom:0, left:10 }}>
