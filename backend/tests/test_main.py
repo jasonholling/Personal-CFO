@@ -57,6 +57,59 @@ class TestAccountsCrud:
         assert not any(a["id"] == created["id"] for a in remaining)
 
 
+class TestAccountFreshness:
+    def test_fresh_with_no_accounts(self, client):
+        r = client.get("/api/accounts/freshness")
+        assert r.status_code == 200
+        data = r.json()
+        assert data == {"account_count": 0, "stale_count": 0, "stale_accounts": [],
+                         "fresh": True, "possible_duplicate_accounts": []}
+
+    def test_freshly_created_account_is_not_stale(self, client):
+        client.post("/api/accounts", json={
+            "name": "Fresh Checking", "account_type": "checking", "owner": "joint",
+            "institution": "", "balance": 1000, "notes": None,
+        })
+        data = client.get("/api/accounts/freshness").json()
+        assert data["stale_count"] == 0
+        assert data["fresh"] is True
+
+    def test_same_name_different_type_flagged_as_possible_duplicate(self, client):
+        """Regression guard for the Quicken-import scenario: a re-import
+        that maps the same real-world account to a different account_type
+        than before creates a second row instead of updating the first
+        (import matches on name+type), silently leaving a stale orphan that
+        still counts toward net worth. This should surface immediately,
+        not only once the orphan crosses the 35-day staleness threshold."""
+        client.post("/api/accounts", json={
+            "name": "Chase Checking", "account_type": "checking", "owner": "joint",
+            "institution": "Chase", "balance": 1000, "notes": None,
+        })
+        client.post("/api/accounts", json={
+            "name": "Chase Checking", "account_type": "savings", "owner": "joint",
+            "institution": "Chase", "balance": 1000, "notes": None,
+        })
+        data = client.get("/api/accounts/freshness").json()
+        assert data["fresh"] is False
+        assert len(data["possible_duplicate_accounts"]) == 1
+        group = data["possible_duplicate_accounts"][0]
+        assert len(group) == 2
+        assert {a["account_type"] for a in group} == {"checking", "savings"}
+
+    def test_distinct_names_are_not_flagged_as_duplicates(self, client):
+        client.post("/api/accounts", json={
+            "name": "Chase Checking", "account_type": "checking", "owner": "joint",
+            "institution": "Chase", "balance": 1000, "notes": None,
+        })
+        client.post("/api/accounts", json={
+            "name": "Ally Savings", "account_type": "savings", "owner": "joint",
+            "institution": "Ally", "balance": 1000, "notes": None,
+        })
+        data = client.get("/api/accounts/freshness").json()
+        assert data["possible_duplicate_accounts"] == []
+        assert data["fresh"] is True
+
+
 class TestInsurancePoliciesCrud:
     def test_create_list_update_delete(self, client):
         created = client.post("/api/insurance-policies", json={
@@ -262,7 +315,20 @@ class TestTasksCrud:
 
 
 class TestQuickenImport:
-    def test_import_without_a_local_mapping_is_rejected(self, client):
+    def test_import_without_a_local_mapping_is_rejected(self, client, monkeypatch):
+        # This test's whole point is "no local mapping -> nothing matches ->
+        # 400" -- it must not depend on whether a real
+        # quicken_account_map.local.json happens to exist on the machine
+        # running the suite. That file is gitignored and, on a dev machine
+        # that has actually used the real Quicken import feature (as this
+        # one has), it legitimately exists with a real mapping for
+        # "First National Checking" -- which would make this exact CSV
+        # import succeed instead of 400, failing the test for reasons that
+        # have nothing to do with the code under test. Force the "no
+        # mapping" condition explicitly instead of relying on ambient
+        # filesystem state.
+        import quicken_importer
+        monkeypatch.setattr(quicken_importer, "_account_map", lambda: {})
         csv_content = (
             "Net Worth Summary\n---\n"
             'Checking,First National Checking,"1,000.00"\n'
@@ -598,6 +664,49 @@ class TestDebtRecommendationEndpoints:
         })
         assert r.status_code == 200
         assert r.json()["suggested_minimum_payment"] == 382
+
+    def test_high_interest_debt_payoff_surplus_goal_augments_extra_monthly(self, client):
+        """The "High-interest debt payoff" surplus_allocations goal must add
+        to whatever extra_monthly the user manually enters on the Debt page
+        — additively, mirroring how debt-targeted life events feed in
+        one-time lump sums (see _get_debt_payoff_surplus_monthly)."""
+        client.post("/api/accounts", json={
+            "name": "Surplus Card", "account_type": "credit_card", "owner": "joint",
+            "institution": "", "balance": 5000, "notes": None,
+            "interest_rate": 0.22, "minimum_payment": 150,
+        })
+        baseline = client.get("/api/debts/recommendation?extra_monthly=50").json()
+        client.put("/api/surplus-allocations/High-interest debt payoff", json={
+            "goal": "High-interest debt payoff", "monthly_amount": 300, "notes": None,
+        })
+        boosted = client.get("/api/debts/recommendation?extra_monthly=50").json()
+        assert boosted["extra_monthly"] == 350
+        assert boosted["manual_extra_monthly"] == 50
+        assert boosted["surplus_debt_payoff_monthly"] == 300
+        # A bigger effective extra payment should never take longer to pay off.
+        assert boosted["months_to_debt_free"] <= baseline["months_to_debt_free"]
+
+        # A goal that ISN'T "High-interest debt payoff" must not leak in.
+        client.put("/api/surplus-allocations/Retirement contributions", json={
+            "goal": "Retirement contributions", "monthly_amount": 900, "notes": None,
+        })
+        unaffected = client.get("/api/debts/recommendation?extra_monthly=50").json()
+        assert unaffected["surplus_debt_payoff_monthly"] == 300
+
+    def test_payoff_plan_also_reflects_surplus_debt_payoff_goal(self, client):
+        client.post("/api/accounts", json={
+            "name": "Plan Card", "account_type": "credit_card", "owner": "joint",
+            "institution": "", "balance": 5000, "notes": None,
+            "interest_rate": 0.22, "minimum_payment": 150,
+        })
+        # Establish the "true 350" baseline BEFORE the surplus goal exists,
+        # so this doesn't also pick up the goal on top of itself.
+        no_surplus = client.get("/api/debts/payoff-plan?extra_monthly=350").json()
+        client.put("/api/surplus-allocations/High-interest debt payoff", json={
+            "goal": "High-interest debt payoff", "monthly_amount": 300, "notes": None,
+        })
+        plan = client.get("/api/debts/payoff-plan?extra_monthly=50").json()
+        assert plan["avalanche"]["months_to_debt_free"] == no_surplus["avalanche"]["months_to_debt_free"]
 
 
 class TestDebtEndpoints:

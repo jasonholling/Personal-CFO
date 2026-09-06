@@ -816,3 +816,24 @@ class TestRunInsuranceAnalysis:
         result = run_insurance_analysis(inputs, sample_accounts)
         assert result["property"]["umbrella_adequate"] is False
         assert result["property"]["umbrella_gap"] == result["property"]["recommended_umbrella"]
+
+    def test_college_funding_gap_tracks_kid_ages_not_hardcoded(self, sample_inputs, sample_accounts):
+        """Regression test: this used to hardcode "7 years to college" for
+        Abby and "11 years" for Cooper regardless of planning_inputs'
+        kid1_age/kid2_age — so the Insurance page's college-funding gap
+        silently drifted out of sync with the Education/Kids pages (which
+        both correctly derive years_to_college from those same ages) as the
+        kids got older. A kid much closer to 18 should show a smaller,
+        less-inflated college cost than one who's much younger, all else equal."""
+        near_college  = run_insurance_analysis({**sample_inputs, "kid1_age": 17, "kid2_age": 17}, sample_accounts)
+        far_from_college = run_insurance_analysis({**sample_inputs, "kid1_age": 5, "kid2_age": 5}, sample_accounts)
+        assert near_college["jason"]["college_funding"] < far_from_college["jason"]["college_funding"]
+
+    def test_college_funding_gap_matches_education_projection_years_to_college(self, sample_inputs, sample_accounts):
+        """The insurance page's implied years-to-college should be the same
+        18-minus-current-age math run_education_projection uses, not an
+        independent assumption."""
+        from projection_engine import run_education_projection
+        inputs = {**sample_inputs, "kid1_age": 17, "kid2_age": 17, "unl_annual_cost": 20000}
+        edu = run_education_projection(inputs, sample_accounts)
+        assert all(goal["years_to_college"] == 1 for goal in edu["goals"])

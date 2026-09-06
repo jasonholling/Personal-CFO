@@ -2,7 +2,7 @@ from fastapi import FastAPI, HTTPException, UploadFile, File, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response as FastAPIResponse
 from pydantic import BaseModel
-from typing import Optional, List
+from typing import Optional, List, Dict
 import sqlite3
 import json
 from datetime import datetime
@@ -311,7 +311,7 @@ def get_accounts():
 def get_account_freshness():
     """Expose balance freshness without changing account data."""
     conn = get_db()
-    accounts = [dict(r) for r in conn.execute("SELECT id, name, account_type, updated_at FROM accounts").fetchall()]
+    accounts = [dict(r) for r in conn.execute("SELECT id, name, account_type, owner, balance, updated_at FROM accounts").fetchall()]
     conn.close()
     now = datetime.now()
     stale = []
@@ -324,8 +324,25 @@ def get_account_freshness():
         account["age_days"] = age_days
         if age_days is None or age_days > 35:
             stale.append(account)
+
+    # Possible-duplicate detection: /api/import/quicken matches an existing
+    # account by (name, account_type) — if a re-import ever maps the same
+    # real-world account to a different account_type than before (a mapping
+    # change, a typo fix, etc.), the old row is never updated again and just
+    # sits there aging instead of being replaced, while a fresh new row
+    # quietly takes over. The >35-day staleness check above would eventually
+    # catch the orphaned original, but only after 35 days of silently
+    # showing a duplicated balance in net worth in the meantime. Surface
+    # same-name groups immediately instead of waiting on staleness alone.
+    by_name: Dict[str, List[dict]] = {}
+    for account in accounts:
+        key = account["name"].strip().lower()
+        by_name.setdefault(key, []).append(account)
+    possible_duplicates = [group for group in by_name.values() if len(group) > 1]
+
     return {"account_count": len(accounts), "stale_count": len(stale), "stale_accounts": stale,
-            "fresh": len(stale) == 0}
+            "fresh": len(stale) == 0 and not possible_duplicates,
+            "possible_duplicate_accounts": possible_duplicates}
 
 @app.post("/api/accounts")
 def create_account(account: Account):
@@ -658,6 +675,23 @@ def export_calendar():
     lines.append("END:VCALENDAR")
     return FastAPIResponse(content="\r\n".join(lines)+"\r\n",media_type="text/calendar",headers={"Content-Disposition":"attachment; filename=personal-cfo-planning-calendar.ics"})
 
+def _get_debt_payoff_surplus_monthly(conn) -> float:
+    """The "High-interest debt payoff" surplus_allocations goal's
+    monthly_amount — money the user has explicitly earmarked (in Surplus
+    Plan) for paying down debt, on top of whatever they type into the
+    /debts/payoff-plan and /debts/recommendation extra_monthly query param.
+    Excluded from run_retirement_projection/simulation_engine.py (it pays
+    down debt, it doesn't grow investable assets — see projection_engine.py's
+    module-level comment), but the debt engine is exactly where it SHOULD
+    land, additively with any manually-entered extra_monthly, mirroring how
+    _get_debt_targeted_life_events feeds one-time lump sums into the same
+    routes below."""
+    row = conn.execute(
+        "SELECT monthly_amount FROM surplus_allocations WHERE goal='High-interest debt payoff'"
+    ).fetchone()
+    return float(row["monthly_amount"]) if row else 0.0
+
+
 # Debt Payoff — operates on accounts whose account_type is a debt type
 # (mortgage, credit_card, student_loan, car_loan, personal_loan)
 @app.get("/api/debts/payoff-plan")
@@ -665,10 +699,11 @@ def get_debt_payoff_plan(extra_monthly: float = 0):
     conn = get_db()
     accounts = [dict(r) for r in conn.execute("SELECT * FROM accounts").fetchall()]
     debt_events = _get_debt_targeted_life_events(conn)
+    surplus_extra = _get_debt_payoff_surplus_monthly(conn)
     conn.close()
     from debt_engine import project_debt_schedule
     one_time_payments = _debt_targeted_events_to_one_time_payments(debt_events)
-    return project_debt_schedule(accounts, extra_monthly, one_time_payments=one_time_payments)
+    return project_debt_schedule(accounts, extra_monthly + surplus_extra, one_time_payments=one_time_payments)
 
 @app.get("/api/debts/recommendation")
 def get_debt_recommendation(extra_monthly: float = 0):
@@ -678,10 +713,21 @@ def get_debt_recommendation(extra_monthly: float = 0):
     conn = get_db()
     accounts = [dict(r) for r in conn.execute("SELECT * FROM accounts").fetchall()]
     debt_events = _get_debt_targeted_life_events(conn)
+    surplus_extra = _get_debt_payoff_surplus_monthly(conn)
     conn.close()
     from debt_engine import recommend_payoff_strategy
     one_time_payments = _debt_targeted_events_to_one_time_payments(debt_events)
-    return recommend_payoff_strategy(accounts, extra_monthly, one_time_payments=one_time_payments)
+    result = recommend_payoff_strategy(accounts, extra_monthly + surplus_extra, one_time_payments=one_time_payments)
+    if result.get("has_debt"):
+        # Breakdown of what makes up "extra_monthly" above — the manual
+        # query-param the user typed in this page vs. the "High-interest
+        # debt payoff" surplus goal set on the Surplus Plan page — so the
+        # frontend doesn't have to (and can't accidentally) recompute
+        # "Monthly Commitment" as total_minimum_payment + the manual amount
+        # alone and silently under-report it.
+        result["manual_extra_monthly"] = extra_monthly
+        result["surplus_debt_payoff_monthly"] = surplus_extra
+    return result
 
 class AmortizedPaymentRequest(BaseModel):
     balance: float

@@ -151,6 +151,16 @@ export default function Accounts() {
         <div style={{ color:'var(--text2)', fontSize:13 }}>{freshness.stale_count} account{freshness.stale_count === 1 ? '' : 's'} ha{freshness.stale_count === 1 ? 's' : 've'} not been updated in over 35 days. Refresh through Quicken import or edit the balance before relying on projections.</div>
       </div>}
 
+      {freshness?.possible_duplicate_accounts?.length > 0 && <div className="card" style={{ marginBottom:20, borderLeft:'3px solid var(--red)' }}>
+        <div style={{ fontWeight:650, marginBottom:4 }}>Possible duplicate accounts</div>
+        <div style={{ color:'var(--text2)', fontSize:13, marginBottom:8 }}>These accounts share the same name — often a re-import that changed account type left an old copy behind, double-counting its balance in net worth. Check each group and delete whichever is stale.</div>
+        {freshness.possible_duplicate_accounts.map((group, i) => (
+          <div key={i} style={{ fontSize:12, color:'var(--text3)', padding:'4px 0' }}>
+            "{group[0].name}": {group.map(a => `${a.account_type} (${a.owner})`).join(', ')}
+          </div>
+        ))}
+      </div>}
+
       <QuickenImport onImportComplete={load} />
 
       {showForm && (

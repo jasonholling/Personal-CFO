@@ -266,9 +266,14 @@ export default function Debt() {
               </div>
               <div>
                 <div className="label">Monthly Commitment</div>
-                <div style={{ fontSize:18, fontWeight:600, marginTop:4 }}>{fmt(rec.total_minimum_payment + Number(extra || 0))}/mo</div>
+                <div style={{ fontSize:18, fontWeight:600, marginTop:4 }}>{fmt(rec.total_minimum_payment + (rec.extra_monthly || 0))}/mo</div>
               </div>
             </div>
+            {rec.surplus_debt_payoff_monthly > 0 && (
+              <div style={{ fontSize:11, color:'var(--text3)', marginTop:-8, marginBottom:16 }}>
+                Includes {fmt(rec.surplus_debt_payoff_monthly)}/mo from the "High-interest debt payoff" goal on the Surplus Plan page, on top of the {fmt(rec.manual_extra_monthly || 0)}/mo entered above.
+              </div>
+            )}
 
             {rec.focus_first && (
               <div style={{ padding:'12px 16px', background:'rgba(79,156,249,0.08)', borderRadius:8, fontSize:13 }}>

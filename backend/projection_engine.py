@@ -1015,11 +1015,18 @@ def run_insurance_analysis(inputs: Dict, accounts: List[Dict]) -> Dict:
     total_debt    = sum(a["balance"] for a in accounts if a["account_type"] in DEBT_TYPES)
     abby_529      = sum(a["balance"] for a in accounts if a["account_type"]=="529" and a["owner"]=="abby")
     cooper_529    = sum(a["balance"] for a in accounts if a["account_type"]=="529" and a["owner"]=="cooper")
-    abby_proj     = _fv(abby_529, 0.07, 7)   + _fv_annuity_monthly(inputs.get("abby_529_monthly", ABBY_MONTHLY_529_DEFAULT), 0.07, 7)
-    cooper_proj   = _fv(cooper_529, 0.07, 11) + _fv_annuity_monthly(inputs.get("cooper_529_monthly", COOPER_MONTHLY_529_DEFAULT), 0.07, 11)
+    # years_to_college mirrors run_education_projection/run_kids_projection
+    # (18 - current age, from the same planning_inputs kid1_age/kid2_age) —
+    # this used to hardcode 7/11 regardless of the actual ages in Planning
+    # Inputs, so the insurance page's college-funding gap would silently
+    # drift out of sync with the Education/Kids pages as the kids got older.
+    abby_years_to_college   = max(0, 18 - inputs.get("kid1_age", 0))
+    cooper_years_to_college = max(0, 18 - inputs.get("kid2_age", 0))
+    abby_proj     = _fv(abby_529, 0.07, abby_years_to_college)   + _fv_annuity_monthly(inputs.get("abby_529_monthly", ABBY_MONTHLY_529_DEFAULT), 0.07, abby_years_to_college)
+    cooper_proj   = _fv(cooper_529, 0.07, cooper_years_to_college) + _fv_annuity_monthly(inputs.get("cooper_529_monthly", COOPER_MONTHLY_529_DEFAULT), 0.07, cooper_years_to_college)
     unl_base      = inputs.get("unl_annual_cost", UNL_CURRENT_ANNUAL)
-    abby_cost     = sum(unl_base*((1+COLLEGE_COST_INFLATION)**(7+yr)) for yr in range(4))
-    cooper_cost   = sum(unl_base*((1+COLLEGE_COST_INFLATION)**(11+yr)) for yr in range(4))
+    abby_cost     = sum(unl_base*((1+COLLEGE_COST_INFLATION)**(abby_years_to_college+yr)) for yr in range(4))
+    cooper_cost   = sum(unl_base*((1+COLLEGE_COST_INFLATION)**(cooper_years_to_college+yr)) for yr in range(4))
     total_529_gap = max(0, abby_cost - abby_proj) + max(0, cooper_cost - cooper_proj)
 
     justin_years_to_ret = max(0, (60 - (jason_age - justin_age)) - justin_age)
