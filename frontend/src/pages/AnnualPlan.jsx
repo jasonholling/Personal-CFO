@@ -44,7 +44,7 @@ export default function AnnualPlan({ onNavigate }) {
     <div>
       <div style={{ display:'flex', justifyContent:'space-between', alignItems:'flex-start', gap:16, marginBottom:28, flexWrap:'wrap' }}>
         <div>
-          <h1 className="section-title">Annual Action Plan</h1>
+          <h1 className="section-title">Action Tracker</h1>
           <p className="section-sub">Your recurring household financial operating calendar and calculation-driven follow-ups.</p>
         </div>
         <div style={{ display:'flex', gap:8, alignItems:'center' }}>
