@@ -17,6 +17,7 @@ backend/cfo.db
 .env.*
 backend/.webauthn_credential.json
 backend/.auth_disabled
+backend/quicken_account_map.local.json
 
 # macOS
 .DS_Store
