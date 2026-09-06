@@ -89,7 +89,9 @@ def init_db():
             asset2_sale_age REAL DEFAULT 0,
             asset2_sale_net REAL DEFAULT 0,
             primary_residence_key TEXT DEFAULT '',
-            rental_property_key TEXT DEFAULT ''
+            rental_property_key TEXT DEFAULT '',
+            retirement_end_age INTEGER DEFAULT 99,
+            state_income_tax_rate REAL DEFAULT 0
         );
 
         CREATE TABLE IF NOT EXISTS insurance_policies (
@@ -194,6 +196,8 @@ def init_db():
         ("primary_residence_key",   "TEXT DEFAULT ''"),
         ("rental_property_key",     "TEXT DEFAULT ''"),
         ("current_monthly_expenses", "REAL DEFAULT 0"),  # for the Emergency Fund check — actual current spending, not the retirement income target
+        ("retirement_end_age",       "INTEGER DEFAULT 99"),
+        ("state_income_tax_rate",    "REAL DEFAULT 0"),
     ]
     for col, typedef in migrations:
         if col not in existing_cols:
@@ -277,3 +281,25 @@ def init_saved_scenarios_table():
     """)
     conn.commit(); conn.close()
 init_saved_scenarios_table()
+
+def init_life_events_table():
+    conn = get_db()
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS life_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            event_type TEXT NOT NULL DEFAULT 'other',
+            event_year INTEGER NOT NULL,
+            one_time_cash_delta REAL NOT NULL DEFAULT 0,
+            monthly_cash_flow_delta REAL NOT NULL DEFAULT 0,
+            duration_months INTEGER NOT NULL DEFAULT 0,
+            notes TEXT,
+            created_at TEXT DEFAULT (datetime('now')),
+            updated_at TEXT DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_life_events_event_year ON life_events(event_year);
+    """)
+    conn.execute("PRAGMA optimize")
+    conn.commit(); conn.close()
+
+init_life_events_table()

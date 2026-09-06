@@ -10,13 +10,15 @@ from projection_engine import run_retirement_projection, run_education_projectio
 from task_engine import sync_auto_tasks
 from cfo_briefing_engine import build_cfo_briefing
 from cash_flow_engine import summarize_cash_flow
+from life_event_engine import summarize_life_events
+from confidence_engine import plan_confidence
 from quicken_importer import parse_quicken_networth_csv, get_net_worth_summary
 from db import init_db, get_db
 import auth
 
 app = FastAPI(title="Personal CFO API")
 
-_BACKUP_TABLES = ("accounts", "planning_inputs", "insurance_policies", "property_policies", "snapshots", "tasks", "cash_flow_items", "surplus_allocations", "saved_scenarios")
+_BACKUP_TABLES = ("accounts", "planning_inputs", "insurance_policies", "property_policies", "snapshots", "tasks", "cash_flow_items", "surplus_allocations", "saved_scenarios", "life_events")
 
 app.add_middleware(
     CORSMiddleware,
@@ -182,6 +184,15 @@ class SurplusAllocation(BaseModel):
 class ScenarioSave(BaseModel):
     name: str
     retirement_age: int = 60
+
+class LifeEvent(BaseModel):
+    name: str
+    event_type: str = "other"
+    event_year: int
+    one_time_cash_delta: float = 0
+    monthly_cash_flow_delta: float = 0
+    duration_months: int = 0
+    notes: Optional[str] = None
 
 @app.get("/api/backup/export")
 def export_backup():
@@ -417,6 +428,37 @@ def save_scenario(body: ScenarioSave):
     result=run_retirement_projection(dict(inputs),accounts,ret_ages=[body.retirement_age]); scenario=next((s for s in result["scenarios"] if s["ss_timing"]=="early"),None)
     summary={k:scenario[k] for k in ("retirement_age","percent_funded","portfolio_at_retirement","projected_surplus","on_track")}
     conn.execute("INSERT INTO saved_scenarios (name,retirement_age,summary_json) VALUES (?,?,?) ON CONFLICT(name) DO UPDATE SET retirement_age=excluded.retirement_age,summary_json=excluded.summary_json,created_at=datetime('now')",(body.name.strip(),body.retirement_age,json.dumps(summary)));conn.commit();conn.close();return summary
+
+@app.get("/api/plan-confidence")
+def get_plan_confidence():
+    conn = get_db()
+    accounts = [dict(r) for r in conn.execute("SELECT * FROM accounts").fetchall()]
+    inputs_row = conn.execute("SELECT * FROM planning_inputs WHERE id=1").fetchone()
+    cash_flow_items = [dict(r) for r in conn.execute("SELECT * FROM cash_flow_items").fetchall()]
+    conn.close()
+    return plan_confidence(accounts, dict(inputs_row) if inputs_row else {}, summarize_cash_flow(cash_flow_items))
+
+@app.get("/api/life-events")
+def get_life_events():
+    conn = get_db()
+    events = [dict(r) for r in conn.execute("SELECT * FROM life_events ORDER BY event_year, id").fetchall()]
+    inputs_row = conn.execute("SELECT * FROM planning_inputs WHERE id=1").fetchone()
+    conn.close()
+    return summarize_life_events(events, dict(inputs_row) if inputs_row else {})
+
+@app.post("/api/life-events")
+def create_life_event(event: LifeEvent):
+    if not event.name.strip() or event.event_year < 2000 or event.event_year > 2200 or event.duration_months < 0:
+        raise HTTPException(status_code=400, detail="Enter a name, a valid year, and a non-negative duration.")
+    conn = get_db()
+    cur = conn.execute("INSERT INTO life_events (name,event_type,event_year,one_time_cash_delta,monthly_cash_flow_delta,duration_months,notes) VALUES (?,?,?,?,?,?,?)", (event.name.strip(), event.event_type, event.event_year, event.one_time_cash_delta, event.monthly_cash_flow_delta, event.duration_months, event.notes))
+    conn.commit(); conn.close()
+    return {**event.model_dump(), "id": cur.lastrowid}
+
+@app.delete("/api/life-events/{event_id}")
+def delete_life_event(event_id: int):
+    conn = get_db(); conn.execute("DELETE FROM life_events WHERE id=?", (event_id,)); conn.commit(); conn.close()
+    return {"deleted": event_id}
 
 # Debt Payoff — operates on accounts whose account_type is a debt type
 # (mortgage, credit_card, student_loan, car_loan, personal_loan)

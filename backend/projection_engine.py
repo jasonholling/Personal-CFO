@@ -258,7 +258,10 @@ def run_retirement_projection(inputs: Dict, accounts: List[Dict], ret_ages: List
 
             # ── Capitalization for summary ────────────────────────────────────
             income_at_ret = income_today * ((1 + inflation) ** years_to_retire)
-            mort_age      = 99
+            # The planning horizon belongs to the household, not a hidden
+            # engine constant. Keep a reasonable guardrail so a typo cannot
+            # produce a negative/implausible drawdown period.
+            mort_age      = max(ret_age + 1, min(110, int(inputs.get("retirement_end_age") or 99)))
             retire_years  = mort_age - ret_age
             real_rate     = ((1 + post_ret) / (1 + inflation) - 1) if post_ret != inflation else 0.0001
 
@@ -387,10 +390,12 @@ def run_retirement_projection(inputs: Dict, accounts: List[Dict], ret_ages: List
                 # untaxed dollars). Approximated with the same MFJ bracket
                 # table used elsewhere in the app and the same
                 # 85%-of-SS-is-taxable convention as simulation_engine.py.
-                # Still approximate — no state tax, no NIIT, no itemizing,
-                # single blended rate per year — but far closer than 0%.
+                # Still approximate — no NIIT, no itemizing, no tax lots or
+                # credits, single blended rate per year — but far closer than
+                # treating distributions as tax-free. State tax is an
+                # explicit optional planning input, not an implicit guess.
                 taxable_income_est = max(0, year_pen + (year_jss + year_uss) * 0.85 + rmd - _STD_DED)
-                pretax_tax_rate = _marginal_rate(taxable_income_est)
+                pretax_tax_rate = min(0.90, _marginal_rate(taxable_income_est) + max(0, float(inputs.get("state_income_tax_rate") or 0)))
 
                 # Draw order: taxable first, then pretax (satisfies RMD minimum),
                 # then roth last (let it compound)
@@ -513,6 +518,8 @@ def run_retirement_projection(inputs: Dict, accounts: List[Dict], ret_ages: List
                 "projected_surplus":             round(surplus),
                 "on_track":                      surplus >= 0,
                 "percent_funded":                pct_funded,
+                "retirement_end_age":            mort_age,
+                "state_income_tax_rate":         inputs.get("state_income_tax_rate", 0),
                 "yearly_detail":                 yearly,
             })
 

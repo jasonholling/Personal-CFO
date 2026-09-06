@@ -104,10 +104,12 @@ export default function Settings() {
         <Row label="Inflation Rate"><NumInput value={form.inflation_rate} onChange={v => set('inflation_rate', v)} pct suffix="%" /></Row>
         <Row label="Pre-Retirement Return" hint="Expected portfolio growth until retirement"><NumInput value={form.expected_return_pre_retirement} onChange={v => set('expected_return_pre_retirement', v)} pct suffix="%" /></Row>
         <Row label="Post-Retirement Return" hint="Expected portfolio growth during retirement"><NumInput value={form.expected_return_post_retirement} onChange={v => set('expected_return_post_retirement', v)} pct suffix="%" /></Row>
+        <Row label="State Income-Tax Rate" hint="Optional planning estimate applied to taxable retirement distributions; enter 0% if not using one"><NumInput value={form.state_income_tax_rate ?? 0} onChange={v => set('state_income_tax_rate', Math.min(0.25, Math.max(0, v)))} pct suffix="%" /></Row>
       </Section>
 
       <Section title="Retirement Income Goal">
         <Row label="Annual Income Goal (today's $)" hint="What you want to spend per year in retirement"><NumInput value={form.retirement_income_today_dollars} onChange={v => set('retirement_income_today_dollars', v)} prefix="$" /></Row>
+        <Row label="Planning Horizon" hint="Age through which retirement income is projected; this is an assumption, not a longevity prediction"><NumInput value={form.retirement_end_age ?? 99} onChange={v => set('retirement_end_age', Math.min(110, Math.max(70, Math.round(v))))} suffix="age" /></Row>
       </Section>
 
       <Section title="Current Spending">
