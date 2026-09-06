@@ -14,8 +14,8 @@ def test_briefing_identifies_missing_foundation_inputs():
 def test_briefing_prioritizes_concrete_risks_and_stale_snapshot():
     old = (datetime.now(timezone.utc) - timedelta(days=40)).isoformat()
     accounts = [
-        {"account_type": "checking", "balance": 1000},
-        {"account_type": "credit_card", "balance": 5000, "interest_rate": .20},
+        {"account_type": "checking", "balance": 1000, "owner": "joint"},
+        {"account_type": "credit_card", "balance": 5000, "interest_rate": .20, "owner": "person1"},
     ]
     result = build_cfo_briefing(
         accounts,
