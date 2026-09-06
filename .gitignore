@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.pyc
+venv/
+*.egg-info/
+
+# Node
+node_modules/
+dist/
+
+# Database (real financial data — stays local)
+*.db
+backend/cfo.db
+
+# Environment / secrets
+.env
+.env.*
+backend/.webauthn_credential.json
+backend/.auth_disabled
+
+# macOS
+.DS_Store
+
+# Accidental Finder/iCloud duplicates
+* 2.*
+*\ 2/
+* 2
+*_backup_*
+
+# Build/editor
+.vscode/
+.idea/
+
+# Test/tool caches
+.pytest_cache/
+.coverage
+.serena/
+.token-savior-cache.json

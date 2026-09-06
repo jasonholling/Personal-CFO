@@ -1,0 +1,1065 @@
+"""
+Retirement Simulation Engine
+Monte Carlo (1000 runs) + Historical Stress Tests
+Uses full bucket structure: pretax (RMDs at 73 or 75, see rmd_start_age()), roth, taxable, hsa
+"""
+
+import random
+import math
+from typing import List, Dict, Tuple
+from projection_engine import (
+    JASON_SS_EARLY_DEFAULT as JASON_SS_EARLY,
+    JASON_SS_DELAYED_DEFAULT as JASON_SS_DELAYED,
+    JUSTIN_SPOUSAL_ANNUAL, JUSTIN_SPOUSAL_AGE,
+    _fv, _fv_annuity, _fv_annuity_monthly, _rmd, pension_for_age, rmd_start_age
+)
+
+# Historical return parameters (annual, nominal)
+EQUITY_MEAN   = 0.09    # ~9% long-run US equity (conservative)
+EQUITY_STD    = 0.17    # ~17% std dev
+BOND_MEAN     = 0.04
+BOND_STD      = 0.06
+EQUITY_WEIGHT = 0.80    # 80/20 portfolio assumption
+BOND_WEIGHT   = 0.20
+
+# Blended portfolio stats — targets ~7% mean to match planning assumptions
+PORT_MEAN = 0.07
+PORT_STD  = math.sqrt((EQUITY_WEIGHT * EQUITY_STD)**2 + (BOND_WEIGHT * BOND_STD)**2)
+
+# Stress scenarios: list of (year_offset, return_override)
+# year_offset 0 = first year of retirement
+SCENARIOS = {
+    "crash_2008": {
+        "label": "2008 Market Crash",
+        "description": "Year 1 down 37%, Year 2 down 5%, recovery follows",
+        "overrides": {0: -0.37, 1: -0.05, 2: 0.265, 3: 0.15, 4: 0.02},
+        "inflation_mult": 1.0,
+    },
+    "stagflation_1970s": {
+        "label": "1970s Stagflation",
+        "description": "10 years of 2% real returns with 8% inflation",
+        "overrides": {i: 0.02 for i in range(10)},
+        "inflation_mult": 4.0,
+    },
+    "lost_decade": {
+        "label": "Lost Decade",
+        "description": "10 years flat nominal returns (Japan/2000s), then recovery",
+        "overrides": {i: 0.00 for i in range(10)},
+        "inflation_mult": 1.0,
+    },
+    "early_sequence": {
+        "label": "Early Retirement Sequence Risk",
+        "description": "Worst 5 years land at retirement — down 30%, 18%, 12%, 25%, 8% — then recovery",
+        "overrides": {0: -0.30, 1: -0.18, 2: -0.12, 3: -0.25, 4: -0.08, 5: 0.26, 6: 0.18, 7: 0.15},
+        "inflation_mult": 1.0,
+    },
+    "bridge_job_loss": {
+        "label": "Bridge Job Loss at Year 2",
+        "description": "Bridge job ends at age 57 instead of 60 — 3 years of full retirement costs early",
+        "overrides": {},
+        "inflation_mult": 1.0,
+        "bridge_years_override": 2,
+    },
+    "ss_reduction": {
+        "label": "Social Security Cut 25%",
+        "description": "SS benefits reduced to 75% of projected — reflects projected 2033 shortfall",
+        "overrides": {},
+        "inflation_mult": 1.0,
+        "ss_reduction": 0.25,
+    },
+}
+
+
+def _run_single(
+    pretax_start, roth_start, taxable_start, hsa_start,
+    ret_age, jason_age, justin_age,
+    pension_annual, jason_ss_annual, jason_ss_age,
+    income_at_ret, inflation, post_ret,
+    annual_returns: List[float],
+    inflation_mults: List[float] = None,
+    phase_inputs: dict = None,
+) -> Tuple[bool, List[float], List[float]]:
+    """
+    Run a single retirement simulation.
+    Returns (survived_to_99, yearly_total_balances, yearly_pretax_balances)
+    """
+    mort_age   = 99
+    retire_yrs = mort_age - ret_age
+
+    pretax  = pretax_start
+    roth    = roth_start
+    taxable = taxable_start
+    hsa     = hsa_start
+
+    balances       = []
+    pretax_bals    = []
+    roth_bals      = []
+    taxable_bals   = []
+    _rmd_start     = rmd_start_age(jason_age)
+
+    for yr in range(retire_yrs):
+        age      = ret_age + yr
+        ret      = annual_returns[yr] if yr < len(annual_returns) else random.gauss(PORT_MEAN, PORT_STD)
+        inf_mult = inflation_mults[yr] if inflation_mults and yr < len(inflation_mults) else 1.0
+        eff_inf  = inflation * inf_mult
+
+        healthcare_pre  = 0  # will be overridden by caller kwargs if passed
+        healthcare_post = 0
+        hc_this_year = healthcare_pre if age < 65 else healthcare_post
+        if phase_inputs and ret_age == 55:
+            bridge_years  = phase_inputs.get("bridge_years", 0)
+            kids_years    = phase_inputs.get("kids_years", 0)
+            kids_cost     = phase_inputs.get("kids_annual_cost", 0)
+            bridge_income = phase_inputs.get("bridge_income", 0)
+            hc_kids       = phase_inputs.get("healthcare_kids", 0)
+            hc_pre        = phase_inputs.get("healthcare_pre", 0)
+            hc_post       = phase_inputs.get("healthcare_post", 0)
+            if yr < bridge_years:
+                hc_this_year = 0
+                year_need = max(0, income_at_ret*(1+eff_inf)**yr + kids_cost*(1+eff_inf)**yr - bridge_income*(1+eff_inf)**yr)
+            elif yr < kids_years and age < 65:
+                hc_this_year = hc_kids
+                year_need = income_at_ret*(1+eff_inf)**yr + kids_cost*(1+eff_inf)**yr + hc_kids*(1+eff_inf)**yr
+            elif age < 65:
+                hc_this_year = hc_pre
+                year_need = income_at_ret*(1+eff_inf)**yr + hc_pre*(1+eff_inf)**yr
+            else:
+                hc_this_year = hc_post
+                year_need = income_at_ret*(1+eff_inf)**yr + hc_post*(1+eff_inf)**yr
+        else:
+            year_need = income_at_ret * ((1 + eff_inf) ** yr) + hc_this_year * ((1 + eff_inf) ** yr)
+        year_pen  = pension_annual  # frozen pension, no COLA
+        year_jss  = (jason_ss_annual * ((1 + eff_inf) ** max(0, age - jason_ss_age))
+                     if age >= jason_ss_age else 0)
+        year_uss  = (JUSTIN_SPOUSAL_ANNUAL * ((1 + eff_inf) ** max(0, age - JUSTIN_SPOUSAL_AGE))
+                     if age >= JUSTIN_SPOUSAL_AGE else 0)
+        fixed     = year_pen + year_jss + year_uss
+        net_need  = max(0, year_need - fixed)
+
+        # RMD
+        rmd = _rmd(pretax, age, _rmd_start)
+        remaining = net_need
+
+        if rmd > 0:
+            actual_rmd = min(rmd, pretax)
+            pretax -= actual_rmd
+            if actual_rmd <= remaining:
+                remaining -= actual_rmd
+            else:
+                taxable += actual_rmd - remaining
+                remaining = 0
+
+        if remaining > 0 and taxable > 0:
+            draw = min(remaining, taxable)
+            taxable -= draw; remaining -= draw
+
+        if remaining > 0 and pretax > 0 and rmd == 0:
+            draw = min(remaining, pretax)
+            pretax -= draw; remaining -= draw
+
+        if remaining > 0 and hsa > 0:
+            draw = min(remaining, hsa)
+            hsa -= draw; remaining -= draw
+
+        if remaining > 0 and roth > 0:
+            draw = min(remaining, roth)
+            roth -= draw; remaining -= draw
+
+        # Grow at this year's return
+        pretax  = max(0, pretax  * (1 + ret))
+        roth    = max(0, roth    * (1 + ret))
+        taxable = max(0, taxable * (1 + ret))
+        hsa     = max(0, hsa     * (1 + ret))
+
+        total = pretax + roth + taxable + hsa
+        balances.append(round(total))
+        pretax_bals.append(round(pretax))
+        roth_bals.append(round(roth))
+        taxable_bals.append(round(taxable))
+
+    survived = balances[-1] > 0 if balances else False
+    return survived, balances, pretax_bals, roth_bals, taxable_bals
+
+
+def run_swr_analysis(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_timing: str = "early", target_success: float = 0.95) -> Dict:
+    """Find the safe withdrawal rate at target success rate (default 95%)."""
+    random.seed(42)
+
+    jason_age    = inputs["jason_age"]
+    justin_age   = inputs["justin_age"]
+    inflation    = inputs["inflation_rate"]
+    post_ret     = inputs["expected_return_post_retirement"]
+    income_today = inputs["retirement_income_today_dollars"]
+    healthcare_pre  = inputs.get("healthcare_pre_medicare", 0)
+    healthcare_post = inputs.get("healthcare_post_medicare", 0)
+
+    years_to_ret = max(0, ret_age - jason_age)
+    pension_annual = pension_for_age(inputs, ret_age)
+    jason_ss_early  = inputs.get("jason_social_security", JASON_SS_EARLY)
+    jason_ss_delayed = inputs.get("jason_ss_delayed", JASON_SS_DELAYED)
+    jason_ss_annual = jason_ss_early if ss_timing == "early" else jason_ss_delayed
+    jason_ss_age    = 62 if ss_timing == "early" else 67
+    justin_ss       = inputs.get("justin_social_security", JUSTIN_SPOUSAL_ANNUAL)
+    justin_ss_age   = inputs.get("justin_ss_age", JUSTIN_SPOUSAL_AGE)
+
+    # Get portfolio at retirement from projection engine — pass ret_age explicitly
+    # so this works for any age, not just the default 55/60/65 anchors.
+    from projection_engine import run_retirement_projection
+    _proj     = run_retirement_projection(inputs, accounts, ret_ages=[ret_age])
+    _scenario = next((s for s in _proj["scenarios"] if s["label"] == f"age_{ret_age}_{ss_timing}"), None)
+    pretax_at_ret  = _scenario["pretax_at_retirement"]
+    roth_at_ret    = _scenario["roth_at_retirement"]
+    taxable_at_ret = _scenario["taxable_at_retirement"]
+    hsa_at_ret     = _scenario["hsa_at_retirement"]
+    portfolio = pretax_at_ret + roth_at_ret + taxable_at_ret + hsa_at_ret
+
+    retire_yrs = 99 - ret_age
+    N          = 1000
+    _rmd_start = rmd_start_age(jason_age)
+
+    # Pre-generate random returns for reproducibility
+    all_returns = [[random.gauss(PORT_MEAN, PORT_STD) for _ in range(retire_yrs)] for _ in range(N)]
+
+    def success_at_withdrawal(annual_withdrawal_today):
+        """How many of N simulations survive with this portfolio withdrawal?"""
+        successes = 0
+        for returns in all_returns:
+            pretax  = pretax_at_ret
+            roth    = roth_at_ret
+            taxable = taxable_at_ret
+            hsa     = hsa_at_ret
+            survived = True
+
+            for yr in range(retire_yrs):
+                age = ret_age + yr
+                ret = returns[yr]
+
+                # Guaranteed income this year
+                year_pen = pension_annual
+                year_jss = jason_ss_annual * ((1+inflation)**max(0,age-jason_ss_age)) if age >= jason_ss_age else 0
+                year_uss = justin_ss * ((1+inflation)**max(0,age-justin_ss_age)) if age >= justin_ss_age else 0
+                guaranteed = year_pen + year_jss + year_uss
+
+                # Portfolio withdrawal needed (inflation-adjusted, on top of guaranteed)
+                portfolio_draw = annual_withdrawal_today * ((1+inflation)**yr)
+
+                # RMD
+                rmd = _rmd(pretax, age, _rmd_start)
+                remaining = portfolio_draw
+
+                if rmd > 0:
+                    actual_rmd = min(rmd, pretax)
+                    pretax -= actual_rmd
+                    if actual_rmd <= remaining:
+                        remaining -= actual_rmd
+                    else:
+                        taxable += actual_rmd - remaining
+                        remaining = 0
+
+                if remaining > 0 and taxable > 0:
+                    draw = min(remaining, taxable); taxable -= draw; remaining -= draw
+                if remaining > 0 and pretax > 0 and rmd == 0:
+                    draw = min(remaining, pretax); pretax -= draw; remaining -= draw
+                if remaining > 0 and hsa > 0:
+                    draw = min(remaining, hsa); hsa -= draw; remaining -= draw
+                if remaining > 0 and roth > 0:
+                    draw = min(remaining, roth); roth -= draw; remaining -= draw
+
+                # Only fail if portfolio is fully depleted
+                total = pretax + roth + taxable + hsa
+                if total <= 0 and remaining > 0:
+                    survived = False
+                    break
+
+                pretax  = max(0, pretax  * (1 + ret))
+                roth    = max(0, roth    * (1 + ret))
+                taxable = max(0, taxable * (1 + ret))
+                hsa     = max(0, hsa     * (1 + ret))
+
+            if survived:
+                successes += 1
+        return successes / N
+
+    # Binary search for the withdrawal amount that hits target_success
+    lo, hi = 0, portfolio * 0.15  # search between 0 and 15% of portfolio
+    for _ in range(20):
+        mid = (lo + hi) / 2
+        rate = success_at_withdrawal(mid)
+        if rate >= target_success:
+            lo = mid
+        else:
+            hi = mid
+
+    safe_withdrawal = lo
+    safe_withdrawal_rate = safe_withdrawal / portfolio
+
+    # Guaranteed income steady-state (once all income sources active)
+    # Show pension + SS as they'll be in the first full year all sources are running
+    ss_start_age   = max(jason_ss_age, justin_ss_age)  # age when both SS streams active
+    years_to_ss    = max(0, ss_start_age - ret_age)
+    guaranteed_first_year = (
+        pension_annual +
+        jason_ss_annual * ((1 + inflation) ** years_to_ss) +
+        justin_ss * ((1 + inflation) ** years_to_ss)
+    )
+    # Also track day-one guaranteed (pension only if retiring before SS)
+    guaranteed_day_one = pension_annual
+    if ret_age >= jason_ss_age:
+        guaranteed_day_one += jason_ss_annual
+    if ret_age >= justin_ss_age:
+        guaranteed_day_one += justin_ss
+
+    total_safe_spend    = safe_withdrawal + guaranteed_day_one
+    income_target       = (income_today + healthcare_pre) * ((1+inflation)**years_to_ret)
+    cushion_pct         = round((total_safe_spend / income_target - 1) * 100, 1)
+
+    return {
+        "portfolio_at_retirement":   round(portfolio),
+        "safe_withdrawal_annual":    round(safe_withdrawal),
+        "safe_withdrawal_rate":      round(safe_withdrawal_rate * 100, 2),
+        "guaranteed_income_annual":  round(guaranteed_day_one),
+        "guaranteed_income_steadystate": round(guaranteed_first_year),
+        "pension_annual":            round(pension_annual),
+        "jason_ss_annual":           round(jason_ss_annual),
+        "justin_ss_annual":          round(justin_ss),
+        "ss_start_age":              ss_start_age,
+        "total_safe_spend":          round(total_safe_spend),
+        "income_target":             round(income_target),
+        "cushion_pct":               cushion_pct,
+        "on_track":                  total_safe_spend >= income_target,
+        "target_success_rate":       round(target_success * 100),
+        "retirement_age":            ret_age,
+        "ss_timing":                 ss_timing,
+    }
+
+
+def run_monte_carlo(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_timing: str = "early") -> Dict:
+    """Run 1000 Monte Carlo simulations."""
+    random.seed(42)  # reproducible
+
+    jason_age  = inputs["jason_age"]
+    justin_age = inputs["justin_age"]
+    inflation  = inputs["inflation_rate"]
+    pre_ret    = inputs["expected_return_pre_retirement"]
+    post_ret   = inputs["expected_return_post_retirement"]
+    income_today = inputs["retirement_income_today_dollars"]
+    annual_hsa   = inputs["annual_hsa_contribution"]
+    annual_rsu   = inputs["annual_rsu_value"]
+
+    years_to_ret = max(0, ret_age - jason_age)
+    pension_annual  = pension_for_age(inputs, ret_age)
+    jason_ss_early  = inputs.get("jason_social_security", JASON_SS_EARLY)
+    jason_ss_delayed = inputs.get("jason_ss_delayed", JASON_SS_DELAYED)
+    jason_ss_annual = jason_ss_early if ss_timing == "early" else jason_ss_delayed
+    jason_ss_age    = 62 if ss_timing == "early" else 67
+    income_at_ret   = income_today * ((1 + inflation) ** years_to_ret)
+
+    # Pull bucket values from projection_engine — pass ret_age explicitly so
+    # this works for any age, not just the default 55/60/65 anchors.
+    from projection_engine import (run_retirement_projection)
+    _proj = run_retirement_projection(inputs, accounts, ret_ages=[ret_age])
+    _scenario = next((s for s in _proj["scenarios"] if s["label"] == f"age_{ret_age}_{ss_timing}"), None)
+    pretax_at_ret  = _scenario["pretax_at_retirement"]
+    roth_at_ret    = _scenario["roth_at_retirement"]
+    taxable_at_ret = _scenario["taxable_at_retirement"]
+    hsa_at_ret     = _scenario["hsa_at_retirement"]
+
+    retire_yrs = 99 - ret_age
+    N = 1000
+
+    successes = 0
+    all_balances = []
+
+    for _ in range(N):
+        returns = [random.gauss(PORT_MEAN, PORT_STD) for _ in range(retire_yrs)]
+        _phase = {
+            "bridge_years":     inputs.get("bridge_years_55", 0),
+            "kids_years":       inputs.get("kids_years_at_home_55", 0),
+            "kids_annual_cost": inputs.get("kids_annual_cost", 0),
+            "bridge_income":    inputs.get("bridge_income_55", 0),
+            "healthcare_kids":  inputs.get("healthcare_kids", 0),
+            "healthcare_pre":   inputs.get("healthcare_pre_medicare", 0),
+            "healthcare_post":  inputs.get("healthcare_post_medicare", 0),
+        } if ret_age == 55 else None
+        survived, balances, *_ = _run_single(
+            pretax_at_ret, roth_at_ret, taxable_at_ret, hsa_at_ret,
+            ret_age, jason_age, justin_age,
+            pension_annual, jason_ss_annual, jason_ss_age,
+            income_at_ret, inflation, post_ret, returns,
+            phase_inputs=_phase,
+        )
+        if survived: successes += 1
+        all_balances.append(balances)
+
+    success_rate = round(successes / N * 100, 1)
+
+    # Percentile bands — every 2 years for chart
+    ages = list(range(ret_age, 99))
+    p10, p25, p50, p75, p90 = [], [], [], [], []
+    for yr in range(retire_yrs):
+        vals = sorted(b[yr] if yr < len(b) else 0 for b in all_balances)
+        p10.append({"age": ages[yr], "balance": vals[int(N*0.10)]})
+        p25.append({"age": ages[yr], "balance": vals[int(N*0.25)]})
+        p50.append({"age": ages[yr], "balance": vals[int(N*0.50)]})
+        p75.append({"age": ages[yr], "balance": vals[int(N*0.75)]})
+        p90.append({"age": ages[yr], "balance": vals[int(N*0.90)]})
+
+    # Chart data combining percentiles
+    chart = [{"age": ages[yr],
+              "p10": p10[yr]["balance"], "p25": p25[yr]["balance"],
+              "p50": p50[yr]["balance"],
+              "p75": p75[yr]["balance"], "p90": p90[yr]["balance"]}
+             for yr in range(0, retire_yrs, 2)]
+
+    # Median depletion age
+    median_run = sorted(all_balances, key=lambda b: b[-1])[N//2]
+    depletion_age = 99
+    for i, bal in enumerate(median_run):
+        if bal <= 0:
+            depletion_age = ret_age + i
+            break
+
+    return {
+        "success_rate": success_rate,
+        "retirement_age": ret_age,
+        "ss_timing": ss_timing,
+        "portfolio_at_retirement": round(pretax_at_ret + roth_at_ret + taxable_at_ret + hsa_at_ret),
+        "median_final_balance": round(sorted(b[-1] for b in all_balances)[N//2]),
+        "median_depletion_age": depletion_age,
+        "simulations": N,
+        "chart": chart,
+    }
+
+
+def run_stress_tests(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_timing: str = "early") -> Dict:
+    """Run deterministic stress test scenarios."""
+    jason_age  = inputs["jason_age"]
+    justin_age = inputs["justin_age"]
+    inflation  = inputs["inflation_rate"]
+    pre_ret    = inputs["expected_return_pre_retirement"]
+    post_ret   = inputs["expected_return_post_retirement"]
+    income_today = inputs["retirement_income_today_dollars"]
+    annual_hsa   = inputs["annual_hsa_contribution"]
+    annual_rsu   = inputs["annual_rsu_value"]
+
+    years_to_ret   = max(0, ret_age - jason_age)
+    pension_annual  = pension_for_age(inputs, ret_age)
+    jason_ss_early  = inputs.get("jason_social_security", JASON_SS_EARLY)
+    jason_ss_delayed = inputs.get("jason_ss_delayed", JASON_SS_DELAYED)
+    jason_ss_annual = jason_ss_early if ss_timing == "early" else jason_ss_delayed
+    jason_ss_age    = 62 if ss_timing == "early" else 67
+    income_at_ret   = income_today * ((1 + inflation) ** years_to_ret)
+
+    from projection_engine import run_retirement_projection
+    _proj = run_retirement_projection(inputs, accounts, ret_ages=[ret_age])
+    _scenario = next(s for s in _proj["scenarios"] if s["label"] == f"age_{ret_age}_{ss_timing}")
+    pretax_at_ret  = _scenario["pretax_at_retirement"]
+    roth_at_ret    = _scenario["roth_at_retirement"]
+    taxable_at_ret = _scenario["taxable_at_retirement"]
+    hsa_at_ret     = _scenario["hsa_at_retirement"]
+
+    retire_yrs = 99 - ret_age
+
+    # Base case — deterministic at post_ret every year
+    base_returns = [post_ret] * retire_yrs
+    _phase_base = {
+        "bridge_years":     inputs.get("bridge_years_55", 0),
+        "kids_years":       inputs.get("kids_years_at_home_55", 0),
+        "kids_annual_cost": inputs.get("kids_annual_cost", 0),
+        "bridge_income":    inputs.get("bridge_income_55", 0),
+        "healthcare_kids":  inputs.get("healthcare_kids", 0),
+        "healthcare_pre":   inputs.get("healthcare_pre_medicare", 0),
+        "healthcare_post":  inputs.get("healthcare_post_medicare", 0),
+    } if ret_age == 55 else None
+    _, base_bals, *_ = _run_single(
+        pretax_at_ret, roth_at_ret, taxable_at_ret, hsa_at_ret,
+        ret_age, jason_age, justin_age,
+        pension_annual, jason_ss_annual, jason_ss_age,
+        income_at_ret, inflation, post_ret, base_returns,
+        phase_inputs=_phase_base,
+    )
+
+    results = {"base": {
+        "label": "Base Case (6% every year)",
+        "survived": base_bals[-1] > 0,
+        "final_balance": base_bals[-1],
+        "chart": [{"age": ret_age+i, "balance": b} for i, b in enumerate(base_bals) if i%2==0],
+    }}
+
+    for key, scenario in SCENARIOS.items():
+        overrides  = scenario["overrides"]
+        inf_mult   = scenario.get("inflation_mult", 1.0)
+        ss_mult    = 1.0 - scenario.get("ss_reduction", 0.0)
+        bridge_override = scenario.get("bridge_years_override", None)
+
+        # For bridge job loss — modify inputs copy
+        sim_inputs = dict(inputs)
+        if bridge_override is not None:
+            sim_inputs["bridge_years_55"] = bridge_override
+
+        # For SS reduction
+        scenario_ss = jason_ss_annual * ss_mult
+        scenario_justin_ss = inputs.get("justin_social_security", JUSTIN_SPOUSAL_ANNUAL) * ss_mult
+
+        returns = []
+        inf_mults = []
+        for yr in range(retire_yrs):
+            if yr in overrides:
+                returns.append(overrides[yr])
+                inf_mults.append(inf_mult if yr < 10 else 1.0)
+            else:
+                returns.append(post_ret)
+                inf_mults.append(1.0)
+
+        # Re-project buckets if bridge years changed
+        if bridge_override is not None and ret_age == 55:
+            _proj2 = run_retirement_projection(sim_inputs, accounts, ret_ages=[ret_age])
+            _s2 = next(s for s in _proj2["scenarios"] if s["label"] == f"age_{ret_age}_{ss_timing}")
+            sim_pretax  = _s2["pretax_at_retirement"]
+            sim_roth    = _s2["roth_at_retirement"]
+            sim_taxable = _s2["taxable_at_retirement"]
+            sim_hsa     = _s2["hsa_at_retirement"]
+        else:
+            sim_pretax, sim_roth, sim_taxable, sim_hsa = pretax_at_ret, roth_at_ret, taxable_at_ret, hsa_at_ret
+
+        # For early sequence risk — sort worst returns to front
+        if key == "early_sequence":
+            normal_returns = [random.gauss(PORT_MEAN, PORT_STD) for _ in range(retire_yrs - len(overrides))]
+            normal_returns.sort()  # worst first after the override years
+            seq_returns = [overrides.get(yr, normal_returns[max(0, yr-len(overrides))]) for yr in range(retire_yrs)]
+            returns = seq_returns
+
+        # Use scenario SS for ss_reduction scenario
+        run_ss = scenario_ss if scenario.get("ss_reduction") else jason_ss_annual
+
+        _phase_st = {
+            "bridge_years":     sim_inputs.get("bridge_years_55", inputs.get("bridge_years_55", 0)),
+            "kids_years":       inputs.get("kids_years_at_home_55", 0),
+            "kids_annual_cost": inputs.get("kids_annual_cost", 0),
+            "bridge_income":    inputs.get("bridge_income_55", 0),
+            "healthcare_kids":  inputs.get("healthcare_kids", 0),
+            "healthcare_pre":   inputs.get("healthcare_pre_medicare", 0),
+            "healthcare_post":  inputs.get("healthcare_post_medicare", 0),
+        } if ret_age == 55 else None
+        _, bals, ptx, rth, txb = _run_single(
+            sim_pretax, sim_roth, sim_taxable, sim_hsa,
+            ret_age, jason_age, justin_age,
+            pension_annual, run_ss, jason_ss_age,
+            income_at_ret, inflation, post_ret, returns, inf_mults,
+            phase_inputs=_phase_st,
+        )
+
+        # Find depletion age
+        dep_age = 99
+        for i, b in enumerate(bals):
+            if b <= 0:
+                dep_age = ret_age + i
+                break
+
+        results[key] = {
+            "label": scenario["label"],
+            "description": scenario["description"],
+            "survived": bals[-1] > 0,
+            "final_balance": bals[-1],
+            "depletion_age": dep_age,
+            "lowest_balance": min(bals),
+            "lowest_balance_age": ret_age + bals.index(min(bals)),
+            "chart": [{"age": ret_age+i, "balance": b, "base": base_bals[i]}
+                      for i, b in enumerate(bals) if i%2==0],
+        }
+
+    return {
+        "retirement_age": ret_age,
+        "ss_timing": ss_timing,
+        "scenarios": results,
+    }
+
+def run_roth_conversion_analysis(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_timing: str = "early") -> Dict:
+    """
+    Find optimal annual Roth conversion amount between retirement and RMD age.
+    Goal: fill the 22% bracket each year to minimize lifetime taxes.
+    """
+    inflation    = inputs["inflation_rate"]
+    post_ret     = inputs["expected_return_post_retirement"]
+    income_today = inputs["retirement_income_today_dollars"]
+    jason_age    = inputs["jason_age"]
+    pension_annual = pension_for_age(inputs, ret_age)
+    jason_ss     = inputs.get("jason_social_security", 0)
+    justin_ss    = inputs.get("justin_social_security", 0)
+    jason_ss_age = 62 if ss_timing == "early" else 67
+
+    # Derived from the canonical 2026 MFJ bracket table in
+    # retirement_tools_engine.py instead of a local hardcoded copy — this
+    # used to be a stale 2024 figure ($201,050/$29,200) that had drifted out
+    # of sync with every other tax calc in the app.
+    from retirement_tools_engine import ORDINARY_BRACKETS_MFJ_2026, STD_DEDUCTION_MFJ_2026
+    BRACKET_TOP_22  = next(cap for rate, cap in ORDINARY_BRACKETS_MFJ_2026 if rate == 0.22)
+    STD_DEDUCTION   = STD_DEDUCTION_MFJ_2026
+    TAX_BRACKET_22  = 0.22
+    TAX_BRACKET_24  = 0.24
+    # SECURE Act 2.0: 73 or 75 depending on birth year, not a fixed 73 —
+    # caught by external audit 2026-09-05.
+    RMD_START_AGE   = rmd_start_age(jason_age)
+
+    from projection_engine import run_retirement_projection
+    _proj = run_retirement_projection(inputs, accounts, ret_ages=[ret_age])
+    _s = next(s for s in _proj["scenarios"] if s["label"] == f"age_{ret_age}_{ss_timing}")
+
+    years_to_ret  = max(0, ret_age - jason_age)
+    pretax_at_ret = _s["pretax_at_retirement"]
+    roth_at_ret   = _s["roth_at_retirement"]
+
+    schedule = []
+    pretax = pretax_at_ret
+    roth   = roth_at_ret
+
+    conversion_years = RMD_START_AGE - ret_age
+
+    for yr in range(conversion_years):
+        age = ret_age + yr
+
+        # Income this year (portfolio draw + pension + SS if active)
+        income_need   = income_today * ((1 + inflation) ** years_to_ret)
+        year_pen      = pension_annual
+        year_jss      = jason_ss * ((1+inflation)**max(0,age-jason_ss_age)) if age >= jason_ss_age else 0
+        year_uss      = justin_ss * ((1+inflation)**max(0,age-67)) if age >= 67 else 0
+        guaranteed    = year_pen + year_jss + year_uss
+        portfolio_draw = max(0, income_need - guaranteed)
+
+        # Taxable income before conversion
+        # Simplified: pension + SS (85% includable) + portfolio draw from pretax
+        ss_taxable    = (year_jss + year_uss) * 0.85
+        base_taxable  = year_pen + ss_taxable + portfolio_draw - STD_DEDUCTION
+
+        # Room in 22% bracket
+        room_in_22 = max(0, BRACKET_TOP_22 - base_taxable)
+
+        # Optimal conversion = fill 22% bracket
+        optimal_conversion = min(room_in_22, pretax)
+
+        # Tax cost of conversion
+        tax_cost = optimal_conversion * TAX_BRACKET_22
+
+        # Project balances
+        pretax_after = max(0, (pretax - portfolio_draw - optimal_conversion) * (1 + post_ret))
+        roth_after   = (roth + optimal_conversion - max(0, portfolio_draw - max(0, pretax - optimal_conversion))) * (1 + post_ret)
+
+        yrs_to_rmd   = max(0, RMD_START_AGE - age)
+        roth_fv_73   = optimal_conversion * ((1 + post_ret) ** yrs_to_rmd)
+        tax_avoided  = roth_fv_73 * 0.24  # 24% bracket at RMD age
+        net_benefit  = tax_avoided - tax_cost
+
+        schedule.append({
+            "age":                age,
+            "year":               2026 + years_to_ret + yr,
+            "pretax_balance":     round(pretax),
+            "roth_balance":       round(roth),
+            "base_taxable_income": round(base_taxable),
+            "room_in_22_bracket": round(room_in_22),
+            "optimal_conversion": round(optimal_conversion),
+            "tax_cost":           round(tax_cost),
+            "roth_fv_at_73":      round(roth_fv_73),
+            "tax_avoided_at_73":  round(tax_avoided),
+            "net_benefit":        round(net_benefit),
+            "pretax_after":       round(pretax_after),
+            "roth_after":         round(roth_after),
+        })
+
+        pretax = pretax_after
+        roth   = roth_after
+
+    total_conversions  = sum(s["optimal_conversion"] for s in schedule)
+    total_tax_cost     = sum(s["tax_cost"] for s in schedule)
+    estimated_rmd_base = _rmd(pretax_at_ret * ((1+post_ret)**conversion_years), RMD_START_AGE, RMD_START_AGE)
+
+    total_tax_avoided = sum(s["tax_avoided_at_73"] for s in schedule)
+    net_lifetime_benefit = total_tax_avoided - total_tax_cost
+
+    return {
+        "schedule":               schedule,
+        "total_conversions":      round(total_conversions),
+        "total_tax_cost":         round(total_tax_cost),
+        "total_tax_avoided":      round(total_tax_avoided),
+        "net_lifetime_benefit":   round(net_lifetime_benefit),
+        "estimated_rmd_without_conversions": round(estimated_rmd_base),
+        "estimated_rmd_with_conversions":    round(_rmd(pretax, RMD_START_AGE, RMD_START_AGE)),
+        "pretax_at_rmd_age_no_conversion":   round(pretax_at_ret * ((1+post_ret)**conversion_years)),
+        "pretax_at_rmd_age_with_conversion": round(pretax),
+        "roth_at_rmd_age_with_conversion":   round(roth),
+        "conversion_years":       conversion_years,
+        "ret_age":                ret_age,
+        "rmd_start_age":          RMD_START_AGE,
+    }
+
+def run_tax_efficiency_simulation(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_timing: str = "early") -> Dict:
+    """
+    Run 1000 market scenarios for 3 draw order strategies.
+    Simplified tax: flat 22% on pretax withdrawals, 0% on Roth, 15% on taxable gains.
+    """
+    random.seed(42)
+
+    jason_age    = inputs["jason_age"]
+    inflation    = inputs["inflation_rate"]
+    post_ret     = inputs["expected_return_post_retirement"]
+    income_today = inputs["retirement_income_today_dollars"]
+    healthcare_pre  = inputs.get("healthcare_pre_medicare", 0)
+    healthcare_post = inputs.get("healthcare_post_medicare", 0)
+
+    pension_annual = pension_for_age(inputs, ret_age)
+    jason_ss_early  = inputs.get("jason_social_security", JASON_SS_EARLY)
+    jason_ss_delayed = inputs.get("jason_ss_delayed", JASON_SS_DELAYED)
+    jason_ss_annual = jason_ss_early if ss_timing == "early" else jason_ss_delayed
+    jason_ss_age    = 62 if ss_timing == "early" else 67
+    justin_ss       = inputs.get("justin_social_security", JUSTIN_SPOUSAL_ANNUAL)
+    justin_ss_age   = inputs.get("justin_ss_age", JUSTIN_SPOUSAL_AGE)
+
+    from projection_engine import run_retirement_projection
+    _proj = run_retirement_projection(inputs, accounts, ret_ages=[ret_age])
+    _s = next(s for s in _proj["scenarios"] if s["label"] == f"age_{ret_age}_{ss_timing}")
+    pretax_start  = _s["pretax_at_retirement"]
+    roth_start    = _s["roth_at_retirement"]
+    taxable_start = _s["taxable_at_retirement"]
+    hsa_start     = _s["hsa_at_retirement"]
+
+    retire_yrs = 99 - ret_age
+    N = 1000
+    TAX_PRETAX   = 0.22
+    TAX_TAXABLE  = 0.15
+    TAX_ROTH     = 0.00
+
+    all_returns = [[random.gauss(PORT_MEAN, PORT_STD) for _ in range(retire_yrs)] for _ in range(N)]
+    _rmd_start = rmd_start_age(jason_age)
+
+    def run_strategy(strategy):
+        """strategy: 'taxable_first', 'roth_first', 'optimal'"""
+        total_taxes = []
+        final_balances = []
+
+        for returns in all_returns:
+            pretax  = pretax_start
+            roth    = roth_start
+            taxable = taxable_start
+            hsa     = hsa_start
+            lifetime_tax = 0
+
+            for yr in range(retire_yrs):
+                age = ret_age + yr
+                ret = returns[yr]
+                hc  = healthcare_pre if age < 65 else healthcare_post
+                year_need  = income_today * ((1+inflation)**yr) + hc * ((1+inflation)**yr)
+                year_pen   = pension_annual
+                year_jss   = jason_ss_annual * ((1+inflation)**max(0,age-jason_ss_age)) if age >= jason_ss_age else 0
+                year_uss   = justin_ss * ((1+inflation)**max(0,age-justin_ss_age)) if age >= justin_ss_age else 0
+                guaranteed = year_pen + year_jss + year_uss
+                net_need   = max(0, year_need - guaranteed)
+
+                # RMD — must take regardless of strategy
+                rmd = _rmd(pretax, age, _rmd_start)
+                tax_this_year = 0
+                remaining = net_need
+
+                if rmd > 0:
+                    actual_rmd = min(rmd, pretax)
+                    pretax -= actual_rmd
+                    tax_this_year += actual_rmd * TAX_PRETAX
+                    if actual_rmd <= remaining:
+                        remaining -= actual_rmd
+                    else:
+                        taxable += actual_rmd - remaining
+                        remaining = 0
+
+                if strategy == 'taxable_first':
+                    if remaining > 0 and taxable > 0:
+                        draw = min(remaining, taxable); taxable -= draw
+                        tax_this_year += draw * TAX_TAXABLE; remaining -= draw
+                    if remaining > 0 and pretax > 0:
+                        draw = min(remaining, pretax); pretax -= draw
+                        tax_this_year += draw * TAX_PRETAX; remaining -= draw
+                    if remaining > 0 and hsa > 0:
+                        draw = min(remaining, hsa); hsa -= draw; remaining -= draw
+                    if remaining > 0 and roth > 0:
+                        draw = min(remaining, roth); roth -= draw; remaining -= draw
+
+                elif strategy == 'roth_first':
+                    if remaining > 0 and roth > 0:
+                        draw = min(remaining, roth); roth -= draw; remaining -= draw
+                    if remaining > 0 and taxable > 0:
+                        draw = min(remaining, taxable); taxable -= draw
+                        tax_this_year += draw * TAX_TAXABLE; remaining -= draw
+                    if remaining > 0 and pretax > 0:
+                        draw = min(remaining, pretax); pretax -= draw
+                        tax_this_year += draw * TAX_PRETAX; remaining -= draw
+                    if remaining > 0 and hsa > 0:
+                        draw = min(remaining, hsa); hsa -= draw; remaining -= draw
+
+                else:  # optimal — fill 22% bracket from pretax, rest from taxable/roth
+                    # Draw from taxable first up to capital gains threshold.
+                    # 0% LTCG threshold, MFJ 2026 — matches TaxPlanning.jsx's
+                    # LTCG_2026 table. (Chain of stale figures here: $89,250
+                    # was 2024, then $96,700 — caught 2026-09-05 — was 2025.)
+                    cap_gains_limit = 98900
+                    if remaining > 0 and taxable > 0:
+                        draw = min(remaining, taxable, cap_gains_limit)
+                        taxable -= draw; remaining -= draw
+                        # 0% tax if within threshold
+                    if remaining > 0 and pretax > 0:
+                        draw = min(remaining, pretax); pretax -= draw
+                        tax_this_year += draw * TAX_PRETAX; remaining -= draw
+                    if remaining > 0 and roth > 0:
+                        draw = min(remaining, roth); roth -= draw; remaining -= draw
+                    if remaining > 0 and hsa > 0:
+                        draw = min(remaining, hsa); hsa -= draw; remaining -= draw
+
+                lifetime_tax += tax_this_year
+                pretax  = max(0, pretax  * (1 + ret))
+                roth    = max(0, roth    * (1 + ret))
+                taxable = max(0, taxable * (1 + ret))
+                hsa     = max(0, hsa     * (1 + ret))
+
+            total_taxes.append(round(lifetime_tax))
+            final_balances.append(round(pretax + roth + taxable + hsa))
+
+        taxes_sorted = sorted(total_taxes)
+        bals_sorted  = sorted(final_balances)
+        return {
+            "median_lifetime_tax":    taxes_sorted[N//2],
+            "p10_lifetime_tax":       taxes_sorted[int(N*0.10)],
+            "p90_lifetime_tax":       taxes_sorted[int(N*0.90)],
+            "median_final_balance":   bals_sorted[N//2],
+            "success_rate":           round(sum(1 for b in final_balances if b > 0) / N * 100, 1),
+        }
+
+    taxable_first = run_strategy('taxable_first')
+    roth_first    = run_strategy('roth_first')
+    optimal       = run_strategy('optimal')
+
+    best_tax = min(taxable_first["median_lifetime_tax"],
+                   roth_first["median_lifetime_tax"],
+                   optimal["median_lifetime_tax"])
+
+    return {
+        "retirement_age": ret_age,
+        "ss_timing":      ss_timing,
+        "strategies": {
+            "taxable_first": {**taxable_first, "label": "Taxable First", "description": "Draw taxable → pretax → Roth last"},
+            "roth_first":    {**roth_first,    "label": "Roth First",    "description": "Draw Roth → taxable → pretax last"},
+            "optimal":       {**optimal,        "label": "Optimal",       "description": "Fill 0% cap gains bracket, then pretax, Roth as buffer"},
+        },
+        "best_strategy_tax": best_tax,
+        "simulations": N,
+    }
+
+
+def run_contribution_sensitivity(inputs: Dict, accounts: List[Dict], ret_age: int = 60) -> Dict:
+    """
+    Compare retirement outcomes at different contribution rates for remaining working years.
+    Extra contributions above 6% go to Roth. Employer stays fixed at 9%.
+    """
+    from projection_engine import run_retirement_projection, _fv, _fv_annuity
+
+    jason_age    = inputs["jason_age"]
+    salary       = inputs.get("w2_salary", 0)
+    pre_ret      = inputs["expected_return_pre_retirement"]
+    inflation    = inputs["inflation_rate"]
+    emp_pct_base = inputs.get("employee_401k_pct", 0.06)
+    er_pct       = inputs.get("employer_401k_pct", 0.09)
+    years_to_ret = max(0, ret_age - jason_age)
+
+    # IRS 401(k) elective-deferral limits, 2026 (was a stale 2024 figure,
+    # $23,000/$30,500) — verify against the current-year IRS figures
+    # annually, same caveat as retirement_tools_engine.py's Roth phase-out
+    # thresholds.
+    LIMIT_UNDER_50  = 24500
+    LIMIT_CATCHUP   = 32500  # age 50+ catch-up (base + $8,000)
+
+    scenarios = []
+    catch_up_limit = LIMIT_CATCHUP if jason_age >= 50 else LIMIT_UNDER_50
+
+    contribution_scenarios = [
+        ("Current (6%)",     0.06),
+        ("7% employee",      0.07),
+        ("8% employee",      0.08),
+        ("10% employee",     0.10),
+        ("Max catch-up",     min(catch_up_limit / salary, 0.99)),
+    ]
+
+    # Base retirement projection for comparison
+    base_result = run_retirement_projection(inputs, accounts, ret_ages=[ret_age])
+    base_scenario = next(s for s in base_result["scenarios"] if s["label"] == f"age_{ret_age}_early")
+    base_surplus   = base_scenario["projected_surplus"]
+    base_portfolio = base_scenario["portfolio_at_retirement"]
+
+    for label, emp_pct in contribution_scenarios:
+        annual_employee = min(salary * emp_pct, catch_up_limit)
+        annual_employer = salary * er_pct
+        annual_total    = annual_employee + annual_employer
+        monthly_cost    = (annual_employee - salary * emp_pct_base) / 12
+        monthly_spending_cut = max(0, (annual_employee - salary * emp_pct_base) * (1 - 0.32) / 12)
+
+        # Project extra Roth contributions to retirement
+        extra_annual_roth = max(0, annual_employee - salary * emp_pct_base)
+        extra_at_ret = _fv_annuity(extra_annual_roth, pre_ret, years_to_ret)
+
+        # Calculate extra Roth FV — contributions compound until retirement
+        extra_annual    = max(0, annual_employee - salary * emp_pct_base)
+        extra_fv_at_ret = _fv_annuity(extra_annual, pre_ret, years_to_ret)
+
+        # For age 55: contributions stop at retirement (no employer match on extra)
+        # For age 60+: contributions continue so full FV applies
+        portfolio_delta = round(extra_fv_at_ret)
+        surplus_delta   = round(extra_fv_at_ret)
+
+        # Breakeven: how many years of retirement spending does the extra surplus buy
+        annual_spend = inputs["retirement_income_today_dollars"]
+        breakeven_years = surplus_delta / annual_spend if annual_spend > 0 else 0
+
+        breakeven_years = surplus_delta / annual_spend if annual_spend > 0 and surplus_delta > 0 else 0
+
+        scenarios.append({
+            "label":                 label,
+            "employee_pct":          round(emp_pct * 100, 1),
+            "annual_employee":       round(annual_employee),
+            "annual_employer":       round(annual_employer),
+            "annual_total":          round(annual_total),
+            "monthly_spending_cut":  round(monthly_spending_cut),
+            "portfolio_at_ret":      round(base_portfolio + portfolio_delta),
+            "surplus_at_ret":        round(base_surplus + surplus_delta),
+            "portfolio_delta":       round(portfolio_delta),
+            "surplus_delta":         round(surplus_delta),
+            "breakeven_years":       round(breakeven_years, 1),
+        })
+
+    return {
+        "base_portfolio":  base_portfolio,
+        "base_surplus":    base_surplus,
+        "years_to_retire": years_to_ret,
+        "retirement_age":  ret_age,
+        "salary":          salary,
+        "scenarios":       scenarios,
+    }
+
+
+def run_survivor_scenario(inputs: Dict, accounts: List[Dict], ret_age: int = 60,
+                           deceased: str = "jason", death_age: int = None,
+                           survivor_need_factor: float = 0.75) -> Dict:
+    """Stress-tests the plan assuming one spouse dies during retirement:
+    the deceased's life insurance payout is added to the portfolio, Social
+    Security switches to the survivor benefit (the higher of the two, not
+    both — that's how SS survivor benefits actually work), pension is
+    assumed 100% Joint & Survivor (matching this codebase's existing
+    PENSION_100J_S assumption), and income need is scaled down by
+    survivor_need_factor to reflect one person's living costs instead of
+    two (0.75 is a common financial-planning rule of thumb; adjustable).
+
+    Does NOT fully model the MFJ->Single tax-bracket change on ongoing
+    withdrawals — that's a real additional drag this doesn't capture,
+    flagged in the recommendation rather than silently baked in as a
+    precise number, since integrating it would mean re-deriving the whole
+    withdrawal-order/tax engine rather than reusing the baseline
+    projection the way everything else here does.
+    """
+    from projection_engine import run_retirement_projection, _pv_annuity
+
+    jason_age  = inputs["jason_age"]
+    justin_age = inputs["justin_age"]
+    post_ret   = inputs["expected_return_post_retirement"]
+    inflation  = inputs["inflation_rate"]
+    age_gap    = jason_age - justin_age  # positive: jason is older
+
+    if death_age is None:
+        death_age = ret_age + 10
+
+    _proj = run_retirement_projection(inputs, accounts, ret_ages=[ret_age])
+    _scenario = next((s for s in _proj["scenarios"] if s["label"] == f"age_{ret_age}_early"), None)
+    if not _scenario:
+        return {"has_data": False}
+
+    # death_age is the DECEASED spouse's age — convert to jason_age terms
+    # to index into yearly_detail, which is always keyed by jason's age.
+    death_jason_age = death_age if deceased == "jason" else death_age + age_gap
+
+    yearly = _scenario["yearly_detail"]
+    death_row = next((y for y in yearly if y["jason_age"] >= death_jason_age), None)
+    if not death_row:
+        return {"has_data": False}
+    death_jason_age = death_row["jason_age"]  # snap to an actual modeled year
+
+    if deceased == "jason":
+        payout = (inputs.get("jason_life_basic", 0) + inputs.get("jason_life_supplemental", 0)
+                  + inputs.get("jason_life_term", 0))
+    else:
+        payout = (inputs.get("justin_life_ul", 0) + inputs.get("justin_life_whole", 0)
+                  + inputs.get("justin_life_conagra", 0) + inputs.get("justin_life_term", 0)
+                  + inputs.get("justin_life_kids", 0))
+
+    portfolio_at_death   = death_row["portfolio_balance"]
+    starting_balance     = portfolio_at_death + payout
+    survivor_ss_annual   = max(inputs.get("jason_social_security", 0), inputs.get("justin_social_security", 0))
+    pension_annual       = death_row["pension"]  # 100% J&S assumption already baked into this figure
+    years_since_ret      = death_row["year"] - (2026 + max(0, ret_age - jason_age))
+    income_today         = inputs["retirement_income_today_dollars"]
+    income_need_at_death = income_today * ((1 + inflation) ** years_since_ret) * survivor_need_factor
+    guaranteed_at_death  = pension_annual + survivor_ss_annual
+
+    schedule = []
+    bal = starting_balance
+    depleted_age = None
+    for i, age in enumerate(range(death_jason_age, 100)):
+        need       = income_need_at_death * ((1 + inflation) ** i)
+        guaranteed = guaranteed_at_death * ((1 + inflation) ** i)
+        draw       = max(0, need - guaranteed)
+        # Catch the edge case where the portfolio is already at (or below)
+        # zero going into this year and there's still a real gap to cover —
+        # without this check, a starting_balance of 0 never triggers the
+        # bal_after<=0-and-bal>0 transition below, so an already-depleted
+        # plan would be silently reported as "survives".
+        if depleted_age is None and bal <= 0 and draw > 0:
+            depleted_age = age
+        bal_after  = max(0, (bal - draw) * (1 + post_ret))
+        schedule.append({"age": age, "starting_balance": round(bal), "draw": round(draw), "ending_balance": round(bal_after)})
+        if bal_after <= 0 and depleted_age is None and bal > 0:
+            depleted_age = age
+        bal = bal_after
+
+    survives = depleted_age is None
+
+    additional_insurance_needed = 0
+    if not survives:
+        net_need  = max(0, income_need_at_death - guaranteed_at_death)
+        real_rate = ((1 + post_ret) / (1 + inflation) - 1) if post_ret != inflation else 0.0001
+        cap_need  = _pv_annuity(net_need, real_rate, 99 - death_jason_age)
+        additional_insurance_needed = max(0, round(cap_need - starting_balance))
+
+    if survives:
+        recommendation = (
+            f"If {deceased} dies at {death_age}, the ${payout:,.0f} life insurance payout plus the portfolio "
+            f"(${portfolio_at_death:,.0f} at that point) covers the survivor's needs through age 99, assuming "
+            f"living costs drop to {survivor_need_factor*100:.0f}% of the couple's target and Social Security "
+            f"switches to the higher of the two benefits. This doesn't account for the tax-bracket jump from "
+            f"filing jointly to filing single, which would add real drag on top of this."
+        )
+    else:
+        recommendation = (
+            f"If {deceased} dies at {death_age}, the plan runs out around age {depleted_age} for the survivor — "
+            f"about ${additional_insurance_needed:,.0f} more life insurance on {deceased} would close that gap "
+            f"(today's dollars, before accounting for the MFJ-to-single tax-bracket jump, which would push the "
+            f"real number higher)."
+        )
+
+    return {
+        "has_data": True,
+        "deceased": deceased,
+        "death_age": death_jason_age if deceased == "jason" else death_age,
+        "portfolio_at_death": round(portfolio_at_death),
+        "life_insurance_payout": round(payout),
+        "starting_balance_after_payout": round(starting_balance),
+        "survivor_ss_annual": round(survivor_ss_annual),
+        "pension_annual": round(pension_annual),
+        "income_need_at_death": round(income_need_at_death),
+        "survivor_need_factor": survivor_need_factor,
+        "survives": survives,
+        "depleted_age": depleted_age,
+        "additional_insurance_needed": additional_insurance_needed,
+        "recommendation": recommendation,
+        "schedule": schedule[::2],
+    }

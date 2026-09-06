@@ -1,0 +1,792 @@
+"""
+Tests for main.py's FastAPI routes, via TestClient against an isolated
+temp db (see conftest.py's `client`/`temp_db` fixtures — never the real
+cfo.db).
+"""
+import auth
+
+
+def _seed_planning_inputs(client, sample_inputs):
+    r = client.put("/api/planning-inputs", json=sample_inputs)
+    assert r.status_code == 200, r.text
+    return r
+
+
+def _seed_accounts(client, sample_accounts):
+    for a in sample_accounts:
+        payload = {k: v for k, v in a.items() if k != "id"}
+        r = client.post("/api/accounts", json=payload)
+        assert r.status_code == 200, r.text
+
+
+class TestAccountsCrud:
+    def test_create_and_list_account(self, client):
+        r = client.post("/api/accounts", json={
+            "name": "Test Checking", "account_type": "checking", "owner": "joint",
+            "institution": "Test Bank", "balance": 1000, "notes": None,
+        })
+        assert r.status_code == 200
+        created = r.json()
+        assert created["id"] is not None
+
+        r2 = client.get("/api/accounts")
+        assert r2.status_code == 200
+        assert any(a["name"] == "Test Checking" for a in r2.json())
+
+    def test_update_account(self, client):
+        created = client.post("/api/accounts", json={
+            "name": "Old Name", "account_type": "savings", "owner": "joint",
+            "institution": "", "balance": 100, "notes": None,
+        }).json()
+        r = client.put(f"/api/accounts/{created['id']}", json={
+            "name": "New Name", "account_type": "savings", "owner": "joint",
+            "institution": "", "balance": 200, "notes": None,
+        })
+        assert r.status_code == 200
+        assert r.json()["name"] == "New Name"
+
+    def test_delete_account(self, client):
+        created = client.post("/api/accounts", json={
+            "name": "To Delete", "account_type": "checking", "owner": "joint",
+            "institution": "", "balance": 0, "notes": None,
+        }).json()
+        r = client.delete(f"/api/accounts/{created['id']}")
+        assert r.status_code == 200
+        remaining = client.get("/api/accounts").json()
+        assert not any(a["id"] == created["id"] for a in remaining)
+
+
+class TestInsurancePoliciesCrud:
+    def test_create_list_update_delete(self, client):
+        created = client.post("/api/insurance-policies", json={
+            "who": "Alex", "policy_type": "Life — Term", "benefit": "$500,000",
+            "premium": "$500/yr", "notes": "", "sort_order": 0,
+        }).json()
+        assert created["id"] is not None
+
+        listed = client.get("/api/insurance-policies").json()
+        assert any(p["id"] == created["id"] for p in listed)
+
+        updated = client.put(f"/api/insurance-policies/{created['id']}", json={
+            "who": "Alex", "policy_type": "Life — Term", "benefit": "$600,000",
+            "premium": "$500/yr", "notes": "", "sort_order": 0,
+        }).json()
+        assert updated["benefit"] == "$600,000"
+
+        r = client.delete(f"/api/insurance-policies/{created['id']}")
+        assert r.status_code == 200
+        listed_after = client.get("/api/insurance-policies").json()
+        assert not any(p["id"] == created["id"] for p in listed_after)
+
+
+class TestPropertyPoliciesCrud:
+    def test_create_list_update_delete(self, client):
+        created = client.post("/api/property-policies", json={
+            "item": "Primary Home", "coverage": "$400k dwelling", "renewal": "1/1", "sort_order": 0,
+        }).json()
+        assert created["id"] is not None
+
+        updated = client.put(f"/api/property-policies/{created['id']}", json={
+            "item": "Primary Home", "coverage": "$450k dwelling", "renewal": "1/1", "sort_order": 0,
+        }).json()
+        assert updated["coverage"] == "$450k dwelling"
+
+        r = client.delete(f"/api/property-policies/{created['id']}")
+        assert r.status_code == 200
+
+
+class TestPlanningInputs:
+    def test_get_returns_defaults_before_any_save(self, client):
+        r = client.get("/api/planning-inputs")
+        assert r.status_code == 200
+        assert r.json()["person1_name"] == "Person 1"
+
+    def test_save_and_reload(self, client, sample_inputs):
+        _seed_planning_inputs(client, sample_inputs)
+        r = client.get("/api/planning-inputs")
+        assert r.json()["person1_name"] == "Alex"
+        assert r.json()["w2_salary"] == 150000
+
+
+class TestNetWorth:
+    def test_empty_accounts_gives_zero_net_worth(self, client):
+        r = client.get("/api/net-worth")
+        assert r.status_code == 200
+        assert r.json()["net_worth"] == 0
+
+    def test_net_worth_reflects_accounts(self, client, sample_accounts):
+        _seed_accounts(client, sample_accounts)
+        r = client.get("/api/net-worth")
+        data = r.json()
+        # 500k 401k + 100k roth + 50k ira + 200k taxable + 20k hsa - 200k mortgage
+        assert data["net_worth"] == 670000
+
+    def test_kids_assets_excluded_from_main_categories(self, client):
+        client.post("/api/accounts", json={
+            "name": "Kid Roth", "account_type": "roth_ira", "owner": "abby",
+            "institution": "", "balance": 5000, "notes": None,
+        })
+        r = client.get("/api/net-worth").json()
+        assert r["kids_assets"] == 5000
+        assert r["investment"] == 0
+
+
+class TestProjectionsRequirePlanningInputs:
+    def test_retirement_projection_200_with_default_row(self, client):
+        # db.init_db() always seeds a planning_inputs row (id=1) with zeroed
+        # defaults, so "no planning inputs" never actually happens once the
+        # app has started — this exercises that default-data path.
+        r = client.get("/api/projections/retirement")
+        assert r.status_code == 200
+
+    def test_retirement_projection_200_with_inputs(self, client, sample_inputs, sample_accounts):
+        _seed_planning_inputs(client, sample_inputs)
+        _seed_accounts(client, sample_accounts)
+        r = client.get("/api/projections/retirement")
+        assert r.status_code == 200
+        assert "scenarios" in r.json()
+
+    def test_retirement_projection_includes_ages_56_through_59(self, client, sample_inputs, sample_accounts):
+        """Regression test — the Retirement Projection page's age buttons
+        were expanded from [55, 60, 65] to also cover 56-59, which only
+        works if the backend actually computes scenarios for those ages."""
+        _seed_planning_inputs(client, sample_inputs)
+        _seed_accounts(client, sample_accounts)
+        r = client.get("/api/projections/retirement")
+        ages = {s["retirement_age"] for s in r.json()["scenarios"]}
+        assert {55, 56, 57, 58, 59, 60, 65}.issubset(ages)
+
+    def test_education_projection_200_with_inputs(self, client, sample_inputs):
+        _seed_planning_inputs(client, sample_inputs)
+        r = client.get("/api/projections/education")
+        assert r.status_code == 200
+        assert "goals" in r.json()
+
+    def test_insurance_analysis_200_with_inputs(self, client, sample_inputs):
+        _seed_planning_inputs(client, sample_inputs)
+        r = client.get("/api/projections/insurance")
+        assert r.status_code == 200
+
+    def test_kids_projection_handles_missing_inputs_gracefully(self, client):
+        r = client.get("/api/projections/kids")
+        assert r.status_code == 200
+
+
+class TestSnapshots:
+    def test_take_and_list_snapshot(self, client, sample_accounts):
+        _seed_accounts(client, sample_accounts)
+        r = client.post("/api/snapshot", json={"note": "Test snapshot"})
+        assert r.status_code == 200
+        listed = client.get("/api/snapshots").json()
+        assert len(listed) == 1
+        assert listed[0]["note"] == "Test snapshot"
+
+
+class TestTasksCrud:
+    def test_create_list_update_delete(self, client):
+        created = client.post("/api/tasks", json={
+            "section": "risk", "title": "Test Task", "description": "desc",
+        }).json()
+        assert created["id"] is not None
+
+        listed = client.get("/api/tasks").json()
+        assert any(t["id"] == created["id"] for t in listed)
+
+        by_section = client.get("/api/tasks?section=risk").json()
+        assert any(t["id"] == created["id"] for t in by_section)
+
+        updated = client.patch(f"/api/tasks/{created['id']}", json={"completed": True}).json()
+        assert updated["completed"] == 1
+
+        r = client.delete(f"/api/tasks/{created['id']}")
+        assert r.status_code == 200
+
+    def test_sync_with_default_planning_inputs_row(self, client):
+        # planning_inputs row always exists (see db.init_db()), so sync
+        # proceeds and inserts the annual tasks even with zeroed defaults.
+        r = client.post("/api/tasks/sync")
+        assert r.status_code == 200
+        assert r.json()["inserted"] > 0
+
+    def test_sync_with_planning_inputs_inserts_tasks(self, client, sample_inputs, sample_accounts):
+        _seed_planning_inputs(client, sample_inputs)
+        _seed_accounts(client, sample_accounts)
+        r = client.post("/api/tasks/sync")
+        assert r.status_code == 200
+        assert r.json()["inserted"] > 0
+
+        # Second sync should not duplicate
+        r2 = client.post("/api/tasks/sync")
+        assert r2.json()["inserted"] == 0
+
+
+class TestQuickenImport:
+    def test_import_valid_csv(self, client):
+        csv_content = (
+            "Net Worth Summary\n---\n"
+            'Checking,First National Checking,"1,000.00"\n'
+        )
+        r = client.post(
+            "/api/import/quicken",
+            files={"file": ("networth.csv", csv_content, "text/csv")},
+        )
+        assert r.status_code == 200
+        assert r.json()["accounts_created"] == 1
+
+    def test_import_csv_with_no_matching_accounts_400s(self, client):
+        csv_content = "Net Worth Summary\n---\nSomething,Totally Unmapped Account,0.00\n"
+        r = client.post(
+            "/api/import/quicken",
+            files={"file": ("networth.csv", csv_content, "text/csv")},
+        )
+        assert r.status_code == 400
+
+
+class TestAnnualReport:
+    def test_report_generates_pdf_with_default_row(self, client):
+        r = client.get("/api/report/annual")
+        assert r.status_code == 200
+        assert r.content[:4] == b"%PDF"
+
+    def test_report_generates_pdf(self, client, sample_inputs, sample_accounts):
+        _seed_planning_inputs(client, sample_inputs)
+        _seed_accounts(client, sample_accounts)
+        r = client.get("/api/report/annual")
+        assert r.status_code == 200
+        assert r.headers["content-type"] == "application/pdf"
+        assert r.content[:4] == b"%PDF"
+
+
+class TestSimulationEndpoints:
+    """Smoke tests — full-depth calc correctness is covered in
+    test_simulation_engine.py; these just verify the routes are wired up
+    and return 200 with seeded data."""
+
+    def _seed(self, client, sample_inputs, sample_accounts):
+        _seed_planning_inputs(client, sample_inputs)
+        _seed_accounts(client, sample_accounts)
+
+    def test_monte_carlo(self, client, sample_inputs, sample_accounts):
+        self._seed(client, sample_inputs, sample_accounts)
+        r = client.get("/api/simulation/monte-carlo?ret_age=60&ss_timing=early")
+        assert r.status_code == 200
+        assert "success_rate" in r.json()
+
+    def test_swr(self, client, sample_inputs, sample_accounts):
+        self._seed(client, sample_inputs, sample_accounts)
+        r = client.get("/api/simulation/swr?ret_age=60&ss_timing=early")
+        assert r.status_code == 200
+
+    def test_swr_batch(self, client, sample_inputs, sample_accounts):
+        self._seed(client, sample_inputs, sample_accounts)
+        r = client.get("/api/simulation/swr-batch")
+        assert r.status_code == 200
+        assert set(str(a) for a in range(55, 68)) <= set(r.json()["swr"].keys())
+
+    def test_stress_tests(self, client, sample_inputs, sample_accounts):
+        self._seed(client, sample_inputs, sample_accounts)
+        r = client.get("/api/simulation/stress-tests?ret_age=55&ss_timing=early")
+        assert r.status_code == 200
+
+    def test_sequence_risk(self, client, sample_inputs, sample_accounts):
+        """Regression test for the endpoint that 500'd at every age due to
+        result["base"] vs result["scenarios"]["base"]."""
+        self._seed(client, sample_inputs, sample_accounts)
+        r = client.get("/api/simulation/sequence-risk?ret_age=55&ss_timing=early")
+        assert r.status_code == 200
+        assert r.json()["base"] is not None
+
+    def test_roth_conversion(self, client, sample_inputs, sample_accounts):
+        self._seed(client, sample_inputs, sample_accounts)
+        r = client.get("/api/simulation/roth-conversion?ret_age=60&ss_timing=early")
+        assert r.status_code == 200
+
+    def test_tax_efficiency(self, client, sample_inputs, sample_accounts):
+        self._seed(client, sample_inputs, sample_accounts)
+        r = client.get("/api/simulation/tax-efficiency?ret_age=60&ss_timing=early")
+        assert r.status_code == 200
+
+    def test_contribution_sensitivity(self, client, sample_inputs, sample_accounts):
+        self._seed(client, sample_inputs, sample_accounts)
+        r = client.get("/api/simulation/contribution-sensitivity?ret_age=60")
+        assert r.status_code == 200
+
+    def test_retirement_sensitivity(self, client, sample_inputs, sample_accounts):
+        self._seed(client, sample_inputs, sample_accounts)
+        r = client.get("/api/projections/retirement-sensitivity")
+        assert r.status_code == 200
+        ages = {s["ret_age"] for s in r.json()["sensitivity"]}
+        assert ages == set(range(55, 68))
+
+    def test_income_sources(self, client, sample_inputs, sample_accounts):
+        self._seed(client, sample_inputs, sample_accounts)
+        r = client.get("/api/retirement/income-sources?ret_age=60&ss_timing=early")
+        assert r.status_code == 200
+
+    def test_income_sources_returns_chart_for_ages_outside_default_three(self, client, sample_inputs, sample_accounts):
+        """Regression test — the Monte Carlo/Historical Stress tabs offer
+        the full 55-67 age range, but this endpoint called
+        run_retirement_projection() with no ret_ages override, defaulting
+        to [55, 60, 65] — any other age silently returned {"error": ...}
+        with no "chart" key, leaving the Income Sources by Year chart
+        empty. Reported: "nothing appears in monte carlo Income Sources
+        by Year.\""""
+        self._seed(client, sample_inputs, sample_accounts)
+        r = client.get("/api/retirement/income-sources?ret_age=58&ss_timing=early")
+        assert r.status_code == 200
+        body = r.json()
+        assert "error" not in body
+        assert len(body["chart"]) > 0
+
+    def test_whatif(self, client, sample_inputs, sample_accounts):
+        self._seed(client, sample_inputs, sample_accounts)
+        r = client.post("/api/projections/whatif", json={"salary_growth_pct": 0.03})
+        assert r.status_code == 200
+        assert "scenarios" in r.json()
+
+    def test_whatif_with_default_row_and_no_overrides(self, client):
+        r = client.post("/api/projections/whatif", json={})
+        assert r.status_code == 200
+        assert "scenarios" in r.json()
+
+    def test_whatif_includes_scenario_for_requested_age_outside_default_three(self, client, sample_inputs, sample_accounts):
+        """Same class of bug as the income-sources gap above — the
+        What-If Builder's slider covers 55-67, but this endpoint never
+        passed ret_age through to run_retirement_projection() at all, so
+        "Impact on Retire at X" silently found nothing for any age other
+        than 55/60/65."""
+        self._seed(client, sample_inputs, sample_accounts)
+        r = client.post("/api/projections/whatif", json={"ret_age": 58})
+        assert r.status_code == 200
+        labels = {s["label"] for s in r.json()["scenarios"]}
+        assert "age_58_early" in labels
+        # The fixed 55/60/65 baseline cards must still be present too.
+        assert {"age_55_early", "age_60_early", "age_65_early"}.issubset(labels)
+
+    def test_retirement_projection_covers_full_55_to_67_range(self, client, sample_inputs, sample_accounts):
+        """Regression test — this endpoint is also WhatIf.jsx's baseline
+        for its full 55-67 slider; a narrower range here (previously
+        [55,56,57,58,59,60,65]) silently broke the base-vs-result
+        comparison for any age outside that original set."""
+        self._seed(client, sample_inputs, sample_accounts)
+        r = client.get("/api/projections/retirement")
+        ages = {s["retirement_age"] for s in r.json()["scenarios"]}
+        assert ages == set(range(55, 68))
+
+
+class TestDebtRecommendationEndpoints:
+    def test_recommendation_with_no_debt(self, client):
+        r = client.get("/api/debts/recommendation")
+        assert r.status_code == 200
+        assert r.json()["has_debt"] is False
+
+    def test_recommendation_with_debt(self, client):
+        client.post("/api/accounts", json={
+            "name": "Test Card", "account_type": "credit_card", "owner": "joint",
+            "institution": "", "balance": 5000, "notes": None,
+            "interest_rate": 0.22, "minimum_payment": 150,
+        })
+        r = client.get("/api/debts/recommendation?extra_monthly=200")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["has_debt"] is True
+        assert data["strategy"] in ("avalanche", "snowball")
+        assert data["reason"]
+        assert data["debt_free_date"] is not None
+
+    def test_recommendation_flags_negative_amortization(self, client):
+        client.post("/api/accounts", json={
+            "name": "Trap Card", "account_type": "credit_card", "owner": "joint",
+            "institution": "", "balance": 10000, "notes": None,
+            "interest_rate": 0.30, "minimum_payment": 100,
+        })
+        r = client.get("/api/debts/recommendation").json()
+        assert len(r["negative_amortization_debts"]) == 1
+
+    def test_term_months_persists_on_account(self, client):
+        created = client.post("/api/accounts", json={
+            "name": "Term Test", "account_type": "car_loan", "owner": "joint",
+            "institution": "", "balance": 15000, "notes": None,
+            "interest_rate": 0.06, "minimum_payment": 300, "term_months": 48,
+        }).json()
+        listed = client.get("/api/accounts").json()
+        found = next(a for a in listed if a["id"] == created["id"])
+        assert found["term_months"] == 48
+
+    def test_suggest_minimum_payment_endpoint(self, client):
+        r = client.post("/api/debts/suggest-minimum-payment", json={
+            "balance": 20000, "interest_rate": 0.055, "term_months": 60,
+        })
+        assert r.status_code == 200
+        assert r.json()["suggested_minimum_payment"] == 382
+
+
+class TestDebtEndpoints:
+    def test_payoff_plan_with_no_debt(self, client):
+        r = client.get("/api/debts/payoff-plan")
+        assert r.status_code == 200
+        assert r.json()["has_debt"] is False
+
+    def test_payoff_plan_with_debt_accounts(self, client):
+        client.post("/api/accounts", json={
+            "name": "Test Card", "account_type": "credit_card", "owner": "joint",
+            "institution": "", "balance": 5000, "notes": None,
+            "interest_rate": 0.22, "minimum_payment": 150,
+        })
+        r = client.get("/api/debts/payoff-plan?extra_monthly=200")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["has_debt"] is True
+        assert data["total_balance"] == 5000
+
+    def test_account_interest_rate_and_minimum_payment_persist(self, client):
+        created = client.post("/api/accounts", json={
+            "name": "Persist Test", "account_type": "student_loan", "owner": "joint",
+            "institution": "", "balance": 20000, "notes": None,
+            "interest_rate": 0.055, "minimum_payment": 250,
+        }).json()
+        listed = client.get("/api/accounts").json()
+        found = next(a for a in listed if a["id"] == created["id"])
+        assert found["interest_rate"] == 0.055
+        assert found["minimum_payment"] == 250
+
+    def test_credit_card_payoff_endpoint(self, client):
+        r = client.post("/api/debts/credit-card-payoff", json={
+            "balance": 5000, "apr": 0.22, "monthly_payment": 150, "extra": 100,
+        })
+        assert r.status_code == 200
+        assert r.json()["months_saved"] > 0
+
+    def test_refinance_analysis_endpoint(self, client):
+        r = client.post("/api/debts/refinance-analysis", json={
+            "balance": 300000, "current_rate": 0.07, "new_rate": 0.055,
+            "term_years": 30, "closing_costs": 5000,
+        })
+        assert r.status_code == 200
+        assert r.json()["worth_it"] is True
+
+    def test_debt_vs_invest_endpoint(self, client):
+        r = client.post("/api/debts/debt-vs-invest", json={
+            "debt_rate": 0.22, "expected_return": 0.07, "employer_match_pct": 3,
+        })
+        assert r.status_code == 200
+        assert r.json()["recommendation"] == "capture_match_then_pay_debt"
+
+    def test_net_worth_treats_new_debt_types_as_liabilities(self, client):
+        """Regression guard: adding credit_card/student_loan/car_loan/
+        personal_loan as new liability types must not let their balances
+        get miscounted as assets."""
+        client.post("/api/accounts", json={
+            "name": "Test Card", "account_type": "credit_card", "owner": "joint",
+            "institution": "", "balance": 3000, "notes": None,
+        })
+        r = client.get("/api/net-worth").json()
+        assert r["liabilities"] == 3000
+
+
+class TestRetirementToolsEndpoints:
+    def test_rmd_planning_no_pretax_balance(self, client, sample_inputs):
+        _seed_planning_inputs(client, sample_inputs)
+        r = client.get("/api/retirement-tools/rmd-planning")
+        assert r.status_code == 200
+        assert r.json()["has_pretax_balance"] is False
+
+    def test_rmd_planning_with_401k_balance(self, client, sample_inputs):
+        _seed_planning_inputs(client, sample_inputs)
+        client.post("/api/accounts", json={
+            "name": "Test 401k", "account_type": "401k", "owner": "jason",
+            "institution": "", "balance": 500000, "notes": None,
+        })
+        r = client.get("/api/retirement-tools/rmd-planning")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["has_pretax_balance"] is True
+        assert data["first_rmd_amount"] > 0
+
+    def test_pension_vs_lump_sum_endpoint(self, client):
+        r = client.post("/api/retirement-tools/pension-vs-lump-sum", json={
+            "monthly_pension": 3000, "lump_sum": 400000,
+            "current_age": 55, "pension_start_age": 65,
+        })
+        assert r.status_code == 200
+        assert r.json()["favors"] in ("pension", "lump_sum")
+
+    def test_backdoor_roth_endpoint(self, client):
+        r = client.post("/api/retirement-tools/backdoor-roth", json={
+            "magi": 300000, "existing_traditional_ira_balance": 50000,
+            "existing_traditional_ira_basis": 0, "planned_contribution": 7000,
+        })
+        assert r.status_code == 200
+        data = r.json()
+        assert data["needs_backdoor"] is True
+        assert data["pro_rata_applies"] is True
+
+    def test_qcd_endpoint(self, client):
+        r = client.post("/api/retirement-tools/qcd", json={
+            "age": 75, "ira_balance": 500000, "rmd_amount": 20000, "desired_qcd_amount": 15000,
+        })
+        assert r.status_code == 200
+        data = r.json()
+        assert data["eligible"] is True
+        assert data["qcd_amount"] == 15000
+
+    def test_qcd_endpoint_not_eligible(self, client):
+        r = client.post("/api/retirement-tools/qcd", json={
+            "age": 60, "ira_balance": 500000, "desired_qcd_amount": 15000,
+        })
+        assert r.status_code == 200
+        assert r.json()["eligible"] is False
+
+    def test_hsa_strategy_endpoint(self, client):
+        r = client.post("/api/retirement-tools/hsa-strategy", json={
+            "oop_expense_this_year": 2000, "years_to_delay": 10,
+        })
+        assert r.status_code == 200
+        data = r.json()
+        assert data["has_expense"] is True
+        assert data["extra_value_from_delaying"] > 0
+
+
+class TestSurvivorScenarioEndpoint:
+    def test_survivor_scenario_endpoint(self, client, sample_inputs, sample_accounts):
+        _seed_planning_inputs(client, sample_inputs)
+        _seed_accounts(client, sample_accounts)
+        r = client.get("/api/simulation/survivor-scenario?ret_age=60&deceased=jason&death_age=65")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["has_data"] is True
+        assert data["deceased"] == "jason"
+
+    def test_survivor_scenario_with_default_planning_inputs_row(self, client):
+        # init_db always seeds a default planning_inputs row (id=1), so
+        # "no inputs set" is unreachable in practice — this hits that
+        # default-row path rather than expecting a 400.
+        r = client.get("/api/simulation/survivor-scenario")
+        assert r.status_code == 200
+
+
+class TestRentalAnalysisEndpoint:
+    def test_no_rental_key_configured(self, client, sample_inputs):
+        _seed_planning_inputs(client, sample_inputs)
+        r = client.get("/api/rental/analysis")
+        assert r.status_code == 200
+        assert r.json()["has_data"] is False
+
+    def test_rental_analysis_with_configured_property(self, client, sample_inputs):
+        _seed_planning_inputs(client, {**sample_inputs, "rental_property_key": "Rental"})
+        client.post("/api/accounts", json={
+            "name": "Rental Unit", "account_type": "real_estate", "owner": "joint",
+            "institution": "", "balance": 200000, "notes": None,
+            "monthly_rental_income": 2000, "monthly_rental_expenses": 500,
+        })
+        r = client.get("/api/rental/analysis")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["has_data"] is True
+        assert data["annual_cash_flow"] == 18000
+
+
+class TestEmergencyFundEndpoint:
+    def test_emergency_fund_endpoint(self, client, sample_inputs):
+        _seed_planning_inputs(client, {**sample_inputs, "current_monthly_expenses": 5000})
+        client.post("/api/accounts", json={
+            "name": "Checking", "account_type": "checking", "owner": "joint",
+            "institution": "", "balance": 20000, "notes": None,
+        })
+        r = client.get("/api/emergency-fund")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["has_data"] is True
+        assert data["liquid_assets"] == 20000
+
+    def test_emergency_fund_no_expenses_configured(self, client, sample_inputs):
+        _seed_planning_inputs(client, {**sample_inputs, "current_monthly_expenses": 0})
+        r = client.get("/api/emergency-fund")
+        assert r.status_code == 200
+        assert r.json()["has_data"] is False
+
+
+class TestEstateEndpoints:
+    def test_tax_exposure_endpoint(self, client, sample_inputs):
+        _seed_planning_inputs(client, sample_inputs)
+        r = client.get("/api/estate/tax-exposure")
+        assert r.status_code == 200
+        data = r.json()
+        assert "exposure" in data
+        assert "recommendation" in data
+
+    def test_tax_exposure_individual_filing(self, client, sample_inputs):
+        _seed_planning_inputs(client, sample_inputs)
+        r = client.get("/api/estate/tax-exposure?filing_as_couple=false")
+        assert r.status_code == 200
+        assert r.json()["filing_as_couple"] is False
+
+
+class TestAllocationEndpoints:
+    def test_allocation_analysis_no_investable_accounts(self, client, sample_inputs):
+        _seed_planning_inputs(client, sample_inputs)
+        r = client.get("/api/allocation/analysis")
+        assert r.status_code == 200
+        assert r.json()["has_data"] is False
+
+    def test_allocation_analysis_with_holdings(self, client, sample_inputs):
+        _seed_planning_inputs(client, sample_inputs)
+        client.post("/api/accounts", json={
+            "name": "Test 401k", "account_type": "401k", "owner": "jason",
+            "institution": "", "balance": 200000, "notes": None,
+            "stock_allocation_pct": 100,
+        })
+        r = client.get("/api/allocation/analysis")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["has_data"] is True
+        assert data["current_stock_pct"] == 100.0
+
+    def test_fee_analysis_no_fee_data(self, client):
+        r = client.get("/api/allocation/fees")
+        assert r.status_code == 200
+        assert r.json()["has_fee_data"] is False
+
+    def test_fee_analysis_with_expense_ratio(self, client):
+        client.post("/api/accounts", json={
+            "name": "High Fee Fund", "account_type": "401k", "owner": "jason",
+            "institution": "", "balance": 200000, "notes": None,
+            "expense_ratio": 0.01,
+        })
+        r = client.get("/api/allocation/fees")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["has_fee_data"] is True
+        assert data["total_annual_fee_dollars"] == 2000
+
+    def test_concentration_risk_endpoint(self, client):
+        client.post("/api/accounts", json={
+            "name": "Concentrated Stock", "account_type": "taxable", "owner": "jason",
+            "institution": "", "balance": 200000, "notes": None,
+        })
+        client.post("/api/accounts", json={
+            "name": "Other Fund", "account_type": "401k", "owner": "jason",
+            "institution": "", "balance": 50000, "notes": None,
+        })
+        r = client.get("/api/allocation/concentration")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["has_data"] is True
+        assert len(data["flagged_positions"]) >= 1
+
+
+class TestAuthEndpoints:
+    def test_status_disabled_after_setup_skipped(self, client):
+        """conftest.py forces APP_PASSPHRASE='' AND simulates first-run
+        setup already having been skipped (see _skip_first_run_auth_setup)
+        for the whole suite, so this is the state every other test in this
+        file runs under too — confirming auth is a no-op once the user has
+        explicitly opted out, not by default on a fresh clone (see the
+        TestFirstRunSetup tests below for that case)."""
+        r = client.get("/api/auth/status")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["auth_enabled"] is False
+        assert data["authenticated"] is True
+        assert data["setup_required"] is False
+
+    def test_setup_required_blocks_other_routes_on_a_fresh_install(self, client, monkeypatch, tmp_path):
+        """Regression test (external audit 2026-09-05): a fresh clone used
+        to silently run wide open (auth_enabled=False, authenticated=True)
+        whenever APP_PASSPHRASE wasn't set. It should now block everything
+        except the auth endpoints until setup runs."""
+        monkeypatch.setattr(auth, "PASSPHRASE", None)
+        monkeypatch.setattr(auth, "PASSPHRASE_HASH", None)
+        monkeypatch.setattr(auth, "_AUTH_DISABLED_PATH", str(tmp_path / "not_there"))
+        r = client.get("/api/auth/status")
+        assert r.json()["setup_required"] is True
+        assert client.get("/api/accounts").status_code == 401
+
+    def test_setup_with_passphrase_unlocks_and_logs_in(self, client, monkeypatch, tmp_path):
+        # set_passphrase() rebinds auth state directly, so isolate both the
+        # legacy plaintext value and the new password hash for this test.
+        monkeypatch.setattr(auth, "PASSPHRASE", None)
+        monkeypatch.setattr(auth, "PASSPHRASE_HASH", None)
+        monkeypatch.setattr(auth, "_AUTH_DISABLED_PATH", str(tmp_path / "not_there"))
+        monkeypatch.setattr(auth, "_ENV_PATH", str(tmp_path / "test.env"))
+        r = client.post("/api/auth/setup", json={"passphrase": "new-secret"})
+        assert r.status_code == 200
+        assert r.json()["auth_enabled"] is True
+        assert client.get("/api/accounts").status_code == 200  # session cookie from setup already authenticates
+
+    def test_setup_with_skip_disables_auth(self, client, monkeypatch, tmp_path):
+        monkeypatch.setattr(auth, "PASSPHRASE", None)
+        monkeypatch.setattr(auth, "PASSPHRASE_HASH", None)
+        monkeypatch.setattr(auth, "_AUTH_DISABLED_PATH", str(tmp_path / "not_there"))
+        r = client.post("/api/auth/setup", json={"skip": True})
+        assert r.status_code == 200
+        assert r.json()["auth_enabled"] is False
+        assert client.get("/api/accounts").status_code == 200
+
+    def test_setup_rejected_once_already_completed(self, client):
+        """conftest.py's fixture already marks setup as skipped, so calling
+        it again should be rejected rather than silently letting anyone
+        reset the passphrase without being logged in."""
+        r = client.post("/api/auth/setup", json={"skip": True})
+        assert r.status_code == 403
+
+    def test_status_enabled_but_not_authenticated(self, client, monkeypatch):
+        monkeypatch.setattr(auth, "PASSPHRASE", "correct-horse")
+        r = client.get("/api/auth/status")
+        data = r.json()
+        assert data["auth_enabled"] is True
+        assert data["authenticated"] is False
+
+    def test_login_wrong_passphrase_401(self, client, monkeypatch):
+        monkeypatch.setattr(auth, "PASSPHRASE", "correct-horse")
+        r = client.post("/api/auth/login", json={"passphrase": "wrong"})
+        assert r.status_code == 401
+
+    def test_login_correct_passphrase_authenticates(self, client, monkeypatch):
+        monkeypatch.setattr(auth, "PASSPHRASE", "correct-horse")
+        r = client.post("/api/auth/login", json={"passphrase": "correct-horse"})
+        assert r.status_code == 200
+        assert client.get("/api/auth/status").json()["authenticated"] is True
+
+    def test_protected_route_401_without_session_when_enabled(self, client, monkeypatch):
+        monkeypatch.setattr(auth, "PASSPHRASE", "correct-horse")
+        r = client.get("/api/accounts")
+        assert r.status_code == 401
+
+    def test_protected_route_200_after_login(self, client, monkeypatch):
+        monkeypatch.setattr(auth, "PASSPHRASE", "correct-horse")
+        client.post("/api/auth/login", json={"passphrase": "correct-horse"})
+        assert client.get("/api/accounts").status_code == 200
+
+    def test_logout_revokes_session(self, client, monkeypatch):
+        monkeypatch.setattr(auth, "PASSPHRASE", "correct-horse")
+        client.post("/api/auth/login", json={"passphrase": "correct-horse"})
+        assert client.get("/api/accounts").status_code == 200
+        client.post("/api/auth/logout")
+        assert client.get("/api/accounts").status_code == 401
+
+    def test_webauthn_register_options_requires_session(self, client, monkeypatch):
+        monkeypatch.setattr(auth, "PASSPHRASE", "correct-horse")
+        r = client.get("/api/auth/webauthn/register-options")
+        assert r.status_code == 401
+
+    def test_webauthn_register_options_after_login(self, client, monkeypatch):
+        monkeypatch.setattr(auth, "PASSPHRASE", "correct-horse")
+        client.post("/api/auth/login", json={"passphrase": "correct-horse"})
+        r = client.get("/api/auth/webauthn/register-options")
+        assert r.status_code == 200
+        assert "challenge" in r.json()
+
+    def test_webauthn_register_verify_rejects_garbage(self, client, monkeypatch):
+        monkeypatch.setattr(auth, "PASSPHRASE", "correct-horse")
+        client.post("/api/auth/login", json={"passphrase": "correct-horse"})
+        r = client.post("/api/auth/webauthn/register-verify", json={"credential": {"not": "real"}})
+        assert r.status_code == 400
+
+    def test_webauthn_login_options_400_when_not_registered(self, client):
+        r = client.get("/api/auth/webauthn/login-options")
+        assert r.status_code == 400
+
+    def test_webauthn_login_verify_rejects_garbage(self, client):
+        r = client.post("/api/auth/webauthn/login-verify", json={"credential": {"not": "real"}})
+        assert r.status_code == 401

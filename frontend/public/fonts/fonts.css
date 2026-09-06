@@ -1,0 +1,51 @@
+/* Self-hosted DM Sans / DM Serif Display — previously loaded from
+   fonts.googleapis.com/fonts.gstatic.com, which leaked the user's IP to
+   Google on every page load despite the app's "nothing leaves the Mac"
+   promise. Fetched once from Google Fonts (v17) and vendored here;
+   latin-ext subset dropped since the app is English-only. DM Sans ships
+   as a single variable-font file — one @font-face per weight, all
+   pointing at the same file, is the normal pattern for that (the browser
+   picks the named instance from the font's weight axis). */
+
+@font-face {
+  font-family: 'DM Sans';
+  font-style: normal;
+  font-weight: 300;
+  font-display: swap;
+  src: url('./dm-sans-latin-variable.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'DM Sans';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('./dm-sans-latin-variable.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'DM Sans';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url('./dm-sans-latin-variable.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'DM Sans';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url('./dm-sans-latin-variable.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'DM Serif Display';
+  font-style: italic;
+  font-weight: 400;
+  font-display: swap;
+  src: url('./dm-serif-display-latin-italic.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'DM Serif Display';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('./dm-serif-display-latin-normal.woff2') format('woff2');
+}

@@ -1,0 +1,44 @@
+name: CI
+
+# Runs on every push and PR, to every branch — this repo is private and
+# local-only, but the whole point is to catch a leak (or a calculation
+# regression) before it's ever pushed anywhere, including a future
+# fork/collaborator.
+on:
+  push:
+  pull_request:
+
+jobs:
+  secrets:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # full history so gitleaks can scan past commits too
+
+      - name: Gitleaks (generic secret scan — API keys, tokens, private keys)
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          # Required or this step fails with a confusing license-looking error
+          # even though gitleaks itself is free for public/private repo scans.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Personal-data + forbidden-file regression check
+        run: python3 scripts/check_sensitive_data.py
+
+  backend-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        working-directory: backend
+        run: pip install -r requirements-dev.txt
+
+      - name: Run backend test suite
+        working-directory: backend
+        run: pytest -v
