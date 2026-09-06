@@ -26,6 +26,7 @@ import SurplusPlan from './pages/SurplusPlan'
 import ProtectionScorecard from './pages/ProtectionScorecard'
 import AnnualReview from './pages/AnnualReview'
 import SavedScenarios from './pages/SavedScenarios'
+import BackupRestore from './pages/BackupRestore'
 import { usePrivacyMode } from './hooks/usePrivacyMode'
 import './App.css'
 
@@ -69,6 +70,7 @@ const NAV = [
   { group:'ESTATE & PLANNING' },
   { id:'estate',     label:'Estate Planning',icon:'⊙' },
   { id:'settings',   label:'Planning Inputs',icon:'≡' },
+  { id:'backup', label:'Backup & Restore', icon:'⇩' },
 ]
 
 export default function App() {
@@ -93,7 +95,7 @@ export default function App() {
   const pages = {
     dashboard:Dashboard, accounts:Accounts, retirement:RetirementProjection, stresstest:StressTestWhatIf, scenarios:SavedScenarios,
     education:Education, kids:Kids, insurance:Insurance,
-    risk:Risk, estate:Estate, settings:Settings,
+    risk:Risk, estate:Estate, settings:Settings, backup:BackupRestore,
     tax:TaxPlanning, report:Report, networth:NetWorth, roth:RothConversion, debt:Debt,
     rettools:RetirementTools, allocation:Allocation, annualplan:AnnualPlan, annualreview:AnnualReview, cashflow:CashFlow, goals:GoalsFunding, surplus:SurplusPlan, protection:ProtectionScorecard,
   }

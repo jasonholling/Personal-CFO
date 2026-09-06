@@ -1,6 +1,6 @@
 from fastapi import FastAPI, HTTPException, UploadFile, File, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response as FastAPIResponse
 from pydantic import BaseModel
 from typing import Optional, List
 import sqlite3
@@ -15,6 +15,8 @@ from db import init_db, get_db
 import auth
 
 app = FastAPI(title="Personal CFO API")
+
+_BACKUP_TABLES = ("accounts", "planning_inputs", "insurance_policies", "property_policies", "snapshots", "tasks", "cash_flow_items", "surplus_allocations", "saved_scenarios")
 
 app.add_middleware(
     CORSMiddleware,
@@ -180,6 +182,48 @@ class SurplusAllocation(BaseModel):
 class ScenarioSave(BaseModel):
     name: str
     retirement_age: int = 60
+
+@app.get("/api/backup/export")
+def export_backup():
+    """Download only Personal CFO's local planning data as portable JSON."""
+    conn = get_db()
+    payload = {"format": "personal-cfo-backup", "version": 1, "exported_at": datetime.now().isoformat(),
+               "tables": {table: [dict(r) for r in conn.execute(f"SELECT * FROM {table}").fetchall()] for table in _BACKUP_TABLES}}
+    conn.close()
+    return FastAPIResponse(content=json.dumps(payload), media_type="application/json",
+                           headers={"Content-Disposition": "attachment; filename=personal-cfo-backup.json"})
+
+@app.post("/api/backup/restore")
+async def restore_backup(file: UploadFile = File(...), confirm: bool = False):
+    """Replace app planning data only after an explicit client confirmation."""
+    if not confirm:
+        raise HTTPException(status_code=400, detail="Restore requires explicit confirmation")
+    try:
+        payload = json.loads((await file.read()).decode("utf-8"))
+        if payload.get("format") != "personal-cfo-backup" or not isinstance(payload.get("tables"), dict):
+            raise ValueError
+    except (ValueError, UnicodeDecodeError, json.JSONDecodeError):
+        raise HTTPException(status_code=400, detail="This is not a valid Personal CFO backup")
+    tables = payload["tables"]
+    if any(table not in _BACKUP_TABLES or not isinstance(rows, list) for table, rows in tables.items()):
+        raise HTTPException(status_code=400, detail="Backup contains an invalid table")
+    conn = get_db()
+    try:
+        conn.execute("BEGIN")
+        for table in _BACKUP_TABLES:
+            conn.execute(f"DELETE FROM {table}")
+        for table, rows in tables.items():
+            for row in rows:
+                if not isinstance(row, dict): raise ValueError
+                columns = [key for key in row if key.replace("_", "").isalnum()]
+                if columns:
+                    conn.execute(f"INSERT INTO {table} ({','.join(columns)}) VALUES ({','.join('?' for _ in columns)})", [row[key] for key in columns])
+        conn.commit()
+    except Exception:
+        conn.rollback(); raise HTTPException(status_code=400, detail="Backup could not be restored")
+    finally:
+        conn.close()
+    return {"ok": True}
 
 class PlanningInputs(BaseModel):
     model_config = {"extra": "allow"}
