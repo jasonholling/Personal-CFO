@@ -125,13 +125,15 @@ export default function Dashboard({ onNavigate }) {
             </div>
           )}
           {confidence && (
-            <button onClick={() => onNavigate('settings')} className="card" style={{ width:'100%', textAlign:'left', cursor:'pointer', marginBottom:24, padding:'14px 16px', border:`1px solid ${confidence.status === 'ready' ? 'rgba(52,211,153,0.30)' : 'rgba(251,191,36,0.30)'}`, background:'var(--bg2)' }}>
+            <div className="card" style={{ marginBottom:24, padding:'16px', border:`1px solid ${confidence.status === 'ready' ? 'rgba(52,211,153,0.30)' : 'rgba(251,191,36,0.30)'}`, background:'var(--bg2)' }}>
               <div style={{ display:'flex', justifyContent:'space-between', gap:12, alignItems:'center' }}>
-                <div><div className="label" style={{ marginBottom:4 }}>PLAN CONFIDENCE</div><div style={{ fontSize:14, fontWeight:650 }}>{confidence.label} <span style={{ fontWeight:400, color:'var(--text2)' }}>— evidence, not a performance prediction</span></div></div>
-                <span style={{ color:confidence.status === 'ready' ? 'var(--green)' : 'var(--amber)', fontSize:12, fontWeight:650 }}>Review inputs →</span>
+                <div><div className="label" style={{ marginBottom:4 }}>PLAN SETUP</div><div style={{ fontSize:16, fontWeight:650 }}>{confidence.status === 'ready' ? 'Your core plan inputs are ready' : `${confidence.checks.filter(check => check.status === 'attention').length} items needed to complete your plan`}</div></div>
               </div>
-              <div style={{ display:'flex', flexWrap:'wrap', gap:8, marginTop:10 }}>{confidence.checks.map(check => <span key={check.key} style={{ fontSize:11, padding:'4px 7px', borderRadius:5, background:check.status === 'ready' ? 'rgba(52,211,153,0.10)' : check.status === 'limited' ? 'rgba(79,156,249,0.10)' : 'rgba(251,191,36,0.10)', color:check.status === 'ready' ? 'var(--green)' : check.status === 'limited' ? 'var(--accent)' : 'var(--amber)' }}>{check.status === 'ready' ? '✓' : check.status === 'limited' ? 'i' : '!'} {check.label}</span>)}</div>
-            </button>
+              <div style={{ display:'flex', flexWrap:'wrap', gap:10, marginTop:14 }}>{confidence.checks.map(check => {
+                const destination = check.key === 'balances' ? 'accounts' : check.key === 'cash_flow' ? 'cashflow' : 'settings'
+                return check.status === 'attention' ? <button key={check.key} className="btn-secondary" onClick={() => onNavigate(destination)} style={{ textAlign:'left', padding:'9px 12px' }}><span style={{ color:'var(--amber)', fontWeight:700 }}>! </span><span style={{ fontWeight:650 }}>{check.label}</span><span style={{ display:'block', fontSize:11, color:'var(--text2)', marginTop:3 }}>{check.detail} →</span></button> : <span key={check.key} style={{ fontSize:12, padding:'8px 10px', borderRadius:6, background:check.status === 'ready' ? 'rgba(52,211,153,0.10)' : 'rgba(79,156,249,0.10)', color:check.status === 'ready' ? 'var(--green)' : 'var(--accent)' }}>{check.status === 'ready' ? '✓' : 'i'} {check.label}</span>
+              })}</div>
+            </div>
           )}
           {emergencyFund?.has_data && emergencyFund.status === 'underfunded' && (
             <div
