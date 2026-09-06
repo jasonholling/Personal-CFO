@@ -63,6 +63,27 @@ def generate_tasks(accounts: List[Dict], inputs: Dict, projections: Dict, educat
          "Update ages, SS estimates, salary, contribution rates in Planning Inputs.",
          "annual", "annual", f"projection_update_{CURRENT_YEAR}", CURRENT_YEAR)
 
+    # ── Tax operating calendar ───────────────────────────────────────────────
+    # These are planning prompts, not tax advice or a filing calculation. They
+    # put the decision points a household commonly misses into the same annual
+    # action plan as the rest of the financial system.
+    if inputs.get("w2_salary", 0) > 0:
+        task("financial_independence", "Review federal and state withholding",
+             "After raises, bonuses, or household income changes, compare payroll withholding with your current-year tax projection. Confirm any change with your tax professional.",
+             "annual", "annual", f"withholding_review_{CURRENT_YEAR}", CURRENT_YEAR)
+    if inputs.get("annual_rsu_value", 0) > 0:
+        task("financial_independence", "Review RSU withholding before vesting",
+             "Employer default withholding may not cover your marginal tax rate. Confirm withholding and a sale plan before the next vesting event.",
+             "calculated", "annual", f"rsu_withholding_{CURRENT_YEAR}", CURRENT_YEAR)
+    if sum(a.get("balance", 0) for a in accounts if a.get("account_type") == "taxable") > 0:
+        task("investments", "Complete year-end tax-loss and gain review",
+             "Before year-end, review taxable-account gains, losses, charitable stock gifts, and any planned concentrated-stock sales with your CPA.",
+             "annual", "annual", f"year_end_tax_review_{CURRENT_YEAR}", CURRENT_YEAR)
+    if inputs.get("annual_rsu_value", 0) > 0 or inputs.get("w2_salary", 0) > 0:
+        task("financial_independence", "Confirm quarterly-tax obligation with CPA",
+             "Use actual year-to-date withholding, investment income, and other income to confirm whether estimated payments are needed. Do not rely on a generic quarterly-payment rule.",
+             "annual", "annual", f"estimated_tax_check_{CURRENT_YEAR}", CURRENT_YEAR)
+
     # ── Calculation-triggered tasks ───────────────────────────────────────────
 
     # 529 funding gaps
