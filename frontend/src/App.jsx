@@ -23,6 +23,7 @@ import AnnualPlan from './pages/AnnualPlan'
 import CashFlow from './pages/CashFlow'
 import GoalsFunding from './pages/GoalsFunding'
 import SurplusPlan from './pages/SurplusPlan'
+import ProtectionScorecard from './pages/ProtectionScorecard'
 import { usePrivacyMode } from './hooks/usePrivacyMode'
 import './App.css'
 
@@ -60,6 +61,7 @@ const NAV = [
   { group:'PROTECTION' },
   { id:'insurance',  label:'Insurance',      icon:'⊕' },
   { id:'risk',       label:'Risk Management',icon:'⊗' },
+  { id:'protection', label:'Protection Scorecard',icon:'✓' },
   { group:'ESTATE & PLANNING' },
   { id:'estate',     label:'Estate Planning',icon:'⊙' },
   { id:'settings',   label:'Planning Inputs',icon:'≡' },
@@ -89,7 +91,7 @@ export default function App() {
     education:Education, kids:Kids, insurance:Insurance,
     risk:Risk, estate:Estate, settings:Settings,
     tax:TaxPlanning, report:Report, networth:NetWorth, roth:RothConversion, debt:Debt,
-    rettools:RetirementTools, allocation:Allocation, annualplan:AnnualPlan, cashflow:CashFlow, goals:GoalsFunding, surplus:SurplusPlan,
+    rettools:RetirementTools, allocation:Allocation, annualplan:AnnualPlan, cashflow:CashFlow, goals:GoalsFunding, surplus:SurplusPlan, protection:ProtectionScorecard,
   }
   const Page = pages[page]
 
