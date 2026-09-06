@@ -86,6 +86,7 @@ def temp_db(tmp_path, monkeypatch):
     monkeypatch.setattr(db_module, "DB_PATH", db_path)
     db_module.init_db()
     db_module.init_tasks_table()
+    db_module.init_cash_flow_table()
     yield db_path
 
 

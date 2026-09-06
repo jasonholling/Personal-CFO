@@ -9,6 +9,7 @@ from datetime import datetime
 from projection_engine import run_retirement_projection, run_education_projection
 from task_engine import sync_auto_tasks
 from cfo_briefing_engine import build_cfo_briefing
+from cash_flow_engine import summarize_cash_flow
 from quicken_importer import parse_quicken_networth_csv, get_net_worth_summary
 from db import init_db, get_db
 import auth
@@ -163,6 +164,15 @@ class Account(BaseModel):
     monthly_rental_income: float = 0    # real_estate accounts only, rental properties
     monthly_rental_expenses: float = 0  # real_estate accounts only, rental properties (taxes, insurance, maintenance, etc — not the mortgage payment, which lives on the separate mortgage liability account)
 
+class CashFlowItem(BaseModel):
+    id: Optional[int] = None
+    name: str
+    cash_flow_type: str
+    category: str = "Other"
+    amount: float = 0
+    essential: bool = False
+    notes: Optional[str] = None
+
 class PlanningInputs(BaseModel):
     model_config = {"extra": "allow"}
     person1_name: str = "Person 1"
@@ -250,6 +260,54 @@ def delete_account(account_id: int):
     conn.commit()
     conn.close()
     return {"deleted": account_id}
+
+# Monthly cash flow — recurring amounts, deliberately separate from balances.
+@app.get("/api/cash-flow")
+def get_cash_flow():
+    conn = get_db()
+    rows = [dict(r) for r in conn.execute(
+        "SELECT * FROM cash_flow_items ORDER BY cash_flow_type, category, name"
+    ).fetchall()]
+    conn.close()
+    return {"items": rows, "summary": summarize_cash_flow(rows)}
+
+@app.post("/api/cash-flow")
+def create_cash_flow_item(item: CashFlowItem):
+    if item.cash_flow_type not in ("income", "expense") or item.amount < 0 or not item.name.strip():
+        raise HTTPException(status_code=400, detail="Enter a name, income or expense type, and a non-negative amount")
+    conn = get_db()
+    cur = conn.execute(
+        "INSERT INTO cash_flow_items (name, cash_flow_type, category, amount, essential, notes) VALUES (?,?,?,?,?,?)",
+        (item.name.strip(), item.cash_flow_type, item.category.strip() or "Other", item.amount, int(item.essential), item.notes),
+    )
+    conn.commit()
+    row = conn.execute("SELECT * FROM cash_flow_items WHERE id=?", (cur.lastrowid,)).fetchone()
+    conn.close()
+    return dict(row)
+
+@app.put("/api/cash-flow/{item_id}")
+def update_cash_flow_item(item_id: int, item: CashFlowItem):
+    if item.cash_flow_type not in ("income", "expense") or item.amount < 0 or not item.name.strip():
+        raise HTTPException(status_code=400, detail="Enter a name, income or expense type, and a non-negative amount")
+    conn = get_db()
+    conn.execute(
+        "UPDATE cash_flow_items SET name=?, cash_flow_type=?, category=?, amount=?, essential=?, notes=?, updated_at=datetime('now') WHERE id=?",
+        (item.name.strip(), item.cash_flow_type, item.category.strip() or "Other", item.amount, int(item.essential), item.notes, item_id),
+    )
+    conn.commit()
+    row = conn.execute("SELECT * FROM cash_flow_items WHERE id=?", (item_id,)).fetchone()
+    conn.close()
+    if not row:
+        raise HTTPException(status_code=404, detail="Cash-flow item not found")
+    return dict(row)
+
+@app.delete("/api/cash-flow/{item_id}")
+def delete_cash_flow_item(item_id: int):
+    conn = get_db()
+    conn.execute("DELETE FROM cash_flow_items WHERE id=?", (item_id,))
+    conn.commit()
+    conn.close()
+    return {"deleted": item_id}
 
 # Debt Payoff — operates on accounts whose account_type is a debt type
 # (mortgage, credit_card, student_loan, car_loan, personal_loan)
@@ -570,6 +628,7 @@ def get_cfo_briefing():
     tasks = [dict(r) for r in conn.execute(
         "SELECT * FROM tasks WHERE completed=0 ORDER BY created_at DESC LIMIT 24"
     ).fetchall()]
+    cash_flow_items = [dict(r) for r in conn.execute("SELECT * FROM cash_flow_items").fetchall()]
     conn.close()
     inputs = dict(inputs_row) if inputs_row else {}
     try:
@@ -579,7 +638,7 @@ def get_cfo_briefing():
         # Empty or partially completed setup should still receive useful
         # data-quality guidance instead of an unusable dashboard error.
         retirement, education = {}, {}
-    return build_cfo_briefing(accounts, inputs, snapshots, tasks, retirement, education)
+    return build_cfo_briefing(accounts, inputs, snapshots, tasks, retirement, education, summarize_cash_flow(cash_flow_items))
 
 @app.get("/api/rental/analysis")
 def get_rental_analysis():

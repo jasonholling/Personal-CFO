@@ -20,6 +20,7 @@ import Debt from './pages/Debt'
 import RetirementTools from './pages/RetirementTools'
 import Allocation from './pages/Allocation'
 import AnnualPlan from './pages/AnnualPlan'
+import CashFlow from './pages/CashFlow'
 import { usePrivacyMode } from './hooks/usePrivacyMode'
 import './App.css'
 
@@ -35,6 +36,7 @@ const NAV = [
   { id:'accounts',   label:'Accounts',       icon:'⊞' },
   { id:'networth',   label:'Net Worth',      icon:'◬' },
   { id:'debt',       label:'Debt Payoff',    icon:'⊝' },
+  { id:'cashflow',   label:'Monthly Cash Flow', icon:'≋' },
   { id:'annualplan', label:'Annual Action Plan', icon:'✓' },
   { group:'RETIREMENT' },
   { id:'retirement', label:'Retirement Projection', icon:'◎' },
@@ -83,7 +85,7 @@ export default function App() {
     education:Education, kids:Kids, insurance:Insurance,
     risk:Risk, estate:Estate, settings:Settings,
     tax:TaxPlanning, report:Report, networth:NetWorth, roth:RothConversion, debt:Debt,
-    rettools:RetirementTools, allocation:Allocation, annualplan:AnnualPlan,
+    rettools:RetirementTools, allocation:Allocation, annualplan:AnnualPlan, cashflow:CashFlow,
   }
   const Page = pages[page]
 

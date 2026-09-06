@@ -224,3 +224,23 @@ def init_tasks_table():
     conn.close()
 
 init_tasks_table()
+
+def init_cash_flow_table():
+    conn = get_db()
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS cash_flow_items (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            cash_flow_type TEXT NOT NULL CHECK (cash_flow_type IN ('income', 'expense')),
+            category TEXT NOT NULL DEFAULT 'Other',
+            amount REAL NOT NULL DEFAULT 0 CHECK (amount >= 0),
+            essential INTEGER NOT NULL DEFAULT 0 CHECK (essential IN (0, 1)),
+            notes TEXT,
+            created_at TEXT DEFAULT (datetime('now')),
+            updated_at TEXT DEFAULT (datetime('now'))
+        );
+    """)
+    conn.commit()
+    conn.close()
+
+init_cash_flow_table()

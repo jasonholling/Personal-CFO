@@ -5,13 +5,13 @@ only prioritizes the household's existing inputs, calculations, and open tasks
 into a compact agenda for the dashboard.
 """
 from datetime import datetime, timezone
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from debt_engine import DEBT_TYPES
 from net_worth_engine import compute_net_worth, emergency_fund_check
 
 
-def _age_in_days(timestamp: str | None) -> int | None:
+def _age_in_days(timestamp: Optional[str]) -> Optional[int]:
     if not timestamp:
         return None
     try:
@@ -25,7 +25,7 @@ def _age_in_days(timestamp: str | None) -> int | None:
 
 def build_cfo_briefing(
     accounts: List[Dict], inputs: Dict, snapshots: List[Dict], tasks: List[Dict],
-    retirement: Dict | None = None, education: Dict | None = None,
+    retirement: Optional[Dict] = None, education: Optional[Dict] = None, cash_flow: Optional[Dict] = None,
 ) -> Dict:
     """Return a transparent, ranked household agenda.
 
@@ -44,6 +44,11 @@ def build_cfo_briefing(
 
     if not accounts:
         add(1, "Build your household balance sheet", "Add checking, investment, real-estate, and debt balances so every recommendation is based on current data.", "accounts")
+
+    if not cash_flow or not cash_flow.get("has_data"):
+        add(2, "Build your monthly cash-flow plan", "Add recurring take-home income and spending so the plan can measure what is available for goals each month.", "cashflow")
+    elif cash_flow.get("status") == "shortfall":
+        add(1, "Resolve the monthly cash-flow shortfall", "Monthly spending is higher than take-home income. Stabilize that gap before adding to long-term investments or optional goals.", "cashflow", abs(cash_flow.get("monthly_surplus", 0)))
 
     if emergency.get("has_data") and emergency.get("status") == "underfunded":
         add(1, "Fund the emergency reserve first", f"Liquid cash covers {emergency['months_covered']:.1f} months of expenses; the minimum target is {emergency['target_min_months']} months.", "settings", emergency["gap_to_min"])
@@ -78,6 +83,7 @@ def build_cfo_briefing(
     return {
         "net_worth": round(net_worth["net_worth"]),
         "emergency_fund": emergency,
+        "cash_flow": cash_flow or {"has_data": False, "status": "not_started"},
         "priorities": sorted(priorities, key=lambda item: item["priority"])[:5],
         "open_tasks": open_tasks[:8],
         "data_health": {

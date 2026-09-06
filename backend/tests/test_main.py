@@ -147,6 +147,30 @@ class TestCfoBriefing:
         assert body["data_health"]["account_count"] == len(sample_accounts)
 
 
+class TestCashFlow:
+    def test_create_list_update_and_delete_cash_flow_item(self, client):
+        created = client.post("/api/cash-flow", json={
+            "name": "Test take-home pay", "cash_flow_type": "income", "category": "Salary", "amount": 8000,
+        })
+        assert created.status_code == 200
+        item = created.json()
+        summary = client.get("/api/cash-flow").json()["summary"]
+        assert summary["monthly_income"] == 8000
+
+        updated = client.put(f"/api/cash-flow/{item['id']}", json={
+            "name": "Test take-home pay", "cash_flow_type": "income", "category": "Salary", "amount": 8200,
+        })
+        assert updated.json()["amount"] == 8200
+        assert client.delete(f"/api/cash-flow/{item['id']}").status_code == 200
+
+    def test_cash_flow_shortfall_reaches_cfo_briefing(self, client):
+        client.post("/api/cash-flow", json={"name":"Income", "cash_flow_type":"income", "amount":4000})
+        client.post("/api/cash-flow", json={"name":"Bills", "cash_flow_type":"expense", "amount":5000, "essential":True})
+        briefing = client.get("/api/cfo-briefing").json()
+        assert briefing["cash_flow"]["status"] == "shortfall"
+        assert any(item["destination"] == "cashflow" for item in briefing["priorities"])
+
+
 class TestProjectionsRequirePlanningInputs:
     def test_retirement_projection_200_with_default_row(self, client):
         # db.init_db() always seeds a planning_inputs row (id=1) with zeroed
