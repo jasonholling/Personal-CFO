@@ -83,7 +83,7 @@ export default function TaskPanel({ section }) {
           cursor: 'pointer', transition: 'all 0.15s', flexShrink: 0,
         }}
       >
-        {task.completed && <span style={{ color: '#fff', fontSize: 11, fontWeight: 700 }}>✓</span>}
+        {!!task.completed && <span style={{ color: '#fff', fontSize: 11, fontWeight: 700 }}>✓</span>}
       </button>
 
       <div style={{ flex: 1 }}>
@@ -112,7 +112,7 @@ export default function TaskPanel({ section }) {
             {task.description}
           </div>
         )}
-        {task.completed && task.completed_date && (
+        {!!task.completed && task.completed_date && (
           <div style={{ fontSize: 11, color: 'var(--text3)', marginTop: 3 }}>
             Completed {new Date(task.completed_date).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
           </div>
