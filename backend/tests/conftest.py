@@ -13,13 +13,19 @@ imported anywhere in the test session, which is why it happens at the very
 top of this file — pytest always loads conftest.py before collecting any
 test_*.py module in the same directory.
 
-Same reasoning for APP_PASSPHRASE: auth.py loads backend/.env at import
-time. If you've set a real passphrase there, forcing it empty here (before
-`main`/`auth` import) keeps the auth middleware off during tests — auth.py
-only loads a key from .env if it isn't already in os.environ, so this wins.
-Without this, every TestClient call in the suite would need a session
-cookie, and pytest would start failing the moment you configure the app
-lock for real, for reasons that have nothing to do with the code changed.
+Same reasoning for APP_PASSPHRASE/APP_PASSPHRASE_HASH: auth.py loads
+backend/.env at import time. If you've set a real passphrase there (either
+the plaintext APP_PASSPHRASE fallback or, after completing setup through
+the running app, the persisted APP_PASSPHRASE_HASH), forcing both empty
+here (before `main`/`auth` import) keeps the auth middleware off during
+tests — auth.py only loads a key from .env if it isn't already in
+os.environ, so this wins. Without this, every TestClient call in the suite
+would need a session cookie, and pytest would start failing the moment you
+configure the app lock for real, for reasons that have nothing to do with
+the code changed. (APP_PASSPHRASE_HASH was missing from this override
+until 2026-09-06 — it only surfaced once a real passphrase had actually
+been set up through the running app, silently failing every auth-dependent
+test in the suite until then.)
 """
 import os
 import tempfile
@@ -28,6 +34,7 @@ from pathlib import Path
 _TEST_DB_DIR = tempfile.mkdtemp(prefix="personal_cfo_test_")
 os.environ["CFO_DB_PATH"] = str(Path(_TEST_DB_DIR) / "conftest_import_time.db")
 os.environ["APP_PASSPHRASE"] = ""
+os.environ["APP_PASSPHRASE_HASH"] = ""
 
 import sys
 

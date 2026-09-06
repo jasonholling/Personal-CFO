@@ -439,7 +439,8 @@ def save_scenario(body: ScenarioSave):
     conn=get_db(); inputs=conn.execute("SELECT * FROM planning_inputs WHERE id=1").fetchone(); accounts=[dict(r) for r in conn.execute("SELECT * FROM accounts").fetchall()]
     if not inputs: conn.close(); raise HTTPException(status_code=400,detail="Planning inputs not set")
     life_events=_get_active_life_events(conn)
-    result=run_retirement_projection(dict(inputs),accounts,ret_ages=[body.retirement_age],life_events=life_events); scenario=next((s for s in result["scenarios"] if s["ss_timing"]=="early"),None)
+    surplus_allocations=_get_relevant_surplus_allocations(conn)
+    result=run_retirement_projection(dict(inputs),accounts,ret_ages=[body.retirement_age],life_events=life_events,surplus_allocations=surplus_allocations); scenario=next((s for s in result["scenarios"] if s["ss_timing"]=="early"),None)
     summary={k:scenario[k] for k in ("retirement_age","percent_funded","portfolio_at_retirement","projected_surplus","on_track")}
     conn.execute("INSERT INTO saved_scenarios (name,retirement_age,summary_json) VALUES (?,?,?) ON CONFLICT(name) DO UPDATE SET retirement_age=excluded.retirement_age,summary_json=excluded.summary_json,created_at=datetime('now')",(body.name.strip(),body.retirement_age,json.dumps(summary)));conn.commit();conn.close();return summary
 
@@ -460,6 +461,20 @@ def _get_active_life_events(conn) -> List[dict]:
     flag; only the actual projection/simulation endpoints filter here."""
     return [dict(r) for r in conn.execute(
         "SELECT * FROM life_events WHERE included_in_projection=1 ORDER BY event_year, id"
+    ).fetchall()]
+
+def _get_relevant_surplus_allocations(conn) -> List[dict]:
+    """Rows from surplus_allocations for the two goals that represent
+    money actually invested toward retirement — "Retirement contributions"
+    and "Taxable investing" (see projection_engine.py's module-level
+    comment for why the other five fixed goals are excluded). Filtered here
+    at the query rather than trusting projection_engine.py alone to filter,
+    same defense-in-depth spirit as _get_active_life_events above. Fed into
+    run_retirement_projection()/simulation_engine.py alongside life_events.
+    GET /api/surplus-allocations (above) still returns every row regardless
+    — this helper only feeds the real projection/simulation math."""
+    return [dict(r) for r in conn.execute(
+        "SELECT * FROM surplus_allocations WHERE goal IN ('Retirement contributions', 'Taxable investing')"
     ).fetchall()]
 
 @app.get("/api/life-events")
@@ -548,8 +563,8 @@ def create_assumption_review(body: AssumptionReview):
 @app.get("/api/financial-runway")
 def financial_runway():
     from net_worth_engine import compute_net_worth, emergency_fund_check
-    conn=get_db(); inputs_row=conn.execute("SELECT * FROM planning_inputs WHERE id=1").fetchone(); accounts=[dict(r) for r in conn.execute("SELECT * FROM accounts").fetchall()]; cash=[dict(r) for r in conn.execute("SELECT * FROM cash_flow_items").fetchall()]; life_events=_get_active_life_events(conn); conn.close()
-    inputs=dict(inputs_row) if inputs_row else {}; retirement=run_retirement_projection(inputs,accounts,ret_ages=[60],life_events=life_events) if inputs else {"scenarios":[]}; age60=next((s for s in retirement["scenarios"] if s["label"]=="age_60_early"),{}); emergency=emergency_fund_check(accounts,inputs.get("current_monthly_expenses",0)); networth=compute_net_worth(accounts); flow=summarize_cash_flow(cash)
+    conn=get_db(); inputs_row=conn.execute("SELECT * FROM planning_inputs WHERE id=1").fetchone(); accounts=[dict(r) for r in conn.execute("SELECT * FROM accounts").fetchall()]; cash=[dict(r) for r in conn.execute("SELECT * FROM cash_flow_items").fetchall()]; life_events=_get_active_life_events(conn); surplus_allocations=_get_relevant_surplus_allocations(conn); conn.close()
+    inputs=dict(inputs_row) if inputs_row else {}; retirement=run_retirement_projection(inputs,accounts,ret_ages=[60],life_events=life_events,surplus_allocations=surplus_allocations) if inputs else {"scenarios":[]}; age60=next((s for s in retirement["scenarios"] if s["label"]=="age_60_early"),{}); emergency=emergency_fund_check(accounts,inputs.get("current_monthly_expenses",0)); networth=compute_net_worth(accounts); flow=summarize_cash_flow(cash)
     return {"net_worth":round(networth["net_worth"]),"emergency":emergency,"cash_flow":flow,"retirement":{"percent_funded":age60.get("percent_funded"),"projected_surplus":age60.get("projected_surplus"),"retirement_age":60},"account_count":len(accounts)}
 
 @app.get("/api/calendar/export")
@@ -886,10 +901,11 @@ def get_cfo_briefing():
     ).fetchall()]
     cash_flow_items = [dict(r) for r in conn.execute("SELECT * FROM cash_flow_items").fetchall()]
     life_events = _get_active_life_events(conn)
+    surplus_allocations = _get_relevant_surplus_allocations(conn)
     conn.close()
     inputs = dict(inputs_row) if inputs_row else {}
     try:
-        retirement = run_retirement_projection(inputs, accounts, ret_ages=[60], life_events=life_events)
+        retirement = run_retirement_projection(inputs, accounts, ret_ages=[60], life_events=life_events, surplus_allocations=surplus_allocations)
         education = run_education_projection(inputs, accounts)
     except (KeyError, ValueError, ZeroDivisionError):
         # Empty or partially completed setup should still receive useful
@@ -917,6 +933,7 @@ def get_retirement_projections():
     inputs_row = conn.execute("SELECT * FROM planning_inputs WHERE id=1").fetchone()
     accounts   = [dict(r) for r in conn.execute("SELECT * FROM accounts").fetchall()]
     life_events = _get_active_life_events(conn)
+    surplus_allocations = _get_relevant_surplus_allocations(conn)
     conn.close()
     if not inputs_row:
         raise HTTPException(status_code=400, detail="Planning inputs not set yet")
@@ -926,7 +943,7 @@ def get_retirement_projections():
     # WhatIf.jsx's baseline for its full 55-67 slider, where a narrower
     # range here silently broke the "Impact on Retire at X" comparison
     # for any age outside the original [55,56,57,58,59,60,65] set.
-    return run_retirement_projection(dict(inputs_row), accounts, ret_ages=list(range(55, 68)), life_events=life_events)
+    return run_retirement_projection(dict(inputs_row), accounts, ret_ages=list(range(55, 68)), life_events=life_events, surplus_allocations=surplus_allocations)
 
 @app.get("/api/projections/education")
 def get_education_projections(continue_contributions_during_college: bool = False):
@@ -1073,12 +1090,13 @@ def sync_tasks():
     inputs_row = conn.execute("SELECT * FROM planning_inputs WHERE id=1").fetchone()
     accounts   = [dict(r) for r in conn.execute("SELECT * FROM accounts").fetchall()]
     life_events = _get_active_life_events(conn)
+    surplus_allocations = _get_relevant_surplus_allocations(conn)
     conn.close()
     if not inputs_row:
         return {"inserted": 0, "message": "No planning inputs yet"}
     inputs = dict(inputs_row)
     try:
-        projections = run_retirement_projection(inputs, accounts, life_events=life_events)
+        projections = run_retirement_projection(inputs, accounts, life_events=life_events, surplus_allocations=surplus_allocations)
         education   = run_education_projection(inputs, accounts)
     except Exception:
         projections = {}
@@ -1118,6 +1136,7 @@ def generate_annual_report():
     inputs_row = conn.execute("SELECT * FROM planning_inputs WHERE id=1").fetchone()
     accounts   = [dict(r) for r in conn.execute("SELECT * FROM accounts").fetchall()]
     life_events = _get_active_life_events(conn)
+    surplus_allocations = _get_relevant_surplus_allocations(conn)
     conn.close()
 
     if not inputs_row:
@@ -1138,7 +1157,7 @@ def generate_annual_report():
 
     data = {
         "net_worth":  nw,
-        "retirement": run_retirement_projection(inputs, accounts, life_events=life_events),
+        "retirement": run_retirement_projection(inputs, accounts, life_events=life_events, surplus_allocations=surplus_allocations),
         "education":  run_education_projection(inputs, accounts),
         "kids":       run_kids_projection(accounts, inputs),
         "insurance":  run_insurance_analysis(inputs, accounts),
@@ -1166,11 +1185,12 @@ def get_monte_carlo(ret_age: int = 60, ss_timing: str = "early"):
     inputs_row = conn.execute("SELECT * FROM planning_inputs WHERE id=1").fetchone()
     accounts   = [dict(r) for r in conn.execute("SELECT * FROM accounts").fetchall()]
     life_events = _get_active_life_events(conn)
+    surplus_allocations = _get_relevant_surplus_allocations(conn)
     conn.close()
     if not inputs_row:
         raise HTTPException(status_code=400, detail="Planning inputs not set yet")
     from simulation_engine import run_monte_carlo
-    return run_monte_carlo(dict(inputs_row), accounts, ret_age, ss_timing, life_events=life_events)
+    return run_monte_carlo(dict(inputs_row), accounts, ret_age, ss_timing, life_events=life_events, surplus_allocations=surplus_allocations)
 
 @app.post("/api/projections/whatif")
 def get_whatif(body: dict):
@@ -1179,6 +1199,7 @@ def get_whatif(body: dict):
     inputs_row = conn.execute("SELECT * FROM planning_inputs ORDER BY id DESC LIMIT 1").fetchone()
     accounts   = [dict(r) for r in conn.execute("SELECT * FROM accounts").fetchall()]
     life_events = _get_active_life_events(conn)
+    surplus_allocations = _get_relevant_surplus_allocations(conn)
     conn.close()
     if not inputs_row: return {"error": "No planning inputs found"}
 
@@ -1215,7 +1236,7 @@ def get_whatif(body: dict):
     # age (the reported "nothing appears" bug, same root cause as the
     # Monte Carlo income-sources gap fixed alongside this).
     ret_ages = sorted({55, 60, 65, ret_age})
-    return run_retirement_projection(inputs, accounts, ret_ages=ret_ages, salary_growth_pct=salary_growth_pct, life_events=life_events)
+    return run_retirement_projection(inputs, accounts, ret_ages=ret_ages, salary_growth_pct=salary_growth_pct, life_events=life_events, surplus_allocations=surplus_allocations)
 
 @app.get("/api/simulation/swr-batch")
 def get_swr_batch():
@@ -1224,13 +1245,14 @@ def get_swr_batch():
     inputs_row = conn.execute("SELECT * FROM planning_inputs ORDER BY id DESC LIMIT 1").fetchone()
     accounts   = [dict(r) for r in conn.execute("SELECT * FROM accounts").fetchall()]
     life_events = _get_active_life_events(conn)
+    surplus_allocations = _get_relevant_surplus_allocations(conn)
     conn.close()
     if not inputs_row: return {"error": "No planning inputs found"}
     from simulation_engine import run_swr_analysis
     results = {}
     for ret_age in range(55, 68):
         try:
-            r = run_swr_analysis(dict(inputs_row), accounts, ret_age=ret_age, ss_timing="early", life_events=life_events)
+            r = run_swr_analysis(dict(inputs_row), accounts, ret_age=ret_age, ss_timing="early", life_events=life_events, surplus_allocations=surplus_allocations)
             results[ret_age] = r
         except Exception as e:
             results[ret_age] = {"error": str(e)}
@@ -1250,6 +1272,7 @@ def get_retirement_sensitivity():
     inputs_row = conn.execute("SELECT * FROM planning_inputs ORDER BY id DESC LIMIT 1").fetchone()
     accounts   = [dict(r) for r in conn.execute("SELECT * FROM accounts").fetchall()]
     life_events = _get_active_life_events(conn)
+    surplus_allocations = _get_relevant_surplus_allocations(conn)
     conn.close()
     if not inputs_row: return {"error": "No planning inputs found"}
 
@@ -1257,7 +1280,7 @@ def get_retirement_sensitivity():
 
     inputs = dict(inputs_row)
     jason_age = inputs["jason_age"]
-    proj = run_retirement_projection(inputs, accounts, ret_ages=list(range(55, 68)), life_events=life_events)
+    proj = run_retirement_projection(inputs, accounts, ret_ages=list(range(55, 68)), life_events=life_events, surplus_allocations=surplus_allocations)
 
     # This page has no early/delayed SS toggle (unlike Retirement.jsx), so we
     # show the "early" scenario at every age — same assumption the old code
@@ -1283,6 +1306,7 @@ def get_income_sources(ret_age: int = 60, ss_timing: str = "early"):
     inputs_row = conn.execute("SELECT * FROM planning_inputs ORDER BY id DESC LIMIT 1").fetchone()
     accounts   = [dict(r) for r in conn.execute("SELECT * FROM accounts").fetchall()]
     life_events = _get_active_life_events(conn)
+    surplus_allocations = _get_relevant_surplus_allocations(conn)
     conn.close()
     if not inputs_row: return {"error": "No planning inputs found"}
     from projection_engine import run_retirement_projection
@@ -1290,7 +1314,7 @@ def get_income_sources(ret_age: int = 60, ss_timing: str = "early"):
     # explicitly, since the Monte Carlo/Historical Stress tabs now offer
     # the full 55-67 range and any age outside the default 3 would
     # otherwise silently compute nothing, leaving this chart empty.
-    result = run_retirement_projection(dict(inputs_row), accounts, ret_ages=[ret_age], life_events=life_events)
+    result = run_retirement_projection(dict(inputs_row), accounts, ret_ages=[ret_age], life_events=life_events, surplus_allocations=surplus_allocations)
     scenario = next((s for s in result["scenarios"] if s["label"] == f"age_{ret_age}_{ss_timing}"), None)
     if not scenario: return {"error": "Scenario not found"}
     # Return simplified chart data
@@ -1312,10 +1336,11 @@ def get_tax_efficiency(ret_age: int = 60, ss_timing: str = "early"):
     inputs_row = conn.execute("SELECT * FROM planning_inputs ORDER BY id DESC LIMIT 1").fetchone()
     accounts   = [dict(r) for r in conn.execute("SELECT * FROM accounts").fetchall()]
     life_events = _get_active_life_events(conn)
+    surplus_allocations = _get_relevant_surplus_allocations(conn)
     conn.close()
     if not inputs_row: return {"error": "No planning inputs found"}
     from simulation_engine import run_tax_efficiency_simulation
-    return run_tax_efficiency_simulation(dict(inputs_row), accounts, ret_age, ss_timing, life_events=life_events)
+    return run_tax_efficiency_simulation(dict(inputs_row), accounts, ret_age, ss_timing, life_events=life_events, surplus_allocations=surplus_allocations)
 
 @app.get("/api/simulation/contribution-sensitivity")
 def get_contribution_sensitivity(ret_age: int = 60):
@@ -1323,10 +1348,11 @@ def get_contribution_sensitivity(ret_age: int = 60):
     inputs_row = conn.execute("SELECT * FROM planning_inputs ORDER BY id DESC LIMIT 1").fetchone()
     accounts   = [dict(r) for r in conn.execute("SELECT * FROM accounts").fetchall()]
     life_events = _get_active_life_events(conn)
+    surplus_allocations = _get_relevant_surplus_allocations(conn)
     conn.close()
     if not inputs_row: return {"error": "No planning inputs found"}
     from simulation_engine import run_contribution_sensitivity
-    return run_contribution_sensitivity(dict(inputs_row), accounts, ret_age, life_events=life_events)
+    return run_contribution_sensitivity(dict(inputs_row), accounts, ret_age, life_events=life_events, surplus_allocations=surplus_allocations)
 
 @app.get("/api/simulation/survivor-scenario")
 def get_survivor_scenario(ret_age: int = 60, deceased: str = "jason", death_age: int = None,
@@ -1335,11 +1361,12 @@ def get_survivor_scenario(ret_age: int = 60, deceased: str = "jason", death_age:
     inputs_row = conn.execute("SELECT * FROM planning_inputs WHERE id=1").fetchone()
     accounts   = [dict(r) for r in conn.execute("SELECT * FROM accounts").fetchall()]
     life_events = _get_active_life_events(conn)
+    surplus_allocations = _get_relevant_surplus_allocations(conn)
     conn.close()
     if not inputs_row:
         raise HTTPException(status_code=400, detail="Planning inputs not set yet")
     from simulation_engine import run_survivor_scenario
-    return run_survivor_scenario(dict(inputs_row), accounts, ret_age, deceased, death_age, survivor_need_factor, life_events=life_events)
+    return run_survivor_scenario(dict(inputs_row), accounts, ret_age, deceased, death_age, survivor_need_factor, life_events=life_events, surplus_allocations=surplus_allocations)
 
 @app.get("/api/simulation/sequence-risk")
 def get_sequence_risk(ret_age: int = 55, ss_timing: str = "early"):
@@ -1347,10 +1374,11 @@ def get_sequence_risk(ret_age: int = 55, ss_timing: str = "early"):
     inputs_row = conn.execute("SELECT * FROM planning_inputs ORDER BY id DESC LIMIT 1").fetchone()
     accounts   = [dict(r) for r in conn.execute("SELECT * FROM accounts").fetchall()]
     life_events = _get_active_life_events(conn)
+    surplus_allocations = _get_relevant_surplus_allocations(conn)
     conn.close()
     if not inputs_row: return {"error": "No planning inputs found"}
     from simulation_engine import run_stress_tests
-    result = run_stress_tests(dict(inputs_row), accounts, ret_age, ss_timing, life_events=life_events)
+    result = run_stress_tests(dict(inputs_row), accounts, ret_age, ss_timing, life_events=life_events, surplus_allocations=surplus_allocations)
     # Return only the new scenarios
     return {
         "early_sequence":  result["scenarios"].get("early_sequence"),
@@ -1365,10 +1393,11 @@ def get_roth_conversion(ret_age: int = 60, ss_timing: str = "early"):
     inputs_row = conn.execute("SELECT * FROM planning_inputs ORDER BY id DESC LIMIT 1").fetchone()
     accounts   = [dict(r) for r in conn.execute("SELECT * FROM accounts").fetchall()]
     life_events = _get_active_life_events(conn)
+    surplus_allocations = _get_relevant_surplus_allocations(conn)
     conn.close()
     if not inputs_row: return {"error": "No planning inputs found"}
     from simulation_engine import run_roth_conversion_analysis
-    return run_roth_conversion_analysis(dict(inputs_row), accounts, ret_age, ss_timing, life_events=life_events)
+    return run_roth_conversion_analysis(dict(inputs_row), accounts, ret_age, ss_timing, life_events=life_events, surplus_allocations=surplus_allocations)
 
 @app.get("/api/simulation/swr")
 def get_swr(ret_age: int = 60, ss_timing: str = "early"):
@@ -1376,10 +1405,11 @@ def get_swr(ret_age: int = 60, ss_timing: str = "early"):
     inputs_row = conn.execute("SELECT * FROM planning_inputs ORDER BY id DESC LIMIT 1").fetchone()
     accounts   = [dict(r) for r in conn.execute("SELECT * FROM accounts").fetchall()]
     life_events = _get_active_life_events(conn)
+    surplus_allocations = _get_relevant_surplus_allocations(conn)
     conn.close()
     if not inputs_row: return {"error": "No planning inputs found"}
     from simulation_engine import run_swr_analysis
-    return run_swr_analysis(dict(inputs_row), accounts, ret_age, ss_timing, life_events=life_events)
+    return run_swr_analysis(dict(inputs_row), accounts, ret_age, ss_timing, life_events=life_events, surplus_allocations=surplus_allocations)
 
 @app.get("/api/simulation/stress-tests")
 def get_stress_tests(ret_age: int = 60, ss_timing: str = "early"):
@@ -1387,8 +1417,9 @@ def get_stress_tests(ret_age: int = 60, ss_timing: str = "early"):
     inputs_row = conn.execute("SELECT * FROM planning_inputs WHERE id=1").fetchone()
     accounts   = [dict(r) for r in conn.execute("SELECT * FROM accounts").fetchall()]
     life_events = _get_active_life_events(conn)
+    surplus_allocations = _get_relevant_surplus_allocations(conn)
     conn.close()
     if not inputs_row:
         raise HTTPException(status_code=400, detail="Planning inputs not set yet")
     from simulation_engine import run_stress_tests
-    return run_stress_tests(dict(inputs_row), accounts, ret_age, ss_timing, life_events=life_events)
+    return run_stress_tests(dict(inputs_row), accounts, ret_age, ss_timing, life_events=life_events, surplus_allocations=surplus_allocations)

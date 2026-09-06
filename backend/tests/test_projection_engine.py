@@ -361,6 +361,126 @@ class TestLifeEventsInRetirementProjection:
             assert w["portfolio_at_retirement"] > b["portfolio_at_retirement"], age
 
 
+class TestSurplusAllocationsInRetirementProjection:
+    """surplus_allocations (from the "Assign Surplus" page's
+    surplus_allocations table) are wired into the real projection as a
+    pre-retirement-only ongoing monthly contribution — unlike life_events,
+    there is deliberately no post-retirement half at all."""
+
+    def test_default_no_allocations_is_unchanged(self, sample_inputs, sample_accounts):
+        no_kwarg       = run_retirement_projection(sample_inputs, sample_accounts, ret_ages=[60])
+        explicit_none  = run_retirement_projection(sample_inputs, sample_accounts, ret_ages=[60], surplus_allocations=None)
+        explicit_empty = run_retirement_projection(sample_inputs, sample_accounts, ret_ages=[60], surplus_allocations=[])
+        a = next(s for s in no_kwarg["scenarios"] if s["ss_timing"] == "early")
+        b = next(s for s in explicit_none["scenarios"] if s["ss_timing"] == "early")
+        c = next(s for s in explicit_empty["scenarios"] if s["ss_timing"] == "early")
+        assert a["portfolio_at_retirement"] == b["portfolio_at_retirement"] == c["portfolio_at_retirement"]
+
+    def test_retirement_contributions_split_pretax_roth_using_existing_ratio(self, sample_inputs, sample_accounts):
+        """jason_age=50, ret_age=60 => years_to_retire=10. $500/mo should
+        compound as a monthly annuity for 10 years, then split pretax/roth
+        using the SAME pretax_401k_pct (0.75 in the fixture) used elsewhere
+        in run_retirement_projection for the existing 401k contributions."""
+        pre_ret = sample_inputs["expected_return_pre_retirement"]
+        pretax_pct = sample_inputs["pretax_401k_pct"]
+        allocations = [{"goal": "Retirement contributions", "monthly_amount": 500}]
+        baseline   = run_retirement_projection(sample_inputs, sample_accounts, ret_ages=[60])
+        with_alloc = run_retirement_projection(sample_inputs, sample_accounts, ret_ages=[60], surplus_allocations=allocations)
+        b = next(s for s in baseline["scenarios"] if s["ss_timing"] == "early")
+        w = next(s for s in with_alloc["scenarios"] if s["ss_timing"] == "early")
+
+        mr = pre_ret / 12
+        months = 10 * 12
+        expected_fv = 500 * (((1 + mr) ** months - 1) / mr)
+
+        # abs=2 rather than a tight rel tolerance: pretax/roth_at_retirement
+        # are each independently round()-ed to whole dollars by the engine
+        # before this delta is taken, so up to ~$1 of rounding error can
+        # show up on each side of the subtraction.
+        pretax_delta = w["pretax_at_retirement"] - b["pretax_at_retirement"]
+        roth_delta   = w["roth_at_retirement"]   - b["roth_at_retirement"]
+        assert pretax_delta == pytest.approx(expected_fv * pretax_pct, abs=2)
+        assert roth_delta   == pytest.approx(expected_fv * (1 - pretax_pct), abs=2)
+        # Taxable/hsa untouched by this goal.
+        assert w["taxable_at_retirement"] == b["taxable_at_retirement"]
+        # Portfolio total reflects exactly the combined pretax+roth delta.
+        assert (w["portfolio_at_retirement"] - b["portfolio_at_retirement"]) == pytest.approx(expected_fv, abs=2)
+
+    def test_taxable_investing_compounds_into_taxable_bucket(self, sample_inputs, sample_accounts):
+        pre_ret = sample_inputs["expected_return_pre_retirement"]
+        allocations = [{"goal": "Taxable investing", "monthly_amount": 300}]
+        baseline   = run_retirement_projection(sample_inputs, sample_accounts, ret_ages=[60])
+        with_alloc = run_retirement_projection(sample_inputs, sample_accounts, ret_ages=[60], surplus_allocations=allocations)
+        b = next(s for s in baseline["scenarios"] if s["ss_timing"] == "early")
+        w = next(s for s in with_alloc["scenarios"] if s["ss_timing"] == "early")
+
+        mr = pre_ret / 12
+        months = 10 * 12
+        expected_fv = 300 * (((1 + mr) ** months - 1) / mr)
+
+        # abs=2, not a tight rel tolerance -- see comment on the sibling
+        # pretax/roth test above re: whole-dollar round()ing on each side.
+        assert (w["taxable_at_retirement"] - b["taxable_at_retirement"]) == pytest.approx(expected_fv, abs=2)
+        assert w["pretax_at_retirement"] == b["pretax_at_retirement"]
+        assert w["roth_at_retirement"]   == b["roth_at_retirement"]
+
+    @pytest.mark.parametrize("goal", [
+        "Emergency reserve", "High-interest debt payoff", "Education funding",
+        "Tax reserve", "Other goal",
+    ])
+    def test_non_retirement_goals_have_zero_effect(self, sample_inputs, sample_accounts, goal):
+        """Regression guard for the deliberate exclusion of the other five
+        fixed goals — a nonzero monthly_amount on any of them must not move
+        the projection at all, even though the row is passed in."""
+        allocations = [{"goal": goal, "monthly_amount": 1000}]
+        baseline   = run_retirement_projection(sample_inputs, sample_accounts, ret_ages=[60])
+        with_alloc = run_retirement_projection(sample_inputs, sample_accounts, ret_ages=[60], surplus_allocations=allocations)
+        b = next(s for s in baseline["scenarios"] if s["ss_timing"] == "early")
+        w = next(s for s in with_alloc["scenarios"] if s["ss_timing"] == "early")
+        assert w["portfolio_at_retirement"] == b["portfolio_at_retirement"]
+        assert w["pretax_at_retirement"]  == b["pretax_at_retirement"]
+        assert w["roth_at_retirement"]    == b["roth_at_retirement"]
+        assert w["taxable_at_retirement"] == b["taxable_at_retirement"]
+
+    def test_zero_and_negative_monthly_amount_have_no_effect(self, sample_inputs, sample_accounts):
+        allocations = [
+            {"goal": "Retirement contributions", "monthly_amount": 0},
+            {"goal": "Taxable investing", "monthly_amount": -100},
+        ]
+        baseline   = run_retirement_projection(sample_inputs, sample_accounts, ret_ages=[60])
+        with_alloc = run_retirement_projection(sample_inputs, sample_accounts, ret_ages=[60], surplus_allocations=allocations)
+        b = next(s for s in baseline["scenarios"] if s["ss_timing"] == "early")
+        w = next(s for s in with_alloc["scenarios"] if s["ss_timing"] == "early")
+        assert w["portfolio_at_retirement"] == b["portfolio_at_retirement"]
+
+    def test_no_post_retirement_effect(self, sample_inputs, sample_accounts):
+        """The extra money stops being contributed at the moment of
+        retirement — confirm the withdrawal-phase yearly_detail is
+        completely unaffected (no life-event-style fields exist for this
+        feature, so the entire yearly_detail list should be identical)."""
+        allocations = [{"goal": "Retirement contributions", "monthly_amount": 500},
+                       {"goal": "Taxable investing", "monthly_amount": 300}]
+        baseline   = run_retirement_projection(sample_inputs, sample_accounts, ret_ages=[60])
+        with_alloc = run_retirement_projection(sample_inputs, sample_accounts, ret_ages=[60], surplus_allocations=allocations)
+        b = next(s for s in baseline["scenarios"] if s["ss_timing"] == "early")
+        w = next(s for s in with_alloc["scenarios"] if s["ss_timing"] == "early")
+        # Withdrawal need each year is driven by income/healthcare/life
+        # events only — none of that changes, so income_need should match
+        # exactly year-over-year even though the starting balances differ.
+        b_needs = [y["income_need"] for y in b["yearly_detail"]]
+        w_needs = [y["income_need"] for y in w["yearly_detail"]]
+        assert b_needs == w_needs
+
+    def test_generic_across_every_retirement_age(self, sample_inputs, sample_accounts):
+        allocations = [{"goal": "Retirement contributions", "monthly_amount": 400}]
+        for age in range(55, 68):
+            baseline   = run_retirement_projection(sample_inputs, sample_accounts, ret_ages=[age])
+            with_alloc = run_retirement_projection(sample_inputs, sample_accounts, ret_ages=[age], surplus_allocations=allocations)
+            b = next(s for s in baseline["scenarios"] if s["ss_timing"] == "early")
+            w = next(s for s in with_alloc["scenarios"] if s["ss_timing"] == "early")
+            assert w["portfolio_at_retirement"] > b["portfolio_at_retirement"], age
+
+
 class TestAssetSaleAndRsuBridgeAt55:
     """Not life-events related — the asset1/asset2 sale bridge and RSU
     accumulation branches at ret_age=55 (existing precedent for

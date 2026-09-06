@@ -180,6 +180,61 @@ def _pre_retirement_taxable_add(pre_events: List[Dict], pre_ret: float, retireme
     return total
 
 
+# Surplus-allocation goals that actually represent money invested toward
+# retirement, and therefore get compounded into the projection below. Of the
+# seven fixed goals in the surplus_allocations table, only these two are
+# "invest this monthly amount toward retirement" money:
+#   - "Retirement contributions" splits across pretax/roth 401k using the
+#     SAME pretax_401k_pct/roth_pct ratio already used elsewhere in
+#     run_retirement_projection for the existing 401k contributions.
+#   - "Taxable investing" lands in the taxable bucket.
+# The other five goals are deliberately excluded — they are cash reserves,
+# debt paydown, a separate 529/education engine, a tax set-aside, or an
+# undefined catch-all, none of which are dollars invested toward retirement:
+#   - "Emergency reserve"            — cash reserve, not invested
+#   - "High-interest debt payoff"    — pays down debt, doesn't grow assets
+#   - "Education funding"            — modeled by run_education_projection,
+#                                       would double-count if also added here
+#   - "Tax reserve"                  — set aside to pay taxes, not invested
+#   - "Other goal"                   — undefined catch-all, no assumption
+# This is a judgment call, not an oversight — a future reader adding a new
+# goal to the fixed list should decide explicitly whether it belongs here.
+SURPLUS_GOAL_RETIREMENT_CONTRIB = "Retirement contributions"
+SURPLUS_GOAL_TAXABLE_INVESTING  = "Taxable investing"
+
+
+def _surplus_allocations_at_retirement(surplus_allocations: List[Dict], pre_ret: float,
+                                        years_to_retire: int) -> Dict[str, float]:
+    """Future-value the two retirement-relevant surplus allocation goals
+    (see comment above) as monthly annuities compounding from *today*
+    through retirement — surplus allocations have no start date of their
+    own (unlike life_events' event_year), they're simply an ongoing amount
+    assumed active as of right now. Uses the same monthly-annuity family
+    as _fv_annuity_monthly (also used by run_education_projection/
+    run_kids_projection) rather than the annual _fv_annuity, since these
+    are monthly assignments in practice.
+
+    Non-positive (zero or negative) monthly_amount rows are skipped —
+    zero is a no-op and negative shouldn't occur (the PUT endpoint
+    validates >= 0) but is guarded here defensively rather than assumed.
+
+    Returns {"retirement_contrib": fv, "taxable_investing": fv}, both 0.0
+    if no matching rows (including the None/empty default)."""
+    retirement_contrib = 0.0
+    taxable_investing  = 0.0
+    for row in (surplus_allocations or []):
+        monthly = float(row.get("monthly_amount") or 0)
+        if monthly <= 0:
+            continue
+        goal = row.get("goal")
+        if goal == SURPLUS_GOAL_RETIREMENT_CONTRIB:
+            retirement_contrib += _fv_annuity_monthly(monthly, pre_ret, years_to_retire)
+        elif goal == SURPLUS_GOAL_TAXABLE_INVESTING:
+            taxable_investing += _fv_annuity_monthly(monthly, pre_ret, years_to_retire)
+        # All other goals intentionally excluded — see module comment above.
+    return {"retirement_contrib": retirement_contrib, "taxable_investing": taxable_investing}
+
+
 def _post_retirement_year_effects(post_events: List[Dict], calendar_year: int):
     """For a single withdrawal-phase calendar year, returns
     (one_time_cash, monthly_adjustment_annual): the one-time_cash_delta of
@@ -217,7 +272,8 @@ def pension_for_age(inputs: Dict, age: int) -> float:
 
 
 def run_retirement_projection(inputs: Dict, accounts: List[Dict], ret_ages: List[int] = None,
-                               salary_growth_pct: float = 0.0, life_events: List[Dict] = None) -> Dict:
+                               salary_growth_pct: float = 0.0, life_events: List[Dict] = None,
+                               surplus_allocations: List[Dict] = None) -> Dict:
     """salary_growth_pct: assumed annual raise rate applied to the 401k
     contribution base (annual_401k_pretax/roth, both derived from salary)
     every year until retirement, compounding — e.g. 0.03 for 3%/yr raises.
@@ -228,7 +284,15 @@ def run_retirement_projection(inputs: Dict, accounts: List[Dict], ret_ages: List
     caller to only the ones with included_in_projection true). Defaults to
     None/empty so every existing caller that doesn't pass this is
     completely unaffected. See _split_life_events/_pre_retirement_taxable_add/
-    _post_retirement_year_effects above for the actual math."""
+    _post_retirement_year_effects above for the actual math.
+
+    surplus_allocations: rows from the surplus_allocations table (only
+    "Retirement contributions" and "Taxable investing" matter here — see
+    _surplus_allocations_at_retirement's comment for why the other five
+    goals are excluded). Unlike life_events, this has no post-retirement
+    half at all: the extra money simply stops being contributed the moment
+    retirement starts, same as any other 401k/taxable contribution above.
+    Defaults to None/empty so every existing caller is unaffected."""
     jason_age  = inputs["jason_age"]
     justin_age = inputs["justin_age"]
     inflation  = inputs["inflation_rate"]
@@ -294,6 +358,11 @@ def run_retirement_projection(inputs: Dict, accounts: List[Dict], ret_ages: List
         pre_life_events, post_life_events = _split_life_events(life_events, retirement_year_for_events)
         life_events_taxable_add = _pre_retirement_taxable_add(pre_life_events, pre_ret, retirement_year_for_events)
 
+        # Surplus allocations compound from today through this ret_age's
+        # retirement — generic across every ret_age in the loop, computed
+        # once here (independent of ss_label) same as the life events above.
+        surplus_at_ret = _surplus_allocations_at_retirement(surplus_allocations, pre_ret, years_to_retire)
+
         for ss_label, jason_ss_annual, jason_ss_age in [
             ("early",   jason_ss_early,   62),
             ("delayed", jason_ss_delayed, 67),
@@ -350,6 +419,23 @@ def run_retirement_projection(inputs: Dict, accounts: List[Dict], ret_ages: List
             # Life events dated before retirement (compounded above) —
             # generic for every ret_age, not just the age-55 bridge case.
             taxable_at_ret += life_events_taxable_add
+
+            # Surplus allocations ("Assign Surplus" page) that represent
+            # money actually invested toward retirement — see
+            # _surplus_allocations_at_retirement's comment above for why
+            # only these two goals qualify. "Retirement contributions"
+            # splits pretax/roth using the SAME ratio as the existing
+            # 401k contributions above (pretax_pct/roth_pct); "Taxable
+            # investing" lands entirely in the taxable bucket. Both stop
+            # contributing at the moment of retirement — there is
+            # deliberately no post-retirement half of this feature (unlike
+            # life events), so nothing further happens to these dollars
+            # in the yearly withdrawal loop below beyond normal growth.
+            if surplus_at_ret["retirement_contrib"]:
+                pretax_at_ret += surplus_at_ret["retirement_contrib"] * pretax_pct
+                roth_at_ret   += surplus_at_ret["retirement_contrib"] * roth_pct
+            if surplus_at_ret["taxable_investing"]:
+                taxable_at_ret += surplus_at_ret["taxable_investing"]
 
             portfolio_at_ret = pretax_at_ret + roth_at_ret + taxable_at_ret + hsa_at_ret
 

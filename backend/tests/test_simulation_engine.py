@@ -210,3 +210,51 @@ class TestLifeEventsInSimulation:
         assert run_tax_efficiency_simulation(sample_inputs, sample_accounts, ret_age=60, ss_timing="early", life_events=events) is not None
         assert run_contribution_sensitivity(sample_inputs, sample_accounts, ret_age=60, life_events=events) is not None
         assert run_survivor_scenario(sample_inputs, sample_accounts, ret_age=60, deceased="jason", death_age=70, life_events=events) is not None
+
+
+class TestSurplusAllocationsInSimulation:
+    """surplus_allocations threaded through simulation_engine.py: it only
+    ever affects the starting bucket balances (via run_retirement_projection)
+    — there is no post-retirement half at all, so no _run_single wiring is
+    expected or tested here (unlike life_events)."""
+
+    def test_monte_carlo_default_no_allocations_unchanged(self, sample_inputs, sample_accounts):
+        no_kwarg = run_monte_carlo(sample_inputs, sample_accounts, ret_age=60, ss_timing="early")
+        explicit_none = run_monte_carlo(sample_inputs, sample_accounts, ret_age=60, ss_timing="early", surplus_allocations=None)
+        assert no_kwarg["portfolio_at_retirement"] == explicit_none["portfolio_at_retirement"]
+        assert no_kwarg["success_rate"] == explicit_none["success_rate"]
+
+    def test_monte_carlo_retirement_contributions_increase_starting_portfolio(self, sample_inputs, sample_accounts):
+        allocations = [{"goal": "Retirement contributions", "monthly_amount": 500}]
+        baseline = run_monte_carlo(sample_inputs, sample_accounts, ret_age=60, ss_timing="early")
+        with_alloc = run_monte_carlo(sample_inputs, sample_accounts, ret_age=60, ss_timing="early", surplus_allocations=allocations)
+        assert with_alloc["portfolio_at_retirement"] > baseline["portfolio_at_retirement"]
+
+    def test_monte_carlo_non_retirement_goal_has_no_effect(self, sample_inputs, sample_accounts):
+        allocations = [{"goal": "Emergency reserve", "monthly_amount": 2000}]
+        baseline = run_monte_carlo(sample_inputs, sample_accounts, ret_age=60, ss_timing="early")
+        with_alloc = run_monte_carlo(sample_inputs, sample_accounts, ret_age=60, ss_timing="early", surplus_allocations=allocations)
+        assert with_alloc["portfolio_at_retirement"] == baseline["portfolio_at_retirement"]
+
+    def test_stress_tests_default_no_allocations_unchanged(self, sample_inputs, sample_accounts):
+        no_kwarg = run_stress_tests(sample_inputs, sample_accounts, ret_age=60, ss_timing="early")
+        explicit_none = run_stress_tests(sample_inputs, sample_accounts, ret_age=60, ss_timing="early", surplus_allocations=None)
+        assert no_kwarg["scenarios"]["base"]["final_balance"] == explicit_none["scenarios"]["base"]["final_balance"]
+
+    def test_stress_tests_taxable_investing_improves_base_case(self, sample_inputs, sample_accounts):
+        allocations = [{"goal": "Taxable investing", "monthly_amount": 1000}]
+        baseline = run_stress_tests(sample_inputs, sample_accounts, ret_age=60, ss_timing="early")
+        with_alloc = run_stress_tests(sample_inputs, sample_accounts, ret_age=60, ss_timing="early", surplus_allocations=allocations)
+        assert with_alloc["scenarios"]["base"]["final_balance"] > baseline["scenarios"]["base"]["final_balance"]
+
+    def test_other_public_entry_points_accept_surplus_allocations_without_error(self, sample_inputs, sample_accounts):
+        """These functions only thread surplus_allocations through to
+        run_retirement_projection() for the starting-bucket effect — this
+        just confirms the parameter is accepted end-to-end and doesn't
+        crash."""
+        allocations = [{"goal": "Retirement contributions", "monthly_amount": 500}]
+        assert run_swr_analysis(sample_inputs, sample_accounts, ret_age=60, ss_timing="early", surplus_allocations=allocations) is not None
+        assert run_roth_conversion_analysis(sample_inputs, sample_accounts, ret_age=60, ss_timing="early", surplus_allocations=allocations) is not None
+        assert run_tax_efficiency_simulation(sample_inputs, sample_accounts, ret_age=60, ss_timing="early", surplus_allocations=allocations) is not None
+        assert run_contribution_sensitivity(sample_inputs, sample_accounts, ret_age=60, surplus_allocations=allocations) is not None
+        assert run_survivor_scenario(sample_inputs, sample_accounts, ret_age=60, deceased="jason", death_age=70, surplus_allocations=allocations) is not None

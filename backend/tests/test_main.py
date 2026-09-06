@@ -486,6 +486,73 @@ class TestLifeEventsAffectRealProjectionAndSimulation:
         assert with_event["portfolio_at_retirement"] > baseline["portfolio_at_retirement"]
 
 
+class TestSurplusAllocationsAffectRealProjectionAndSimulation:
+    """End-to-end: a surplus allocation on one of the two retirement-relevant
+    goals actually moves the numbers on /api/projections/retirement and
+    /api/simulation/monte-carlo, while a non-retirement goal (and the
+    isolated GET /api/surplus-allocations overlay) is unaffected."""
+
+    def _seed(self, client, sample_inputs, sample_accounts):
+        _seed_planning_inputs(client, sample_inputs)
+        _seed_accounts(client, sample_accounts)
+
+    def _portfolio_at_60(self, client):
+        r = client.get("/api/projections/retirement")
+        scenario = next(s for s in r.json()["scenarios"] if s["label"] == "age_60_early")
+        return scenario["portfolio_at_retirement"]
+
+    def test_retirement_contributions_goal_moves_real_retirement_projection(self, client, sample_inputs, sample_accounts):
+        self._seed(client, sample_inputs, sample_accounts)
+        baseline = self._portfolio_at_60(client)
+        client.put("/api/surplus-allocations/Retirement contributions", json={
+            "goal": "Retirement contributions", "monthly_amount": 500, "notes": None,
+        })
+        with_alloc = self._portfolio_at_60(client)
+        assert with_alloc > baseline
+
+    def test_taxable_investing_goal_moves_real_retirement_projection(self, client, sample_inputs, sample_accounts):
+        self._seed(client, sample_inputs, sample_accounts)
+        baseline = self._portfolio_at_60(client)
+        client.put("/api/surplus-allocations/Taxable investing", json={
+            "goal": "Taxable investing", "monthly_amount": 300, "notes": None,
+        })
+        with_alloc = self._portfolio_at_60(client)
+        assert with_alloc > baseline
+
+    def test_non_retirement_goal_does_not_move_real_retirement_projection(self, client, sample_inputs, sample_accounts):
+        self._seed(client, sample_inputs, sample_accounts)
+        baseline = self._portfolio_at_60(client)
+        client.put("/api/surplus-allocations/Emergency reserve", json={
+            "goal": "Emergency reserve", "monthly_amount": 1000, "notes": None,
+        })
+        after = self._portfolio_at_60(client)
+        assert after == baseline
+
+    def test_surplus_allocation_moves_monte_carlo(self, client, sample_inputs, sample_accounts):
+        self._seed(client, sample_inputs, sample_accounts)
+        baseline = client.get("/api/simulation/monte-carlo?ret_age=60&ss_timing=early").json()
+        client.put("/api/surplus-allocations/Retirement contributions", json={
+            "goal": "Retirement contributions", "monthly_amount": 800, "notes": None,
+        })
+        with_alloc = client.get("/api/simulation/monte-carlo?ret_age=60&ss_timing=early").json()
+        assert with_alloc["portfolio_at_retirement"] > baseline["portfolio_at_retirement"]
+
+    def test_surplus_allocations_overlay_unaffected_by_goal_filtering(self, client, sample_inputs, sample_accounts):
+        """GET /api/surplus-allocations is still the user's plain tracking
+        view — it must keep returning every goal regardless of which ones
+        actually move the projection."""
+        self._seed(client, sample_inputs, sample_accounts)
+        client.put("/api/surplus-allocations/Emergency reserve", json={
+            "goal": "Emergency reserve", "monthly_amount": 1000, "notes": None,
+        })
+        client.put("/api/surplus-allocations/Retirement contributions", json={
+            "goal": "Retirement contributions", "monthly_amount": 500, "notes": None,
+        })
+        overlay = client.get("/api/surplus-allocations").json()
+        goals = {row["goal"] for row in overlay["allocations"]}
+        assert goals == {"Emergency reserve", "Retirement contributions"}
+
+
 class TestDebtRecommendationEndpoints:
     def test_recommendation_with_no_debt(self, client):
         r = client.get("/api/debts/recommendation")

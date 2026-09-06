@@ -112,8 +112,17 @@ def _run_single(
         inf_mult = inflation_mults[yr] if inflation_mults and yr < len(inflation_mults) else 1.0
         eff_inf  = inflation * inf_mult
 
-        healthcare_pre  = 0  # will be overridden by caller kwargs if passed
-        healthcare_post = 0
+        # healthcare_pre/healthcare_post used to only get read out of
+        # phase_inputs inside the `ret_age == 55` branch below, so every
+        # other retirement age (56, 57, 58...) silently modeled $0
+        # healthcare cost for the entire retirement -- an in-between-age
+        # gap in the same family as the ones already fixed elsewhere in
+        # this codebase (see CLAUDE.md). Read unconditionally here instead;
+        # the age-55 branch below still owns the bridge-job/kids-at-home
+        # phasing, but no longer needs its own separate hc_pre/hc_post
+        # copies since it can just reuse these.
+        healthcare_pre  = (phase_inputs or {}).get("healthcare_pre", 0)
+        healthcare_post = (phase_inputs or {}).get("healthcare_post", 0)
         hc_this_year = healthcare_pre if age < 65 else healthcare_post
         if phase_inputs and ret_age == 55:
             bridge_years  = phase_inputs.get("bridge_years", 0)
@@ -121,8 +130,6 @@ def _run_single(
             kids_cost     = phase_inputs.get("kids_annual_cost", 0)
             bridge_income = phase_inputs.get("bridge_income", 0)
             hc_kids       = phase_inputs.get("healthcare_kids", 0)
-            hc_pre        = phase_inputs.get("healthcare_pre", 0)
-            hc_post       = phase_inputs.get("healthcare_post", 0)
             if yr < bridge_years:
                 hc_this_year = 0
                 year_need = max(0, income_at_ret*(1+eff_inf)**yr + kids_cost*(1+eff_inf)**yr - bridge_income*(1+eff_inf)**yr)
@@ -130,11 +137,11 @@ def _run_single(
                 hc_this_year = hc_kids
                 year_need = income_at_ret*(1+eff_inf)**yr + kids_cost*(1+eff_inf)**yr + hc_kids*(1+eff_inf)**yr
             elif age < 65:
-                hc_this_year = hc_pre
-                year_need = income_at_ret*(1+eff_inf)**yr + hc_pre*(1+eff_inf)**yr
+                hc_this_year = healthcare_pre
+                year_need = income_at_ret*(1+eff_inf)**yr + healthcare_pre*(1+eff_inf)**yr
             else:
-                hc_this_year = hc_post
-                year_need = income_at_ret*(1+eff_inf)**yr + hc_post*(1+eff_inf)**yr
+                hc_this_year = healthcare_post
+                year_need = income_at_ret*(1+eff_inf)**yr + healthcare_post*(1+eff_inf)**yr
         else:
             year_need = income_at_ret * ((1 + eff_inf) ** yr) + hc_this_year * ((1 + eff_inf) ** yr)
 
@@ -203,14 +210,20 @@ def _run_single(
 
 
 def run_swr_analysis(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_timing: str = "early",
-                      target_success: float = 0.95, life_events: List[Dict] = None) -> Dict:
+                      target_success: float = 0.95, life_events: List[Dict] = None,
+                      surplus_allocations: List[Dict] = None) -> Dict:
     """Find the safe withdrawal rate at target success rate (default 95%).
 
     life_events: threaded through to run_retirement_projection below so
     pre-retirement events affect the starting portfolio; this function's
     own binary-search loop does not separately model withdrawal-phase
     events (unlike run_monte_carlo/run_stress_tests) — a known scope
-    limitation, not an oversight."""
+    limitation, not an oversight.
+
+    surplus_allocations: threaded through to run_retirement_projection
+    below for the starting portfolio only — this feature has no
+    withdrawal-phase half at all (see projection_engine.py), so there is
+    nothing further to wire in here."""
     random.seed(42)
 
     jason_age    = inputs["jason_age"]
@@ -233,7 +246,8 @@ def run_swr_analysis(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_t
     # Get portfolio at retirement from projection engine — pass ret_age explicitly
     # so this works for any age, not just the default 55/60/65 anchors.
     from projection_engine import run_retirement_projection
-    _proj     = run_retirement_projection(inputs, accounts, ret_ages=[ret_age], life_events=life_events)
+    _proj     = run_retirement_projection(inputs, accounts, ret_ages=[ret_age], life_events=life_events,
+                                           surplus_allocations=surplus_allocations)
     _scenario = next((s for s in _proj["scenarios"] if s["label"] == f"age_{ret_age}_{ss_timing}"), None)
     pretax_at_ret  = _scenario["pretax_at_retirement"]
     roth_at_ret    = _scenario["roth_at_retirement"]
@@ -362,14 +376,20 @@ def run_swr_analysis(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_t
 
 
 def run_monte_carlo(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_timing: str = "early",
-                     life_events: List[Dict] = None) -> Dict:
+                     life_events: List[Dict] = None, surplus_allocations: List[Dict] = None) -> Dict:
     """Run 1000 Monte Carlo simulations.
 
     life_events: optional list of life_events rows (already filtered to
     included_in_projection=true by the caller). Pre-retirement events
     affect the starting bucket balances via run_retirement_projection
     below; withdrawal-phase events are applied inside each simulated run
-    via _run_single. Defaults to None/no-op."""
+    via _run_single. Defaults to None/no-op.
+
+    surplus_allocations: optional list of surplus_allocations rows (only
+    the two retirement-relevant goals matter — see projection_engine.py).
+    Affects only the starting bucket balances via run_retirement_projection
+    below — this feature has no withdrawal-phase half, so _run_single is
+    untouched. Defaults to None/no-op."""
     random.seed(42)  # reproducible
 
     jason_age  = inputs["jason_age"]
@@ -392,7 +412,8 @@ def run_monte_carlo(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_ti
     # Pull bucket values from projection_engine — pass ret_age explicitly so
     # this works for any age, not just the default 55/60/65 anchors.
     from projection_engine import (run_retirement_projection)
-    _proj = run_retirement_projection(inputs, accounts, ret_ages=[ret_age], life_events=life_events)
+    _proj = run_retirement_projection(inputs, accounts, ret_ages=[ret_age], life_events=life_events,
+                                       surplus_allocations=surplus_allocations)
     _scenario = next((s for s in _proj["scenarios"] if s["label"] == f"age_{ret_age}_{ss_timing}"), None)
     pretax_at_ret  = _scenario["pretax_at_retirement"]
     roth_at_ret    = _scenario["roth_at_retirement"]
@@ -411,17 +432,24 @@ def run_monte_carlo(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_ti
     successes = 0
     all_balances = []
 
+    # Built once outside the N-run loop — doesn't depend on the loop
+    # variable. Always populated (not gated to ret_age==55): healthcare_pre/
+    # healthcare_post need to reach _run_single for every retirement age, not
+    # just the age-55 bridge scenario (see _run_single's own comment for the
+    # in-between-age bug this fixes). The bridge/kids fields are harmless for
+    # other ages since _run_single only reads them when ret_age == 55.
+    _phase = {
+        "bridge_years":     inputs.get("bridge_years_55", 0),
+        "kids_years":       inputs.get("kids_years_at_home_55", 0),
+        "kids_annual_cost": inputs.get("kids_annual_cost", 0),
+        "bridge_income":    inputs.get("bridge_income_55", 0),
+        "healthcare_kids":  inputs.get("healthcare_kids", 0),
+        "healthcare_pre":   inputs.get("healthcare_pre_medicare", 0),
+        "healthcare_post":  inputs.get("healthcare_post_medicare", 0),
+    }
+
     for _ in range(N):
         returns = [random.gauss(PORT_MEAN, PORT_STD) for _ in range(retire_yrs)]
-        _phase = {
-            "bridge_years":     inputs.get("bridge_years_55", 0),
-            "kids_years":       inputs.get("kids_years_at_home_55", 0),
-            "kids_annual_cost": inputs.get("kids_annual_cost", 0),
-            "bridge_income":    inputs.get("bridge_income_55", 0),
-            "healthcare_kids":  inputs.get("healthcare_kids", 0),
-            "healthcare_pre":   inputs.get("healthcare_pre_medicare", 0),
-            "healthcare_post":  inputs.get("healthcare_post_medicare", 0),
-        } if ret_age == 55 else None
         survived, balances, *_ = _run_single(
             pretax_at_ret, roth_at_ret, taxable_at_ret, hsa_at_ret,
             ret_age, jason_age, justin_age,
@@ -474,11 +502,14 @@ def run_monte_carlo(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_ti
 
 
 def run_stress_tests(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_timing: str = "early",
-                      life_events: List[Dict] = None) -> Dict:
+                      life_events: List[Dict] = None, surplus_allocations: List[Dict] = None) -> Dict:
     """Run deterministic stress test scenarios.
 
     life_events: see run_monte_carlo — same optional, defaults-to-no-op
-    wiring."""
+    wiring.
+
+    surplus_allocations: see run_monte_carlo — same optional,
+    starting-balance-only wiring."""
     jason_age  = inputs["jason_age"]
     justin_age = inputs["justin_age"]
     inflation  = inputs["inflation_rate"]
@@ -497,7 +528,8 @@ def run_stress_tests(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_t
     income_at_ret   = income_today * ((1 + inflation) ** years_to_ret)
 
     from projection_engine import run_retirement_projection
-    _proj = run_retirement_projection(inputs, accounts, ret_ages=[ret_age], life_events=life_events)
+    _proj = run_retirement_projection(inputs, accounts, ret_ages=[ret_age], life_events=life_events,
+                                       surplus_allocations=surplus_allocations)
     _scenario = next(s for s in _proj["scenarios"] if s["label"] == f"age_{ret_age}_{ss_timing}")
     pretax_at_ret  = _scenario["pretax_at_retirement"]
     roth_at_ret    = _scenario["roth_at_retirement"]
@@ -521,7 +553,7 @@ def run_stress_tests(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_t
         "healthcare_kids":  inputs.get("healthcare_kids", 0),
         "healthcare_pre":   inputs.get("healthcare_pre_medicare", 0),
         "healthcare_post":  inputs.get("healthcare_post_medicare", 0),
-    } if ret_age == 55 else None
+    }  # always populated -- see _run_single's comment on the in-between-age fix
     _, base_bals, *_ = _run_single(
         pretax_at_ret, roth_at_ret, taxable_at_ret, hsa_at_ret,
         ret_age, jason_age, justin_age,
@@ -565,7 +597,8 @@ def run_stress_tests(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_t
 
         # Re-project buckets if bridge years changed
         if bridge_override is not None and ret_age == 55:
-            _proj2 = run_retirement_projection(sim_inputs, accounts, ret_ages=[ret_age], life_events=life_events)
+            _proj2 = run_retirement_projection(sim_inputs, accounts, ret_ages=[ret_age], life_events=life_events,
+                                                surplus_allocations=surplus_allocations)
             _s2 = next(s for s in _proj2["scenarios"] if s["label"] == f"age_{ret_age}_{ss_timing}")
             sim_pretax  = _s2["pretax_at_retirement"]
             sim_roth    = _s2["roth_at_retirement"]
@@ -592,7 +625,7 @@ def run_stress_tests(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_t
             "healthcare_kids":  inputs.get("healthcare_kids", 0),
             "healthcare_pre":   inputs.get("healthcare_pre_medicare", 0),
             "healthcare_post":  inputs.get("healthcare_post_medicare", 0),
-        } if ret_age == 55 else None
+        }  # always populated -- see _run_single's comment on the in-between-age fix
         _, bals, ptx, rth, txb = _run_single(
             sim_pretax, sim_roth, sim_taxable, sim_hsa,
             ret_age, jason_age, justin_age,
@@ -628,11 +661,15 @@ def run_stress_tests(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_t
     }
 
 def run_roth_conversion_analysis(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_timing: str = "early",
-                                  life_events: List[Dict] = None) -> Dict:
+                                  life_events: List[Dict] = None,
+                                  surplus_allocations: List[Dict] = None) -> Dict:
     """
     Find optimal annual Roth conversion amount between retirement and RMD age.
     Goal: fill the 22% bracket each year to minimize lifetime taxes.
-    """
+
+    life_events/surplus_allocations: threaded through to
+    run_retirement_projection below for the starting pretax/roth balances
+    only; both default to None/no-op."""
     inflation    = inputs["inflation_rate"]
     post_ret     = inputs["expected_return_post_retirement"]
     income_today = inputs["retirement_income_today_dollars"]
@@ -656,7 +693,8 @@ def run_roth_conversion_analysis(inputs: Dict, accounts: List[Dict], ret_age: in
     RMD_START_AGE   = rmd_start_age(jason_age)
 
     from projection_engine import run_retirement_projection
-    _proj = run_retirement_projection(inputs, accounts, ret_ages=[ret_age], life_events=life_events)
+    _proj = run_retirement_projection(inputs, accounts, ret_ages=[ret_age], life_events=life_events,
+                                       surplus_allocations=surplus_allocations)
     _s = next(s for s in _proj["scenarios"] if s["label"] == f"age_{ret_age}_{ss_timing}")
 
     years_to_ret  = max(0, ret_age - jason_age)
@@ -746,11 +784,15 @@ def run_roth_conversion_analysis(inputs: Dict, accounts: List[Dict], ret_age: in
     }
 
 def run_tax_efficiency_simulation(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_timing: str = "early",
-                                   life_events: List[Dict] = None) -> Dict:
+                                   life_events: List[Dict] = None,
+                                   surplus_allocations: List[Dict] = None) -> Dict:
     """
     Run 1000 market scenarios for 3 draw order strategies.
     Simplified tax: flat 22% on pretax withdrawals, 0% on Roth, 15% on taxable gains.
-    """
+
+    life_events/surplus_allocations: threaded through to
+    run_retirement_projection below for the starting bucket balances only;
+    both default to None/no-op."""
     random.seed(42)
 
     jason_age    = inputs["jason_age"]
@@ -769,7 +811,8 @@ def run_tax_efficiency_simulation(inputs: Dict, accounts: List[Dict], ret_age: i
     justin_ss_age   = inputs.get("justin_ss_age", JUSTIN_SPOUSAL_AGE)
 
     from projection_engine import run_retirement_projection
-    _proj = run_retirement_projection(inputs, accounts, ret_ages=[ret_age], life_events=life_events)
+    _proj = run_retirement_projection(inputs, accounts, ret_ages=[ret_age], life_events=life_events,
+                                       surplus_allocations=surplus_allocations)
     _s = next(s for s in _proj["scenarios"] if s["label"] == f"age_{ret_age}_{ss_timing}")
     pretax_start  = _s["pretax_at_retirement"]
     roth_start    = _s["roth_at_retirement"]
@@ -906,10 +949,15 @@ def run_tax_efficiency_simulation(inputs: Dict, accounts: List[Dict], ret_age: i
 
 
 def run_contribution_sensitivity(inputs: Dict, accounts: List[Dict], ret_age: int = 60,
-                                  life_events: List[Dict] = None) -> Dict:
+                                  life_events: List[Dict] = None,
+                                  surplus_allocations: List[Dict] = None) -> Dict:
     """
     Compare retirement outcomes at different contribution rates for remaining working years.
     Extra contributions above 6% go to Roth. Employer stays fixed at 9%.
+
+    life_events/surplus_allocations: threaded through to the base
+    run_retirement_projection call below only, for the base_portfolio/
+    base_surplus comparison figures; both default to None/no-op.
     """
     from projection_engine import run_retirement_projection, _fv, _fv_annuity
 
@@ -940,7 +988,8 @@ def run_contribution_sensitivity(inputs: Dict, accounts: List[Dict], ret_age: in
     ]
 
     # Base retirement projection for comparison
-    base_result = run_retirement_projection(inputs, accounts, ret_ages=[ret_age], life_events=life_events)
+    base_result = run_retirement_projection(inputs, accounts, ret_ages=[ret_age], life_events=life_events,
+                                             surplus_allocations=surplus_allocations)
     base_scenario = next(s for s in base_result["scenarios"] if s["label"] == f"age_{ret_age}_early")
     base_surplus   = base_scenario["projected_surplus"]
     base_portfolio = base_scenario["portfolio_at_retirement"]
@@ -998,7 +1047,8 @@ def run_contribution_sensitivity(inputs: Dict, accounts: List[Dict], ret_age: in
 def run_survivor_scenario(inputs: Dict, accounts: List[Dict], ret_age: int = 60,
                            deceased: str = "jason", death_age: int = None,
                            survivor_need_factor: float = 0.75,
-                           life_events: List[Dict] = None) -> Dict:
+                           life_events: List[Dict] = None,
+                           surplus_allocations: List[Dict] = None) -> Dict:
     """Stress-tests the plan assuming one spouse dies during retirement:
     the deceased's life insurance payout is added to the portfolio, Social
     Security switches to the survivor benefit (the higher of the two, not
@@ -1014,6 +1064,10 @@ def run_survivor_scenario(inputs: Dict, accounts: List[Dict], ret_age: int = 60,
     precise number, since integrating it would mean re-deriving the whole
     withdrawal-order/tax engine rather than reusing the baseline
     projection the way everything else here does.
+
+    life_events/surplus_allocations: threaded through to
+    run_retirement_projection below for the pre-death baseline portfolio
+    only; both default to None/no-op.
     """
     from projection_engine import run_retirement_projection, _pv_annuity
 
@@ -1026,7 +1080,8 @@ def run_survivor_scenario(inputs: Dict, accounts: List[Dict], ret_age: int = 60,
     if death_age is None:
         death_age = ret_age + 10
 
-    _proj = run_retirement_projection(inputs, accounts, ret_ages=[ret_age], life_events=life_events)
+    _proj = run_retirement_projection(inputs, accounts, ret_ages=[ret_age], life_events=life_events,
+                                       surplus_allocations=surplus_allocations)
     _scenario = next((s for s in _proj["scenarios"] if s["label"] == f"age_{ret_age}_early"), None)
     if not _scenario:
         return {"has_data": False}
