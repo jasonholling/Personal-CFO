@@ -347,6 +347,26 @@ class TestLifeEventsInRetirementProjection:
         w = next(s for s in with_event["scenarios"] if s["ss_timing"] == "early")
         assert w["portfolio_at_retirement"] < b["portfolio_at_retirement"]
 
+    def test_debt_targeted_event_has_zero_effect_on_portfolio_and_surplus(self, sample_inputs, sample_accounts):
+        """A life event with target_debt_account_id set models a one-time
+        lump payment toward a specific debt (see debt_engine.
+        project_debt_schedule) — it must be entirely excluded from
+        _split_life_events' pre/post classification, so it has ZERO effect
+        on portfolio_at_retirement/projected_surplus even with a large
+        one_time_cash_delta. (Debt isn't tracked as a portfolio bucket in
+        this engine at all, so this money was never going to be invested —
+        giving it special treatment here would double-count it against the
+        debt-payoff engine.)"""
+        events = [{"event_year": CURRENT_YEAR + 2, "one_time_cash_delta": -150000,
+                   "monthly_cash_flow_delta": 0, "duration_months": 0,
+                   "target_debt_account_id": 6}]
+        baseline = run_retirement_projection(sample_inputs, sample_accounts, ret_ages=[60])
+        with_event = run_retirement_projection(sample_inputs, sample_accounts, ret_ages=[60], life_events=events)
+        b = next(s for s in baseline["scenarios"] if s["ss_timing"] == "early")
+        w = next(s for s in with_event["scenarios"] if s["ss_timing"] == "early")
+        assert w["portfolio_at_retirement"] == b["portfolio_at_retirement"]
+        assert w["projected_surplus"] == b["projected_surplus"]
+
     def test_generic_across_every_retirement_age_not_just_55(self, sample_inputs, sample_accounts):
         """Regression guard: life events used to only be prototyped against
         the age-55 bridge scenario; confirm the pre-retirement compounding

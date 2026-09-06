@@ -663,6 +663,102 @@ class TestDebtEndpoints:
         assert r["liabilities"] == 3000
 
 
+class TestDebtTargetedLifeEvents:
+    """Validation for POST /api/life-events' target_debt_account_id field,
+    and the combined effect on /api/debts/payoff-plan and /recommendation."""
+
+    def _make_debt(self, client, balance=5000, interest_rate=0.06, minimum_payment=500):
+        return client.post("/api/accounts", json={
+            "name": "Mortgage Test", "account_type": "mortgage", "owner": "joint",
+            "institution": "", "balance": balance, "notes": None,
+            "interest_rate": interest_rate, "minimum_payment": minimum_payment,
+        }).json()["id"]
+
+    def test_positive_one_time_cash_delta_with_debt_target_rejected(self, client):
+        debt_id = self._make_debt(client)
+        r = client.post("/api/life-events", json={
+            "name": "Bad event", "event_type": "windfall", "event_year": 2028,
+            "one_time_cash_delta": 5000, "monthly_cash_flow_delta": 0, "duration_months": 0,
+            "target_debt_account_id": debt_id,
+        })
+        assert r.status_code == 400
+        assert "not income" in r.json()["detail"] or "positive" in r.json()["detail"].lower() or "zero or negative" in r.json()["detail"]
+
+    def test_non_debt_account_type_rejected(self, client):
+        checking_id = client.post("/api/accounts", json={
+            "name": "Checking", "account_type": "checking", "owner": "joint",
+            "institution": "", "balance": 1000, "notes": None,
+        }).json()["id"]
+        r = client.post("/api/life-events", json={
+            "name": "Bad target", "event_type": "other", "event_year": 2028,
+            "one_time_cash_delta": -5000, "monthly_cash_flow_delta": 0, "duration_months": 0,
+            "target_debt_account_id": checking_id,
+        })
+        assert r.status_code == 400
+
+    def test_unknown_account_id_rejected(self, client):
+        r = client.post("/api/life-events", json={
+            "name": "Bad target", "event_type": "other", "event_year": 2028,
+            "one_time_cash_delta": -5000, "monthly_cash_flow_delta": 0, "duration_months": 0,
+            "target_debt_account_id": 999999,
+        })
+        assert r.status_code == 400
+
+    def test_valid_debt_targeted_event_accepted_and_monthly_delta_zeroed(self, client):
+        debt_id = self._make_debt(client)
+        r = client.post("/api/life-events", json={
+            "name": "Mortgage paydown", "event_type": "windfall", "event_year": 2028,
+            "one_time_cash_delta": -50000, "monthly_cash_flow_delta": 250, "duration_months": 0,
+            "target_debt_account_id": debt_id,
+        })
+        assert r.status_code == 200
+        body = r.json()
+        assert body["target_debt_account_id"] == debt_id
+        # monthly_cash_flow_delta is silently zeroed when a debt target is
+        # set — this feature models a one-time lump sum only.
+        assert body["monthly_cash_flow_delta"] == 0
+
+    def test_payoff_plan_reflects_debt_targeted_event(self, client):
+        debt_id = self._make_debt(client, balance=20000, interest_rate=0.06, minimum_payment=500)
+        client.post("/api/life-events", json={
+            "name": "Rental sale paydown", "event_type": "windfall", "event_year": CURRENT_YEAR + 1,
+            "one_time_cash_delta": -10000, "monthly_cash_flow_delta": 0, "duration_months": 0,
+            "target_debt_account_id": debt_id,
+        })
+        r = client.get("/api/debts/payoff-plan")
+        assert r.status_code == 200
+        data = r.json()
+        effects = data["one_time_payment_effect"]["avalanche"]
+        assert len(effects) == 1
+        assert effects[0]["account_id"] == debt_id
+        assert effects[0]["new_payoff_month"] <= effects[0]["original_payoff_month"]
+
+    def test_recommendation_reflects_debt_targeted_event(self, client):
+        debt_id = self._make_debt(client, balance=20000, interest_rate=0.06, minimum_payment=500)
+        client.post("/api/life-events", json={
+            "name": "Rental sale paydown", "event_type": "windfall", "event_year": CURRENT_YEAR + 1,
+            "one_time_cash_delta": -10000, "monthly_cash_flow_delta": 0, "duration_months": 0,
+            "target_debt_account_id": debt_id,
+        })
+        r = client.get("/api/debts/recommendation")
+        assert r.status_code == 200
+        data = r.json()
+        assert len(data["life_event_debt_payments"]) == 1
+        assert data["life_event_debt_payments"][0]["account_id"] == debt_id
+
+    def test_toggled_off_debt_event_has_no_effect_on_payoff_plan(self, client):
+        debt_id = self._make_debt(client, balance=20000, interest_rate=0.06, minimum_payment=500)
+        created = client.post("/api/life-events", json={
+            "name": "Rental sale paydown", "event_type": "windfall", "event_year": CURRENT_YEAR + 1,
+            "one_time_cash_delta": -10000, "monthly_cash_flow_delta": 0, "duration_months": 0,
+            "target_debt_account_id": debt_id,
+        })
+        event_id = created.json()["id"]
+        client.patch(f"/api/life-events/{event_id}/toggle", json={"included_in_projection": False})
+        r = client.get("/api/debts/payoff-plan").json()
+        assert r["one_time_payment_effect"]["avalanche"] == []
+
+
 class TestRetirementToolsEndpoints:
     def test_rmd_planning_no_pretax_balance(self, client, sample_inputs):
         _seed_planning_inputs(client, sample_inputs)

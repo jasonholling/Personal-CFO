@@ -145,9 +145,24 @@ def _split_life_events(life_events: List[Dict], retirement_year: int):
     transition only gets modeled through retirement (the pre-retirement
     annuity below is capped at retirement_year) — it does not resume as a
     withdrawal-phase adjustment afterward. That's a known simplification,
-    not an oversight."""
+    not an oversight.
+
+    Events with a truthy target_debt_account_id are skipped entirely here
+    — those model a one-time lump payment toward a SPECIFIC debt account,
+    not money that was ever going to be invested. This engine's buckets
+    (pretax/roth/taxable/hsa) are asset-only and never track debt/mortgage
+    balances as a liability, so a debt-targeted event correctly has ZERO
+    effect on portfolio_at_retirement/projected_surplus — the cash was
+    never destined for the taxable bucket to begin with. That money is
+    instead modeled by debt_engine.py's project_debt_schedule (via
+    main.py's /api/debts/payoff-plan and /recommendation routes), which
+    actually reduces the target debt's balance and payoff schedule. Giving
+    it special debt-aware treatment in THIS engine would double-count it
+    (once here as investable cash, once there as debt payoff)."""
     pre, post = [], []
     for event in (life_events or []):
+        if event.get("target_debt_account_id"):
+            continue
         event_year = int(event["event_year"])
         one_time = float(event.get("one_time_cash_delta") or 0)
         monthly  = float(event.get("monthly_cash_flow_delta") or 0)

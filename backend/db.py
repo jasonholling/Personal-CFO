@@ -312,6 +312,15 @@ def init_life_events_table():
     life_events_cols = [r[1] for r in conn.execute("PRAGMA table_info(life_events)").fetchall()]
     if "included_in_projection" not in life_events_cols:
         conn.execute("ALTER TABLE life_events ADD COLUMN included_in_projection INTEGER NOT NULL DEFAULT 1")
+    # Migrate: add target_debt_account_id (nullable — most events don't
+    # target a debt) for the "apply this life event's cash as a one-time
+    # extra payment on a specific debt" feature. Same PRAGMA table_info +
+    # ALTER TABLE idiom as included_in_projection above. NULL/absent means
+    # "not debt-targeted" — the historical behavior (cash flows into the
+    # taxable investment bucket in the retirement projection).
+    life_events_cols = [r[1] for r in conn.execute("PRAGMA table_info(life_events)").fetchall()]
+    if "target_debt_account_id" not in life_events_cols:
+        conn.execute("ALTER TABLE life_events ADD COLUMN target_debt_account_id INTEGER")
     conn.execute("PRAGMA optimize")
     conn.commit(); conn.close()
 

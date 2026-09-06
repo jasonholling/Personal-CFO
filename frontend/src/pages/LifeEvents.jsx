@@ -6,18 +6,30 @@ const fmt = value => isPrivacyMode() ? MASK_CURRENCY : new Intl.NumberFormat('en
 const TYPES = [
   ['career', 'Career change'], ['home', 'Home purchase or sale'], ['education', 'Education'], ['caregiving', 'Caregiving'], ['sabbatical', 'Sabbatical'], ['windfall', 'Windfall / inheritance'], ['other', 'Other'],
 ]
-const empty = () => ({ name:'', event_type:'career', event_year:new Date().getFullYear()+1, one_time_cash_delta:'', monthly_cash_flow_delta:'', duration_months:0, notes:'' })
+// Must match debt_engine.DEBT_TYPES exactly — no endpoint exposes that set
+// directly, so it's hardcoded here (same as Debt.jsx's own DEBT_TYPES list).
+const DEBT_ACCOUNT_TYPES = new Set(['mortgage', 'credit_card', 'student_loan', 'car_loan', 'personal_loan'])
+const empty = () => ({ name:'', event_type:'career', event_year:new Date().getFullYear()+1, one_time_cash_delta:'', monthly_cash_flow_delta:'', duration_months:0, notes:'', target_debt_account_id:'' })
 
 export default function LifeEvents() {
   const [data, setData] = useState(null)
   const [form, setForm] = useState(null)
   const [error, setError] = useState('')
+  const [debtAccounts, setDebtAccounts] = useState([])
   const load = () => axios.get('/api/life-events').then(r => setData(r.data)).catch(() => setError('Could not load life-event scenarios.'))
-  useEffect(() => { load() }, [])
+  useEffect(() => {
+    load()
+    axios.get('/api/accounts').then(r => setDebtAccounts(r.data.filter(a => DEBT_ACCOUNT_TYPES.has(a.account_type)))).catch(() => {})
+  }, [])
   const save = async () => {
     if (!form.name.trim()) { setError('Give this event a clear name.'); return }
     try {
-      await axios.post('/api/life-events', { ...form, name:form.name.trim(), event_year:Number(form.event_year), one_time_cash_delta:Number(form.one_time_cash_delta || 0), monthly_cash_flow_delta:Number(form.monthly_cash_flow_delta || 0), duration_months:Number(form.duration_months || 0) })
+      await axios.post('/api/life-events', {
+        ...form, name:form.name.trim(), event_year:Number(form.event_year),
+        one_time_cash_delta:Number(form.one_time_cash_delta || 0), monthly_cash_flow_delta:Number(form.monthly_cash_flow_delta || 0),
+        duration_months:Number(form.duration_months || 0),
+        target_debt_account_id: form.target_debt_account_id ? Number(form.target_debt_account_id) : null,
+      })
       setForm(null); setError(''); load()
     } catch (e) { setError(e.response?.data?.detail || 'Could not save this event.') }
   }
@@ -43,6 +55,18 @@ export default function LifeEvents() {
         <Field label="Monthly cash-flow impact"><input type="number" value={form.monthly_cash_flow_delta} onChange={e => setForm({...form,monthly_cash_flow_delta:e.target.value})} placeholder="Positive = more cash flow" /></Field>
         <Field label="Duration (months)"><input type="number" min="0" value={form.duration_months} onChange={e => setForm({...form,duration_months:e.target.value})} /><div style={{fontSize:11,color:'var(--text3)',marginTop:4}}>0 = continues to retirement</div></Field>
         <Field label="Note (optional)"><input value={form.notes} onChange={e => setForm({...form,notes:e.target.value})} placeholder="What this estimate includes" /></Field>
+        <Field label="Target a specific debt (optional)">
+          <select
+            disabled={!(Number(form.one_time_cash_delta) < 0)}
+            value={form.target_debt_account_id || ''}
+            onChange={e => setForm({...form, target_debt_account_id:e.target.value})}
+          >
+            <option value="">None — invest this cash instead</option>
+            {debtAccounts.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
+          </select>
+          {!(Number(form.one_time_cash_delta) < 0) && <div style={{fontSize:11,color:'var(--text3)',marginTop:4}}>Only applies to a negative one-time cash impact (a payment, not proceeds).</div>}
+          {form.target_debt_account_id && <div style={{fontSize:11,color:'var(--text3)',marginTop:4}}>Modeled as an extra payment toward this debt, not invested — see the Debt Payoff page for its effect.</div>}
+        </Field>
       </div>
       {error && <div style={{ color:'var(--red)', fontSize:13, marginBottom:10 }}>{error}</div>}
       <button className="btn-primary" onClick={save}>Save scenario</button><button className="btn-secondary" onClick={() => setForm(null)} style={{marginLeft:8}}>Cancel</button>

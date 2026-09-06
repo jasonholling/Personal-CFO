@@ -13,6 +13,8 @@ from debt_engine import (
     credit_card_payoff_calculator,
     refinance_breakeven,
     debt_vs_invest_crossover,
+    project_debt_schedule,
+    _simulate_payoff,
     DEBT_TYPES,
 )
 
@@ -125,6 +127,134 @@ class TestDebtVsInvestCrossover:
     def test_equal_rates_recommends_split(self):
         result = debt_vs_invest_crossover(debt_rate=0.07, expected_return=0.07)
         assert result["recommendation"] == "split_evenly"
+
+
+class TestOneTimeLumpPayments:
+    """The new one-time lump-sum mechanic (life-event-sourced extra
+    payments targeted at a SPECIFIC debt, not avalanche/snowball-ordered)."""
+
+    def test_default_no_payments_is_byte_for_byte_unchanged(self, two_debts):
+        """The default/no-payments case must be identical to today's
+        behavior — both the None default and an explicit empty list."""
+        no_kwarg = _simulate_payoff(two_debts, extra_monthly=100, order_key=lambda d: -d.get("interest_rate", 0))
+        explicit_none = _simulate_payoff(two_debts, extra_monthly=100, order_key=lambda d: -d.get("interest_rate", 0), one_time_payments=None)
+        explicit_empty = _simulate_payoff(two_debts, extra_monthly=100, order_key=lambda d: -d.get("interest_rate", 0), one_time_payments=[])
+        for key in ("months_to_debt_free", "total_interest_paid", "payoff_order", "schedule"):
+            assert no_kwarg[key] == explicit_none[key] == explicit_empty[key]
+
+    def test_lump_payment_accelerates_targeted_debt(self, two_debts):
+        baseline = _simulate_payoff(two_debts, extra_monthly=0, order_key=lambda d: d["id"])
+        with_payment = _simulate_payoff(
+            two_debts, extra_monthly=0, order_key=lambda d: d["id"],
+            one_time_payments=[{"account_id": 1, "months_from_now": 1, "amount": 3000}],
+        )
+        base_month = next(p["payoff_month"] for p in baseline["payoff_order"] if p["id"] == 1)
+        new_month  = next(p["payoff_month"] for p in with_payment["payoff_order"] if p["id"] == 1)
+        assert new_month < base_month
+        assert with_payment["interest_by_debt"][1] < baseline["interest_by_debt"][1]
+
+    def test_payment_on_one_debt_does_not_affect_others(self, two_debts):
+        """A PARTIAL lump sum (not enough to pay debt 1 off outright) must
+        leave debt 2 completely untouched — no shared pool, no snowball
+        rollover in play since debt 1 isn't actually paid off early here."""
+        baseline = _simulate_payoff(two_debts, extra_monthly=0, order_key=lambda d: d["id"])
+        with_payment = _simulate_payoff(
+            two_debts, extra_monthly=0, order_key=lambda d: d["id"],
+            one_time_payments=[{"account_id": 1, "months_from_now": 1, "amount": 500}],
+        )
+        base_month_2 = next(p["payoff_month"] for p in baseline["payoff_order"] if p["id"] == 2)
+        new_month_2  = next(p["payoff_month"] for p in with_payment["payoff_order"] if p["id"] == 2)
+        assert base_month_2 == new_month_2
+        assert baseline["interest_by_debt"][2] == with_payment["interest_by_debt"][2]
+        # Debt 1 finishes slightly sooner with the extra $500, so the
+        # overall simulation (bounded by whichever debt takes longest) is
+        # shorter overall — compare debt 2's trajectory only over the
+        # months both runs share; every shared month must match exactly.
+        shared_len = min(len(baseline["balance_history"][2]), len(with_payment["balance_history"][2]))
+        assert baseline["balance_history"][2][:shared_len] == with_payment["balance_history"][2][:shared_len]
+
+    def test_lump_sum_exceeding_balance_does_not_roll_over_within_that_month(self, two_debts):
+        """A $50,000 lump sum against a $1,500 debt should just extinguish
+        it in month 1 without going negative, and the excess ($48,500) must
+        NOT spill onto the other debt within that same month — verified by
+        checking debt 1's month-1 balance is exactly what plain interest +
+        minimum payment would produce, with no extra applied to it.
+        (A later month's freed-up $50/mo minimum from the now-paid-off
+        debt 2 legitimately DOES roll forward into debt 1 afterward — see
+        _simulate_payoff's docstring — that's the pre-existing snowball
+        mechanic for ANY debt that finishes early, not something this
+        lump-sum feature introduces; this test isolates the lump sum's own
+        month from that unrelated, expected effect.)"""
+        baseline = _simulate_payoff(two_debts, extra_monthly=0, order_key=lambda d: d["id"])
+        result = _simulate_payoff(
+            two_debts, extra_monthly=0, order_key=lambda d: d["id"],
+            one_time_payments=[{"account_id": 2, "months_from_now": 1, "amount": 50000}],
+        )
+        payoff_2 = next(p["payoff_month"] for p in result["payoff_order"] if p["id"] == 2)
+        assert payoff_2 == 1
+        # debt 2 never goes negative despite the wildly oversized lump sum
+        assert all(entry["balance"] >= 0 for entry in result["balance_history"][2])
+        # debt 1's very first month is identical to the no-payment baseline
+        # — none of debt 2's $48,500 excess landed on it that month.
+        baseline_month1_debt1 = baseline["balance_history"][1][0]
+        result_month1_debt1   = result["balance_history"][1][0]
+        assert baseline_month1_debt1 == result_month1_debt1 == {"month": 1, "balance": 4942}
+
+    def test_payment_ignored_if_account_id_not_in_debts(self, two_debts):
+        """A one-time payment targeting an account not in this household's
+        debt list should be silently ignored, not raise."""
+        baseline = _simulate_payoff(two_debts, extra_monthly=0, order_key=lambda d: d["id"])
+        result = _simulate_payoff(
+            two_debts, extra_monthly=0, order_key=lambda d: d["id"],
+            one_time_payments=[{"account_id": 999, "months_from_now": 1, "amount": 1000}],
+        )
+        assert result["months_to_debt_free"] == baseline["months_to_debt_free"]
+        assert result["total_interest_paid"] == baseline["total_interest_paid"]
+
+
+class TestProjectDebtSchedule:
+    def test_no_debt_returns_has_debt_false(self):
+        assert project_debt_schedule([{"account_type": "checking", "balance": 1000}]) == {"has_debt": False}
+
+    def test_default_matches_run_avalanche_snowball_plus_empty_effect(self, two_debts):
+        classic = run_avalanche_snowball(two_debts, extra_monthly=150)
+        extended = project_debt_schedule(two_debts, extra_monthly=150)
+        for key in ("has_debt", "total_balance", "total_minimum_payment", "interest_saved_with_avalanche"):
+            assert classic[key] == extended[key]
+        assert extended["one_time_payment_effect"] == {"avalanche": [], "snowball": []}
+
+    def test_targeted_debt_shows_up_in_effect_with_expected_fields(self, two_debts):
+        result = project_debt_schedule(
+            two_debts, extra_monthly=0,
+            one_time_payments=[{"account_id": 1, "months_from_now": 1, "amount": 2000}],
+        )
+        for strategy in ("avalanche", "snowball"):
+            effects = result["one_time_payment_effect"][strategy]
+            assert len(effects) == 1
+            effect = effects[0]
+            assert effect["account_id"] == 1
+            assert effect["name"] == "High-rate card"
+            assert effect["new_payoff_month"] <= effect["original_payoff_month"]
+            assert effect["interest_saved"] >= 0
+            assert isinstance(effect["balance_history"], list)
+
+    def test_two_events_targeting_same_debt_in_different_years_both_apply(self, two_debts):
+        """Two life events targeting the same debt in different years is a
+        supported (if unusual) case — both payments land independently,
+        each capped at whatever balance remains when it hits."""
+        result = project_debt_schedule(
+            two_debts, extra_monthly=0,
+            one_time_payments=[
+                {"account_id": 1, "months_from_now": 1, "amount": 2000},
+                {"account_id": 1, "months_from_now": 6, "amount": 2000},
+            ],
+        )
+        payoff_1 = next(p["payoff_month"] for p in result["avalanche"]["payoff_order"] if p["id"] == 1)
+        # Two separate $2000 payments against a $5000 balance should clear
+        # it well before its un-accelerated payoff month.
+        no_payments = project_debt_schedule(two_debts, extra_monthly=0)
+        baseline_payoff_1 = next(p["payoff_month"] for p in no_payments["avalanche"]["payoff_order"] if p["id"] == 1)
+        assert payoff_1 < baseline_payoff_1
 
 
 class TestAmortizedPayment:

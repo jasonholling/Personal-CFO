@@ -194,6 +194,11 @@ class LifeEvent(BaseModel):
     duration_months: int = 0
     notes: Optional[str] = None
     included_in_projection: bool = True
+    # Nullable — when set, this event models a one-time lump-sum extra
+    # payment toward a SPECIFIC debt account (see POST /api/life-events'
+    # validation) instead of cash landing in the taxable investment
+    # bucket. None/absent is the historical behavior.
+    target_debt_account_id: Optional[int] = None
 
 class EstateDocument(BaseModel):
     document_type: str
@@ -463,6 +468,53 @@ def _get_active_life_events(conn) -> List[dict]:
         "SELECT * FROM life_events WHERE included_in_projection=1 ORDER BY event_year, id"
     ).fetchall()]
 
+def _get_debt_targeted_life_events(conn) -> List[dict]:
+    """Rows from life_events that target a specific debt account (a
+    one-time lump-sum extra payment, not investable cash) — filtered to
+    included_in_projection=1 same as _get_active_life_events above, so a
+    toggled-off event has zero effect on the debt-payoff routes either.
+    Fed into debt_engine.project_debt_schedule (via GET /api/debts/
+    payoff-plan and /recommendation) as one_time_payments, after converting
+    each event_year to a months-from-now offset — see the callers below for
+    that conversion, which follows projection_engine.CURRENT_YEAR the same
+    way every other "life-event year -> time offset" conversion in this
+    codebase does."""
+    return [dict(r) for r in conn.execute(
+        "SELECT * FROM life_events WHERE included_in_projection=1 AND target_debt_account_id IS NOT NULL "
+        "ORDER BY event_year, id"
+    ).fetchall()]
+
+
+def _debt_targeted_events_to_one_time_payments(events: List[dict]) -> List[dict]:
+    """Convert life_events rows (event_year, one_time_cash_delta,
+    target_debt_account_id) into the {"account_id","months_from_now",
+    "amount"} shape debt_engine.project_debt_schedule expects.
+
+    months_from_now follows the same CURRENT_YEAR convention
+    projection_engine.py uses everywhere else to turn a life-event
+    calendar year into a time offset (e.g. retirement_year_for_events =
+    CURRENT_YEAR + years_to_retire) — we don't track a real "today" date
+    anywhere in this app, just the assumed current year. An event dated in
+    the current year or earlier (already-past relative to that
+    assumption) is clamped to land in month 1 of the simulation — "apply
+    it now" — rather than being dropped or landing at a negative/zero
+    month index the simulator would never reach.
+
+    one_time_cash_delta is validated <= 0 at write time (see POST
+    /api/life-events), so the payment amount is its absolute value.
+    """
+    from projection_engine import CURRENT_YEAR
+    payments = []
+    for ev in events:
+        months_from_now = max(1, (int(ev["event_year"]) - CURRENT_YEAR) * 12)
+        payments.append({
+            "account_id": ev["target_debt_account_id"],
+            "months_from_now": months_from_now,
+            "amount": abs(float(ev.get("one_time_cash_delta") or 0)),
+        })
+    return payments
+
+
 def _get_relevant_surplus_allocations(conn) -> List[dict]:
     """Rows from surplus_allocations for the two goals that represent
     money actually invested toward retirement — "Retirement contributions"
@@ -504,12 +556,38 @@ def create_life_event(event: LifeEvent):
     if not event.name.strip() or event.event_year < 2000 or event.event_year > 2200 or event.duration_months < 0:
         raise HTTPException(status_code=400, detail="Enter a name, a valid year, and a non-negative duration.")
     conn = get_db()
+    monthly_cash_flow_delta = event.monthly_cash_flow_delta
+    if event.target_debt_account_id is not None:
+        from debt_engine import DEBT_TYPES
+        account = conn.execute("SELECT account_type FROM accounts WHERE id=?", (event.target_debt_account_id,)).fetchone()
+        if not account or account["account_type"] not in DEBT_TYPES:
+            conn.close()
+            raise HTTPException(status_code=400, detail="Target debt account not found, or isn't a debt account.")
+        if event.one_time_cash_delta > 0:
+            conn.close()
+            raise HTTPException(
+                status_code=400,
+                detail="A debt-targeted life event must have a zero or negative one-time cash amount — it's a "
+                       "payment toward that debt, not income. Use a positive amount (with no debt target) for "
+                       "cash going into an investable bucket instead.",
+            )
+        # monthly_cash_flow_delta is silently zeroed rather than 400ing —
+        # this feature models a single one-time lump payment landing in
+        # event_year, not an ongoing monthly override of the debt's actual
+        # minimum payment (which already lives on the account itself via
+        # Account.minimum_payment). Rejecting outright would force the
+        # frontend to strip the field before submitting whenever a user
+        # flips the debt-target dropdown on/off; zeroing it here is the
+        # same "ignore what doesn't apply" treatment already used
+        # elsewhere in this file (e.g. surplus_allocations goal filtering).
+        monthly_cash_flow_delta = 0
     cur = conn.execute(
-        "INSERT INTO life_events (name,event_type,event_year,one_time_cash_delta,monthly_cash_flow_delta,duration_months,notes,included_in_projection) VALUES (?,?,?,?,?,?,?,?)",
-        (event.name.strip(), event.event_type, event.event_year, event.one_time_cash_delta, event.monthly_cash_flow_delta, event.duration_months, event.notes, 1 if event.included_in_projection else 0),
+        "INSERT INTO life_events (name,event_type,event_year,one_time_cash_delta,monthly_cash_flow_delta,duration_months,notes,included_in_projection,target_debt_account_id) VALUES (?,?,?,?,?,?,?,?,?)",
+        (event.name.strip(), event.event_type, event.event_year, event.one_time_cash_delta, monthly_cash_flow_delta,
+         event.duration_months, event.notes, 1 if event.included_in_projection else 0, event.target_debt_account_id),
     )
     conn.commit(); conn.close()
-    return {**event.model_dump(), "id": cur.lastrowid}
+    return {**event.model_dump(), "monthly_cash_flow_delta": monthly_cash_flow_delta, "id": cur.lastrowid}
 
 @app.delete("/api/life-events/{event_id}")
 def delete_life_event(event_id: int):
@@ -586,9 +664,11 @@ def export_calendar():
 def get_debt_payoff_plan(extra_monthly: float = 0):
     conn = get_db()
     accounts = [dict(r) for r in conn.execute("SELECT * FROM accounts").fetchall()]
+    debt_events = _get_debt_targeted_life_events(conn)
     conn.close()
-    from debt_engine import run_avalanche_snowball
-    return run_avalanche_snowball(accounts, extra_monthly)
+    from debt_engine import project_debt_schedule
+    one_time_payments = _debt_targeted_events_to_one_time_payments(debt_events)
+    return project_debt_schedule(accounts, extra_monthly, one_time_payments=one_time_payments)
 
 @app.get("/api/debts/recommendation")
 def get_debt_recommendation(extra_monthly: float = 0):
@@ -597,9 +677,11 @@ def get_debt_recommendation(extra_monthly: float = 0):
     avalanche-vs-snowball numbers from /payoff-plan."""
     conn = get_db()
     accounts = [dict(r) for r in conn.execute("SELECT * FROM accounts").fetchall()]
+    debt_events = _get_debt_targeted_life_events(conn)
     conn.close()
     from debt_engine import recommend_payoff_strategy
-    return recommend_payoff_strategy(accounts, extra_monthly)
+    one_time_payments = _debt_targeted_events_to_one_time_payments(debt_events)
+    return recommend_payoff_strategy(accounts, extra_monthly, one_time_payments=one_time_payments)
 
 class AmortizedPaymentRequest(BaseModel):
     balance: float

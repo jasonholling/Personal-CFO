@@ -277,6 +277,22 @@ export default function Debt() {
             )}
           </div>
 
+          {/* Life-event debt paydowns — distinct from the manual extra_monthly input above */}
+          {rec.life_event_debt_payments?.length > 0 && (
+            <div className="card" style={{ marginBottom:24, borderLeft:`3px solid ${GREEN}` }}>
+              <div className="label" style={{ marginBottom:12 }}>From Life Events</div>
+              {rec.life_event_debt_payments.map(p => (
+                <div key={p.account_id} style={{ fontSize:13, color:'var(--text2)', padding:'8px 0', borderBottom:'1px solid var(--border)' }}>
+                  A one-time payment from a life event accelerates <strong>{p.name}</strong>:{' '}
+                  {p.new_payoff_month != null ? `paid off in ${fmtMonths(p.new_payoff_month)}` : 'still beyond 50 years'}
+                  {p.original_payoff_month != null && p.months_saved != null && ` (${p.months_saved} month${p.months_saved === 1 ? '' : 's'} sooner than without it)`}
+                  {p.interest_saved > 0 && `, saving ~${fmt(p.interest_saved)} in interest`}.
+                </div>
+              ))}
+              <div style={{ fontSize:11, color:'var(--text3)', marginTop:8 }}>Set up on the Life Events page — separate from the manual extra monthly payment above.</div>
+            </div>
+          )}
+
           {/* Full payoff order */}
           <div className="card" style={{ marginBottom:24 }}>
             <div className="label" style={{ marginBottom:16 }}>Payoff Order</div>
