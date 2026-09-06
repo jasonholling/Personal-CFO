@@ -30,6 +30,7 @@ import json
 import secrets
 import hashlib
 import hmac
+from typing import Optional
 
 from webauthn import (
     generate_registration_options, verify_registration_response,
@@ -71,10 +72,17 @@ def _load_env_file():
 _load_env_file()
 
 # APP_PASSPHRASE is supported only to avoid locking out an existing local
-# install. New passphrases are stored as a salted scrypt hash instead.
+# install. New passphrases are stored as a salted PBKDF2-HMAC-SHA256 hash
+# instead. (Originally scrypt via hashlib.scrypt, but that function is only
+# present when Python's OpenSSL build includes scrypt support — Apple's
+# bundled Python links LibreSSL instead, which doesn't, so `set_passphrase`
+# raised AttributeError on this exact machine. pbkdf2_hmac has no such
+# dependency: it's implemented in hashlib unconditionally on every
+# platform. Iteration count follows OWASP's 2023 PBKDF2-SHA256 guidance.)
 PASSPHRASE = os.environ.get("APP_PASSPHRASE", "").strip() or None
 PASSPHRASE_HASH = os.environ.get("APP_PASSPHRASE_HASH", "").strip() or None
 _LEGACY_PASSPHRASE_LOADED = bool(PASSPHRASE and not PASSPHRASE_HASH)
+_PBKDF2_ITERATIONS = 600_000
 
 
 def auth_enabled() -> bool:
@@ -85,22 +93,21 @@ def legacy_passphrase_needs_migration() -> bool:
     return _LEGACY_PASSPHRASE_LOADED and bool(PASSPHRASE) and not PASSPHRASE_HASH
 
 
-def _hash_passphrase(passphrase: str, salt: bytes | None = None) -> str:
+def _hash_passphrase(passphrase: str, salt: Optional[bytes] = None) -> str:
     salt = salt or secrets.token_bytes(16)
-    derived = hashlib.scrypt(passphrase.encode("utf-8"), salt=salt, n=2**14, r=8, p=1)
-    return f"scrypt$16384$8$1${salt.hex()}${derived.hex()}"
+    derived = hashlib.pbkdf2_hmac("sha256", passphrase.encode("utf-8"), salt, _PBKDF2_ITERATIONS)
+    return f"pbkdf2_sha256${_PBKDF2_ITERATIONS}${salt.hex()}${derived.hex()}"
 
 
 def verify_passphrase(passphrase: str) -> bool:
     """Constant-time verification of a new hash or a legacy local value."""
     if PASSPHRASE_HASH:
         try:
-            algorithm, n, r, p, salt_hex, expected_hex = PASSPHRASE_HASH.split("$")
-            if algorithm != "scrypt":
+            algorithm, iterations, salt_hex, expected_hex = PASSPHRASE_HASH.split("$")
+            if algorithm != "pbkdf2_sha256":
                 return False
-            actual = hashlib.scrypt(
-                passphrase.encode("utf-8"), salt=bytes.fromhex(salt_hex),
-                n=int(n), r=int(r), p=int(p),
+            actual = hashlib.pbkdf2_hmac(
+                "sha256", passphrase.encode("utf-8"), bytes.fromhex(salt_hex), int(iterations),
             ).hex()
             return hmac.compare_digest(actual, expected_hex)
         except (ValueError, TypeError):

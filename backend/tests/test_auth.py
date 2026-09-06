@@ -69,7 +69,7 @@ class TestFirstRunSetup:
         auth.set_passphrase("new-secret")
         assert auth.PASSPHRASE is None
         saved = env_path.read_text()
-        assert "APP_PASSPHRASE_HASH=scrypt$" in saved
+        assert "APP_PASSPHRASE_HASH=pbkdf2_sha256$" in saved
         assert "new-secret" not in saved
         assert auth.verify_passphrase("new-secret") is True
         assert auth.verify_passphrase("wrong-secret") is False
