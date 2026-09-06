@@ -989,7 +989,7 @@ def run_survivor_scenario(inputs: Dict, accounts: List[Dict], ret_age: int = 60,
                   + inputs.get("jason_life_term", 0))
     else:
         payout = (inputs.get("justin_life_ul", 0) + inputs.get("justin_life_whole", 0)
-                  + inputs.get("justin_life_conagra", 0) + inputs.get("justin_life_term", 0)
+                  + inputs.get("person2_life_employer", 0) + inputs.get("justin_life_term", 0)
                   + inputs.get("justin_life_kids", 0))
 
     portfolio_at_death   = death_row["portfolio_balance"]

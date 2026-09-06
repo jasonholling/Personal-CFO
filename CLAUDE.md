@@ -1,9 +1,8 @@
 # Personal CFO
 
-Local-only personal financial dashboard for Jason & Justin. All data stays on the Mac; nothing leaves the machine except anonymized queries to the Claude API. Not deployed — runs locally.
+Local-first personal financial dashboard for a household. Financial data stays on the Mac. Not deployed — runs locally.
 
-**Repo:** https://github.com/jasonholling/Personal-CFO (private)
-**Path:** ~/Projects/personal-CFO
+Never put a personal repository URL or local filesystem path in public documentation.
 
 ## Stack
 - **Backend:** Python 3.10+, FastAPI 0.115 + Uvicorn, Pydantic 2.7, ReportLab (PDF reports), SQLite. Runs on 127.0.0.1:8000.
@@ -32,7 +31,7 @@ TaxPlanning, Simulation, WhatIf, SideBySide, Risk, Insurance, Estate, Education,
 - **`cfo.db` is gitignored** — it holds real financial data and stays local only. A fresh clone starts with an empty DB (created on first run). Never commit it.
 - Accidental `* 2` / `* 3` Finder/iCloud duplicate files are gitignored — don't commit them.
 - No API keys are committed; keep it that way (use env vars / .env, which is gitignored).
-- **All real personal data belongs in `cfo.db` only, never hardcoded in source** — this app previously had real salary/mortgage/SS-benefit/insurance figures and family names baked into `db.py`/`main.py`/`projection_engine.py`/`simulation_engine.py`/frontend pages as fallback defaults and UI labels (fixed 2026-08-26). Person/child names are now configurable via Settings (`person1_name` etc., see `usePersonNames()` hook) instead of hardcoded "Jason"/"Justin"/"Abby"/"Cooper".
+- **All real personal data belongs in `cfo.db` only, never hardcoded in source.** Person and child labels are configurable in Planning Inputs.
 
 ## Tests (`backend/tests/`)
 ```bash

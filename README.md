@@ -1,7 +1,7 @@
 # Personal CFO
 
-A local-only personal financial dashboard for Jason & Justin.
-All data stays on your Mac. Nothing leaves your machine except anonymized queries to the Claude API.
+A local-first personal financial dashboard for a household.
+All financial data stays on your Mac.
 
 ## Requirements
 
@@ -22,8 +22,8 @@ Then open http://localhost:5173 in your browser.
 
 1. Go to **Planning Inputs** and fill in your ages, SS estimates, pension, contributions
 2. Go to **Accounts** and add all your accounts with current balances
-3. Go to **Retirement** to see your projection vs the 2021 Creative Planning report
-4. Go to **Education** to see Abby & Cooper's 529 status
+3. Go to **Retirement** to review your projection
+4. Go to **Education** to review each child's 529 status
 5. Hit **Save Snapshot** on the Dashboard — do this monthly when you do bills
 
 ## Monthly Routine (10 minutes)

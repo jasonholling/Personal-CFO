@@ -17,7 +17,8 @@ def test_init_db_creates_expected_tables(temp_db):
     ).fetchall()}
     conn.close()
     assert {"accounts", "planning_inputs", "insurance_policies",
-            "property_policies", "snapshots", "tasks"} <= tables
+            "property_policies", "snapshots", "tasks", "estate_documents",
+            "assumption_reviews", "life_events"} <= tables
 
 
 def test_init_db_seeds_one_planning_inputs_row(temp_db):

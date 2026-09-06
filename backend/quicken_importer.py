@@ -28,35 +28,8 @@ def _clean_amount(val: str) -> float:
 Personal account, employer, property, vehicle, and routing-style labels belong
 in backend/quicken_account_map.local.json (gitignored)."""
 ACCOUNT_MAP = {
-    # Checking
-    'first national checking':          ('checking', 'joint'),
-    'optum bank':                       ('checking', 'joint'),
-
-    # Savings
-    'first national savings':           ('savings', 'joint'),
-    'first national savings (justin)':  ('savings', 'justin'),
-    'marcus online emergency savings':  ('savings', 'joint'),
-    'metro fcu savings':                ('savings', 'joint'),
-
-    # HSA investments
-
-    # Taxable brokerage
-
-    # Retirement
-
-    # 529
-
-    # Real estate
-
-    # Business
-
-    # Insurance
-
-    # Personal property (we'll skip vehicles, track separately)
-
-    # Savings bonds
-
-    # Mortgages (liabilities)
+    # Keep this empty in the public project. Local account aliases belong in
+    # quicken_account_map.local.json, which is intentionally gitignored.
 }
 
 _LOCAL_MAP_PATH = os.path.join(os.path.dirname(__file__), "quicken_account_map.local.json")

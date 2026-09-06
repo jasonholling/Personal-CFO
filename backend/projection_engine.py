@@ -823,7 +823,7 @@ def run_insurance_analysis(inputs: Dict, accounts: List[Dict]) -> Dict:
 
     justin_total_need    = total_debt + total_529_gap
     justin_current_coverage = (inputs.get("justin_life_ul", 0) + inputs.get("justin_life_whole", 0)
-                                + inputs.get("justin_life_conagra", 0) + inputs.get("justin_life_term", 0)
+                                + inputs.get("person2_life_employer", 0) + inputs.get("justin_life_term", 0)
                                 + inputs.get("justin_life_kids", 0))
     justin_surplus       = justin_current_coverage - justin_total_need
 

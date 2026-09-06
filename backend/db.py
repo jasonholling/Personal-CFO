@@ -65,7 +65,7 @@ def init_db():
             jason_life_term REAL DEFAULT 0,
             justin_life_ul REAL DEFAULT 0,
             justin_life_whole REAL DEFAULT 0,
-            justin_life_conagra REAL DEFAULT 0,
+            person2_life_employer REAL DEFAULT 0,
             justin_life_term REAL DEFAULT 0,
             justin_life_kids REAL DEFAULT 0,
             disability_monthly REAL DEFAULT 0,
@@ -168,7 +168,7 @@ def init_db():
         ("jason_life_term",        "REAL DEFAULT 0"),
         ("justin_life_ul",         "REAL DEFAULT 0"),
         ("justin_life_whole",      "REAL DEFAULT 0"),
-        ("justin_life_conagra",    "REAL DEFAULT 0"),
+        ("person2_life_employer",  "REAL DEFAULT 0"),
         ("justin_life_term",       "REAL DEFAULT 0"),
         ("justin_life_kids",       "REAL DEFAULT 0"),
         ("disability_monthly",     "REAL DEFAULT 0"),
@@ -202,6 +202,11 @@ def init_db():
     for col, typedef in migrations:
         if col not in existing_cols:
             conn.execute(f"ALTER TABLE planning_inputs ADD COLUMN {col} {typedef}")
+    # Preserve a value from an earlier local-only schema whose column name
+    # exposed an employer. The legacy column remains only in existing local
+    # databases; new/public schemas use the neutral field above.
+    if "justin_life_conagra" in existing_cols:
+        conn.execute("UPDATE planning_inputs SET person2_life_employer=justin_life_conagra WHERE person2_life_employer=0")
     conn.commit()
 
     conn.close()
@@ -303,3 +308,29 @@ def init_life_events_table():
     conn.commit(); conn.close()
 
 init_life_events_table()
+
+def init_cfo_operating_tables():
+    conn = get_db()
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS estate_documents (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            document_type TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'not_started',
+            reviewed_on TEXT,
+            next_review_on TEXT,
+            location_hint TEXT,
+            notes TEXT,
+            updated_at TEXT DEFAULT (datetime('now'))
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_estate_documents_type ON estate_documents(document_type);
+        CREATE TABLE IF NOT EXISTS assumption_reviews (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            label TEXT NOT NULL,
+            assumptions_json TEXT NOT NULL,
+            created_at TEXT DEFAULT (datetime('now'))
+        );
+    """)
+    conn.execute("PRAGMA optimize")
+    conn.commit(); conn.close()
+
+init_cfo_operating_tables()

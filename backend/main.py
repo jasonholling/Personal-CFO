@@ -18,7 +18,7 @@ import auth
 
 app = FastAPI(title="Personal CFO API")
 
-_BACKUP_TABLES = ("accounts", "planning_inputs", "insurance_policies", "property_policies", "snapshots", "tasks", "cash_flow_items", "surplus_allocations", "saved_scenarios", "life_events")
+_BACKUP_TABLES = ("accounts", "planning_inputs", "insurance_policies", "property_policies", "snapshots", "tasks", "cash_flow_items", "surplus_allocations", "saved_scenarios", "life_events", "estate_documents", "assumption_reviews")
 
 app.add_middleware(
     CORSMiddleware,
@@ -193,6 +193,18 @@ class LifeEvent(BaseModel):
     monthly_cash_flow_delta: float = 0
     duration_months: int = 0
     notes: Optional[str] = None
+
+class EstateDocument(BaseModel):
+    document_type: str
+    status: str = "not_started"
+    reviewed_on: Optional[str] = None
+    next_review_on: Optional[str] = None
+    location_hint: Optional[str] = None
+    notes: Optional[str] = None
+
+class AssumptionReview(BaseModel):
+    label: str = "Assumption review"
+    assumptions: dict
 
 @app.get("/api/backup/export")
 def export_backup():
@@ -460,6 +472,50 @@ def delete_life_event(event_id: int):
     conn = get_db(); conn.execute("DELETE FROM life_events WHERE id=?", (event_id,)); conn.commit(); conn.close()
     return {"deleted": event_id}
 
+@app.get("/api/estate-documents")
+def get_estate_documents():
+    conn = get_db(); rows = [dict(r) for r in conn.execute("SELECT * FROM estate_documents ORDER BY document_type").fetchall()]; conn.close()
+    return rows
+
+@app.put("/api/estate-documents/{document_type}")
+def save_estate_document(document_type: str, body: EstateDocument):
+    if document_type != body.document_type or not document_type.strip() or body.status not in {"not_started", "in_progress", "complete"}:
+        raise HTTPException(status_code=400, detail="Invalid estate-document status")
+    conn = get_db()
+    conn.execute("INSERT INTO estate_documents (document_type,status,reviewed_on,next_review_on,location_hint,notes,updated_at) VALUES (?,?,?,?,?,?,datetime('now')) ON CONFLICT(document_type) DO UPDATE SET status=excluded.status,reviewed_on=excluded.reviewed_on,next_review_on=excluded.next_review_on,location_hint=excluded.location_hint,notes=excluded.notes,updated_at=datetime('now')", (body.document_type,body.status,body.reviewed_on,body.next_review_on,body.location_hint,body.notes))
+    conn.commit(); conn.close(); return body
+
+@app.get("/api/assumption-reviews")
+def get_assumption_reviews():
+    conn=get_db(); rows=[dict(r) for r in conn.execute("SELECT * FROM assumption_reviews ORDER BY created_at DESC LIMIT 12").fetchall()]; conn.close()
+    for row in rows: row["assumptions"] = json.loads(row.pop("assumptions_json"))
+    return rows
+
+@app.post("/api/assumption-reviews")
+def create_assumption_review(body: AssumptionReview):
+    conn=get_db(); cur=conn.execute("INSERT INTO assumption_reviews (label,assumptions_json) VALUES (?,?)", (body.label.strip() or "Assumption review",json.dumps(body.assumptions))); conn.commit(); conn.close()
+    return {"id":cur.lastrowid,**body.model_dump()}
+
+@app.get("/api/financial-runway")
+def financial_runway():
+    from net_worth_engine import compute_net_worth, emergency_fund_check
+    conn=get_db(); inputs_row=conn.execute("SELECT * FROM planning_inputs WHERE id=1").fetchone(); accounts=[dict(r) for r in conn.execute("SELECT * FROM accounts").fetchall()]; cash=[dict(r) for r in conn.execute("SELECT * FROM cash_flow_items").fetchall()]; conn.close()
+    inputs=dict(inputs_row) if inputs_row else {}; retirement=run_retirement_projection(inputs,accounts,ret_ages=[60]) if inputs else {"scenarios":[]}; age60=next((s for s in retirement["scenarios"] if s["label"]=="age_60_early"),{}); emergency=emergency_fund_check(accounts,inputs.get("current_monthly_expenses",0)); networth=compute_net_worth(accounts); flow=summarize_cash_flow(cash)
+    return {"net_worth":round(networth["net_worth"]),"emergency":emergency,"cash_flow":flow,"retirement":{"percent_funded":age60.get("percent_funded"),"projected_surplus":age60.get("projected_surplus"),"retirement_age":60},"account_count":len(accounts)}
+
+@app.get("/api/calendar/export")
+def export_calendar():
+    """Portable calendar file for Google Calendar, Apple Calendar, and Outlook."""
+    conn=get_db(); tasks=[dict(r) for r in conn.execute("SELECT * FROM tasks WHERE completed=0 ORDER BY due_year,title").fetchall()]; conn.close()
+    year=datetime.now().year; lines=["BEGIN:VCALENDAR","VERSION:2.0","PRODID:-//Personal CFO//Planning Calendar//EN","CALSCALE:GREGORIAN"]
+    for index, task in enumerate(tasks):
+        due=f"{max(year, task.get('due_year') or year)}0101"
+        summary=task['title'].replace('\\', '\\\\').replace(',', '\\,').replace(';', '\\;')
+        description=(task.get('description') or '').replace('\\', '\\\\').replace('\n', '\\n').replace(',', '\\,').replace(';', '\\;')
+        lines += ["BEGIN:VEVENT",f"UID:personal-cfo-{task['id']}-{year}@local",f"DTSTAMP:{datetime.utcnow().strftime('%Y%m%dT%H%M%SZ')}",f"DTSTART;VALUE=DATE:{due}",f"SUMMARY:{summary}",f"DESCRIPTION:{description}","END:VEVENT"]
+    lines.append("END:VCALENDAR")
+    return FastAPIResponse(content="\r\n".join(lines)+"\r\n",media_type="text/calendar",headers={"Content-Disposition":"attachment; filename=personal-cfo-planning-calendar.ics"})
+
 # Debt Payoff — operates on accounts whose account_type is a debt type
 # (mortgage, credit_card, student_loan, car_loan, personal_loan)
 @app.get("/api/debts/payoff-plan")
@@ -629,7 +685,7 @@ def get_estate_tax_exposure(filing_as_couple: bool = True):
     nw = compute_net_worth(accounts)
     life_insurance_total = (
         inputs.get("jason_life_basic", 0) + inputs.get("jason_life_supplemental", 0) + inputs.get("jason_life_term", 0)
-        + inputs.get("justin_life_ul", 0) + inputs.get("justin_life_whole", 0) + inputs.get("justin_life_conagra", 0)
+        + inputs.get("justin_life_ul", 0) + inputs.get("justin_life_whole", 0) + inputs.get("person2_life_employer", 0)
         + inputs.get("justin_life_term", 0) + inputs.get("justin_life_kids", 0)
     )
     from estate_engine import estate_tax_exposure

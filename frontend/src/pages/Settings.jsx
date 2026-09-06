@@ -176,7 +176,7 @@ export default function Settings() {
         <Row label={`${p1} — Term coverage`}><NumInput value={form.jason_life_term ?? 0} onChange={v => set('jason_life_term', v)} prefix="$" /></Row>
         <Row label={`${p2} — Universal life`}><NumInput value={form.justin_life_ul ?? 0} onChange={v => set('justin_life_ul', v)} prefix="$" /></Row>
         <Row label={`${p2} — Whole life`}><NumInput value={form.justin_life_whole ?? 0} onChange={v => set('justin_life_whole', v)} prefix="$" /></Row>
-        <Row label={`${p2} — Employer spousal`}><NumInput value={form.justin_life_conagra ?? 0} onChange={v => set('justin_life_conagra', v)} prefix="$" /></Row>
+        <Row label={`${p2} — Employer-sponsored coverage`}><NumInput value={form.person2_life_employer ?? 0} onChange={v => set('person2_life_employer', v)} prefix="$" /></Row>
         <Row label={`${p2} — Term coverage`}><NumInput value={form.justin_life_term ?? 0} onChange={v => set('justin_life_term', v)} prefix="$" /></Row>
         <Row label={`Kids — Employer dependent (${k1} + ${k2} combined)`}><NumInput value={form.justin_life_kids ?? 0} onChange={v => set('justin_life_kids', v)} prefix="$" /></Row>
       </Section>

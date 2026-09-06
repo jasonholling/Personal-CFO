@@ -57,6 +57,16 @@ class TestMathPrimitives:
     def test_growing_annuity_zero_years_is_zero(self):
         assert _fv_growing_annuity(1000, 0.07, 0.03, 0) == 0
 
+    def test_projection_uses_configured_planning_horizon(self, sample_inputs, sample_accounts):
+        scenario = run_retirement_projection({**sample_inputs, "retirement_end_age": 95}, sample_accounts, ret_ages=[60])["scenarios"][0]
+        assert scenario["retirement_end_age"] == 95
+        assert len(scenario["yearly_detail"]) == 35
+
+    def test_state_tax_control_increases_retirement_distribution_tax(self, sample_inputs, sample_accounts):
+        baseline = run_retirement_projection({**sample_inputs, "state_income_tax_rate": 0}, sample_accounts, ret_ages=[60])["scenarios"][0]
+        with_state = run_retirement_projection({**sample_inputs, "state_income_tax_rate": .05}, sample_accounts, ret_ages=[60])["scenarios"][0]
+        assert sum(y["estimated_tax"] for y in with_state["yearly_detail"]) >= sum(y["estimated_tax"] for y in baseline["yearly_detail"])
+
 
 class TestPensionForAge:
     """This function replaced six copy-pasted, partly-broken versions of the
