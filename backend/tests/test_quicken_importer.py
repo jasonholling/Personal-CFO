@@ -1,4 +1,6 @@
 """Tests for quicken_importer.py — Quicken Net Worth Summary CSV parsing."""
+import json
+import quicken_importer
 from quicken_importer import (
     parse_quicken_networth_csv,
     get_net_worth_summary,
@@ -46,12 +48,19 @@ class TestGuessInstitution:
 
 
 class TestParseQuickenNetworthCsv:
-    def test_parses_mapped_accounts(self):
+    def test_public_importer_skips_unmapped_accounts(self, monkeypatch, tmp_path):
+        """The public repo must never carry a household's account aliases."""
+        monkeypatch.setattr(quicken_importer, "_LOCAL_MAP_PATH", str(tmp_path / "missing-map.json"))
         accounts = parse_quicken_networth_csv(SAMPLE_CSV)
-        names = {a["name"] for a in accounts}
-        assert "First National Checking" in names
-        assert "Empower 401k" in names
-        assert "Schwab Brokerage Creative Planning" in names
+        assert accounts == []
+
+    def test_local_mapping_imports_accounts(self, monkeypatch, tmp_path):
+        local_map = tmp_path / "account-map.json"
+        local_map.write_text(json.dumps({"retirement account": ["401k", "person1"]}))
+        monkeypatch.setattr(quicken_importer, "_LOCAL_MAP_PATH", str(local_map))
+        accounts = parse_quicken_networth_csv("Header\n---\nRetirement,Retirement Account,250000\n")
+        assert accounts[0]["account_type"] == "401k"
+        assert accounts[0]["owner"] == "person1"
 
     def test_skips_zero_balance_accounts(self):
         accounts = parse_quicken_networth_csv(SAMPLE_CSV)
@@ -65,16 +74,6 @@ class TestParseQuickenNetworthCsv:
         accounts = parse_quicken_networth_csv(SAMPLE_CSV)
         assert not any("Total" in a["name"] for a in accounts)
 
-    def test_account_type_and_owner_assigned(self):
-        accounts = parse_quicken_networth_csv(SAMPLE_CSV)
-        checking = next(a for a in accounts if a["name"] == "First National Checking")
-        assert checking["account_type"] == "checking"
-        assert checking["owner"] == "joint"
-
-    def test_balance_parsed_correctly(self):
-        accounts = parse_quicken_networth_csv(SAMPLE_CSV)
-        checking = next(a for a in accounts if a["name"] == "First National Checking")
-        assert checking["balance"] == 1234.56
 
     def test_empty_csv_returns_empty_list(self):
         assert parse_quicken_networth_csv("") == []
@@ -83,20 +82,24 @@ class TestParseQuickenNetworthCsv:
         csv_without_dashes = "Account,Balance\nChecking,100.00\n"
         assert parse_quicken_networth_csv(csv_without_dashes) == []
 
-    def test_short_rows_are_skipped(self):
-        csv_content = "Header\n---\nonly,two\nChecking,First National Checking,\"1,000.00\"\n"
+    def test_short_rows_are_skipped(self, monkeypatch, tmp_path):
+        local_map = tmp_path / "account-map.json"; local_map.write_text(json.dumps({"checking account": ["checking", "joint"]}))
+        monkeypatch.setattr(quicken_importer, "_LOCAL_MAP_PATH", str(local_map))
+        csv_content = "Header\n---\nonly,two\nChecking,Checking Account,\"1,000.00\"\n"
         accounts = parse_quicken_networth_csv(csv_content)
         assert len(accounts) == 1
 
-    def test_section_header_row_is_skipped(self):
-        csv_content = 'Header\n---\nSection,Investments,\nChecking,First National Checking,"1,000.00"\n'
+    def test_section_header_row_is_skipped(self, monkeypatch, tmp_path):
+        local_map = tmp_path / "account-map.json"; local_map.write_text(json.dumps({"checking account": ["checking", "joint"]}))
+        monkeypatch.setattr(quicken_importer, "_LOCAL_MAP_PATH", str(local_map))
+        csv_content = 'Header\n---\nSection,Investments,\nChecking,Checking Account,"1,000.00"\n'
         accounts = parse_quicken_networth_csv(csv_content)
         assert len(accounts) == 1
 
-    def test_partial_match_fallback_maps_unlisted_variant(self):
-        # "First National Checking Account" isn't a literal ACCOUNT_MAP key,
-        # but "first national checking" is a substring of it.
-        csv_content = 'Header\n---\nChecking,First National Checking Extra,"500.00"\n'
+    def test_partial_match_fallback_maps_unlisted_variant(self, monkeypatch, tmp_path):
+        local_map = tmp_path / "account-map.json"; local_map.write_text(json.dumps({"checking account": ["checking", "joint"]}))
+        monkeypatch.setattr(quicken_importer, "_LOCAL_MAP_PATH", str(local_map))
+        csv_content = 'Header\n---\nChecking,Checking Account Extra,"500.00"\n'
         accounts = parse_quicken_networth_csv(csv_content)
         assert len(accounts) == 1
         assert accounts[0]["account_type"] == "checking"

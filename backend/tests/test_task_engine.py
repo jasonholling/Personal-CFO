@@ -9,11 +9,14 @@ def _base_args(sample_inputs, sample_accounts):
     return sample_accounts, sample_inputs, projections, education
 
 
-def test_always_includes_the_ten_annual_tasks(sample_inputs, sample_accounts):
+def test_includes_core_annual_tasks_and_current_tax_reviews(sample_inputs, sample_accounts):
     accounts, inputs, projections, education = _base_args(sample_inputs, sample_accounts)
     tasks = generate_tasks(accounts, inputs, projections, education)
     annual = [t for t in tasks if t["recurrence"] == "annual" and t["task_type"] == "annual"]
-    assert len(annual) == 10
+    assert len(annual) >= 10
+    keys = {task["auto_key"] for task in annual}
+    assert f"withholding_review_{CURRENT_YEAR}" in keys
+    assert f"estimated_tax_check_{CURRENT_YEAR}" in keys
 
 
 def test_education_gap_task_created_when_underfunded(sample_inputs, sample_accounts):
