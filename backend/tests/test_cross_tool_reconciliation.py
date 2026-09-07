@@ -129,6 +129,42 @@ class TestGuaranteedIncomeConsistentAcrossConsumers:
             delta = roth["schedule"][0]["base_taxable_income"] - roth_no_pension["schedule"][0]["base_taxable_income"]
             assert delta == pytest.approx(expected_pension, abs=1)
 
+    def test_social_security_claiming_age_and_amount_consistent(self, household, sample_accounts):
+        """Every consumer that reads jason_social_security/jason_ss_delayed
+        selects between them by ss_timing ('early' -> jason_social_security
+        starting at 62, 'delayed' -> jason_ss_delayed starting at 67) —
+        checked here via run_retirement_projection (which echoes the
+        selected amount/age directly) against run_roth_conversion_analysis
+        (which doesn't echo SS directly, but a household with Jason already
+        past both claiming ages must show the SAME base_taxable_income
+        whether "early" or "delayed" is requested, once real SS income is
+        actually flowing under both — a real drift in the selected AMOUNT
+        or START AGE between consumers would show up as a difference
+        here)."""
+        ret_age = 68  # past both the early (62) and delayed (67) claiming ages
+        for timing in ("early", "delayed"):
+            proj = run_retirement_projection(household, sample_accounts, ret_ages=[ret_age])
+            s = next(x for x in proj["scenarios"] if x["label"] == f"age_{ret_age}_{timing}")
+            expected_ss = household["jason_social_security"] if timing == "early" else household["jason_ss_delayed"]
+            expected_age = 62 if timing == "early" else 67
+            assert s["jason_ss_start_age"] == expected_age
+            assert s["jason_ss_annual"] == pytest.approx(expected_ss, abs=0.01)
+            assert ret_age >= expected_age  # sanity: SS is actually active by the time this scenario retires
+
+            roth = run_roth_conversion_analysis(household, sample_accounts, ret_age=ret_age, ss_timing=timing)
+            no_ss_inputs = {**household, "jason_social_security": 0, "jason_ss_delayed": 0}
+            roth_no_ss = run_roth_conversion_analysis(no_ss_inputs, sample_accounts, ret_age=ret_age, ss_timing=timing)
+            if roth["schedule"] and roth_no_ss["schedule"]:
+                delta = roth["schedule"][0]["base_taxable_income"] - roth_no_ss["schedule"][0]["base_taxable_income"]
+                # 85% of SS is includable in taxable income (same convention
+                # both consumers use), COLA'd from the claiming age to
+                # ret_age (both tools apply the same annual COLA to SS,
+                # frozen pension aside) — the delta must match the SAME
+                # amount/age selection run_retirement_projection made.
+                cola_years = ret_age - expected_age
+                expected_ss_at_ret_age = expected_ss * ((1 + household["inflation_rate"]) ** cola_years)
+                assert delta == pytest.approx(expected_ss_at_ret_age * 0.85, abs=1)
+
 
 class TestNoConsumerReportsANegativeBalance:
     """A stress scenario (high spending need, modest balances) exercised
