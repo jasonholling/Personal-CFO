@@ -162,6 +162,34 @@ class TestRunRetirementProjection:
         b = next(s for s in explicit0["scenarios"] if s["ss_timing"] == "early")
         assert a["portfolio_at_retirement"] == b["portfolio_at_retirement"]
 
+    def test_annual_bonus_pct_increases_portfolio_at_retirement(self, sample_inputs, sample_accounts):
+        inputs = {**sample_inputs, "w2_salary": 150000, "annual_bonus_pct": 0.20}
+        baseline = run_retirement_projection(sample_inputs, sample_accounts, ret_ages=[65])
+        with_bonus = run_retirement_projection(inputs, sample_accounts, ret_ages=[65])
+        b = next(s for s in baseline["scenarios"] if s["ss_timing"] == "early")
+        w = next(s for s in with_bonus["scenarios"] if s["ss_timing"] == "early")
+        assert w["taxable_at_retirement"] > b["taxable_at_retirement"]
+
+    def test_annual_bonus_pct_scales_with_salary_growth(self, sample_inputs, sample_accounts):
+        """A bonus expressed as % of salary should grow along with raises,
+        same as the 401k contributions it's modeled after — unlike
+        annual_rsu_value (a flat dollar figure), which doesn't."""
+        inputs = {**sample_inputs, "w2_salary": 150000, "annual_bonus_pct": 0.20}
+        flat   = run_retirement_projection(inputs, sample_accounts, ret_ages=[65])
+        growth = run_retirement_projection(inputs, sample_accounts, ret_ages=[65], salary_growth_pct=0.03)
+        f = next(s for s in flat["scenarios"] if s["ss_timing"] == "early")
+        g = next(s for s in growth["scenarios"] if s["ss_timing"] == "early")
+        assert g["taxable_at_retirement"] > f["taxable_at_retirement"]
+
+    def test_annual_bonus_pct_defaults_to_zero_no_behavior_change(self, sample_inputs, sample_accounts):
+        no_key = {k: v for k, v in sample_inputs.items() if k != "annual_bonus_pct"}
+        explicit0 = {**sample_inputs, "annual_bonus_pct": 0}
+        a = run_retirement_projection(no_key, sample_accounts, ret_ages=[65])
+        b = run_retirement_projection(explicit0, sample_accounts, ret_ages=[65])
+        a_s = next(s for s in a["scenarios"] if s["ss_timing"] == "early")
+        b_s = next(s for s in b["scenarios"] if s["ss_timing"] == "early")
+        assert a_s["taxable_at_retirement"] == b_s["taxable_at_retirement"]
+
     def test_kids_accounts_excluded_from_investable_assets(self, sample_inputs):
         accounts = [
             {"id": 1, "name": "Kid Roth", "account_type": "roth_ira", "owner": "abby", "balance": 999999, "institution": "", "notes": ""},

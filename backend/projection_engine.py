@@ -359,6 +359,11 @@ def run_retirement_projection(inputs: Dict, accounts: List[Dict], ret_ages: List
     er_pct      = inputs.get("employer_401k_pct", 0.09)
     annual_401k_roth   = inputs.get("annual_401k_roth_employee",  salary * emp_pct)
     annual_401k_pretax = inputs.get("annual_401k_pretax_employer", salary * er_pct)
+    # Recurring annual bonus, as a fraction of salary (unlike annual_rsu_value,
+    # a flat dollar amount) — scales with salary_growth_pct the same way the
+    # 401k contributions above do, since a bonus expressed as % of salary
+    # naturally grows alongside raises.
+    annual_bonus = salary * inputs.get("annual_bonus_pct", 0)
 
     # Pre-tax: traditional 401k slice + Justin IRA
     pretax_start = pretax_401k + sum(
@@ -436,6 +441,20 @@ def run_retirement_projection(inputs: Dict, accounts: List[Dict], ret_ages: List
             )
             if annual_rsu > 0:
                 taxable_at_ret += _fv_annuity(annual_rsu * 0.65, pre_ret, years_to_retire)
+            if annual_bonus > 0:
+                # Same net-of-tax treatment as RSUs above (bonuses are
+                # withheld at a higher supplemental-wage rate in practice,
+                # and this codebase doesn't model payroll tax brackets in
+                # this pre-retirement accumulation phase, so it reuses the
+                # existing approximation rather than inventing a second
+                # one). Grows with salary_growth_pct like the 401k
+                # contributions above, since this is defined as a % of
+                # salary rather than a flat dollar amount.
+                bonus_fv = (
+                    _fv_growing_annuity(annual_bonus * 0.65, pre_ret, salary_growth_pct, years_to_retire)
+                    if salary_growth_pct else _fv_annuity(annual_bonus * 0.65, pre_ret, years_to_retire)
+                )
+                taxable_at_ret += bonus_fv
 
             # Sale proceeds — a sale is real regardless of which retirement
             # age this scenario column happens to be modeling, same as life

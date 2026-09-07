@@ -140,6 +140,7 @@ export default function Settings() {
         </Row>
         <Row label="Annual HSA Contribution"><NumInput value={form.annual_hsa_contribution} onChange={v => set('annual_hsa_contribution', v)} prefix="$" /></Row>
         <Row label="Annual RSU Value (gross)" hint="0 if none this year"><NumInput value={form.annual_rsu_value} onChange={v => set('annual_rsu_value', v)} prefix="$" /></Row>
+        <Row label="Annual Bonus" hint="As % of salary — scales with raises, unlike RSU above"><NumInput value={form.annual_bonus_pct ?? 0} onChange={v => set('annual_bonus_pct', v)} pct suffix="%" /></Row>
       </Section>
 
       <Section title="Social Security">

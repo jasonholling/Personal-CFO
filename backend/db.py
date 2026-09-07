@@ -51,6 +51,7 @@ def init_db():
             annual_roth_contribution REAL DEFAULT 0,
             annual_hsa_contribution REAL DEFAULT 0,
             annual_rsu_value REAL DEFAULT 0,
+            annual_bonus_pct REAL DEFAULT 0,
             mortgage_balance REAL DEFAULT 0,
             pretax_401k_pct REAL DEFAULT 0.75,
             employee_401k_pct REAL DEFAULT 0.06,
@@ -198,6 +199,7 @@ def init_db():
         ("current_monthly_expenses", "REAL DEFAULT 0"),  # for the Emergency Fund check — actual current spending, not the retirement income target
         ("retirement_end_age",       "INTEGER DEFAULT 99"),
         ("state_income_tax_rate",    "REAL DEFAULT 0"),
+        ("annual_bonus_pct",         "REAL DEFAULT 0"),  # recurring annual bonus, as a fraction of w2_salary (e.g. 0.20 for 20%) — scales with salary_growth_pct like 401k contributions, unlike the flat-dollar annual_rsu_value
     ]
     for col, typedef in migrations:
         if col not in existing_cols:

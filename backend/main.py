@@ -296,6 +296,7 @@ class PlanningInputs(BaseModel):
     annual_roth_contribution: float = 0
     annual_hsa_contribution: float = 0
     annual_rsu_value: float = 0
+    annual_bonus_pct: float = 0
     mortgage_balance: float = 0
 
 class SnapshotNote(BaseModel):
