@@ -832,6 +832,24 @@ class TestRunSurvivorScenario:
         assert result["has_data"] is True
         assert result["deceased"] == "jason"
 
+    def test_default_death_age_anchors_to_real_current_age_not_a_past_ret_age(
+            self, sample_inputs, sample_accounts):
+        """Regression (independent review, 2026-09-07, third follow-up —
+        the second of two adjacent cases flagged alongside the past-
+        ret_age timeline fix): the default death_age (when not passed
+        explicitly) was `ret_age + 10`, meant as "10 years into
+        retirement" — but for an already-past selected ret_age (e.g. 55
+        while actually 65 today), that defaults to a death age at or
+        before the household's REAL current age, effectively modeling
+        the household as already dead rather than dying 10 years from
+        now. Must anchor to the real current age instead: currently 65,
+        selecting ret_age 55, should default to death at 75 (65+10), not
+        65 (55+10)."""
+        inputs = {**sample_inputs, "jason_age": 65, "justin_age": 65}
+        result = run_survivor_scenario(inputs, sample_accounts, ret_age=55, deceased="jason", death_age=None)
+        assert result["has_data"] is True
+        assert result["death_age"] == 75
+
     def test_death_year_spending_is_not_double_counted(self, sample_inputs):
         """Regression (external audit 2026-09-07): death_row["portfolio_
         balance"] (the baseline's END-OF-YEAR figure for the death year)

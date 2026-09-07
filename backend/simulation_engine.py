@@ -16,6 +16,7 @@ from projection_engine import (
 )
 from annual_engine import (AccountState, DEFAULT_ORDER, ROTH_FIRST_ORDER, marginal_bracket_tax_model, no_tax_model,
                            simulate_conversion, simulate_withdrawal_year)
+from timeline_engine import build_cumulative_inflation, build_timeline
 # Module-level, not lazy/per-call — _pretax_marginal_tax_rate below is
 # called once per simulated year per trial (up to ~40 years x 1000 trials
 # per Monte Carlo/SWR request), so a per-call `from X import Y` measurably
@@ -166,25 +167,21 @@ def _run_single(
     "success" (external audit 2026-09-06, same root cause as
     projection_engine.py's on_track fix).
     """
-    # withdrawal_start_age anchors every forward-looking age/year/horizon
-    # computation below to whichever is later: the selected ret_age (the
-    # normal, still-in-the-future case) or the household's actual current
-    # age (the already-past-that-age case — e.g. selecting a sensitivity
-    # comparison at age 55 while actually 65 today). Mirrors
-    # projection_engine.run_retirement_projection's own
-    # withdrawal_start_age exactly (independent review, 2026-09-07 follow-
-    # up: this shared function, and every other simulation_engine.py
-    # consumer, still used raw ret_age for its OWN timeline — a household
-    # selecting a past retirement age got a wildly different simulated
-    # horizon here than in the main projection, which fixed this same gap
-    # in an earlier session. `ret_age` itself is left untouched below for
-    # genuinely age-55-specific POLICY (the bridge-job/kids-at-home
-    # branch) — that's a selection, not a timeline, same precedent as
-    # pension_annual using raw ret_age via the caller's pension_for_age).
-    withdrawal_start_age = max(ret_age, jason_age)
-    mort_age   = max(withdrawal_start_age + 1, min(110, int(retirement_end_age or 99)))
-    retire_yrs = mort_age - withdrawal_start_age
-    retirement_year = CURRENT_YEAR + (withdrawal_start_age - jason_age)
+    # `timeline` is the single shared source of effective_start_age,
+    # retirement_year, end_age/retire_yrs, and age-gap arithmetic —
+    # extracted into timeline_engine.py (2026-09-07 consolidation
+    # follow-up) after the third independent review found this exact
+    # computation duplicated (and, until an earlier fix, WRONG in this
+    # copy specifically) across every withdrawal-phase consumer. Mirrors
+    # run_retirement_projection's own convention exactly: `ret_age`
+    # itself is left untouched below for genuinely age-55-specific
+    # POLICY (the bridge-job/kids-at-home branch) — that's a selection,
+    # not a timeline, same precedent as pension_annual using raw ret_age
+    # via the caller's pension_for_age.
+    timeline = build_timeline(jason_age, justin_age, ret_age, retirement_end_age)
+    withdrawal_start_age = timeline.effective_start_age
+    retire_yrs = timeline.retire_yrs
+    retirement_year = timeline.retirement_year
 
     pretax  = pretax_start
     roth    = roth_start
@@ -198,32 +195,30 @@ def _run_single(
     _rmd_start     = rmd_start_age(jason_age)
     any_unmet_need = False
 
-    # A true cumulative inflation index, built once up front — cum_inflation[k]
-    # is the accumulated price-growth factor from the start of retirement
-    # through the start of year k (cum_inflation[0] == 1.0, today's dollars).
-    # Every inflated figure below used to be computed as
-    # (1 + eff_inf)**yr — using THIS year's inflation_mult (which some
-    # stress scenarios, e.g. stagflation_1970s, deliberately change
-    # partway through the horizon) raised to the power of ALL elapsed
-    # years. That retroactively re-derives the entire price history from
-    # whatever rate happens to be in effect this year, instead of
-    # accumulating it — a rate that drops next year doesn't just slow
-    # future growth, it silently erases the compounding already "banked"
-    # from earlier, higher-inflation years (external audit 2026-09-07,
-    # reproduced: spending step from $100,000 to $112,000 to $106,090 as
-    # inflation eased, an actual DECREASE in nominal spending need that
-    # should never happen just because the inflation *rate* slowed).
-    # Reduces to the exact original (1+inflation)**yr whenever inf_mult is
-    # constant across the whole horizon — true for every stress scenario
-    # except stagflation_1970s and for ordinary Monte Carlo, so this is a
-    # zero-behavior-change fix for the overwhelming majority of runs.
-    cum_inflation = [1.0]
-    for k in range(retire_yrs):
-        k_mult = inflation_mults[k] if inflation_mults and k < len(inflation_mults) else 1.0
-        cum_inflation.append(cum_inflation[-1] * (1 + inflation * k_mult))
+    # A true cumulative inflation index (timeline_engine.build_cumulative_
+    # inflation) — cum_inflation[k] is the accumulated price-growth factor
+    # from the start of retirement through the start of year k
+    # (cum_inflation[0] == 1.0, today's dollars). Every inflated figure
+    # below used to be computed as (1 + eff_inf)**yr — using THIS year's
+    # inflation_mult (which some stress scenarios, e.g. stagflation_1970s,
+    # deliberately change partway through the horizon) raised to the
+    # power of ALL elapsed years. That retroactively re-derives the
+    # entire price history from whatever rate happens to be in effect
+    # this year, instead of accumulating it — a rate that drops next year
+    # doesn't just slow future growth, it silently erases the compounding
+    # already "banked" from earlier, higher-inflation years (external
+    # audit 2026-09-07, reproduced: spending step from $100,000 to
+    # $112,000 to $106,090 as inflation eased, an actual DECREASE in
+    # nominal spending need that should never happen just because the
+    # inflation *rate* slowed). Reduces to the exact original
+    # (1+inflation)**yr whenever inf_mult is constant across the whole
+    # horizon — true for every stress scenario except stagflation_1970s
+    # and for ordinary Monte Carlo, so this is a zero-behavior-change fix
+    # for the overwhelming majority of runs.
+    cum_inflation = build_cumulative_inflation(inflation, retire_yrs, inflation_mults)
 
     for yr in range(retire_yrs):
-        age      = withdrawal_start_age + yr
+        age      = timeline.age(yr)
         ret      = annual_returns[yr] if yr < len(annual_returns) else random.gauss(post_ret, PORT_STD)
         inf_mult = inflation_mults[yr] if inflation_mults and yr < len(inflation_mults) else 1.0
         eff_inf  = inflation * inf_mult
@@ -275,39 +270,23 @@ def _run_single(
         # above (cum_inflation[yr] / cum_inflation[claim_yr] instead of
         # (1+eff_inf)**years_since_claim, same "retroactively erases
         # earlier inflation" bug when inf_mult varies over the horizon).
-        #
-        # When a claim age precedes ret_age (early SS claimed before this
-        # retirement scenario even starts — e.g. claim at 62, retire at
-        # 65), yr_claim_jason clamped to 0 dropped the COLA already
-        # accrued in those pre-retirement years entirely: jason_ss_annual
-        # was used as-is at yr=0 instead of compounded forward by
-        # (ret_age - jason_ss_age) years first (independent review,
-        # 2026-09-07 follow-up — reproduced: claim at 62 / retire at 65 /
-        # 3% inflation reported $20,000 at retirement instead of the
-        # $21,855 every other consumer's deterministic formula,
-        # `jason_ss_annual * (1+inflation)**max(0,age-jason_ss_age)`,
-        # already gets right for the identical inputs). This
-        # pre-retirement leg is deterministic (flat `inflation`, not the
-        # per-trial `inflation_mults` — this function only models
-        # stochastic/stress inflation during the WITHDRAWAL horizon
-        # captured by cum_inflation; pre-retirement accumulation is a
-        # separate, already-computed phase everywhere else in this file),
-        # then the post-retirement leg continues to use each trial's own
-        # cum_inflation path exactly as before. Reduces to the original
-        # formula exactly whenever a claim age is during/after retirement
-        # (pre_ret_cola == 1).
+        # The pre-loop-start leg (timeline.pre_start_cola) covers a claim
+        # that already happened before the loop's own effective_start_age
+        # (independent review, 2026-09-07 follow-up — reproduced: claim
+        # at 62 / retire at 65 / 3% inflation used to report $20,000 at
+        # retirement instead of the correct $21,855). That leg is
+        # deterministic (flat `inflation`, not the per-trial
+        # `inflation_mults` — this function only models stochastic/stress
+        # inflation during the WITHDRAWAL horizon captured by
+        # cum_inflation; pre-retirement accumulation is a separate,
+        # already-computed phase everywhere else in this file); the
+        # post-loop-start leg continues to use each trial's own
+        # cum_inflation path. Reduces to the original formula exactly
+        # whenever a claim age is during/after the loop's start
+        # (pre_start_cola == 1).
         year_pen  = pension_annual  # frozen pension, no COLA
-        # Pre-retirement COLA (and the claim-year index below) is relative
-        # to withdrawal_start_age, not raw ret_age — the same fix as the
-        # timeline above applies here too (independent review, 2026-09-07
-        # second follow-up): a household currently 65 selecting a past
-        # ret_age of 55 has already accrued 65-minus-claim-age years of
-        # COLA by the time this loop actually starts (at 65), not
-        # 55-minus-claim-age (which could even be negative, wrongly
-        # zeroing out pre-loop COLA that's real).
-        jason_pre_ret_cola = (1 + inflation) ** max(0, withdrawal_start_age - jason_ss_age)
-        yr_claim_jason = max(0, jason_ss_age - withdrawal_start_age)
-        year_jss  = (jason_ss_annual * jason_pre_ret_cola * (cum_inflation[yr] / cum_inflation[yr_claim_jason])
+        year_jss  = (jason_ss_annual * timeline.pre_start_cola(jason_ss_age, inflation)
+                     * (cum_inflation[yr] / cum_inflation[timeline.claim_year_index(jason_ss_age)])
                      if age >= jason_ss_age else 0)
         # justin_ss_age is JUSTIN's own claiming age, so it has to be
         # compared against Justin's own current age, not Jason's `age` —
@@ -315,10 +294,10 @@ def _run_single(
         # off by the couple's age gap whenever jason_age != justin_age
         # (external audit 2026-09-06, same bug as
         # projection_engine.run_retirement_projection's yearly loop).
-        justin_age_this_year = age - (jason_age - justin_age)
-        justin_pre_ret_cola = (1 + inflation) ** max(0, (withdrawal_start_age - (jason_age - justin_age)) - justin_ss_age)
-        yr_claim_justin = max(0, justin_ss_age - withdrawal_start_age + (jason_age - justin_age))
-        year_uss  = (justin_ss_annual * justin_pre_ret_cola * (cum_inflation[yr] / cum_inflation[yr_claim_justin])
+        justin_age_this_year = timeline.justin_age_at(age)
+        justin_claim_age_in_jason_years = justin_ss_age + timeline.age_gap
+        year_uss  = (justin_ss_annual * timeline.pre_start_cola(justin_claim_age_in_jason_years, inflation)
+                     * (cum_inflation[yr] / cum_inflation[timeline.claim_year_index(justin_claim_age_in_jason_years)])
                      if justin_age_this_year >= justin_ss_age else 0)
         fixed     = year_pen + year_jss + year_uss
 
@@ -409,13 +388,15 @@ def run_swr_analysis(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_t
     hsa_at_ret     = _scenario["hsa_at_retirement"]
     portfolio = pretax_at_ret + roth_at_ret + taxable_at_ret + hsa_at_ret
 
-    # Same fix as _run_single/run_monte_carlo/run_stress_tests
-    # (independent review, 2026-09-07 second follow-up): a household
+    # timeline_engine.build_timeline: the single shared source of
+    # effective_start_age/end_age/retire_yrs, used by every withdrawal-
+    # phase consumer (consolidation follow-up, 2026-09-07) — a household
     # selecting an already-past ret_age must simulate forward from its
     # actual current age, not re-run the years already behind it.
-    withdrawal_start_age = max(ret_age, jason_age)
-    end_age = max(withdrawal_start_age + 1, min(110, int(inputs.get("retirement_end_age") or 99)))
-    retire_yrs = end_age - withdrawal_start_age
+    timeline = build_timeline(jason_age, justin_age, ret_age, inputs.get("retirement_end_age"))
+    withdrawal_start_age = timeline.effective_start_age
+    end_age = timeline.end_age
+    retire_yrs = timeline.retire_yrs
     N          = 1000
     _rmd_start = rmd_start_age(jason_age)
 
@@ -424,7 +405,7 @@ def run_swr_analysis(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_t
 
     retirement_year = CURRENT_YEAR + years_to_ret
     _, post_events = _split_life_events(life_events, retirement_year)
-    post_events = post_events + _post_retirement_asset_sale_events(inputs, jason_age, ret_age)
+    post_events = post_events + _post_retirement_asset_sale_events(inputs, jason_age, timeline.effective_start_age)
 
     def success_at_withdrawal(annual_withdrawal_today):
         """How many of N simulations survive with this portfolio withdrawal?"""
@@ -437,7 +418,7 @@ def run_swr_analysis(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_t
             survived = True
 
             for yr in range(retire_yrs):
-                age = withdrawal_start_age + yr
+                age = timeline.age(yr)
                 ret = returns[yr]
 
                 # Guaranteed income this year
@@ -448,7 +429,7 @@ def run_swr_analysis(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_t
                 # gap), not Jason's `age` directly (external audit
                 # 2026-09-06, same bug fixed in _run_single/
                 # run_retirement_projection).
-                justin_age_this_year = age - (jason_age - justin_age)
+                justin_age_this_year = timeline.justin_age_at(age)
                 year_uss = justin_ss * ((1+inflation)**max(0,justin_age_this_year-justin_ss_age)) if justin_age_this_year >= justin_ss_age else 0
                 guaranteed = year_pen + year_jss + year_uss
 
@@ -658,15 +639,16 @@ def run_monte_carlo(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_ti
     taxable_at_ret = _scenario["taxable_at_retirement"]
     hsa_at_ret     = _scenario["hsa_at_retirement"]
 
-    # withdrawal_start_age: same fix as _run_single's own (independent
-    # review, 2026-09-07 second follow-up) — end_age/retire_yrs/the chart's
-    # own age labels must anchor to whichever is later, ret_age or the
-    # household's actual current age, or a past-ret_age selection reports
-    # a wildly wrong number of simulated years and mislabeled ages on the
-    # chart even though _run_single's own internal loop is now correct.
-    withdrawal_start_age = max(ret_age, jason_age)
-    end_age = max(withdrawal_start_age + 1, min(110, int(inputs.get("retirement_end_age") or 99)))
-    retire_yrs = end_age - withdrawal_start_age
+    # timeline_engine.build_timeline: same shared source _run_single uses
+    # internally — end_age/retire_yrs/the chart's own age labels must
+    # anchor to whichever is later, ret_age or the household's actual
+    # current age, or a past-ret_age selection reports a wildly wrong
+    # number of simulated years and mislabeled ages on the chart even
+    # though _run_single's own internal loop is correct.
+    timeline = build_timeline(jason_age, justin_age, ret_age, inputs.get("retirement_end_age"))
+    withdrawal_start_age = timeline.effective_start_age
+    end_age = timeline.end_age
+    retire_yrs = timeline.retire_yrs
     N = 1000
 
     # Withdrawal-phase life events, split once outside the N-run loop —
@@ -675,10 +657,10 @@ def run_monte_carlo(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_ti
     # correct unchanged: years_to_ret == withdrawal_start_age - jason_age
     # in both branches (years_to_ret is already max(0, ret_age-jason_age),
     # which equals withdrawal_start_age-jason_age whether or not the
-    # clamp binds).
+    # clamp binds) -- same value as timeline.retirement_year.
     retirement_year = CURRENT_YEAR + years_to_ret
     _, post_life_events = _split_life_events(life_events, retirement_year)
-    post_life_events = post_life_events + _post_retirement_asset_sale_events(inputs, jason_age, ret_age)
+    post_life_events = post_life_events + _post_retirement_asset_sale_events(inputs, jason_age, timeline.effective_start_age)
 
     successes = 0
     all_balances = []
@@ -796,19 +778,20 @@ def run_stress_tests(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_t
     taxable_at_ret = _scenario["taxable_at_retirement"]
     hsa_at_ret     = _scenario["hsa_at_retirement"]
 
-    # Same fix as run_monte_carlo's own withdrawal_start_age (independent
-    # review, 2026-09-07 second follow-up) — end_age/retire_yrs and every
-    # chart/depletion-age label below must anchor to whichever is later,
-    # ret_age or the household's actual current age.
-    withdrawal_start_age = max(ret_age, jason_age)
-    end_age = max(withdrawal_start_age + 1, min(110, int(inputs.get("retirement_end_age") or 99)))
-    retire_yrs = end_age - withdrawal_start_age
+    # timeline_engine.build_timeline: same shared source run_monte_carlo
+    # uses — end_age/retire_yrs and every chart/depletion-age label below
+    # must anchor to whichever is later, ret_age or the household's
+    # actual current age.
+    timeline = build_timeline(jason_age, justin_age, ret_age, inputs.get("retirement_end_age"))
+    withdrawal_start_age = timeline.effective_start_age
+    end_age = timeline.end_age
+    retire_yrs = timeline.retire_yrs
 
     # Withdrawal-phase life events, split once — the pre-retirement half
     # is already folded into the bucket values above.
     retirement_year = CURRENT_YEAR + years_to_ret
     _, post_life_events = _split_life_events(life_events, retirement_year)
-    post_life_events = post_life_events + _post_retirement_asset_sale_events(inputs, jason_age, ret_age)
+    post_life_events = post_life_events + _post_retirement_asset_sale_events(inputs, jason_age, timeline.effective_start_age)
 
     # Base case — deterministic at post_ret every year
     base_returns = [post_ret] * retire_yrs
@@ -1007,12 +990,15 @@ def run_roth_conversion_analysis(inputs: Dict, accounts: List[Dict], ret_age: in
     roth    = roth_at_ret
     taxable = taxable_at_ret
 
-    # withdrawal_start_age: same fix as every other withdrawal-phase
-    # consumer in this file (independent review, 2026-09-07 second
-    # follow-up) — a household selecting an already-past ret_age must
-    # start its conversion window from its actual current age, not
-    # re-open a window that (nominally) started years ago.
-    withdrawal_start_age = max(ret_age, jason_age)
+    # timeline_engine.build_timeline: same shared source every other
+    # withdrawal-phase consumer in this file uses — a household selecting
+    # an already-past ret_age must start its conversion window from its
+    # actual current age, not re-open a window that (nominally) started
+    # years ago. retirement_end_age doesn't apply to this function's own
+    # horizon (RMD_START_AGE does instead — see conversion_years below),
+    # so it's omitted here.
+    timeline = build_timeline(jason_age, justin_age, ret_age)
+    withdrawal_start_age = timeline.effective_start_age
     conversion_years = RMD_START_AGE - withdrawal_start_age
 
     # Pre-inflate today's-dollars figures to the retirement start date —
@@ -1035,17 +1021,17 @@ def run_roth_conversion_analysis(inputs: Dict, accounts: List[Dict], ret_age: in
     # 2026-09-07).
     retirement_year = CURRENT_YEAR + years_to_ret
     _, post_events = _split_life_events(life_events, retirement_year)
-    post_events = post_events + _post_retirement_asset_sale_events(inputs, jason_age, ret_age)
+    post_events = post_events + _post_retirement_asset_sale_events(inputs, jason_age, timeline.effective_start_age)
 
     for yr in range(conversion_years):
-        age = withdrawal_start_age + yr
+        age = timeline.age(yr)
 
         # Income this year (portfolio draw + pension + SS if active)
         hc = healthcare_pre_at_ret if age < 65 else healthcare_post_at_ret
         income_need   = income_at_ret * ((1 + inflation) ** yr) + hc * ((1 + inflation) ** yr)
         year_pen      = pension_annual
         year_jss      = jason_ss * ((1+inflation)**max(0,age-jason_ss_age)) if age >= jason_ss_age else 0
-        justin_age_this_year = age - (jason_age - justin_age)
+        justin_age_this_year = timeline.justin_age_at(age)
         year_uss      = justin_ss * ((1+inflation)**max(0,justin_age_this_year-justin_ss_age)) if justin_age_this_year >= justin_ss_age else 0
         guaranteed    = year_pen + year_jss + year_uss
 
@@ -1215,12 +1201,12 @@ def run_roth_conversion_analysis(inputs: Dict, accounts: List[Dict], ret_age: in
     # fallback" vs. "neither," not conversions in isolation.
     no_conv_roth = roth_at_ret
     for yr in range(conversion_years):
-        age = withdrawal_start_age + yr
+        age = timeline.age(yr)
         hc = healthcare_pre_at_ret if age < 65 else healthcare_post_at_ret
         income_need = income_at_ret * ((1 + inflation) ** yr) + hc * ((1 + inflation) ** yr)
         year_pen = pension_annual
         year_jss = jason_ss * ((1+inflation)**max(0,age-jason_ss_age)) if age >= jason_ss_age else 0
-        justin_age_this_year = age - (jason_age - justin_age)
+        justin_age_this_year = timeline.justin_age_at(age)
         year_uss = justin_ss * ((1+inflation)**max(0,justin_age_this_year-justin_ss_age)) if justin_age_this_year >= justin_ss_age else 0
         guaranteed = year_pen + year_jss + year_uss
         calendar_year = retirement_year + yr
@@ -1413,13 +1399,14 @@ def run_tax_efficiency_simulation(inputs: Dict, accounts: List[Dict], ret_age: i
     taxable_start = _s["taxable_at_retirement"]
     hsa_start     = _s["hsa_at_retirement"]
 
-    # Same fix as every other withdrawal-phase consumer in this file
-    # (independent review, 2026-09-07 second follow-up) — a household
-    # selecting an already-past ret_age must simulate forward from its
-    # actual current age.
-    withdrawal_start_age = max(ret_age, jason_age)
-    end_age = max(withdrawal_start_age + 1, min(110, int(inputs.get("retirement_end_age") or 99)))
-    retire_yrs = end_age - withdrawal_start_age
+    # timeline_engine.build_timeline: same shared source every other
+    # withdrawal-phase consumer in this file uses — a household selecting
+    # an already-past ret_age must simulate forward from its actual
+    # current age.
+    timeline = build_timeline(jason_age, justin_age, ret_age, inputs.get("retirement_end_age"))
+    withdrawal_start_age = timeline.effective_start_age
+    end_age = timeline.end_age
+    retire_yrs = timeline.retire_yrs
     N = 1000
     TAX_PRETAX   = 0.22
     TAX_TAXABLE  = 0.15
@@ -1434,7 +1421,7 @@ def run_tax_efficiency_simulation(inputs: Dict, accounts: List[Dict], ret_age: i
     # phase (external audit 2026-09-07).
     retirement_year_te = CURRENT_YEAR + years_to_ret_te
     _, post_events_te = _split_life_events(life_events, retirement_year_te)
-    post_events_te = post_events_te + _post_retirement_asset_sale_events(inputs, jason_age, ret_age)
+    post_events_te = post_events_te + _post_retirement_asset_sale_events(inputs, jason_age, timeline.effective_start_age)
 
     def run_strategy(strategy):
         """strategy: 'taxable_first', 'roth_first', 'optimal'"""
@@ -1451,13 +1438,13 @@ def run_tax_efficiency_simulation(inputs: Dict, accounts: List[Dict], ret_age: i
             any_unmet_need = False
 
             for yr in range(retire_yrs):
-                age = withdrawal_start_age + yr
+                age = timeline.age(yr)
                 ret = returns[yr]
                 hc  = healthcare_pre_te if age < 65 else healthcare_post_te
                 year_need  = income_at_ret_te * ((1+inflation)**yr) + hc * ((1+inflation)**yr)
                 year_pen   = pension_annual
                 year_jss   = jason_ss_annual * ((1+inflation)**max(0,age-jason_ss_age)) if age >= jason_ss_age else 0
-                justin_age_this_year = age - (jason_age - justin_age)
+                justin_age_this_year = timeline.justin_age_at(age)
                 year_uss   = justin_ss * ((1+inflation)**max(0,justin_age_this_year-justin_ss_age)) if justin_age_this_year >= justin_ss_age else 0
                 guaranteed = year_pen + year_jss + year_uss
 
@@ -1787,8 +1774,19 @@ def run_survivor_scenario(inputs: Dict, accounts: List[Dict], ret_age: int = 60,
     inflation  = inputs["inflation_rate"]
     age_gap    = jason_age - justin_age  # positive: jason is older
 
+    # timeline_engine.build_timeline: same shared source every other
+    # withdrawal-phase consumer uses. The death_age default below was the
+    # second of the two adjacent cases flagged alongside the asset-sale
+    # timing fix (independent review, 2026-09-07, third follow-up): "10
+    # years into retirement" defaulted to `ret_age + 10`, which for an
+    # already-past selected ret_age (e.g. 55 while actually 65 today)
+    # could default to a death age at or before the household's REAL
+    # current age — effectively "already dead" rather than 10 years from
+    # now. Anchored to effective_start_age instead; reduces to the exact
+    # original formula whenever ret_age >= jason_age.
+    timeline = build_timeline(jason_age, justin_age, ret_age, inputs.get("retirement_end_age"))
     if death_age is None:
-        death_age = ret_age + 10
+        death_age = timeline.effective_start_age + 10
 
     _proj = run_retirement_projection(inputs, accounts, ret_ages=[ret_age], life_events=life_events,
                                        surplus_allocations=surplus_allocations)

@@ -917,6 +917,36 @@ class TestAssetSaleAndRsuBridgeAt55:
         assert w_by_age[60]["portfolio_balance"] > b_by_age[60]["portfolio_balance"]
         assert w_by_age[65]["portfolio_balance"] > b_by_age[65]["portfolio_balance"]
 
+    def test_asset_sale_between_a_past_ret_age_and_real_current_age_is_not_dropped(
+            self, sample_inputs, sample_accounts):
+        """Regression (independent review, 2026-09-07, third follow-up —
+        an adjacent case flagged alongside the past-ret_age timeline fix,
+        resolved by correcting the reference implementation together with
+        every consumer, not by leaving it agreeing with a known bug): a
+        sale dated between an already-past selected ret_age and the
+        household's real current age used to satisfy NEITHER the
+        accumulation phase's inclusion check (asset_sale_age <= ret_age)
+        NOR _post_retirement_asset_sale_events' own exclusion check
+        (also <= ret_age) — both compared against the wrong (too-early)
+        boundary, so the sale vanished entirely rather than being counted
+        exactly once. Household currently 65, selecting ret_age 55, a
+        $500K sale at 60 (between the two) must show up exactly once,
+        with the same total (balance + proceeds, no pre-sale-to-today
+        growth omitted) as selecting the real current age directly."""
+        inputs = {**sample_inputs, "jason_age": 65, "justin_age": 65,
+                  "asset2_sale_age": 60, "asset2_sale_net": 500000}
+        past = run_retirement_projection(inputs, sample_accounts, ret_ages=[55])
+        current = run_retirement_projection(inputs, sample_accounts, ret_ages=[65])
+        p = next(s for s in past["scenarios"] if s["label"] == "age_55_early")
+        c = next(s for s in current["scenarios"] if s["label"] == "age_65_early")
+        assert p["taxable_at_retirement"] == pytest.approx(c["taxable_at_retirement"], abs=1)
+        # Sanity: the sale actually landed somewhere, not just "nothing
+        # changed by coincidence."
+        no_sale = run_retirement_projection({**inputs, "asset2_sale_age": 0, "asset2_sale_net": 0},
+                                             sample_accounts, ret_ages=[55])
+        n = next(s for s in no_sale["scenarios"] if s["label"] == "age_55_early")
+        assert p["taxable_at_retirement"] > n["taxable_at_retirement"]
+
 
 class TestRunEducationProjection:
     def test_returns_two_goals(self, sample_inputs, sample_accounts):

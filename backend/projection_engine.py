@@ -16,6 +16,7 @@ import datetime
 import math
 
 from annual_engine import AccountState, DEFAULT_ORDER, marginal_bracket_tax_model, simulate_withdrawal_year
+from timeline_engine import CURRENT_YEAR, Timeline, build_cumulative_inflation, build_timeline
 
 COLLEGE_COST_INFLATION = 0.04
 COLLEGE_YEARS          = 4
@@ -71,7 +72,11 @@ ANNUAL_401K_ROTH_DEFAULT     = 0
 # loop's own "year" field formula (CURRENT_YEAR + yr + years_to_retire),
 # which was already hardcoded to 2026 before life events existed. Kept as
 # one named constant instead of two literals so the two can't drift apart.
-CURRENT_YEAR = 2026
+# Canonical definition now lives in timeline_engine.py (consolidation
+# follow-up, 2026-09-07), imported at the top of this file — so that
+# module has no dependency on this one, and every existing
+# `from projection_engine import CURRENT_YEAR` call site elsewhere is
+# unaffected (Python re-exports it here unchanged).
 
 
 def _fv(pv, r, n):
@@ -197,27 +202,38 @@ def _split_life_events(life_events: List[Dict], retirement_year: int):
     return pre, post
 
 
-def _post_retirement_asset_sale_events(inputs: Dict, jason_age: int, ret_age: int) -> List[Dict]:
-    """Asset 1/2 sales (Settings page) scheduled to happen AFTER this
-    specific ret_age scenario's own retirement date. The accumulation-phase
-    code in run_retirement_projection only ever handles a sale at or before
-    retirement (assetN_sale_age <= ret_age) — a sale scheduled for
-    partway through retirement simply vanished from every per-year cash
-    flow, and Monte Carlo/stress-test/SWR simulations (which only inherit
-    run_retirement_projection's pre-retirement accumulation result and have
-    no other way to see this Settings field) never modeled it at all
-    (external audit 2026-09-07: "retire at 58, sell an asset for $500,000
-    at 60 -> annual results identical to no sale"). Returns life-event-
-    shaped one-time-cash dicts — the same {"event_year","one_time","
-    monthly","duration_months"} shape _split_life_events produces — meant
-    to be appended directly to a post_life_events list. Sales at or before
-    ret_age are intentionally excluded here (already counted via the
-    accumulation-phase code); appending them here too would double-count."""
+def _post_retirement_asset_sale_events(inputs: Dict, jason_age: int, effective_start_age: int) -> List[Dict]:
+    """Asset 1/2 sales (Settings page) scheduled to happen AFTER the
+    withdrawal phase's own effective start date. The accumulation-phase
+    code in run_retirement_projection only ever handles a sale at or
+    before that date (assetN_sale_age <= effective_start_age) — a sale
+    scheduled for partway through retirement simply vanished from every
+    per-year cash flow, and Monte Carlo/stress-test/SWR simulations
+    (which only inherit run_retirement_projection's pre-retirement
+    accumulation result and have no other way to see this Settings
+    field) never modeled it at all (external audit 2026-09-07: "retire
+    at 58, sell an asset for $500,000 at 60 -> annual results identical
+    to no sale"). Returns life-event-shaped one-time-cash dicts — the
+    same {"event_year","one_time","monthly","duration_months"} shape
+    _split_life_events produces — meant to be appended directly to a
+    post_life_events list. Sales at or before effective_start_age are
+    intentionally excluded here (already counted via the accumulation-
+    phase code); appending them here too would double-count.
+
+    `effective_start_age` (not the raw, possibly-past ret_age) is what
+    this boundary must be measured against — independent review,
+    2026-09-07, third follow-up: comparing against raw ret_age let a
+    sale dated between an already-past ret_age and the household's real
+    current age fall through both this function's exclusion AND the
+    accumulation phase's own inclusion (each checked against the wrong
+    end of the gap), silently vanishing entirely rather than double-
+    counting. Reference implementation corrected together with every
+    consumer here, not left agreeing with a known bug."""
     events = []
     for label, appreciates in (("asset1", True), ("asset2", False)):
         sale_age = inputs.get(f"{label}_sale_age", 0)
         sale_net = inputs.get(f"{label}_sale_net", 0)
-        if not sale_age or sale_age <= ret_age:
+        if not sale_age or sale_age <= effective_start_age:
             continue
         yrs_from_now = max(0, sale_age - jason_age)
         # Matches the accumulation-phase code's own asset1-vs-asset2
@@ -461,15 +477,22 @@ def run_retirement_projection(inputs: Dict, accounts: List[Dict], ret_ages: List
         # whichever is later: the selected ret_age (the normal, still-in-
         # the-future case, where this is just ret_age unchanged) or the
         # household's actual current age (the already-past-that-age case).
-        withdrawal_start_age = max(ret_age, jason_age)
+        # timeline_engine.build_timeline is the single shared source of
+        # this computation now (consolidation follow-up, 2026-09-07) —
+        # this function was the reference implementation every other
+        # withdrawal-phase consumer's own version was modeled on, so it
+        # moves onto the shared module too rather than staying a 6th
+        # independent copy.
+        timeline = build_timeline(jason_age, justin_age, ret_age, inputs.get("retirement_end_age"))
+        withdrawal_start_age = timeline.effective_start_age
         pension_annual  = pension_for_age(inputs, ret_age)
 
         # Life events split by calendar year relative to this ret_age's
         # retirement year — independent of ss_label, so computed once here
         # rather than inside the ss_label loop below.
-        retirement_year_for_events = CURRENT_YEAR + years_to_retire
+        retirement_year_for_events = timeline.retirement_year
         pre_life_events, post_life_events = _split_life_events(life_events, retirement_year_for_events)
-        post_life_events = post_life_events + _post_retirement_asset_sale_events(inputs, jason_age, ret_age)
+        post_life_events = post_life_events + _post_retirement_asset_sale_events(inputs, jason_age, timeline.effective_start_age)
         life_events_taxable_add = _pre_retirement_taxable_add(pre_life_events, pre_ret, retirement_year_for_events)
 
         # Surplus allocations compound from today through this ret_age's
@@ -539,19 +562,30 @@ def run_retirement_projection(inputs: Dict, accounts: List[Dict], ret_ages: List
             # zero scenarios (found via a bug-hunt sandbox, confirmed
             # against this app's real data: a sale_age of 56 meant this
             # $75K+ never appeared in any of the 55-67 columns).
+            # Compared against timeline.effective_start_age, not raw
+            # ret_age (independent review, 2026-09-07, third follow-up —
+            # see _post_retirement_asset_sale_events' docstring for the
+            # full account): a sale dated between an already-past
+            # ret_age and the household's real current age used to fall
+            # through both this check AND that function's own exclusion,
+            # vanishing entirely. yrs_to_grow is measured to
+            # effective_start_age too (not years_to_retire, which is 0
+            # in the past-ret_age case) — this reduces to the exact
+            # original formula whenever ret_age >= jason_age
+            # (effective_start_age == ret_age there).
             asset1_sale_age = inputs.get("asset1_sale_age", 0)
             asset1_sale_net = inputs.get("asset1_sale_net", 0)
             asset1_app      = inputs.get("asset1_appreciation", 0.03)
-            if asset1_sale_age and asset1_sale_age <= ret_age:
+            if asset1_sale_age and asset1_sale_age <= timeline.effective_start_age:
                 yrs_asset1 = max(0, asset1_sale_age - jason_age)
-                yrs_to_grow = years_to_retire - yrs_asset1
+                yrs_to_grow = timeline.effective_start_age - asset1_sale_age
                 asset1_proceeds = asset1_sale_net * ((1 + asset1_app) ** yrs_asset1)
                 taxable_at_ret  += asset1_proceeds * ((1 + pre_ret) ** yrs_to_grow)
             asset2_sale_age = inputs.get("asset2_sale_age", 0)
             asset2_sale_net = inputs.get("asset2_sale_net", 0)
-            if asset2_sale_age and asset2_sale_age <= ret_age:
+            if asset2_sale_age and asset2_sale_age <= timeline.effective_start_age:
                 yrs_asset2    = max(0, asset2_sale_age - jason_age)
-                yrs_to_grow    = years_to_retire - yrs_asset2
+                yrs_to_grow    = timeline.effective_start_age - asset2_sale_age
                 taxable_at_ret += asset2_sale_net * ((1 + pre_ret) ** yrs_to_grow)
 
             # Life events dated before retirement (compounded above) —
@@ -589,8 +623,8 @@ def run_retirement_projection(inputs: Dict, accounts: List[Dict], ret_ages: List
             # household's real mortality/planning-horizon age. Identical to
             # the old `ret_age`-based formula whenever ret_age >= jason_age
             # (withdrawal_start_age == ret_age in that case).
-            mort_age      = max(withdrawal_start_age + 1, min(110, int(inputs.get("retirement_end_age") or 99)))
-            retire_years  = mort_age - withdrawal_start_age
+            mort_age      = timeline.end_age
+            retire_years  = timeline.retire_yrs
 
             healthcare_pre       = inputs.get("healthcare_pre_medicare", 0)
             healthcare_post      = inputs.get("healthcare_post_medicare", 0)
@@ -621,8 +655,8 @@ def run_retirement_projection(inputs: Dict, accounts: List[Dict], ret_ages: List
 
             yearly = []
             for yr in range(retire_years):
-                age = withdrawal_start_age + yr
-                calendar_year = CURRENT_YEAR + yr + years_to_retire
+                age = timeline.age(yr)
+                calendar_year = timeline.calendar_year(yr)
 
                 # Income need this year (includes healthcare, phased for age 55)
                 if ret_age == 55:
@@ -677,7 +711,7 @@ def run_retirement_projection(inputs: Dict, accounts: List[Dict], ret_ages: List
                 # (external audit 2026-09-06). justin_age_this_year matches
                 # the same "justin_age" figure already recorded per-row
                 # below (age - (jason_age - justin_age)).
-                justin_age_this_year = age - (jason_age - justin_age)
+                justin_age_this_year = timeline.justin_age_at(age)
                 year_uss = (justin_ss_annual * ((1 + inflation) ** max(0, justin_age_this_year - justin_ss_age))
                             if justin_age_this_year >= justin_ss_age else 0)
                 fixed_income = year_pen + year_jss + year_uss
@@ -757,7 +791,7 @@ def run_retirement_projection(inputs: Dict, accounts: List[Dict], ret_ages: List
 
                 yearly.append({
                     "jason_age":        age,
-                    "justin_age":       age - (jason_age - justin_age),
+                    "justin_age":       timeline.justin_age_at(age),
                     "year":             calendar_year,
                     "income_need":      round(year_need),
                     "healthcare_cost":   round(healthcare_inflated),
