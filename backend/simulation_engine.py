@@ -17,6 +17,7 @@ from projection_engine import (
 from annual_engine import (AccountState, DEFAULT_ORDER, ROTH_FIRST_ORDER, marginal_bracket_tax_model, no_tax_model,
                            simulate_conversion, simulate_withdrawal_year)
 from timeline_engine import build_cumulative_inflation, build_timeline, healthcare_for_age
+from annual_inputs import build_annual_income_inputs
 # Module-level, not lazy/per-call — _pretax_marginal_tax_rate below is
 # called once per simulated year per trial (up to ~40 years x 1000 trials
 # per Monte Carlo/SWR request), so a per-call `from X import Y` measurably
@@ -295,6 +296,24 @@ def _run_single(
         healthcare_pre  = (phase_inputs or {}).get("healthcare_pre", 0) * ((1 + inflation) ** max(0, withdrawal_start_age - jason_age))
         healthcare_post = (phase_inputs or {}).get("healthcare_post", 0) * ((1 + inflation) ** max(0, withdrawal_start_age - jason_age))
         hc_this_year = healthcare_for_age(age, healthcare_pre, healthcare_post)
+
+        # Shared annual-input builder (consolidation, 2026-09-07): Social
+        # Security (COLA'd from each spouse's own claim age, including
+        # the pre-loop-start leg) and signed life-event offsets,
+        # generalized from this exact function's own formulas below into
+        # annual_inputs.py so run_retirement_projection and every other
+        # consumer share it instead of five independent copies. Healthcare
+        # is consolidated too, EXCEPT inside the ret_age==55 bridge/kids
+        # branch just below, which is a genuinely different, deliberate
+        # policy this consolidation preserves rather than erasing.
+        income = build_annual_income_inputs(
+            timeline, yr, cum_inflation, inflation,
+            healthcare_pre_at_start=healthcare_pre, healthcare_post_at_start=healthcare_post,
+            jason_ss_annual=jason_ss_annual, jason_ss_age=jason_ss_age,
+            justin_ss_annual=justin_ss_annual, justin_ss_age=justin_ss_age,
+            post_life_events=post_life_events, post_retirement_year_effects=_post_retirement_year_effects,
+        )
+
         if phase_inputs and ret_age == 55:
             bridge_years  = phase_inputs.get("bridge_years", 0)
             kids_years    = phase_inputs.get("kids_years", 0)
@@ -314,50 +333,24 @@ def _run_single(
                 hc_this_year = healthcare_post
                 year_need = income_at_ret*cum_inf + healthcare_post*cum_inf
         else:
-            year_need = income_at_ret * cum_inf + hc_this_year * cum_inf
+            year_need = income_at_ret * cum_inf + income.healthcare
 
-        # Life events active in the withdrawal phase — same treatment as
-        # projection_engine.run_retirement_projection's yearly loop: a
-        # recurring monthly delta adjusts year_need directly, a one-time
-        # delta lands in taxable below instead.
+        # Life events active in the withdrawal phase — computed above via
+        # the shared builder (same _post_retirement_year_effects call
+        # this function used inline before).
         calendar_year = retirement_year + yr
-        life_event_cash, life_event_monthly = _post_retirement_year_effects(post_life_events or [], calendar_year)
+        life_event_cash, life_event_monthly = income.life_event_cash, income.life_event_monthly
         year_need -= life_event_monthly
 
-        # SS COLA is relative to each person's OWN claim year, not to the
-        # start of retirement — accumulated the same true way as year_need
-        # above (cum_inflation[yr] / cum_inflation[claim_yr] instead of
-        # (1+eff_inf)**years_since_claim, same "retroactively erases
-        # earlier inflation" bug when inf_mult varies over the horizon).
-        # The pre-loop-start leg (timeline.pre_start_cola) covers a claim
-        # that already happened before the loop's own effective_start_age
-        # (independent review, 2026-09-07 follow-up — reproduced: claim
-        # at 62 / retire at 65 / 3% inflation used to report $20,000 at
-        # retirement instead of the correct $21,855). That leg is
-        # deterministic (flat `inflation`, not the per-trial
-        # `inflation_mults` — this function only models stochastic/stress
-        # inflation during the WITHDRAWAL horizon captured by
-        # cum_inflation; pre-retirement accumulation is a separate,
-        # already-computed phase everywhere else in this file); the
-        # post-loop-start leg continues to use each trial's own
-        # cum_inflation path. Reduces to the original formula exactly
-        # whenever a claim age is during/after the loop's start
-        # (pre_start_cola == 1).
+        # SS COLA — computed above via the shared builder (same formula
+        # this function's own comment/history documents: COLA relative to
+        # each person's OWN claim year, cumulative-inflation-accurate
+        # under variable per-trial inflation_mults, with the pre-loop-
+        # start leg for a claim that already happened before
+        # effective_start_age).
         year_pen  = pension_annual  # frozen pension, no COLA
-        year_jss  = (jason_ss_annual * timeline.pre_start_cola(jason_ss_age, inflation)
-                     * (cum_inflation[yr] / cum_inflation[timeline.claim_year_index(jason_ss_age)])
-                     if age >= jason_ss_age else 0)
-        # justin_ss_age is JUSTIN's own claiming age, so it has to be
-        # compared against Justin's own current age, not Jason's `age` —
-        # comparing it against `age` directly started/stopped the benefit
-        # off by the couple's age gap whenever jason_age != justin_age
-        # (external audit 2026-09-06, same bug as
-        # projection_engine.run_retirement_projection's yearly loop).
-        justin_age_this_year = timeline.justin_age_at(age)
-        justin_claim_age_in_jason_years = justin_ss_age + timeline.age_gap
-        year_uss  = (justin_ss_annual * timeline.pre_start_cola(justin_claim_age_in_jason_years, inflation)
-                     * (cum_inflation[yr] / cum_inflation[timeline.claim_year_index(justin_claim_age_in_jason_years)])
-                     if justin_age_this_year >= justin_ss_age else 0)
+        year_jss  = income.jason_ss
+        year_uss  = income.justin_ss
         fixed     = year_pen + year_jss + year_uss
 
         # RMD
