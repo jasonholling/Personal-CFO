@@ -2,16 +2,17 @@
 
 **Baseline:** `ec61309e6749d74ee31a02070aa46fd238a8ffd5` (verified identical to
 `origin/main` and local `main` at the time this branch was created).
-**Branch:** `codex/consolidate-calculation-engine`, 17 commits, pushed but
+**Branch:** `codex/consolidate-calculation-engine`, 20 commits, pushed but
 **not merged into `main`** (per instruction — awaiting Jason's re-review;
-see the independent-review note below before assuming this is close to
-merge-ready).
+see the two independent-review notes below before assuming this is close
+to merge-ready).
 
-*This is the third revision of this document. The first (6 commits)
+*This is the fourth revision of this document. The first (6 commits)
 covered Phases 1–4 partial + a documented SWR exception. The second (7
 more commits) finished Phase 4, did a scoped Phase 5, and ran Phase 6 for
-the first time. This revision (4 more commits) covers a real independent
-review of the second revision's commit finding 4 genuine bugs, all fixed.*
+the first time. The third (4 more commits) covers an independent review
+finding 4 genuine bugs. This revision (3 more commits) covers that same
+reviewer's follow-up pass finding 2 more.*
 
 ## Independent review found 4 real bugs — fixed, not disputed
 
@@ -34,6 +35,31 @@ adversarial pass and survived it — not that it no longer needs one.**
 Recommend a second look at the fixes themselves before merging, given the
 first review's hit rate on a branch that had already passed 649+ tests
 and multiple golden diffs.
+
+## A second follow-up review found 2 more real bugs — also fixed
+
+The same reviewer looked again and found two more real issues, both in
+code the first pass's fixes had just touched or adjacent to it: (1) the
+recurring-income floor the first pass's negative-life-event fix
+introduced in `run_tax_efficiency_simulation` silently discarded any
+RECURRING income above spending (mirror-image of the bug just fixed,
+in the opposite direction), and (2) Monte Carlo/Stress Tests still drop
+Social Security COLA accrued before retirement whenever SS is claimed
+before the scenario's own retirement age — a gap the first pass's new
+SS-timing check didn't cover because it only exercised
+`run_retirement_projection`/`run_roth_conversion_analysis`, never Monte
+Carlo or Stress. Full detail and reproduction numbers:
+`CALCULATION_CONTRACT.md` section 7. Both fixed, both covered by
+regression tests reproducing the review's exact numbers (including a
+72-case full-year parity matrix for the first fix, matching the size of
+the reviewer's own matrix), full suite re-verified green (761 tests,
+97.47% coverage). **This is now the second review pass in a row to find
+real bugs in this branch.** Two rounds of real findings on a branch that
+kept passing its own growing test suite between them is worth sitting
+with, not just fixing and moving on — a broader systematic sweep of the
+remaining consumers, rather than reactive fixes chasing each new review,
+may be worth considering before another round. Left as Jason's call, not
+decided here.
 
 ## Status: substantially complete, two documented exceptions remain by design
 
@@ -210,8 +236,9 @@ check.
 
 ### Phase 7 — This handoff, verification
 
-- Backend: **685 passed**, **97.46% coverage** (floor 95%) — after the
-  independent-review fixes; was 680/97.45% right after Phase 6.
+- Backend: **761 passed**, **97.47% coverage** (floor 95%) — after both
+  independent-review follow-ups; was 680/97.45% right after Phase 6,
+  685/97.46% after the first review's fixes.
 - Frontend: **13 passed** (unchanged — no frontend code touched this
   session), build succeeds (`vite build`, same pre-existing >500kB chunk
   warning as before, unrelated).
@@ -240,22 +267,29 @@ check.
 
 ## Recommended next steps, in priority order
 
-1. **A second review pass on the 4 independent-review fixes themselves**
-   (commits `7ccb43e`, `520e2a6`, `f18c6b0`, `00e85f9`) — the first
-   review caught real bugs in code that had already passed its own
-   golden diffs and test suite, which is exactly the situation to not
-   assume is resolved just because it's fixed and tested again now.
-2. **Jason: sanity-check the Roth Conversion planner's new numbers**
-   against real household data before this branch merges — both the
-   original tax-gap fix AND the Roth-fallback/growth-timing fixes from
-   the independent review move this tool's dollar output; this is the
-   one function in the whole consolidation where that's expected and
-   intentional, not a sign something's still wrong.
-3. Merge to `main` once (1) and (2) are done.
-4. If tax-efficiency's or SWR's inner loop is ever made faster
+1. **Jason: decide whether to keep reviewing reactively or run one
+   broader systematic sweep next** — two review passes in a row each
+   found real bugs (4, then 2 more, several in code the previous fix had
+   just touched). That pattern suggests there may be more of the same
+   shape still latent rather than that the well is dry; a deliberate,
+   comprehensive pass over the remaining consumers might find them faster
+   than a third reactive round. Not decided here — Jason's call.
+2. A review pass on all 6 independent-review fixes together (commits
+   `7ccb43e`, `520e2a6`, `f18c6b0`, `00e85f9`, `cfbc64f`, `e6c0056`) —
+   each prior review caught real bugs in code that had already passed
+   its own golden diffs and test suite, which is exactly the situation to
+   not assume is resolved just because it's fixed and tested again now.
+3. **Jason: sanity-check the Roth Conversion planner's new numbers**
+   against real household data before this branch merges — the tax-gap
+   fix AND the Roth-fallback/growth-timing fixes from the independent
+   review move this tool's dollar output; this is the one function in
+   the whole consolidation where that's expected and intentional, not a
+   sign something's still wrong.
+4. Merge to `main` once (1)–(3) are resolved to Jason's satisfaction.
+5. If tax-efficiency's or SWR's inner loop is ever made faster
    (fewer Monte Carlo trials, a smarter SWR search), revisit full
    engine migration for both — same performance profile, same
    fix would likely apply to both.
-5. Education/Kids' drawdown/timeline consolidation remains available if
+6. Education/Kids' drawdown/timeline consolidation remains available if
    a real bug is ever found there (not for consolidation's own sake —
    see Phase 5 above).
