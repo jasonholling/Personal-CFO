@@ -683,3 +683,73 @@ What remains duplicated, with reasoning for each:
   is constant; duplicating the simpler form where the general one isn't
   needed is a legibility choice, not a drift risk, since both are now
   expressed through the same `Timeline` object's fields.
+
+## 10. Item 4 (optimal strategy), item 3 (SWR), item 5 (Roth reconciliation) — 2026-09-07
+
+### Item 4 — `run_tax_efficiency_simulation`'s "optimal" strategy
+
+Extracted into `_optimal_draw` (simulation_engine.py) — same pattern as
+`_ordered_draw`, same measured-performance reason for not calling
+`simulate_withdrawal_year` directly. 7 parity tests in
+`test_tax_efficiency_engine_parity.py` decompose its 3-phase policy
+(taxable up to the 0% LTCG threshold, then pretax/roth/hsa, then any
+taxable remainder above the threshold) into 3 chained
+`simulate_withdrawal_year` calls, proving the shared gross-up/shortfall
+conventions hold at every phase even though the threshold policy itself
+is genuinely distinct from every other consumer's.
+
+### Item 3 — `run_swr_analysis`
+
+Full engine migration remains reverted (measured >2x slower, unchanged
+from the original exception). What's new: the per-year step is now
+`_swr_year_step`, a standalone function (previously inline in a closure,
+untestable in isolation), parity-tested against
+`simulate_withdrawal_year` three ways per item 3's own explicit ask:
+
+1. 8 hand-picked cases covering the documented edge behavior (a negative
+   one-time event exceeding taxable, a positive recurring event
+   exceeding the draw, RMD fully/partially covering need, every bucket
+   exhausted).
+2. **200 randomized annual cases** (fixed seed for reproducibility) —
+   balances, draw amount, signed events, RMD, and tax rate all drawn
+   from wide ranges.
+3. **A full 20-year chained scenario** — growth, an RMD phase-in, and a
+   mid-plan life event, comparing running balances at every year (not
+   just single-year snapshots, which could miss a compounding drift bug
+   that only shows up after several years).
+
+All 209 pass. SWR's one real material assumption (spending is drawn ON
+TOP of guaranteed income, never netted against it — section 3.5) is
+preserved exactly: `guaranteed_income=0.0` in every parity comparison,
+matching the fast path's own behavior, not an approximation of it.
+
+### Item 5 — Roth conversion reconciliation
+
+`tests/test_roth_conversion_reconciliation.py`, independent of the
+existing per-bug regression tests in `test_simulation_engine.py`:
+
+- **Cohort growth** (36-case matrix: retirement ages 60/67/74 × returns
+  0%/3%/10% × pretax $400K/$1M × taxable $0/$300K): the sum of every
+  year's `roth_fv_at_73` (each cohort's own projected value at RMD age)
+  plus the untouched starting Roth balance's own growth must equal the
+  actual `roth_at_rmd_age_with_conversion`, to rounding. Holds precisely
+  when Roth is never drawn for spending along the way (zero starting
+  Roth, zero ordinary spending need) — the same condition used to
+  discover it holds at all; a household whose Roth-spending-fallback
+  fires in some year will show a real, non-bug gap between the two
+  figures, since `roth_fv_at_73` deliberately answers "what will THIS
+  conversion be worth if never touched again," not "what will the whole
+  account be worth" once later draws are possible.
+- **Matched with/without pair**: forcing conversion room to zero
+  (guaranteed income alone fills the 22% bracket) makes the "with
+  conversions" path's own pretax trajectory identical to the "without
+  conversions" baseline's — proving the two loops genuinely differ only
+  in conversion policy, not in some other silently-diverged mechanic.
+- **RMD impact**: real conversions measurably lower both
+  `estimated_rmd_with_conversions` and `pretax_at_rmd_age_with_conversion`
+  relative to the no-conversion baseline.
+- **Tax funding**: the full converted amount lands in Roth when taxable
+  can afford the tax bill (not conversion-minus-its-own-tax).
+- **Unmet spending**: zero for a well-funded household, at both the
+  per-row and summary level (already covered for the depleted case by
+  an existing regression test — see section 6).
