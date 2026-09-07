@@ -14,7 +14,8 @@ from projection_engine import (
     _fv, _fv_annuity, _fv_annuity_monthly, _rmd, pension_for_age, rmd_start_age,
     _split_life_events, _post_retirement_year_effects, _post_retirement_asset_sale_events
 )
-from annual_engine import AccountState, DEFAULT_ORDER, marginal_bracket_tax_model, no_tax_model, simulate_withdrawal_year
+from annual_engine import (AccountState, DEFAULT_ORDER, marginal_bracket_tax_model, no_tax_model,
+                           simulate_conversion, simulate_withdrawal_year)
 # Module-level, not lazy/per-call — _pretax_marginal_tax_rate below is
 # called once per simulated year per trial (up to ~40 years x 1000 trials
 # per Monte Carlo/SWR request), so a per-call `from X import Y` measurably
@@ -972,22 +973,41 @@ def run_roth_conversion_analysis(inputs: Dict, accounts: List[Dict], ret_age: in
 
         calendar_year = retirement_year + yr
         life_event_cash, life_event_monthly = _post_retirement_year_effects(post_events, calendar_year)
-        if life_event_cash:
-            taxable += life_event_cash
-        portfolio_draw = max(0, income_need - guaranteed - life_event_monthly)
 
-        # Spending draws from taxable brokerage before pretax — same
-        # preference order as the household's actual withdrawal waterfall
-        # elsewhere in this app (run_retirement_projection: taxable first,
-        # pretax next). This used to assume 100% of portfolio_draw came
-        # from pretax regardless of any taxable/brokerage balance, so a
-        # household with real brokerage assets got identical conversion
-        # room whether or not those assets existed (external audit
-        # 2026-09-07) — spending funded from taxable isn't ordinary
-        # income, so it shouldn't eat into the 22%-bracket room being
-        # measured for actual Roth conversions.
-        taxable_draw = min(portfolio_draw, taxable)
-        pretax_draw  = portfolio_draw - taxable_draw
+        # Migrated onto the shared withdrawal engine (backend/annual_engine.py,
+        # calculation-engine consolidation Phase 4). Previously this
+        # function counted the pretax-funded portion of spending as
+        # taxable income when computing 22%-bracket room, but never
+        # actually deducted that tax from any balance — only the
+        # conversion's own tax was ever paid. That's the same class of
+        # "untaxed withdrawal" bug fixed everywhere else in this file
+        # (Monte Carlo/Stress Tests/SWR, external audit 2026-09-07);
+        # confirmed materially wrong here too (2026-09-07 consolidation
+        # follow-up): a scenario with a modest taxable balance produced a
+        # year with $63,284 of self-reported taxable income and $0 of tax
+        # paid anywhere. Fixed per explicit product decision (Jason,
+        # 2026-09-07) rather than silently: real pretax draws are now
+        # taxed at the household's actual marginal rate (same
+        # _pretax_marginal_tax_rate helper run_retirement_projection/
+        # _run_single use), gross-up included, so numbers WILL move for
+        # any household whose taxable brokerage runs dry during the
+        # conversion window — that's the fix working as intended, not a
+        # regression. Draw order stays taxable-then-pretax only (never
+        # HSA/Roth for spending — this tool has never modeled either),
+        # preserving the original's deliberate scope.
+        pretax_tax_rate = _pretax_marginal_tax_rate(year_pen, year_jss, year_uss, 0.0,
+                                                      inputs.get("state_income_tax_rate", 0) or 0)
+        base_result = simulate_withdrawal_year(
+            opening=AccountState(pretax=pretax, roth=roth, taxable=taxable, hsa=0.0),
+            spending_need=income_need - life_event_monthly,
+            guaranteed_income=guaranteed,
+            life_event_cash=life_event_cash,
+            rmd_amount=0.0,
+            tax_model=marginal_bracket_tax_model(pretax_rate=pretax_tax_rate, taxable_rate=0.0),
+            growth_rate=post_ret,
+            order=("taxable", "pretax"),
+        )
+        pretax_draw = base_result.draws.get("pretax", 0.0)
 
         # Taxable income before conversion
         # Simplified: pension + SS (85% includable) + the pretax-funded
@@ -1001,38 +1021,34 @@ def run_roth_conversion_analysis(inputs: Dict, accounts: List[Dict], ret_age: in
 
         # Standard practice: pay the conversion's tax bill from OUTSIDE
         # the IRA (taxable/brokerage), not from the IRA itself — otherwise
-        # you're taxed on money that never makes it into Roth at all. This
-        # used to compute tax_cost but never deduct it from anything —
-        # lifetime_tax-style reporting with no funding source, the same
-        # class of bug as run_tax_efficiency_simulation's unfunded
-        # withdrawals (external audit 2026-09-07, reproduced: $1M IRA /
-        # $100K spend / 0% growth reported $31,592 year-one conversion tax
-        # while leaving $900,000 combined assets, and eventually a
-        # negative $500,000 Roth balance from the uncapped spending
-        # fallback below). Cap the conversion itself by what its own tax
-        # bill can actually afford from remaining taxable, rather than
-        # ever leaving a tax bill unfunded.
-        taxable_available_for_tax = max(0, taxable - taxable_draw)
-        max_conversion_affordable = (taxable_available_for_tax / TAX_BRACKET_22) if TAX_BRACKET_22 > 0 else float("inf")
+        # you're taxed on money that never makes it into Roth at all. Cap
+        # the conversion itself by what its own tax bill can actually
+        # afford from remaining taxable (post spending-draw, post-growth —
+        # simulate_conversion is layered on top of an already-computed
+        # withdrawal year, per its own contract), rather than ever
+        # leaving a tax bill unfunded.
+        max_conversion_affordable = (base_result.closing.taxable / TAX_BRACKET_22) if TAX_BRACKET_22 > 0 else float("inf")
 
         # Optimal conversion = fill 22% bracket, capped by what's actually
-        # affordable (funds available, and a tax bill that can be paid).
-        optimal_conversion = min(room_in_22, pretax, max_conversion_affordable)
+        # affordable (funds available, and a tax bill that can be paid),
+        # and by what's actually left in pretax after this year's own
+        # spending draw and growth — the original capped this by the
+        # YEAR'S OPENING pretax balance instead, which could silently
+        # over-convert past what the draw left behind (floored to 0
+        # rather than actually capped); using the post-draw balance fixes
+        # that as a side effect of the same migration.
+        optimal_conversion = min(room_in_22, base_result.closing.pretax, max_conversion_affordable)
 
-        # Tax cost of conversion — always <= taxable_available_for_tax by
-        # construction above, so taxable never needs an unmet-need signal
-        # or a negative floor here the way pretax/roth still might below.
-        tax_cost = optimal_conversion * TAX_BRACKET_22
+        conv_result = simulate_conversion(
+            base_result, optimal_conversion,
+            tax_model=marginal_bracket_tax_model(pretax_rate=TAX_BRACKET_22, taxable_rate=0.0),
+            tax_funding_order=("taxable",),
+        )
+        tax_cost = conv_result.taxes_paid.get("conversion", 0.0) + conv_result.taxes_paid.get("conversion_shortfall", 0.0)
 
-        # Project balances. roth_after floored at 0 — the "shortfall
-        # spills into Roth" term below (when pretax can't cover both its
-        # own spending draw and the conversion) previously had no floor,
-        # so a large enough shortfall could report a NEGATIVE Roth
-        # balance rather than the account simply running out (external
-        # audit 2026-09-07).
-        pretax_after   = max(0, (pretax - pretax_draw - optimal_conversion) * (1 + post_ret))
-        roth_after     = max(0, (roth + optimal_conversion - max(0, pretax_draw - max(0, pretax - optimal_conversion))) * (1 + post_ret))
-        taxable_after  = max(0, (taxable - taxable_draw - tax_cost) * (1 + post_ret))
+        pretax_after  = conv_result.closing.pretax
+        roth_after    = conv_result.closing.roth
+        taxable_after = conv_result.closing.taxable
 
         yrs_to_rmd   = max(0, RMD_START_AGE - age)
         roth_fv_73   = optimal_conversion * ((1 + post_ret) ** yrs_to_rmd)
@@ -1089,13 +1105,24 @@ def run_roth_conversion_analysis(inputs: Dict, accounts: List[Dict], ret_age: in
         guaranteed = year_pen + year_jss + year_uss
         calendar_year = retirement_year + yr
         life_event_cash, life_event_monthly = _post_retirement_year_effects(post_events, calendar_year)
-        if life_event_cash:
-            no_conv_taxable += life_event_cash
-        portfolio_draw = max(0, income_need - guaranteed - life_event_monthly)
-        taxable_draw = min(portfolio_draw, no_conv_taxable)
-        pretax_draw  = portfolio_draw - taxable_draw
-        no_conv_pretax  = max(0, (no_conv_pretax - pretax_draw) * (1 + post_ret))
-        no_conv_taxable = max(0, (no_conv_taxable - taxable_draw) * (1 + post_ret))
+        # Same shared-engine migration and same tax fix as the with-
+        # conversions loop above, applied to the baseline — otherwise the
+        # comparison would still be apples-to-oranges (a correctly-taxed
+        # "with conversions" path against a still-untaxed "without" one).
+        no_conv_pretax_rate = _pretax_marginal_tax_rate(year_pen, year_jss, year_uss, 0.0,
+                                                          inputs.get("state_income_tax_rate", 0) or 0)
+        no_conv_result = simulate_withdrawal_year(
+            opening=AccountState(pretax=no_conv_pretax, roth=0.0, taxable=no_conv_taxable, hsa=0.0),
+            spending_need=income_need - life_event_monthly,
+            guaranteed_income=guaranteed,
+            life_event_cash=life_event_cash,
+            rmd_amount=0.0,
+            tax_model=marginal_bracket_tax_model(pretax_rate=no_conv_pretax_rate, taxable_rate=0.0),
+            growth_rate=post_ret,
+            order=("taxable", "pretax"),
+        )
+        no_conv_pretax  = no_conv_result.closing.pretax
+        no_conv_taxable = no_conv_result.closing.taxable
     estimated_rmd_base = _rmd(no_conv_pretax, RMD_START_AGE, RMD_START_AGE)
 
     total_tax_avoided = sum(s["tax_avoided_at_73"] for s in schedule)
