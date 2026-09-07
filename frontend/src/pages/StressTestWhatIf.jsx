@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import axios from 'axios'
 import { useScenario } from '../hooks/useScenario'
 import { usePersonNames } from '../hooks/usePersonNames'
@@ -28,10 +28,42 @@ const TABS = [
 function SurvivorScenarioSection({ retAge }) {
   const { person1Name, person2Name } = usePersonNames()
   const [deceased, setDeceased] = useState('jason')
+  const [ages, setAges] = useState(null)
   const [deathAge, setDeathAge] = useState(retAge + 10)
+  const [deathAgeTouched, setDeathAgeTouched] = useState(false)
   const [needFactor, setNeedFactor] = useState(75)
   const [result, setResult] = useState(null)
   const [loading, setLoading] = useState(false)
+
+  useEffect(() => {
+    axios.get('/api/planning-inputs').then(r => {
+      const d = r.data || {}
+      setAges({ jasonAge: d.jason_age, justinAge: d.justin_age })
+    }).catch(() => {})
+  }, [])
+
+  // "10 years into retirement" default, computed the same way the
+  // backend's own default does (timeline_engine.build_timeline +
+  // run_survivor_scenario's death_age default) — independent review,
+  // 2026-09-07, fourth follow-up: this field used to default to
+  // `retAge + 10` regardless of the household's actual current age or
+  // which spouse was selected, and was ALWAYS sent explicitly to the
+  // API, so the backend's own (now-corrected) default was never
+  // actually reachable through this form. effective_start_age anchors
+  // to whichever is later, the selected retirement age or Jason's real
+  // current age; "10 years into retirement" is then computed in the
+  // SELECTED (deceased) spouse's own age terms, converting to Justin's
+  // age via the couple's age gap when Justin is the one selected.
+  // Recomputes only until the user deliberately edits the field —
+  // afterward their typed value is preserved regardless of later
+  // deceased/retirement-age changes.
+  useEffect(() => {
+    if (deathAgeTouched || !ages || ages.jasonAge == null || ages.justinAge == null) return
+    const effectiveStartAge = Math.max(retAge, ages.jasonAge)
+    const ageGap = ages.jasonAge - ages.justinAge  // positive: Jason older
+    const deceasedEffectiveStartAge = deceased === 'jason' ? effectiveStartAge : effectiveStartAge - ageGap
+    setDeathAge(deceasedEffectiveStartAge + 10)
+  }, [ages, retAge, deceased, deathAgeTouched])
 
   const run = () => {
     setLoading(true)
@@ -61,7 +93,7 @@ function SurvivorScenarioSection({ retAge }) {
           </div>
           <div>
             <div className="label" style={{ marginBottom:8 }}>At Age</div>
-            <input type="number" value={deathAge} onChange={e => setDeathAge(parseInt(e.target.value) || 0)} />
+            <input type="number" value={deathAge} onChange={e => { setDeathAgeTouched(true); setDeathAge(parseInt(e.target.value) || 0) }} />
           </div>
           <div>
             <div className="label" style={{ marginBottom:8 }}>Survivor's Living Cost (% of couple's target)</div>

@@ -1853,11 +1853,27 @@ def run_survivor_scenario(inputs: Dict, accounts: List[Dict], ret_age: int = 60,
     # already-past selected ret_age (e.g. 55 while actually 65 today)
     # could default to a death age at or before the household's REAL
     # current age — effectively "already dead" rather than 10 years from
-    # now. Anchored to effective_start_age instead; reduces to the exact
-    # original formula whenever ret_age >= jason_age.
+    # now.
     timeline = build_timeline(jason_age, justin_age, ret_age, inputs.get("retirement_end_age"))
     if death_age is None:
-        death_age = timeline.effective_start_age + 10
+        # Fixed to effective_start_age but computed in JASON's terms
+        # unconditionally — wrong for deceased="justin", since the code
+        # just below (death_jason_age = death_age if deceased == "jason"
+        # else death_age + age_gap) treats `death_age` as already being
+        # in the DECEASED person's own age terms whenever deceased !=
+        # "jason" (independent review, 2026-09-07, fourth follow-up —
+        # reproduced: Jason 65, Justin 55, requested retirement 55,
+        # deceased="justin" defaulted to death_age=75, read as "Justin
+        # dies at 75," but actually indexed to Jason's age 85 — twenty
+        # years from today, not the intended ten. $1M taxable-only, $10K/
+        # yr spending, 0% growth/inflation selected a $790,000 baseline
+        # instead of the correct $890,000). Default in the SAME person's
+        # own age terms the rest of this function already expects:
+        # effective_start_age converted to Justin's own age
+        # (timeline.justin_age_at) when Justin is the deceased spouse.
+        deceased_effective_start_age = (timeline.effective_start_age if deceased == "jason"
+                                         else timeline.justin_age_at(timeline.effective_start_age))
+        death_age = deceased_effective_start_age + 10
 
     _proj = run_retirement_projection(inputs, accounts, ret_ages=[ret_age], life_events=life_events,
                                        surplus_allocations=surplus_allocations)

@@ -753,3 +753,81 @@ existing per-bug regression tests in `test_simulation_engine.py`:
 - **Unmet spending**: zero for a well-funded household, at both the
   per-row and summary level (already covered for the depleted case by
   an existing regression test — see section 6).
+
+## 11. Independent review, fourth follow-up (2026-09-07) — two more real bugs, both on merged `main`
+
+The branch was merged to `main` after the third follow-up. A further
+independent review of the merged code found two more real bugs — both
+in fixes from that same third pass, both fixed here directly on `main`
+(no branch — this repo has no PR process).
+
+### P1 — Asset-sale growth-years fix credited historical investment returns
+
+Section 9's asset-sale timing fix changed the growth-years exponent to
+`effective_start_age - sale_age` directly. That's correct ONLY when the
+sale is at or after `jason_age` (nothing to clamp) — for a sale that
+predates `jason_age`, it silently credited investment RETURN for
+calendar years already in the past, on top of the years actually
+remaining before the effective retirement start. Reproduced exactly:
+age 65 today, retiring at 70, a sale at 60 with 10% pre-retirement
+returns — the fix added **$259,374** (10 years of compounding, `70-60`)
+instead of the correct **$161,051** (5 real remaining accumulation
+years, `70-65`). The prior regression test for this fix only ever
+compared two calls using the SAME (buggy) formula against each other
+(a past-ret_age selection vs. selecting the real current age directly),
+so it could not have caught an overstatement present in both sides of
+that comparison equally.
+
+**Fixed formula:** `yrs_to_grow = max(0, effective_start_age - jason_age)
+- max(0, sale_age - jason_age)` — years from TODAY to the effective
+retirement start, minus years from today to the sale (0 if the sale
+already happened). This reduces to the untouched pre-independent-review
+formula (`years_to_retire - yrs_assetN`) exactly whenever `ret_age >=
+jason_age`, and gives 0 growth years (proceeds added at face value, per
+the existing inclusion check — not silently dropped) for a sale that's
+already behind "today" even in the past-ret_age case, rather than
+inventing a historical-reconstruction policy this app has no data to
+support. Verified with 10 hand-calculated cases across both assets,
+past/current/future sale dates, and past/current/future retirement
+selections (`TestAssetSaleGrowthYearsHandCalculated`, including a
+5-combination cross-check against the original formula computed
+independently in the test, not imported from the implementation).
+
+### P2 — Survivor `death_age` default computed in the wrong person's age terms
+
+Section 8's survivor `death_age` default fix computed `effective_
+start_age + 10` in JASON's age terms unconditionally — but the very next
+lines of `run_survivor_scenario` (`death_jason_age = death_age if
+deceased == "jason" else death_age + age_gap`) treat the incoming
+`death_age` value as already being in the DECEASED person's own age
+terms whenever `deceased != "jason"`. Reproduced exactly: Jason 65,
+Justin 55, requested retirement 55 (past), `deceased="justin"` — the
+broken default (75) was reported as "Justin dies at 75" but actually
+indexed to Jason's age 85 (twenty years from today, not the intended
+ten), giving a **$790,000** baseline death-year balance in a $1M
+taxable-only / $10K-yr-spend / 0%-everything scenario instead of the
+correct **$890,000** (Justin's own correctly-computed default death age
+of 65).
+
+**Fixed:** the default now computes the deceased person's own effective-
+start-age (`timeline.effective_start_age` for Jason,
+`timeline.justin_age_at(timeline.effective_start_age)` for Justin) before
+adding 10 — matching the age-coordinate system the rest of the function
+already expects. Reduces to the exact prior formula when `deceased ==
+"jason"`. New regression test:
+`test_default_death_age_for_justin_uses_justins_own_age_terms`.
+
+**Frontend gap, found in the same review:** `StressTestWhatIf.jsx`'s
+Survivor Scenario form initialized `deathAge` as `retAge + 10` — the
+same class of bug the backend default had before ITS OWN third-follow-up
+fix — and always sent it explicitly to the API, so the backend's
+corrected default was never actually reachable through the normal UI
+flow (this frontend gap predates the backend fixes; it was simply never
+wired to whatever the backend computed). Fixed: the form now fetches the
+household's ages and recomputes the SAME default the backend computes
+(mirrored in JS, not re-derived independently) whenever the retirement
+age or selected deceased spouse changes — until the user deliberately
+edits the field, at which point their typed value is preserved across
+later changes. New test file `SurvivorScenario.test.jsx` (4 tests)
+verifies the actual request payload for both spouses, an uneven spousal
+age gap, and that a manual edit survives switching who dies first.

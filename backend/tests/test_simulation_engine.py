@@ -850,6 +850,41 @@ class TestRunSurvivorScenario:
         assert result["has_data"] is True
         assert result["death_age"] == 75
 
+    def test_default_death_age_for_justin_uses_justins_own_age_terms(self, sample_inputs):
+        """Regression (independent review, 2026-09-07, fourth follow-up):
+        the fix above computed the default in JASON's age terms
+        unconditionally (`effective_start_age + 10`), but the very next
+        lines of this function (`death_jason_age = death_age if
+        deceased == "jason" else death_age + age_gap`) treat `death_age`
+        as already being in the DECEASED person's own age terms whenever
+        deceased != "jason". Reproduced exactly: Jason 65, Justin 55,
+        requested retirement 55 (past), deceased="justin" -- the broken
+        default (75) was read as "Justin dies at 75" but actually indexed
+        to Jason's age 85 (twenty years from today, not the intended
+        ten), giving a $790,000 baseline death-year balance in a $1M
+        taxable-only / $10K-yr-spend / 0%-everything scenario instead of
+        the correct $890,000. Fixed default: Justin's own effective-
+        start-age (55, since retiring at the already-past 55 while
+        actually 65 means the effective start is Jason's real current
+        age 65, i.e. Justin's current age 55) + 10 = 65."""
+        inputs = {
+            **sample_inputs, "jason_age": 65, "justin_age": 55,
+            "retirement_income_today_dollars": 10000,
+            "inflation_rate": 0.0, "expected_return_pre_retirement": 0.0,
+            "expected_return_post_retirement": 0.0,
+            "jason_social_security": 0, "jason_ss_delayed": 0, "justin_social_security": 0,
+            "healthcare_pre_medicare": 0, "healthcare_post_medicare": 0,
+            "pension_55": 0, "pension_60": 0, "pension_65": 0,
+            "jason_life_basic": 0, "jason_life_supplemental": 0, "jason_life_term": 0,
+            "justin_life_ul": 0, "justin_life_whole": 0, "person2_life_employer": 0,
+            "justin_life_term": 0, "justin_life_kids": 0,
+        }
+        accounts = [{"name": "Brokerage", "account_type": "taxable", "owner": "joint", "balance": 1_000_000}]
+        result = run_survivor_scenario(inputs, accounts, ret_age=55, deceased="justin", death_age=None)
+        assert result["has_data"] is True
+        assert result["death_age"] == 65  # Justin's own age, not Jason's 75
+        assert result["portfolio_at_death"] == 890_000
+
     def test_death_year_spending_is_not_double_counted(self, sample_inputs):
         """Regression (external audit 2026-09-07): death_row["portfolio_
         balance"] (the baseline's END-OF-YEAR figure for the death year)
