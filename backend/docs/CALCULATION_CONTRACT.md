@@ -450,3 +450,57 @@ review's exact numbers (`TestRunRothConversionAnalysis` /
 Social Security claiming-age/amount cross-tool check added to Phase 6's
 sweep (the review noted it checked pension consistency but not SS
 timing). Full suite re-verified green after all fixes.
+
+## 7. Independent review, second follow-up (2026-09-07) — 2 more real gaps, fixed
+
+A second look at the section-6 fixes found two more real issues, both
+confirmed and fixed:
+
+1. **`run_tax_efficiency_simulation` discarded recurring income above
+   spending.** The section-6 fix for the negative-one-time-event bug
+   introduced `spending_target = max(0, year_need - life_event_monthly)`
+   — flooring at 0, which silently discarded any RECURRING income above
+   the ordinary spending need instead of banking the excess as savings,
+   the same class of bug as the one-time-event fix but in the opposite
+   direction. Reproduced exactly: $1M pretax-only, $0 ordinary spending,
+   a $1,000/mo recurring income over a 2-year horizon ($24,000 total)
+   ended at ~$1,000,000 (the fixed floor discarded the recurring income
+   entirely) instead of the correct $1,024,000. Fixed by extracting the
+   per-year cash-flow arithmetic into
+   `simulation_engine._cash_available_offsets_need` — `spending_target`
+   is no longer floored, matching `annual_engine.simulate_withdrawal_year`'s
+   own convention exactly (it never floors `spending_need` either). A
+   72-case parity matrix (ordinary spending × pension × signed one-time
+   events × signed recurring events × both draw orders) in
+   `test_tax_efficiency_engine_parity.py` now covers the FULL per-year
+   step against the shared engine, not just `_ordered_draw`'s bucket
+   mechanics in isolation — closing the exact gap the reviewer's own
+   72-comparison matrix found (48 matches / 24 mismatches, all in the
+   recurring-income-above-spending cases).
+2. **Monte Carlo/Stress Tests still lose Social Security COLA accrued
+   before retirement.** `_run_single`'s cumulative-inflation SS formula
+   clamps a claim-year index to 0 whenever the claim age precedes
+   `ret_age` (e.g. claim at 62, retire at 67) — dropping every year of
+   COLA that accrued between claiming and retirement entirely, unlike
+   the deterministic `(1+inflation)**max(0,age-jason_ss_age)` formula
+   every OTHER consumer (SWR, Roth conversion, tax-efficiency, survivor)
+   already gets right for the identical inputs. Reproduced exactly:
+   claim at 62 / retire at 67 / 3% inflation / $30,000 SS input —
+   `run_retirement_projection` correctly reports $34,778 of SS; Monte
+   Carlo with deterministic (0%) simulated returns reported $30,000
+   (implying zero pre-retirement COLA). Fixed by computing each person's
+   pre-retirement COLA deterministically (`(1+inflation)**max(0,
+   ret_age-claim_age)`, same flat rate every other consumer uses — this
+   function's per-trial stress/Monte-Carlo inflation variation only
+   ever applied to the WITHDRAWAL horizon, never modeled a stochastic
+   pre-retirement path) and multiplying it into the existing per-trial
+   cumulative-inflation formula for the retirement-period leg. Reduces
+   to the original formula exactly whenever a claim age is during/after
+   retirement. The Phase 6 SS-timing check added in section 6 retired
+   past both claiming ages and never exercised this — the reviewer's own
+   observation ("the new SS test compares Retirement with Roth... does
+   not call Monte Carlo or Stress") — so a second Phase 6 test
+   (`test_social_security_pre_retirement_cola_reaches_monte_carlo_and_stress`)
+   was added specifically retiring AFTER an early SS claim, checked with
+   deterministic returns against `run_retirement_projection`'s own
+   figure for an exact match.
