@@ -141,6 +141,13 @@ export default function Settings() {
         <Row label="Annual HSA Contribution"><NumInput value={form.annual_hsa_contribution} onChange={v => set('annual_hsa_contribution', v)} prefix="$" /></Row>
         <Row label="Annual RSU Value (gross)" hint="0 if none this year"><NumInput value={form.annual_rsu_value} onChange={v => set('annual_rsu_value', v)} prefix="$" /></Row>
         <Row label="Annual Bonus" hint="As % of salary — scales with raises, unlike RSU above"><NumInput value={form.annual_bonus_pct ?? 0} onChange={v => set('annual_bonus_pct', v)} pct suffix="%" /></Row>
+        {((form.annual_bonus_pct ?? 0) > 0 || (form.annual_rsu_value ?? 0) > 0) && (
+          <div style={{ padding:'10px 12px', background:'rgba(251,191,36,0.08)', borderRadius:8, marginTop:8, fontSize:12, color:'var(--amber)' }}>
+            ⚠ RSU/Bonus above are already assumed invested automatically each year toward retirement. If you've
+            also assigned this same money on the Assign Surplus page (e.g. under "Taxable investing"), it will be
+            counted twice — pick one place to describe it, not both.
+          </div>
+        )}
       </Section>
 
       <Section title="Social Security">

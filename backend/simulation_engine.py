@@ -12,7 +12,7 @@ from projection_engine import (
     JASON_SS_DELAYED_DEFAULT as JASON_SS_DELAYED,
     JUSTIN_SPOUSAL_ANNUAL, JUSTIN_SPOUSAL_AGE, CURRENT_YEAR,
     _fv, _fv_annuity, _fv_annuity_monthly, _rmd, pension_for_age, rmd_start_age,
-    _split_life_events, _post_retirement_year_effects
+    _split_life_events, _post_retirement_year_effects, _post_retirement_asset_sale_events
 )
 
 # Historical return parameters (annual, nominal)
@@ -302,6 +302,7 @@ def run_swr_analysis(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_t
 
     retirement_year = CURRENT_YEAR + years_to_ret
     _, post_events = _split_life_events(life_events, retirement_year)
+    post_events = post_events + _post_retirement_asset_sale_events(inputs, jason_age, ret_age)
 
     def success_at_withdrawal(annual_withdrawal_today):
         """How many of N simulations survive with this portfolio withdrawal?"""
@@ -496,6 +497,7 @@ def run_monte_carlo(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_ti
     # above via run_retirement_projection.
     retirement_year = CURRENT_YEAR + years_to_ret
     _, post_life_events = _split_life_events(life_events, retirement_year)
+    post_life_events = post_life_events + _post_retirement_asset_sale_events(inputs, jason_age, ret_age)
 
     successes = 0
     all_balances = []
@@ -619,6 +621,7 @@ def run_stress_tests(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_t
     # is already folded into the bucket values above.
     retirement_year = CURRENT_YEAR + years_to_ret
     _, post_life_events = _split_life_events(life_events, retirement_year)
+    post_life_events = post_life_events + _post_retirement_asset_sale_events(inputs, jason_age, ret_age)
 
     # Base case — deterministic at post_ret every year
     base_returns = [post_ret] * retire_yrs
@@ -794,13 +797,15 @@ def run_roth_conversion_analysis(inputs: Dict, accounts: List[Dict], ret_age: in
                                        surplus_allocations=surplus_allocations)
     _s = next(s for s in _proj["scenarios"] if s["label"] == f"age_{ret_age}_{ss_timing}")
 
-    years_to_ret  = max(0, ret_age - jason_age)
-    pretax_at_ret = _s["pretax_at_retirement"]
-    roth_at_ret   = _s["roth_at_retirement"]
+    years_to_ret   = max(0, ret_age - jason_age)
+    pretax_at_ret  = _s["pretax_at_retirement"]
+    roth_at_ret    = _s["roth_at_retirement"]
+    taxable_at_ret = _s["taxable_at_retirement"]
 
     schedule = []
-    pretax = pretax_at_ret
-    roth   = roth_at_ret
+    pretax  = pretax_at_ret
+    roth    = roth_at_ret
+    taxable = taxable_at_ret
 
     conversion_years = RMD_START_AGE - ret_age
 
@@ -816,10 +821,25 @@ def run_roth_conversion_analysis(inputs: Dict, accounts: List[Dict], ret_age: in
         guaranteed    = year_pen + year_jss + year_uss
         portfolio_draw = max(0, income_need - guaranteed)
 
+        # Spending draws from taxable brokerage before pretax — same
+        # preference order as the household's actual withdrawal waterfall
+        # elsewhere in this app (run_retirement_projection: taxable first,
+        # pretax next). This used to assume 100% of portfolio_draw came
+        # from pretax regardless of any taxable/brokerage balance, so a
+        # household with real brokerage assets got identical conversion
+        # room whether or not those assets existed (external audit
+        # 2026-09-07) — spending funded from taxable isn't ordinary
+        # income, so it shouldn't eat into the 22%-bracket room being
+        # measured for actual Roth conversions.
+        taxable_draw = min(portfolio_draw, taxable)
+        pretax_draw  = portfolio_draw - taxable_draw
+
         # Taxable income before conversion
-        # Simplified: pension + SS (85% includable) + portfolio draw from pretax
+        # Simplified: pension + SS (85% includable) + the pretax-funded
+        # portion of the portfolio draw (taxable-funded spending excluded
+        # — see above)
         ss_taxable    = (year_jss + year_uss) * 0.85
-        base_taxable  = year_pen + ss_taxable + portfolio_draw - STD_DEDUCTION
+        base_taxable  = year_pen + ss_taxable + pretax_draw - STD_DEDUCTION
 
         # Room in 22% bracket
         room_in_22 = max(0, BRACKET_TOP_22 - base_taxable)
@@ -831,8 +851,9 @@ def run_roth_conversion_analysis(inputs: Dict, accounts: List[Dict], ret_age: in
         tax_cost = optimal_conversion * TAX_BRACKET_22
 
         # Project balances
-        pretax_after = max(0, (pretax - portfolio_draw - optimal_conversion) * (1 + post_ret))
-        roth_after   = (roth + optimal_conversion - max(0, portfolio_draw - max(0, pretax - optimal_conversion))) * (1 + post_ret)
+        pretax_after   = max(0, (pretax - pretax_draw - optimal_conversion) * (1 + post_ret))
+        roth_after     = (roth + optimal_conversion - max(0, pretax_draw - max(0, pretax - optimal_conversion))) * (1 + post_ret)
+        taxable_after  = max(0, (taxable - taxable_draw) * (1 + post_ret))
 
         yrs_to_rmd   = max(0, RMD_START_AGE - age)
         roth_fv_73   = optimal_conversion * ((1 + post_ret) ** yrs_to_rmd)
@@ -844,6 +865,7 @@ def run_roth_conversion_analysis(inputs: Dict, accounts: List[Dict], ret_age: in
             "year":               2026 + years_to_ret + yr,
             "pretax_balance":     round(pretax),
             "roth_balance":       round(roth),
+            "taxable_balance":    round(taxable),
             "base_taxable_income": round(base_taxable),
             "room_in_22_bracket": round(room_in_22),
             "optimal_conversion": round(optimal_conversion),
@@ -853,10 +875,12 @@ def run_roth_conversion_analysis(inputs: Dict, accounts: List[Dict], ret_age: in
             "net_benefit":        round(net_benefit),
             "pretax_after":       round(pretax_after),
             "roth_after":         round(roth_after),
+            "taxable_after":      round(taxable_after),
         })
 
-        pretax = pretax_after
-        roth   = roth_after
+        pretax  = pretax_after
+        roth    = roth_after
+        taxable = taxable_after
 
     total_conversions  = sum(s["optimal_conversion"] for s in schedule)
     total_tax_cost     = sum(s["tax_cost"] for s in schedule)
@@ -957,23 +981,39 @@ def run_tax_efficiency_simulation(inputs: Dict, accounts: List[Dict], ret_age: i
                 tax_this_year = 0
                 remaining = net_need
 
+                # Every taxed draw below is grossed up so its AFTER-TAX
+                # proceeds (not the gross withdrawal) cover `remaining` —
+                # otherwise the tax accumulated in tax_this_year/lifetime_tax
+                # is purely a reported number with no funding source: the
+                # bucket only ever shrinks by the net spending need, so
+                # final_balances/success_rate come out as if every
+                # withdrawal had been tax-free while still claiming a real
+                # lifetime tax bill was paid (external audit 2026-09-07,
+                # reproduced with a $1M IRA / $100K spend / 1yr / 0% growth
+                # — $22K "tax paid" alongside a $900K ending balance that
+                # never actually paid for it). Matches
+                # run_retirement_projection's existing gross-up pattern.
                 if rmd > 0:
                     actual_rmd = min(rmd, pretax)
                     pretax -= actual_rmd
-                    tax_this_year += actual_rmd * TAX_PRETAX
-                    if actual_rmd <= remaining:
-                        remaining -= actual_rmd
+                    rmd_tax = actual_rmd * TAX_PRETAX
+                    tax_this_year += rmd_tax
+                    after_tax_rmd = actual_rmd - rmd_tax
+                    if after_tax_rmd <= remaining:
+                        remaining -= after_tax_rmd
                     else:
-                        taxable += actual_rmd - remaining
+                        taxable += after_tax_rmd - remaining
                         remaining = 0
 
                 if strategy == 'taxable_first':
                     if remaining > 0 and taxable > 0:
-                        draw = min(remaining, taxable); taxable -= draw
-                        tax_this_year += draw * TAX_TAXABLE; remaining -= draw
+                        gross = remaining / (1 - TAX_TAXABLE)
+                        draw = min(gross, taxable); taxable -= draw
+                        tax = draw * TAX_TAXABLE; tax_this_year += tax; remaining -= (draw - tax)
                     if remaining > 0 and pretax > 0:
-                        draw = min(remaining, pretax); pretax -= draw
-                        tax_this_year += draw * TAX_PRETAX; remaining -= draw
+                        gross = remaining / (1 - TAX_PRETAX)
+                        draw = min(gross, pretax); pretax -= draw
+                        tax = draw * TAX_PRETAX; tax_this_year += tax; remaining -= (draw - tax)
                     if remaining > 0 and hsa > 0:
                         draw = min(remaining, hsa); hsa -= draw; remaining -= draw
                     if remaining > 0 and roth > 0:
@@ -983,11 +1023,13 @@ def run_tax_efficiency_simulation(inputs: Dict, accounts: List[Dict], ret_age: i
                     if remaining > 0 and roth > 0:
                         draw = min(remaining, roth); roth -= draw; remaining -= draw
                     if remaining > 0 and taxable > 0:
-                        draw = min(remaining, taxable); taxable -= draw
-                        tax_this_year += draw * TAX_TAXABLE; remaining -= draw
+                        gross = remaining / (1 - TAX_TAXABLE)
+                        draw = min(gross, taxable); taxable -= draw
+                        tax = draw * TAX_TAXABLE; tax_this_year += tax; remaining -= (draw - tax)
                     if remaining > 0 and pretax > 0:
-                        draw = min(remaining, pretax); pretax -= draw
-                        tax_this_year += draw * TAX_PRETAX; remaining -= draw
+                        gross = remaining / (1 - TAX_PRETAX)
+                        draw = min(gross, pretax); pretax -= draw
+                        tax = draw * TAX_PRETAX; tax_this_year += tax; remaining -= (draw - tax)
                     if remaining > 0 and hsa > 0:
                         draw = min(remaining, hsa); hsa -= draw; remaining -= draw
 
@@ -1000,10 +1042,11 @@ def run_tax_efficiency_simulation(inputs: Dict, accounts: List[Dict], ret_age: i
                     if remaining > 0 and taxable > 0:
                         draw = min(remaining, taxable, cap_gains_limit)
                         taxable -= draw; remaining -= draw
-                        # 0% tax if within threshold
+                        # 0% tax if within threshold — no gross-up needed
                     if remaining > 0 and pretax > 0:
-                        draw = min(remaining, pretax); pretax -= draw
-                        tax_this_year += draw * TAX_PRETAX; remaining -= draw
+                        gross = remaining / (1 - TAX_PRETAX)
+                        draw = min(gross, pretax); pretax -= draw
+                        tax = draw * TAX_PRETAX; tax_this_year += tax; remaining -= (draw - tax)
                     if remaining > 0 and roth > 0:
                         draw = min(remaining, roth); roth -= draw; remaining -= draw
                     if remaining > 0 and hsa > 0:
@@ -1082,11 +1125,28 @@ def run_contribution_sensitivity(inputs: Dict, accounts: List[Dict], ret_age: in
     catch_up_limit = LIMIT_CATCHUP if jason_age >= 50 else LIMIT_UNDER_50
 
     contribution_scenarios = [
-        ("Current (6%)",     0.06),
+        # "Current" used to be hardcoded to 0.06 regardless of the
+        # household's real employee_401k_pct — with a real rate of, say,
+        # 10%, the fixed comparison points at or below 10% (including the
+        # mislabeled "Current (6%)" row itself) all showed identical
+        # projected portfolios, since the delta math below only ever
+        # measured a scenario against this hardcoded 6% baseline, never
+        # against what the household actually contributes (external
+        # audit 2026-09-07).
+        (f"Current ({emp_pct_base*100:.0f}%)", emp_pct_base),
         ("7% employee",      0.07),
         ("8% employee",      0.08),
         ("10% employee",     0.10),
-        ("Max catch-up",     min(catch_up_limit / salary, 0.99)),
+        # salary=0 (not yet entered in Settings, or genuinely retired/no
+        # W2 income) used to divide by zero here — a valid $0 shouldn't
+        # crash Contribution Sensitivity, and by extension the whole
+        # Historical Stress tab, which waits on this endpoint alongside
+        # Roth conversion and its own stress-test call via Promise.all
+        # and swallows any one of their failures (external audit
+        # 2026-09-07). A scenario expressed as "% of salary" is
+        # meaningless at $0 salary, so it contributes nothing rather than
+        # crashing.
+        ("Max catch-up",     min(catch_up_limit / salary, 0.99) if salary > 0 else 0.0),
     ]
 
     # Base retirement projection for comparison
@@ -1104,12 +1164,15 @@ def run_contribution_sensitivity(inputs: Dict, accounts: List[Dict], ret_age: in
         monthly_cost    = (annual_employee - salary * emp_pct_base) / 12
         monthly_spending_cut = max(0, (annual_employee - salary * emp_pct_base) * (1 - 0.32) / 12)
 
-        # Project extra Roth contributions to retirement
-        extra_annual_roth = max(0, annual_employee - salary * emp_pct_base)
-        extra_at_ret = _fv_annuity(extra_annual_roth, pre_ret, years_to_ret)
-
-        # Calculate extra Roth FV — contributions compound until retirement
-        extra_annual    = max(0, annual_employee - salary * emp_pct_base)
+        # Extra (or reduced) Roth contributions vs. the real current rate,
+        # compounded to retirement — signed, not clamped to a minimum of 0.
+        # A scenario contributing LESS than emp_pct_base is a real,
+        # legitimate comparison point (test it against a rate below your
+        # own) and must show a negative delta, not an identical-to-current
+        # 0 like every other below-current scenario would then also show
+        # (external audit 2026-09-07 — "10%, current, and reductions all
+        # showed the same portfolio").
+        extra_annual    = annual_employee - salary * emp_pct_base
         extra_fv_at_ret = _fv_annuity(extra_annual, pre_ret, years_to_ret)
 
         # For age 55: contributions stop at retirement (no employer match on extra)
@@ -1118,9 +1181,9 @@ def run_contribution_sensitivity(inputs: Dict, accounts: List[Dict], ret_age: in
         surplus_delta   = round(extra_fv_at_ret)
 
         # Breakeven: how many years of retirement spending does the extra surplus buy
+        # (only meaningful for a genuine gain — a reduced-contribution scenario's
+        # negative surplus_delta doesn't "buy" years of anything).
         annual_spend = inputs["retirement_income_today_dollars"]
-        breakeven_years = surplus_delta / annual_spend if annual_spend > 0 else 0
-
         breakeven_years = surplus_delta / annual_spend if annual_spend > 0 and surplus_delta > 0 else 0
 
         scenarios.append({

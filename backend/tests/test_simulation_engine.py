@@ -72,6 +72,18 @@ class TestRunMonteCarlo:
             result = run_monte_carlo(sample_inputs, sample_accounts, ret_age=age, ss_timing="early")
             assert "success_rate" in result
 
+    def test_asset_sale_after_retirement_improves_monte_carlo_outcome(self, sample_inputs, sample_accounts):
+        """Regression (external audit 2026-09-07): Monte Carlo only ever
+        inherits run_retirement_projection's pre-retirement accumulation
+        result — it has no other way to see the Settings-page asset-sale
+        fields, so a sale scheduled for AFTER retirement (sale_age >
+        ret_age) had zero effect on simulated outcomes, same root cause as
+        the withdrawal-phase gap in run_retirement_projection itself."""
+        inputs_sale = {**sample_inputs, "jason_age": 50, "asset2_sale_age": 60, "asset2_sale_net": 500000}
+        baseline  = run_monte_carlo(sample_inputs, sample_accounts, ret_age=58, ss_timing="early")
+        with_sale = run_monte_carlo(inputs_sale, sample_accounts, ret_age=58, ss_timing="early")
+        assert with_sale["median_final_balance"] > baseline["median_final_balance"]
+
 
 class TestRunStressTests:
     def test_returns_base_and_named_scenarios(self, sample_inputs, sample_accounts):
@@ -96,6 +108,22 @@ class TestRunRothConversionAnalysis:
         result = run_roth_conversion_analysis(sample_inputs, sample_accounts, ret_age=age, ss_timing="early")
         assert result is not None
 
+    def test_taxable_brokerage_assets_increase_conversion_room(self, sample_inputs, sample_accounts):
+        """Regression (external audit 2026-09-07): this function read only
+        pretax_at_retirement/roth_at_retirement and assumed spending drew
+        100% from pretax, ignoring taxable_at_retirement entirely — a
+        household with real brokerage assets (including bonus-funded
+        taxable savings, per the annual_bonus_pct feature) got identical
+        conversion output whether or not those assets existed, since
+        spending funded from taxable shouldn't count as ordinary income
+        eating into 22%-bracket room the way a pretax withdrawal does."""
+        no_taxable = [a for a in sample_accounts if a["account_type"] != "taxable"]
+        without_brokerage = run_roth_conversion_analysis(sample_inputs, no_taxable, ret_age=60, ss_timing="early")
+        with_brokerage     = run_roth_conversion_analysis(sample_inputs, sample_accounts, ret_age=60, ss_timing="early")
+        assert with_brokerage["total_conversions"] > without_brokerage["total_conversions"]
+        assert with_brokerage["schedule"][0]["taxable_balance"] > 0
+        assert without_brokerage["schedule"][0]["taxable_balance"] == 0
+
 
 class TestRunTaxEfficiencySimulation:
     @pytest.mark.parametrize("age", INTERMEDIATE_AGES)
@@ -103,12 +131,85 @@ class TestRunTaxEfficiencySimulation:
         result = run_tax_efficiency_simulation(sample_inputs, sample_accounts, ret_age=age, ss_timing="early")
         assert result is not None
 
+    def test_reported_tax_actually_reduces_ending_balance(self, sample_inputs, monkeypatch):
+        """Regression (external audit 2026-09-07): tax_this_year accumulated
+        into lifetime_tax for reporting, but every draw only ever removed
+        the NET spending need from its bucket — never grossed up to also
+        fund its own tax — so the reported lifetime tax had no effect on
+        final_balances at all. Reproduces the audit's exact scenario: $1M
+        pretax, $100K/yr spend, 1 year, 0% growth (forced via monkeypatched
+        random.gauss so every simulated year is exactly 0%, not just
+        approximately so) -> should end up near $1M - $100K/(1-0.22) =
+        ~$871,795, not the un-funded $900,000 the bug produced."""
+        import random as random_module
+        monkeypatch.setattr(random_module, "gauss", lambda mu, sigma: 0.0)
+
+        inputs = {
+            **sample_inputs, "jason_age": 60, "justin_age": 60,
+            "retirement_income_today_dollars": 100000, "inflation_rate": 0,
+            "expected_return_pre_retirement": 0, "expected_return_post_retirement": 0,
+            "healthcare_pre_medicare": 0, "healthcare_post_medicare": 0,
+            "jason_social_security": 0, "jason_ss_delayed": 0, "justin_social_security": 0,
+            "pension_55": 0, "pension_60": 0, "pension_65": 0,
+            "w2_salary": 0, "annual_401k_contribution": 0, "annual_hsa_contribution": 0,
+            "retirement_end_age": 61,
+        }
+        accounts = [{"name": "IRA", "account_type": "401k", "owner": "jason", "balance": 1_000_000}]
+        result = run_tax_efficiency_simulation(inputs, accounts, ret_age=60, ss_timing="early")
+
+        taxable_first = result["strategies"]["taxable_first"]
+        # Grossed-up withdrawal: $100,000 / (1 - 0.22) = $128,205 gross,
+        # of which $28,205 is tax — not the un-grossed-up $22,000 (22% of
+        # the $100,000 net) the bug reported while leaving $900,000, as if
+        # that $22,000 had come from nowhere.
+        assert taxable_first["median_lifetime_tax"] == pytest.approx(28205, abs=1)
+        assert taxable_first["median_final_balance"] == pytest.approx(871795, abs=10)
+        assert taxable_first["median_final_balance"] < 900000
+
 
 class TestRunContributionSensitivity:
     @pytest.mark.parametrize("age", INTERMEDIATE_AGES)
     def test_intermediate_ages_do_not_crash(self, sample_inputs, sample_accounts, age):
         result = run_contribution_sensitivity(sample_inputs, sample_accounts, ret_age=age)
         assert result is not None
+
+    def test_current_scenario_reflects_real_employee_pct(self, sample_inputs, sample_accounts):
+        """Regression (external audit 2026-09-07): "Current" used to be
+        hardcoded to 6% regardless of the household's real
+        employee_401k_pct — with a real rate of 10%, the "Current (6%)"
+        label was wrong and its own comparison scenario didn't actually
+        model the household's real contribution rate at all."""
+        inputs = {**sample_inputs, "employee_401k_pct": 0.10}
+        result = run_contribution_sensitivity(inputs, sample_accounts, ret_age=60)
+        current = result["scenarios"][0]
+        assert current["label"] == "Current (10%)"
+        assert current["employee_pct"] == 10.0
+        assert current["portfolio_delta"] == 0
+        assert current["portfolio_at_ret"] == result["base_portfolio"]
+
+    def test_below_current_scenario_shows_negative_delta(self, sample_inputs, sample_accounts):
+        """Regression: contributing LESS than the real current rate used
+        to be clamped to a delta of 0 (identical to "Current"), instead of
+        the negative delta a real reduction implies — external audit
+        2026-09-07: "10%, current, and reductions all showed the same
+        portfolio" when the real current rate was 10%."""
+        inputs = {**sample_inputs, "employee_401k_pct": 0.10}
+        result = run_contribution_sensitivity(inputs, sample_accounts, ret_age=60)
+        seven_pct = next(s for s in result["scenarios"] if s["label"] == "7% employee")
+        assert seven_pct["portfolio_delta"] < 0
+        assert seven_pct["portfolio_at_ret"] < result["base_portfolio"]
+
+    def test_zero_salary_does_not_crash(self, sample_inputs, sample_accounts):
+        """Regression (external audit 2026-09-07): catch_up_limit / salary
+        raised ZeroDivisionError at salary=0 (not yet entered in Settings,
+        or genuinely no W2 income) — this endpoint is one of three the
+        Historical Stress tab waits on together via Promise.all, so this
+        crash silently blanked out an otherwise-valid stress-test result
+        on the frontend."""
+        inputs = {**sample_inputs, "w2_salary": 0}
+        result = run_contribution_sensitivity(inputs, sample_accounts, ret_age=60)
+        max_catchup = next(s for s in result["scenarios"] if s["label"] == "Max catch-up")
+        assert max_catchup["employee_pct"] == 0.0
 
 
 class TestWithdrawalWaterfallReconciliationFixes:

@@ -177,6 +177,39 @@ def _split_life_events(life_events: List[Dict], retirement_year: int):
     return pre, post
 
 
+def _post_retirement_asset_sale_events(inputs: Dict, jason_age: int, ret_age: int) -> List[Dict]:
+    """Asset 1/2 sales (Settings page) scheduled to happen AFTER this
+    specific ret_age scenario's own retirement date. The accumulation-phase
+    code in run_retirement_projection only ever handles a sale at or before
+    retirement (assetN_sale_age <= ret_age) — a sale scheduled for
+    partway through retirement simply vanished from every per-year cash
+    flow, and Monte Carlo/stress-test/SWR simulations (which only inherit
+    run_retirement_projection's pre-retirement accumulation result and have
+    no other way to see this Settings field) never modeled it at all
+    (external audit 2026-09-07: "retire at 58, sell an asset for $500,000
+    at 60 -> annual results identical to no sale"). Returns life-event-
+    shaped one-time-cash dicts — the same {"event_year","one_time","
+    monthly","duration_months"} shape _split_life_events produces — meant
+    to be appended directly to a post_life_events list. Sales at or before
+    ret_age are intentionally excluded here (already counted via the
+    accumulation-phase code); appending them here too would double-count."""
+    events = []
+    for label, appreciates in (("asset1", True), ("asset2", False)):
+        sale_age = inputs.get(f"{label}_sale_age", 0)
+        sale_net = inputs.get(f"{label}_sale_net", 0)
+        if not sale_age or sale_age <= ret_age:
+            continue
+        yrs_from_now = max(0, sale_age - jason_age)
+        # Matches the accumulation-phase code's own asset1-vs-asset2
+        # treatment: asset1 appreciates from today to its sale date at
+        # asset1_appreciation; asset2_sale_net is already a sale-date
+        # figure with no pre-sale appreciation modeled.
+        proceeds = sale_net * ((1 + inputs.get("asset1_appreciation", 0.03)) ** yrs_from_now) if appreciates else sale_net
+        events.append({"event_year": CURRENT_YEAR + yrs_from_now, "one_time": proceeds,
+                        "monthly": 0.0, "duration_months": 0})
+    return events
+
+
 def _pre_retirement_taxable_add(pre_events: List[Dict], pre_ret: float, retirement_year: int) -> float:
     """Future-value a list of pre-retirement life events into the taxable
     bucket at retirement — the one-time delta compounds from event_year to
@@ -400,6 +433,7 @@ def run_retirement_projection(inputs: Dict, accounts: List[Dict], ret_ages: List
         # rather than inside the ss_label loop below.
         retirement_year_for_events = CURRENT_YEAR + years_to_retire
         pre_life_events, post_life_events = _split_life_events(life_events, retirement_year_for_events)
+        post_life_events = post_life_events + _post_retirement_asset_sale_events(inputs, jason_age, ret_age)
         life_events_taxable_add = _pre_retirement_taxable_add(pre_life_events, pre_ret, retirement_year_for_events)
 
         # Surplus allocations compound from today through this ret_age's

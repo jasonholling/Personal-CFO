@@ -753,6 +753,28 @@ class TestAssetSaleAndRsuBridgeAt55:
         assert w[56]["taxable_at_retirement"] > b[56]["taxable_at_retirement"]
         assert w[60]["taxable_at_retirement"] > b[60]["taxable_at_retirement"]
 
+    def test_asset_sale_scheduled_after_retirement_appears_in_withdrawal_phase(self, sample_inputs, sample_accounts):
+        """Regression (external audit 2026-09-07): a sale scheduled for
+        AFTER a given retirement-age scenario's own retirement date
+        (sale_age > ret_age) was invisible everywhere — not covered by the
+        accumulation-phase code above (which only handles sale_age <=
+        ret_age) and nothing else in the app modeled a post-retirement
+        asset sale at all. Reproduces the audit's exact case: retire at
+        58, sell for $500,000 at 60 -> the withdrawal-phase year matching
+        age 60 must show the cash arriving, and the portfolio must be
+        higher than a no-sale baseline every year from then on."""
+        inputs_no_sale = {**sample_inputs, "jason_age": 50}
+        inputs_sale = {**inputs_no_sale, "asset2_sale_age": 60, "asset2_sale_net": 500000}
+        baseline  = run_retirement_projection(inputs_no_sale, sample_accounts, ret_ages=[58])
+        with_sale = run_retirement_projection(inputs_sale, sample_accounts, ret_ages=[58])
+        b = next(s for s in baseline["scenarios"] if s["ss_timing"] == "early")
+        w = next(s for s in with_sale["scenarios"] if s["ss_timing"] == "early")
+        b_by_age = {y["jason_age"]: y for y in b["yearly_detail"]}
+        w_by_age = {y["jason_age"]: y for y in w["yearly_detail"]}
+        assert w_by_age[60]["life_event_cash"] == 500000
+        assert w_by_age[60]["portfolio_balance"] > b_by_age[60]["portfolio_balance"]
+        assert w_by_age[65]["portfolio_balance"] > b_by_age[65]["portfolio_balance"]
+
 
 class TestRunEducationProjection:
     def test_returns_two_goals(self, sample_inputs, sample_accounts):
