@@ -275,6 +275,77 @@ class TestRunRothConversionAnalysis:
         result = run_roth_conversion_analysis(inputs, thin_accounts, ret_age=60, ss_timing="early")
         assert all(row["roth_after"] >= 0 for row in result["schedule"])
 
+    def test_roth_funds_spending_once_pretax_and_taxable_are_exhausted(self, sample_inputs):
+        """Regression (independent review, 2026-09-07): the shared-engine
+        migration dropped Roth from the withdrawal order entirely (on the
+        mistaken claim that this tool never modeled Roth spending — the
+        pre-migration code's roth_after formula explicitly spilled any
+        shortfall into Roth once pretax couldn't cover both the year's
+        draw and the conversion). Reproduced exactly: $1M Roth only, $0
+        pretax/taxable, $100K/yr spend, 0% growth/inflation/income/
+        pension/SS -> the buggy migration reported the full $1M Roth
+        balance untouched at RMD age (and 0 unmet_need) instead of
+        depleting after 10 years like every OTHER account-holding shape
+        would for the same spending pattern."""
+        inputs = {**sample_inputs, "jason_age": 60, "justin_age": 60,
+                  "retirement_income_today_dollars": 100000,
+                  "inflation_rate": 0.0, "expected_return_pre_retirement": 0.0,
+                  "expected_return_post_retirement": 0.0,
+                  "jason_social_security": 0, "jason_ss_delayed": 0, "justin_social_security": 0,
+                  "healthcare_pre_medicare": 0, "healthcare_post_medicare": 0,
+                  "pension_55": 0, "pension_60": 0, "pension_65": 0}
+        accounts = [{"name": "Roth", "account_type": "roth_ira", "owner": "jason", "balance": 1_000_000}]
+        result = run_roth_conversion_analysis(inputs, accounts, ret_age=60, ss_timing="early")
+        # 15 conversion years (60 -> RMD start 75) at $100K/yr spend from a
+        # $1M starting Roth (no growth) depletes partway through, not at
+        # the untouched-$1M-forever the bug reported.
+        assert result["schedule"][-1]["roth_after"] < 500_000
+        assert any(row["unmet_need"] > 0 for row in result["schedule"])
+        assert result["total_unmet_need"] > 0
+        assert result["any_unmet_need"] is True
+
+    def test_conversion_benefit_does_not_double_count_a_year_of_growth(self, sample_inputs):
+        """Regression (independent review, 2026-09-07): roth_fv_at_73 used
+        `RMD_START_AGE - age` as its compounding exponent, but the
+        converted amount already reflects the CURRENT year's growth
+        (simulate_conversion layers the conversion on top of an already-
+        grown year) — using the naive age difference double-counted that
+        year's growth for a one-year conversion window. Reproduced: a
+        $100K IRA (no other assets) growing to $110K at a 10% post-
+        retirement return and converting at year-end (age 74, RMD start
+        75, one conversion year) must report roth_fv_at_73/tax_avoided_at_73
+        against the ACTUAL $110K landing in Roth (24% of $110K = $26,400),
+        not an over-grown $121K/$29,040."""
+        inputs = {**sample_inputs, "jason_age": 60, "justin_age": 60,
+                  "retirement_income_today_dollars": 0,
+                  "inflation_rate": 0.0, "expected_return_pre_retirement": 0.0,
+                  "expected_return_post_retirement": 0.10,
+                  "jason_social_security": 0, "jason_ss_delayed": 0, "justin_social_security": 0,
+                  "healthcare_pre_medicare": 0, "healthcare_post_medicare": 0,
+                  "pension_55": 0, "pension_60": 0, "pension_65": 0,
+                  # Zero every pre-retirement contribution source so
+                  # pretax_at_retirement is exactly the $100K starting
+                  # balance (0% pre-return, no new contributions) — not
+                  # $100K plus 14 years of salary-driven 401k contributions
+                  # split 75/25 into pretax/roth per pretax_401k_pct.
+                  "w2_salary": 0, "employee_401k_pct": 0, "employer_401k_pct": 0,
+                  "annual_401k_contribution": 0, "annual_hsa_contribution": 0,
+                  "annual_rsu_value": 0, "annual_roth_contribution": 0,
+                  # run_retirement_projection splits even a starting 401k
+                  # balance's OWN attribution between pretax/roth by this
+                  # ratio, not just new contributions — force 100% pretax
+                  # so the $100K account maps to pretax_at_retirement
+                  # exactly, with no starting Roth balance muddying the
+                  # "which dollars are the conversion" assertions below.
+                  "pretax_401k_pct": 1.0}
+        accounts = [{"name": "IRA", "account_type": "401k", "owner": "jason", "balance": 100_000}]
+        result = run_roth_conversion_analysis(inputs, accounts, ret_age=74, ss_timing="early")
+        assert result["conversion_years"] == 1
+        row = result["schedule"][0]
+        assert row["optimal_conversion"] == pytest.approx(row["roth_after"], abs=1)
+        assert row["roth_fv_at_73"] == pytest.approx(row["optimal_conversion"], abs=1)
+        assert row["tax_avoided_at_73"] == pytest.approx(row["optimal_conversion"] * 0.24, abs=1)
+
 
 class TestRunTaxEfficiencySimulation:
     @pytest.mark.parametrize("age", INTERMEDIATE_AGES)
@@ -391,6 +462,45 @@ class TestRunTaxEfficiencySimulation:
         assert optimal["median_lifetime_tax"] == pytest.approx(17841, abs=5)
         assert optimal["median_final_balance"] == pytest.approx(782159, abs=10)
         assert optimal["success_rate"] == 100.0
+
+    def test_negative_life_event_actually_funds_the_expense(self, sample_inputs, monkeypatch):
+        """Regression (independent review, 2026-09-07): a negative
+        one-time life event was unconditionally credited (i.e. debited,
+        since it's negative) to `taxable`, but the spending-need
+        calculation never saw it — so a deficit that drove taxable
+        negative just sat there uncorrected until the year's final
+        `taxable = max(0, taxable * (1+ret))` floored it back to 0,
+        silently erasing the expense entirely. Reproduces the review's
+        exact case: $1M pretax-only, $0 ordinary spending, a $100K
+        one-time expense, 0% growth/inflation/income -> every strategy
+        reported $0 tax, 100% success, and a final balance barely below
+        $1M instead of the expense actually being drawn (and taxed) from
+        pretax, same as the shared engine's own ~$888,889 for the
+        identical scenario."""
+        import random as random_module
+        monkeypatch.setattr(random_module, "gauss", lambda mu, sigma: 0.0)
+
+        inputs = {
+            **sample_inputs, "jason_age": 60, "justin_age": 60,
+            "retirement_income_today_dollars": 0, "inflation_rate": 0,
+            "expected_return_pre_retirement": 0, "expected_return_post_retirement": 0,
+            "healthcare_pre_medicare": 0, "healthcare_post_medicare": 0,
+            "jason_social_security": 0, "jason_ss_delayed": 0, "justin_social_security": 0,
+            "pension_55": 0, "pension_60": 0, "pension_65": 0,
+            "w2_salary": 0, "annual_401k_contribution": 0, "annual_hsa_contribution": 0,
+            "retirement_end_age": 62,
+        }
+        accounts = [{"name": "IRA", "account_type": "401k", "owner": "jason", "balance": 1_000_000}]
+        events = [{"event_year": 2027, "one_time_cash_delta": -100_000,
+                   "monthly_cash_flow_delta": 0, "duration_months": 0}]
+        result = run_tax_efficiency_simulation(inputs, accounts, ret_age=60, ss_timing="early",
+                                                life_events=events)
+        # $100K gross-up at 22% pretax: $100,000/(1-0.22)=$128,205,
+        # $28,205 tax, ending ~$871,795 — not the bug's untouched ~$1M.
+        for strategy in ("taxable_first", "optimal"):
+            s = result["strategies"][strategy]
+            assert s["median_lifetime_tax"] == pytest.approx(28205, abs=5)
+            assert s["median_final_balance"] == pytest.approx(871795, abs=10)
 
 
 class TestRunContributionSensitivity:

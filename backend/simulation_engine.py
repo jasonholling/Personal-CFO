@@ -992,9 +992,25 @@ def run_roth_conversion_analysis(inputs: Dict, accounts: List[Dict], ret_age: in
         # _run_single use), gross-up included, so numbers WILL move for
         # any household whose taxable brokerage runs dry during the
         # conversion window — that's the fix working as intended, not a
-        # regression. Draw order stays taxable-then-pretax only (never
-        # HSA/Roth for spending — this tool has never modeled either),
-        # preserving the original's deliberate scope.
+        # regression.
+        #
+        # Draw order is taxable, then pretax, then Roth as a LAST-RESORT
+        # spending fallback — corrected from an earlier version of this
+        # migration that dropped Roth from the order entirely on the
+        # mistaken claim that "this tool has never modeled Roth spending."
+        # It has: the pre-migration code's roth_after formula explicitly
+        # spilled any spending shortfall into Roth whenever pretax
+        # couldn't cover both the year's own draw and the conversion
+        # (`roth + optimal_conversion - max(0, pretax_draw - max(0, pretax
+        # - optimal_conversion))`). Dropping Roth from the order silently
+        # stopped funding spending once pretax ran out and reported the
+        # untouched Roth balance as if the plan were still fully funded —
+        # caught by independent review, 2026-09-07 (reproduced: $1M Roth
+        # only / $100K spend / 0% growth/inflation/income — the
+        # unmigrated tool depletes after 10 years; this migration was
+        # reporting $1M untouched at RMD age instead). HSA is still
+        # excluded — the original never modeled HSA spending here and
+        # this tool has no HSA input at all.
         pretax_tax_rate = _pretax_marginal_tax_rate(year_pen, year_jss, year_uss, 0.0,
                                                       inputs.get("state_income_tax_rate", 0) or 0)
         base_result = simulate_withdrawal_year(
@@ -1005,7 +1021,7 @@ def run_roth_conversion_analysis(inputs: Dict, accounts: List[Dict], ret_age: in
             rmd_amount=0.0,
             tax_model=marginal_bracket_tax_model(pretax_rate=pretax_tax_rate, taxable_rate=0.0),
             growth_rate=post_ret,
-            order=("taxable", "pretax"),
+            order=("taxable", "pretax", "roth"),
         )
         pretax_draw = base_result.draws.get("pretax", 0.0)
 
@@ -1050,7 +1066,19 @@ def run_roth_conversion_analysis(inputs: Dict, accounts: List[Dict], ret_age: in
         roth_after    = conv_result.closing.roth
         taxable_after = conv_result.closing.taxable
 
-        yrs_to_rmd   = max(0, RMD_START_AGE - age)
+        # `optimal_conversion` is capped by base_result.closing.pretax,
+        # which already reflects THIS year's growth (simulate_conversion
+        # layers the conversion on top of an already-grown year, per its
+        # own contract) — so the dollar amount landing in Roth already
+        # represents its value at the END of year `age` / the START of
+        # year `age + 1`. Compounding it forward by `RMD_START_AGE - age`
+        # more years double-counts that year's growth (independent
+        # review, 2026-09-07 — reproduced: a $100K IRA growing to $110K
+        # at 10% and converting at year-end reported $121K/$29,040 tax
+        # avoided at RMD age instead of the actual $110K/$26,400). One
+        # fewer year of compounding is needed than the naive age
+        # difference suggests.
+        yrs_to_rmd   = max(0, RMD_START_AGE - age - 1)
         roth_fv_73   = optimal_conversion * ((1 + post_ret) ** yrs_to_rmd)
         tax_avoided  = roth_fv_73 * 0.24  # 24% bracket at RMD age
         net_benefit  = tax_avoided - tax_cost
@@ -1071,6 +1099,12 @@ def run_roth_conversion_analysis(inputs: Dict, accounts: List[Dict], ret_age: in
             "pretax_after":       round(pretax_after),
             "roth_after":         round(roth_after),
             "taxable_after":      round(taxable_after),
+            # Surfaced rather than silently dropped (independent review,
+            # 2026-09-07) — nonzero only if taxable+pretax+Roth together
+            # can't fund the year's spending need even after RMD/growth;
+            # a schedule row is NOT a fully-funded trajectory if this is
+            # nonzero, regardless of how healthy the balances look.
+            "unmet_need":         round(base_result.unmet_need),
         })
 
         pretax  = pretax_after
@@ -1094,6 +1128,14 @@ def run_roth_conversion_analysis(inputs: Dict, accounts: List[Dict], ret_age: in
     # policy differs between the two paths.
     no_conv_pretax  = pretax_at_ret
     no_conv_taxable = taxable_at_ret
+    # Track Roth too, for the same reason as the with-conversions loop
+    # above: the two paths are meant to isolate the conversion policy
+    # difference, holding everything else (including the spending
+    # waterfall's bucket order) identical — leaving Roth out of the
+    # baseline while the with-conversions path can fall back to it would
+    # make the comparison measure "conversions AND a Roth spending
+    # fallback" vs. "neither," not conversions in isolation.
+    no_conv_roth = roth_at_ret
     for yr in range(conversion_years):
         age = ret_age + yr
         hc = healthcare_pre_at_ret if age < 65 else healthcare_post_at_ret
@@ -1112,17 +1154,18 @@ def run_roth_conversion_analysis(inputs: Dict, accounts: List[Dict], ret_age: in
         no_conv_pretax_rate = _pretax_marginal_tax_rate(year_pen, year_jss, year_uss, 0.0,
                                                           inputs.get("state_income_tax_rate", 0) or 0)
         no_conv_result = simulate_withdrawal_year(
-            opening=AccountState(pretax=no_conv_pretax, roth=0.0, taxable=no_conv_taxable, hsa=0.0),
+            opening=AccountState(pretax=no_conv_pretax, roth=no_conv_roth, taxable=no_conv_taxable, hsa=0.0),
             spending_need=income_need - life_event_monthly,
             guaranteed_income=guaranteed,
             life_event_cash=life_event_cash,
             rmd_amount=0.0,
             tax_model=marginal_bracket_tax_model(pretax_rate=no_conv_pretax_rate, taxable_rate=0.0),
             growth_rate=post_ret,
-            order=("taxable", "pretax"),
+            order=("taxable", "pretax", "roth"),
         )
         no_conv_pretax  = no_conv_result.closing.pretax
         no_conv_taxable = no_conv_result.closing.taxable
+        no_conv_roth    = no_conv_result.closing.roth
     estimated_rmd_base = _rmd(no_conv_pretax, RMD_START_AGE, RMD_START_AGE)
 
     total_tax_avoided = sum(s["tax_avoided_at_73"] for s in schedule)
@@ -1145,6 +1188,8 @@ def run_roth_conversion_analysis(inputs: Dict, accounts: List[Dict], ret_age: in
         "conversion_years":       conversion_years,
         "ret_age":                ret_age,
         "rmd_start_age":          RMD_START_AGE,
+        "total_unmet_need":       round(sum(s["unmet_need"] for s in schedule)),
+        "any_unmet_need":         any(s["unmet_need"] > 0 for s in schedule),
     }
 
 def _ordered_draw(pretax, roth, taxable, hsa, remaining, order, tax_pretax_rate, tax_taxable_rate):
@@ -1299,9 +1344,35 @@ def run_tax_efficiency_simulation(inputs: Dict, accounts: List[Dict], ret_age: i
 
                 calendar_year_te = retirement_year_te + yr
                 life_event_cash, life_event_monthly = _post_retirement_year_effects(post_events_te, calendar_year_te)
-                if life_event_cash:
-                    taxable += life_event_cash
-                net_need   = max(0, year_need - guaranteed - life_event_monthly)
+                # Signed life-event cash must offset (or add to) this
+                # year's spending need BEFORE anything is drawn — not get
+                # unconditionally credited/debited to taxable while the
+                # need calc pretends it doesn't exist. The old
+                # "taxable += life_event_cash" version worked out fine for
+                # a positive windfall (extra savings on top of an
+                # unadjusted draw) but for a negative one-time cost with
+                # taxable at or near zero, it drove taxable negative with
+                # nothing tracking the resulting deficit — floored to 0 at
+                # the end of the year, silently erasing the expense
+                # (independent review, 2026-09-07 — reproduced: a $100K
+                # one-time expense against a $1M pretax-only household
+                # with zero ordinary spending produced $0 tax, 100%
+                # success, and a final balance barely below $1M in every
+                # strategy, instead of the shared engine's own
+                # correctly-taxed ~$888,889). Matches the cash_available-
+                # offsets-need convention every other migrated consumer
+                # already uses (annual_engine.simulate_withdrawal_year):
+                # guaranteed income + life-event cash covers need first: a
+                # shortfall increases what must be drawn from the
+                # buckets below, a surplus is swept into taxable as
+                # savings — never both, never neither.
+                cash_available = guaranteed + life_event_cash
+                spending_target = max(0, year_need - life_event_monthly)
+                if cash_available >= spending_target:
+                    taxable += cash_available - spending_target
+                    net_need = 0.0
+                else:
+                    net_need = spending_target - cash_available
 
                 # RMD — must take regardless of strategy
                 rmd = _rmd(pretax, age, _rmd_start)
