@@ -504,3 +504,65 @@ confirmed and fixed:
    was added specifically retiring AFTER an early SS claim, checked with
    deterministic returns against `run_retirement_projection`'s own
    figure for an exact match.
+
+## 8. Independent review, third follow-up (2026-09-07) — the past-ret_age timeline gap, fixed everywhere
+
+`run_retirement_projection` (projection_engine.py) has anchored its own
+withdrawal-phase timeline to `withdrawal_start_age = max(ret_age,
+jason_age)` since an earlier session — a household selecting an
+already-past retirement age (e.g. a "what if I'd retired at 55"
+sensitivity column while actually 65 today) simulates forward from its
+real current age, not a nominal age years behind it. That fix was never
+propagated to any OTHER withdrawal-phase consumer in simulation_engine.py
+— `_run_single` (Monte Carlo + Stress Tests), `run_swr_analysis`,
+`run_roth_conversion_analysis`, and `run_tax_efficiency_simulation` all
+still used raw `ret_age` for their own `retire_yrs`/age-progression math.
+Reproduced exactly (both spouses currently 65, selecting ret_age 55, end
+age 69, $2M taxable-only, $100K/yr spending, zero returns/inflation/
+pension/SS/healthcare/contributions — deterministic returns):
+
+| Consumer | Before | After |
+|---|---|---|
+| Main Retirement (reference, already correct) | 4 spending years, $1.6M ending | unchanged |
+| Monte Carlo | 14 spending years, $600K ending | 4 years, $1.6M — matches Main |
+| Stress base case | same 14-year error, chart starts at 55 | matches Main; chart starts at 65 |
+| SWR | $142,857/yr vs. $500,000/yr for the current-age selection | both selections agree |
+| Tax-efficiency (taxable-first) | $352,941 vs. $1,529,412 for the current-age selection | both selections agree exactly |
+| Roth conversion schedule | starts at age 55 | starts at age 65 (the real current age) |
+
+**Fix:** every affected function now computes its own `withdrawal_start_age
+= max(ret_age, jason_age)` (mirroring `run_retirement_projection`'s
+existing convention exactly) and uses it — not raw `ret_age` — for every
+forward-looking timeline computation: `retire_yrs`/`end_age`, the
+per-year `age` loop variable, healthcare pre-retirement inflation, SS
+pre-retirement COLA (the section-7 fix's own formula also needed this —
+it used raw `ret_age` for the pre-retirement-COLA exponent, which is
+wrong in exactly this same past-ret_age case), the Roth conversion
+window (`conversion_years`), and every reported chart/depletion-age/
+lowest-balance-age label. `ret_age` itself is deliberately preserved
+unchanged everywhere it represents a genuine POLICY selection rather
+than a timeline: `pension_for_age(inputs, ret_age)`, the age-55 bridge-
+job/kids-at-home branch condition, and the top-level `"retirement_age"`
+field callers report back (what was selected, not the effective
+simulation start).
+
+**Explicitly out of scope, flagged rather than silently left alone:**
+`_post_retirement_asset_sale_events`'s own inclusion check
+(`sale_age <= ret_age`) has this same class of edge case for a sale
+scheduled between the past ret_age and the real current age — but
+`run_retirement_projection` itself (the reference implementation this
+fix mirrors) has the identical gap in its own accumulation-phase asset-
+sale logic, so fixing it here alone would create a NEW inconsistency
+with the reference rather than close one. Not touched; revisit
+alongside `run_retirement_projection`'s own asset-sale timing if this
+ever becomes a real reported issue (it wasn't part of the review's
+reproduction, which used no asset sales). `run_survivor_scenario`'s
+`death_age = ret_age + 10` default has a related shape (also not part
+of the review's finding) — also not touched.
+
+Regression tests: `TestPastRetirementAgeTimelineConsistency` in
+`test_cross_tool_reconciliation.py` — reproduces the review's exact
+scenario across all 6 consumers, asserting the past-age and current-age
+selections now produce identical results (not just plausible-looking
+ones), with the review's own reported current-age figures pinned so a
+regression changes a number, not just an equality.
