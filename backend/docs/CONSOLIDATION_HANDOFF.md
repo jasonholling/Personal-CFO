@@ -1,3 +1,79 @@
+# Calculation engine consolidation — CLOSED (2026-09-07)
+
+**This consolidation is done.** This file is kept for history; the
+current state of the work lives in `CALCULATION_CONTRACT.md`
+(especially sections 8, 9, 10, 11, 12), not here — this document's
+earlier revisions described a branch mid-review that has since been
+merged and closed out. Do not act on the "paused for review, not
+merged" language further down this file (visible in the repo's git
+history) — it's stale as of this closing update.
+
+## Final status against Jason's 9-item follow-on task list
+
+All 9 items are resolved:
+
+1. Shared timeline normalizer (`timeline_engine.py`) — done.
+2. Shared annual-input builder (`annual_inputs.py`) — done, closed
+   2026-09-07. See `CALCULATION_CONTRACT.md` section 12.
+3. SWR proven equivalent to the shared engine (full migration stays
+   reverted, documented performance exception) — done.
+4. Tax-efficiency's "optimal" strategy onto shared-ledger conventions —
+   done.
+5. Roth conversion reconciliation — done.
+6. Survivor calculations on the shared account state — substantially
+   already done from a prior session; the single-aggregate-bucket
+   policy remains a deliberate product choice, not an unconsolidated
+   ledger.
+7. **Education/Kids drawdown/rollover/custodial/timeline halves —
+   deliberately deferred, not done.** No matching literal duplication
+   to remove (Kids' age-60 timeline has no Education equivalent;
+   Education's drawdown tracks a "worst deficit" figure Kids doesn't
+   compute). Revisit only if a real bug motivates it — see Phase 5's
+   reasoning in `CALCULATION_CONTRACT.md` section 5.
+8. API-output-level invariant tests across all consumers —
+   substantially already done via `test_cross_tool_reconciliation.py`.
+9. Duplicate-formula inventory — done, consolidation substantially
+   advanced.
+
+## How it actually closed out
+
+- The branch (`codex/consolidate-calculation-engine`) was merged to
+  `main` after the third independent-review follow-up found a systemic
+  timeline bug and it got fixed everywhere (`CALCULATION_CONTRACT.md`
+  section 8).
+- A fourth independent-review pass, done directly on the merged `main`
+  (no PR process in this repo), found two more real bugs — both fixed
+  (section 11: an asset-sale growth-years overstatement, a survivor
+  `death_age` default computed in the wrong person's age terms, plus a
+  matching frontend gap in `StressTestWhatIf.jsx`).
+- Item 2 (the shared annual-input builder) was then built and migrated
+  into all 3 remaining eligible consumers directly on `main` (section
+  12).
+- A follow-up code review of that item-2 work found no correctness
+  bugs — only two minor cleanup items (a stale docstring cross-
+  reference, a dead healthcare computation in a hot loop), both fixed.
+- The Roth Conversion planner was sanity-checked against real
+  household data at three retirement ages: internally consistent,
+  fully funded (`total_unmet_need == 0` in all three), no anomalies.
+- Full backend suite: **1064 passed**, no failures.
+
+## What's still independent, on purpose (unchanged, not oversights)
+
+1. `run_swr_analysis`'s inner loop — measured >2x slower on migration.
+2. `run_tax_efficiency_simulation`'s `optimal` strategy — doesn't fit
+   the order-driven shape `taxable_first`/`roth_first` share.
+3. Education/Kids' drawdown and timeline halves — item 7, above.
+4. The 5 material assumptions in `CALCULATION_CONTRACT.md` section 3 —
+   product decisions, not bugs.
+
+If a future session revisits any of these, start from
+`CALCULATION_CONTRACT.md`, not this file.
+
+---
+
+*Below this line: the original mid-review document, kept verbatim for
+history. Superseded by everything above.*
+
 # Calculation engine consolidation — handoff
 
 **PAUSED FOR REVIEW as of this snapshot.** Per Jason's explicit

@@ -831,3 +831,65 @@ edits the field, at which point their typed value is preserved across
 later changes. New test file `SurvivorScenario.test.jsx` (4 tests)
 verifies the actual request payload for both spouses, an uneven spousal
 age gap, and that a manual edit survives switching who dies first.
+
+## 12. Item 2 (shared annual-input builder) — closed, consolidation complete
+
+`annual_inputs.py`'s `build_annual_income_inputs()` (see its own module
+docstring for full detail) generalizes the SS/healthcare/life-event
+per-year income calculation that item 9's inventory found duplicated
+across every withdrawal-phase consumer — the same class of bug
+independent review caught three separate times (the 2026-09-06 Justin
+age-gap bug, the 2026-09-07 past-ret-age timeline bug, and this
+module's own `justin_ss` default-age bug in `run_survivor_scenario`).
+Migrated into `run_retirement_projection`, `_run_single` (Monte
+Carlo/Stress), and `run_roth_conversion_analysis` (both the
+with-conversion and without-conversion comparison loops); documented in
+`tests/test_annual_inputs.py` (22 tests: hand-calculated reference
+values, a variable-inflation divergence-from-the-old-shortcut proof, a
+signed-life-event suite, two multi-year integration tests, and explicit
+parity tests naming the two performance exceptions below by their own
+test class).
+
+**Two consumers remain deliberately independent, unchanged from section
+4/10's existing exceptions** — `run_swr_analysis`'s inner loop and
+`run_tax_efficiency_simulation`'s ordered strategies both still inline
+the same SS/healthcare formula this module now owns, for the same
+measured performance reason (>2x and ~2.9x slower on full-engine
+migration, both loops running N=1000 Monte Carlo trials x retire_yrs).
+Both inline copies carry a comment pointing here and to their own
+parity tests rather than to a nonexistent docstring section (fixed
+2026-09-07 -- a fourth review pass found the comments pointed at
+`annual_engine.py`'s module docstring, which never mentions SWR or a
+fast path at all).
+
+**A related dead-store also fixed this pass:** `_run_single`'s
+`hc_this_year` was computed unconditionally every loop iteration via
+`healthcare_for_age()` before the shared builder was even called, but
+is only ever *read* inside the `ret_age == 55` bridge/kids branch
+(which always overwrites it first) -- the non-55 path uses
+`income.healthcare` from the shared builder instead. The unconditional
+call was pure waste in this file's hottest loop (N=1000 trials x
+retire_yrs) with no observable effect on output; removed.
+
+**Roth Conversion planner sanity-checked against real household data
+(2026-09-07):** ran `run_roth_conversion_analysis` directly against the
+real `cfo.db` (read-only, no API/auth involved) at retirement ages 55,
+60, and 65. All three produced internally consistent, sane output --
+`total_tax_avoided - total_tax_cost == net_lifetime_benefit` exactly,
+`total_unmet_need == 0` in every case, RMDs and pretax/Roth balances
+moved in the expected direction (RMD at 75 dropped from [real household figure removed pre-sharing] to
+[real household figure removed pre-sharing] under the age-60 conversion schedule), no negative or NaN
+figures anywhere in the output. No further changes needed here.
+
+**Status: with item 2 closed, all 9 items from Jason's follow-on list
+are now resolved** -- 1, 2, 3, 4, 5, 9 done; 6 and 8 substantially
+satisfied by earlier work in the branch; 7 (Education/Kids
+drawdown/rollover/custodial/timeline halves) remains the one
+deliberately deferred item, per Phase 5's own scope reasoning -- revisit
+only if a real bug motivates it, not for consolidation's own sake. This
+branch was merged to `main` after the third independent-review
+follow-up (section 8); two further review passes since then (section
+11's fourth follow-up, and this item-2 closure) were done directly on
+`main`, per this repo's no-PR workflow. Full backend suite: 1064
+passed. `CONSOLIDATION_HANDOFF.md` is superseded by this section and by
+its own closing update -- see that file for the final status.

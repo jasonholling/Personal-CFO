@@ -295,7 +295,12 @@ def _run_single(
         # copies since it can just reuse these.
         healthcare_pre  = (phase_inputs or {}).get("healthcare_pre", 0) * ((1 + inflation) ** max(0, withdrawal_start_age - jason_age))
         healthcare_post = (phase_inputs or {}).get("healthcare_post", 0) * ((1 + inflation) ** max(0, withdrawal_start_age - jason_age))
-        hc_this_year = healthcare_for_age(age, healthcare_pre, healthcare_post)
+        # hc_this_year is only meaningful inside the ret_age==55 bridge/kids
+        # branch below (which overwrites it); the non-55 path uses
+        # income.healthcare from the shared builder instead. Left unset here
+        # on purpose -- don't reintroduce the unconditional healthcare_for_age
+        # call this hot loop (N=1000 Monte Carlo trials x retire_yrs) used to
+        # pay for on every non-55 iteration with no observable effect.
 
         # Shared annual-input builder (consolidation, 2026-09-07): Social
         # Security (COLA'd from each spouse's own claim age, including
@@ -472,7 +477,8 @@ def run_swr_analysis(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_t
             # SS formula below is the same one annual_inputs.
             # build_annual_income_inputs() generalizes — deliberately
             # kept inline as a documented performance exception (see
-            # annual_engine.py's module docstring on SWR's fast path):
+            # docs/CALCULATION_CONTRACT.md, "run_swr_analysis's inner loop"
+            # section, and _swr_year_step's own docstring):
             # this loop runs N times per binary-search iteration, and is
             # algebraically equivalent to the shared builder's output for
             # every case this tool exercises (no stress inflation_mults
@@ -1550,8 +1556,9 @@ def run_tax_efficiency_simulation(inputs: Dict, accounts: List[Dict], ret_age: i
             # annual_inputs.build_annual_income_inputs() generalizes —
             # deliberately kept inline rather than migrated, as a
             # documented performance exception matching
-            # run_swr_analysis's own precedent (annual_engine.py's module
-            # docstring): this loop runs N=1000 * retire_yrs * 3
+            # run_swr_analysis's own precedent (docs/CALCULATION_CONTRACT.md,
+            # "run_tax_efficiency_simulation's ordered strategies" section):
+            # this loop runs N=1000 * retire_yrs * 3
             # strategies times per call, and both are algebraically
             # equivalent to the shared builder's output for every case
             # this tool exercises (no stress inflation_mults apply here).
