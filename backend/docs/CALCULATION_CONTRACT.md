@@ -308,3 +308,41 @@ function call) is duplicated here, for a measured, documented reason. If
 search that needs fewer calls, or N reduced), this exception should be
 revisited — it is a performance trade-off, not a permanent architectural
 stance.
+
+### `run_tax_efficiency_simulation`'s ordered strategies — same exception, mitigated with a parity-tested shared helper
+
+`run_tax_efficiency_simulation`'s `taxable_first`/`roth_first` strategies
+(its `optimal` strategy's LTCG-threshold logic is a genuinely different
+policy, not attempted here) were migrated onto `simulate_withdrawal_year`
+the same way `_run_single` and `run_retirement_projection` were, and
+measured: **~2.9x slower** (0.084s -> 0.242s per call) at 1000 trials x
+~35 years x 2 of 3 strategies — worse than SWR's already-documented >2x,
+for the same reason (call volume where the shared engine's per-year
+dataclass/dict/`Transfer`-list allocations stop being free). Reverted for
+the same reason SWR's migration was.
+
+Unlike SWR, this exception ships with a mitigation instead of just a
+duplicated implementation: `taxable_first`/`roth_first`'s per-year draw
+logic was extracted into `simulation_engine._ordered_draw` — a pure
+four-floats-in/four-floats-out function, order-driven so both strategies
+share it instead of two independently-copy-pasted blocks, with zero
+dataclass/dict overhead (confirmed negligible: 0.084s -> 0.090s per call,
+~7%, an acceptable cost for de-duplicating the two strategies into one
+function). `tests/test_tax_efficiency_engine_parity.py` proves this fast
+path is byte-identical to `simulate_withdrawal_year` for the same inputs
+across 6 cases (ample funds, an exhausted first bucket spilling to the
+next, every bucket exhausted with real unmet need, a zero-need no-op, an
+HSA-only remainder, and fractional-dollar amounts) x both strategies (12
+tests total) — so a future drift between the fast path and the engine's
+semantics fails a test before it reaches a user, even though the two
+aren't literally the same code path. The `optimal` strategy remains
+fully independent (no shared helper) since its LTCG-threshold behavior
+doesn't fit the order-driven shape at all.
+
+If `_ordered_draw`'s and `simulate_withdrawal_year`'s per-bucket
+gross-up/tax formulas are ever changed, both need to change together —
+the parity test will catch a missed one, but it won't catch a "changed
+both the same wrong way" mistake, since it only proves equivalence
+between the two implementations, not correctness against first
+principles (that's `test_annual_engine_reference.py`'s job for the
+engine itself).

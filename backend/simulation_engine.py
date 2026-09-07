@@ -14,7 +14,7 @@ from projection_engine import (
     _fv, _fv_annuity, _fv_annuity_monthly, _rmd, pension_for_age, rmd_start_age,
     _split_life_events, _post_retirement_year_effects, _post_retirement_asset_sale_events
 )
-from annual_engine import (AccountState, DEFAULT_ORDER, marginal_bracket_tax_model, no_tax_model,
+from annual_engine import (AccountState, DEFAULT_ORDER, ROTH_FIRST_ORDER, marginal_bracket_tax_model, no_tax_model,
                            simulate_conversion, simulate_withdrawal_year)
 # Module-level, not lazy/per-call — _pretax_marginal_tax_rate below is
 # called once per simulated year per trial (up to ~40 years x 1000 trials
@@ -1147,6 +1147,61 @@ def run_roth_conversion_analysis(inputs: Dict, accounts: List[Dict], ret_age: in
         "rmd_start_age":          RMD_START_AGE,
     }
 
+def _ordered_draw(pretax, roth, taxable, hsa, remaining, order, tax_pretax_rate, tax_taxable_rate):
+    """Draw `remaining` need from the four buckets in `order`, taxed/
+    grossed-up exactly like annual_engine.simulate_withdrawal_year's own
+    per-bucket loop, but as four plain floats in/four plain floats out —
+    no dataclass, no dict, no Transfer list. Extracted from
+    run_tax_efficiency_simulation's inline taxable_first/roth_first
+    strategy blocks (calculation-engine consolidation Phase 4) so the two
+    strategies share one order-driven implementation instead of two
+    copy-pasted ones, and so a parity test (test_annual_engine_reference.py)
+    can prove this gives byte-identical results to the shared engine.
+
+    NOT migrated onto simulate_withdrawal_year itself: measured >2x
+    slower at this call volume (1000 trials x ~35 years x 2 of 3
+    strategies, timed 2026-09-07) — same class of hot-path exception as
+    run_swr_analysis's, documented in CALCULATION_CONTRACT.md. This
+    function is the shared-formula compromise: one implementation, zero
+    extra allocation, verified equivalent to the engine rather than
+    merely assumed so."""
+    total_tax = 0.0
+    for bucket in order:
+        if remaining <= 0:
+            break
+        if bucket == "pretax":
+            bal = pretax
+        elif bucket == "roth":
+            bal = roth
+        elif bucket == "taxable":
+            bal = taxable
+        else:
+            bal = hsa
+        if bal <= 0:
+            continue
+        rate = tax_pretax_rate if bucket == "pretax" else (tax_taxable_rate if bucket == "taxable" else 0.0)
+        if rate > 0:
+            gross = remaining / (1 - rate) if rate < 1 else remaining
+            draw = min(gross, bal)
+            tax = draw * rate
+            net = draw - tax
+        else:
+            draw = min(remaining, bal)
+            tax = 0.0
+            net = draw
+        if bucket == "pretax":
+            pretax = bal - draw
+        elif bucket == "roth":
+            roth = bal - draw
+        elif bucket == "taxable":
+            taxable = bal - draw
+        else:
+            hsa = bal - draw
+        remaining -= net
+        total_tax += tax
+    return pretax, roth, taxable, hsa, remaining, total_tax
+
+
 def run_tax_efficiency_simulation(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_timing: str = "early",
                                    life_events: List[Dict] = None,
                                    surplus_allocations: List[Dict] = None) -> Dict:
@@ -1277,33 +1332,11 @@ def run_tax_efficiency_simulation(inputs: Dict, accounts: List[Dict], ret_age: i
                         taxable += after_tax_rmd - remaining
                         remaining = 0
 
-                if strategy == 'taxable_first':
-                    if remaining > 0 and taxable > 0:
-                        gross = remaining / (1 - TAX_TAXABLE)
-                        draw = min(gross, taxable); taxable -= draw
-                        tax = draw * TAX_TAXABLE; tax_this_year += tax; remaining -= (draw - tax)
-                    if remaining > 0 and pretax > 0:
-                        gross = remaining / (1 - TAX_PRETAX)
-                        draw = min(gross, pretax); pretax -= draw
-                        tax = draw * TAX_PRETAX; tax_this_year += tax; remaining -= (draw - tax)
-                    if remaining > 0 and hsa > 0:
-                        draw = min(remaining, hsa); hsa -= draw; remaining -= draw
-                    if remaining > 0 and roth > 0:
-                        draw = min(remaining, roth); roth -= draw; remaining -= draw
-
-                elif strategy == 'roth_first':
-                    if remaining > 0 and roth > 0:
-                        draw = min(remaining, roth); roth -= draw; remaining -= draw
-                    if remaining > 0 and taxable > 0:
-                        gross = remaining / (1 - TAX_TAXABLE)
-                        draw = min(gross, taxable); taxable -= draw
-                        tax = draw * TAX_TAXABLE; tax_this_year += tax; remaining -= (draw - tax)
-                    if remaining > 0 and pretax > 0:
-                        gross = remaining / (1 - TAX_PRETAX)
-                        draw = min(gross, pretax); pretax -= draw
-                        tax = draw * TAX_PRETAX; tax_this_year += tax; remaining -= (draw - tax)
-                    if remaining > 0 and hsa > 0:
-                        draw = min(remaining, hsa); hsa -= draw; remaining -= draw
+                if strategy in ('taxable_first', 'roth_first'):
+                    _order = DEFAULT_ORDER if strategy == 'taxable_first' else ROTH_FIRST_ORDER
+                    pretax, roth, taxable, hsa, remaining, _tax = _ordered_draw(
+                        pretax, roth, taxable, hsa, remaining, _order, TAX_PRETAX, TAX_TAXABLE)
+                    tax_this_year += _tax
 
                 else:  # optimal — fill 22% bracket from pretax, rest from taxable/roth
                     # Draw from taxable first up to capital gains threshold.
