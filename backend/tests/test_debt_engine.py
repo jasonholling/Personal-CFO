@@ -317,6 +317,26 @@ class TestRecommendPayoffStrategy:
         result = recommend_payoff_strategy(debts, extra_monthly=0)
         assert len(result["negative_amortization_debts"]) == 1
 
+    def test_focus_first_matches_avalanche_ordering_not_soonest_payoff(self):
+        # External audit 2026-09-07: a tiny, low-rate debt can finish paying
+        # off chronologically FIRST purely because its balance is small,
+        # even when avalanche (highest rate first) is the selected
+        # strategy. focus_first must follow the avalanche rule (highest
+        # rate), not "whichever debt's balance hits zero soonest" per
+        # _simulate_payoff's payoff_order.
+        debts = [
+            {"id": 1, "name": "Big HighRate Loan", "account_type": "personal_loan", "balance": 100000, "interest_rate": 0.20, "minimum_payment": 2000},
+            {"id": 2, "name": "Tiny LowRate Loan", "account_type": "personal_loan", "balance": 500, "interest_rate": 0.01, "minimum_payment": 50},
+        ]
+        result = recommend_payoff_strategy(debts, extra_monthly=500, today=date(2026, 8, 1))
+        assert result["strategy"] == "avalanche"
+        # Sanity check the bug's precondition: the tiny debt really does
+        # finish first chronologically under this payment plan.
+        assert result["payoff_order"][0]["name"] == "Tiny LowRate Loan"
+        # But the recommended target for extra payments must still be the
+        # highest-rate debt, matching the avalanche strategy just selected.
+        assert result["focus_first"]["name"] == "Big HighRate Loan"
+
     def test_debt_free_date_is_calendar_correct(self):
         debts = [{"id": 1, "name": "Small loan", "account_type": "personal_loan", "balance": 1200, "interest_rate": 0.10, "minimum_payment": 200}]
         result = recommend_payoff_strategy(debts, extra_monthly=0, today=date(2026, 1, 15))

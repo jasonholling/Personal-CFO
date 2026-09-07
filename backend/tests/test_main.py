@@ -1064,6 +1064,30 @@ class TestRetirementToolsEndpoints:
         assert r.status_code == 200
         data = r.json()
         assert data["has_pretax_balance"] is True
+        # With only a $500k 401k and no other assets, sample_inputs' default
+        # ret_age=60 spend-down (retirement_income_today_dollars=100000)
+        # actually depletes the pretax bucket by RMD age (75, given
+        # jason_age=50) in the real projection — so first_rmd_amount is
+        # correctly 0 here, not the naive-compounded-balance figure this
+        # endpoint used to report before the fix for external audit
+        # 2026-09-07 (see TestRunRmdPlanning.test_ignores_real_drawdown in
+        # test_retirement_tools_engine.py for the fix's own direct test).
+        assert data["first_rmd_amount"] >= 0
+        assert data["projected_balance_at_start_age"] >= 0
+
+    def test_rmd_planning_reflects_real_drawdown_via_ret_age_param(self, client, sample_inputs):
+        """Retiring later (closer to RMD age) with a big enough balance
+        should leave real money left at RMD age and a positive first RMD —
+        confirms the ret_age query param actually reaches the engine."""
+        _seed_planning_inputs(client, sample_inputs)
+        client.post("/api/accounts", json={
+            "name": "Big 401k", "account_type": "401k", "owner": "jason",
+            "institution": "", "balance": 5_000_000, "notes": None,
+        })
+        r = client.get("/api/retirement-tools/rmd-planning?ret_age=65")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["has_pretax_balance"] is True
         assert data["first_rmd_amount"] > 0
 
     def test_pension_vs_lump_sum_endpoint(self, client):

@@ -58,6 +58,47 @@ class TestRunRmdPlanning:
         result = run_rmd_planning(inputs, accounts)
         assert "Roth" in result["recommendation"]
 
+    def test_ignores_real_drawdown_reproduces_and_fixes_audit_finding(self, sample_inputs):
+        """External audit 2026-09-07: a $1M pretax account with
+        $100k/yr spending and 0% returns is fully depleted by RMD age in
+        the REAL retirement projection (run_retirement_projection), but
+        run_rmd_planning used to just compound today's balance forward
+        with no withdrawals subtracted, reporting a healthy first RMD off
+        a balance that will never exist. Retiring at 55 (well before RMD
+        age) and spending it all down should now show the account
+        correctly drained by RMD age."""
+        inputs = {
+            **sample_inputs,
+            "jason_age": 50, "justin_age": 50,
+            "expected_return_pre_retirement": 0.0,
+            "expected_return_post_retirement": 0.0,
+            "inflation_rate": 0.0,
+            "retirement_income_today_dollars": 100000,
+            "annual_401k_contribution": 0, "annual_hsa_contribution": 0, "annual_rsu_value": 0,
+            "pretax_401k_pct": 1.0,
+            "pension_55": 0, "pension_60": 0, "pension_65": 0,
+            "jason_social_security": 0, "justin_social_security": 0,
+        }
+        accounts = [{"account_type": "401k", "balance": 1_000_000, "owner": "jason"}]
+
+        result = run_rmd_planning(inputs, accounts, ret_age=55)
+
+        assert result["has_pretax_balance"] is True
+        # Old (buggy) behavior: projected_balance_at_start_age == 1_000_000
+        # and first_rmd_amount == 40650, completely ignoring the household
+        # actually spending the balance down to zero well before RMD age.
+        assert result["projected_balance_at_start_age"] == 0
+        assert result["first_rmd_amount"] == 0
+
+    def test_default_ret_age_used_when_none_specified(self, sample_inputs):
+        """ret_age defaults to 60 (matching every other retirement-tools
+        call site) so existing callers that don't pass it keep working."""
+        accounts = [{"account_type": "401k", "balance": 5_000_000, "owner": "jason"}]
+        inputs = {**sample_inputs, "pension_65": 0, "jason_social_security": 0, "justin_social_security": 0}
+        result = run_rmd_planning(inputs, accounts)
+        assert result["has_pretax_balance"] is True
+        assert result["projected_balance_at_start_age"] > 0
+
 
 class TestPensionVsLumpSum:
     def test_generous_lump_sum_favors_lump_sum(self):
@@ -87,6 +128,25 @@ class TestPensionVsLumpSum:
             pension_start_age=65, life_expectancy_age=90,
         )
         assert result["implied_discount_rate_pct"] is None
+
+    def test_pension_total_below_lump_sum_correctly_favors_lump_sum_explanation(self):
+        """External audit 2026-09-07: pension_monthly=100, years=10 totals
+        only $12,000 nominal vs. a $20,000 lump sum — no positive discount
+        rate can make the pension worth $20,000, so _implied_discount_rate
+        correctly returns None. The bug was in how that None was explained:
+        it used to say "the pension's implied return is very high — hard
+        to beat", the exact opposite of what a failed-to-find-any-rate
+        result means here. It should say the lump sum is clearly favored."""
+        result = pension_vs_lump_sum(
+            monthly_pension=100, lump_sum=20000, current_age=60,
+            pension_start_age=60, life_expectancy_age=70,  # 10 years receiving
+        )
+        assert result["implied_discount_rate_pct"] is None
+        assert result["favors"] == "lump_sum"
+        assert "very high" not in result["recommendation"]
+        assert "hard to beat" not in result["recommendation"]
+        assert "lump sum" in result["recommendation"].lower()
+        assert "clear choice" in result["recommendation"]
 
 
 class TestBackdoorRothEligibility:
