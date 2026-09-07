@@ -83,6 +83,45 @@ describe('What-If scenario continuity', () => {
   })
 })
 
+describe('stale response guard (external audit 2026-09-07, finding #13)', () => {
+  it.each([
+    [MonteCarloSection, 'Run Monte Carlo Simulation', 'Probability of Success'],
+    [StressTestSection, 'Run Stress Tests', 'Roth Conversion Optimizer'],
+  ])('discards a slow response that resolves after inputs changed (%s)', async (Component, button, resultText) => {
+    let resolveFirst
+    axios.post.mockImplementation(() => new Promise(resolve => { resolveFirst = resolve }))
+    await act(async () => root.render(<Component retAge={60} ssTiming="early" overrides={{}} />))
+    await click(button)
+    // User changes the selection (e.g. retirement age) while the request
+    // for the OLD selection is still in flight.
+    await act(async () => root.render(<Component retAge={65} ssTiming="early" overrides={{}} />))
+    // The slow response for the OLD (age 60) selection now resolves.
+    await act(async () => {
+      resolveFirst({ data: { success_rate: 99, simulations: 1000, chart: [], scenarios: {
+        base: {}, crash_2008: { survived: true, label: 'x', description: 'x', lowest_balance: 0, lowest_balance_age: 60, final_balance: 0 },
+        stagflation_1970s: { survived: true, label: 'x', description: 'x', lowest_balance: 0, lowest_balance_age: 60, final_balance: 0 },
+        lost_decade: { survived: true, label: 'x', description: 'x', lowest_balance: 0, lowest_balance_age: 60, final_balance: 0 },
+      } } })
+      await flush()
+    })
+    // Must NOT render the stale result under the new (age 65) selection —
+    // it should have reverted to the "ready" state instead.
+    expect(container.textContent).not.toContain(resultText)
+    expect(container.textContent).toContain('Ready to')
+  })
+
+  it.each([
+    [MonteCarloSection, 'Run Monte Carlo Simulation'],
+    [StressTestSection, 'Run Stress Tests'],
+  ])('shows an error instead of silently reverting to ready (%s)', async (Component, button) => {
+    axios.post.mockRejectedValue(new Error('network down'))
+    await act(async () => root.render(<Component retAge={60} ssTiming="early" overrides={{}} />))
+    await click(button)
+    await flush()
+    expect(container.textContent).toMatch(/failed to run/i)
+  })
+})
+
 describe('companion requests', () => {
   it.each([
     [MonteCarloSection, 'Run Monte Carlo Simulation',

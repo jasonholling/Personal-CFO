@@ -286,6 +286,25 @@ def init_saved_scenarios_table():
             created_at TEXT DEFAULT (datetime('now'))
         );
     """)
+    # Migrate: add ss_timing + assumptions_json (same PRAGMA table_info +
+    # ALTER TABLE idiom used above for accounts/planning_inputs/life_events).
+    # Originally a saved scenario stored only name + retirement_age and
+    # ALWAYS projected against early SS claiming, with no way to tell later
+    # what assumptions actually produced the saved numbers (external audit
+    # 2026-09-07, finding #15). ss_timing defaults to 'early' so existing
+    # rows keep meaning exactly what they always implicitly meant.
+    # assumptions_json is nullable and only covers retirement_age +
+    # ss_timing today — it does NOT capture What-If Builder overrides,
+    # since those live as page-local React state in StressTestWhatIf.jsx
+    # rather than the shared scenario module (utils/scenario.js) that
+    # ss_timing/retAge live in, so there's nothing durable to read them
+    # from at save time. A saved scenario is self-describing for
+    # age/timing but still summary-only with respect to What-If overrides.
+    saved_scenarios_cols = [r[1] for r in conn.execute("PRAGMA table_info(saved_scenarios)").fetchall()]
+    if "ss_timing" not in saved_scenarios_cols:
+        conn.execute("ALTER TABLE saved_scenarios ADD COLUMN ss_timing TEXT NOT NULL DEFAULT 'early'")
+    if "assumptions_json" not in saved_scenarios_cols:
+        conn.execute("ALTER TABLE saved_scenarios ADD COLUMN assumptions_json TEXT")
     conn.commit(); conn.close()
 init_saved_scenarios_table()
 

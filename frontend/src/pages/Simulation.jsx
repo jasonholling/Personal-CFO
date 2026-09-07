@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import axios from 'axios'
 import {
   AreaChart, Area, LineChart, Line,
@@ -57,11 +57,26 @@ export function MonteCarloSection({ retAge, ssTiming, overrides }) {
   const [swr, setSwr]           = useState(null)
   const [incSrc, setIncSrc]     = useState(null)
   const [loading, setLoading]   = useState(false)
+  const [error, setError]       = useState(null)
+  // Bumped on every run() and every input change. A response is only
+  // applied if this counter still matches the value captured when the
+  // request was fired — otherwise the user has since changed age/timing/
+  // overrides or started a newer run, and applying the stale response
+  // would render an old scenario's numbers under the new selection
+  // (external audit 2026-09-07, finding #13). Also resets `loading` on
+  // input change instead of leaving it stuck true forever, since a stale
+  // response now takes the early-return path instead of clearing it.
+  const genRef = useRef(0)
 
-  useEffect(() => { setData(null); setSwr(null); setIncSrc(null) }, [retAge, ssTiming, overrides])
+  useEffect(() => {
+    genRef.current++
+    setData(null); setSwr(null); setIncSrc(null); setError(null); setLoading(false)
+  }, [retAge, ssTiming, overrides])
 
   const run = () => {
+    const gen = ++genRef.current
     setLoading(true)
+    setError(null)
     setData(null); setSwr(null); setIncSrc(null)
     const mcCall = overrides
       ? axios.post('/api/simulation/monte-carlo', { ...overrides, ret_age: retAge, ss_timing: ssTiming })
@@ -71,11 +86,16 @@ export function MonteCarloSection({ retAge, ssTiming, overrides }) {
       axios.post('/api/simulation/swr', { ...overrides, ret_age: retAge, ss_timing: ssTiming }),
       axios.post('/api/retirement/income-sources', { ...overrides, ret_age: retAge, ss_timing: ssTiming })
     ]).then(([mc, sw, inc]) => {
+      if (gen !== genRef.current) return // stale — selection changed or a newer run superseded this one
       setData(mc.data)
       setSwr(sw.data)
       setIncSrc(inc.data)
       setLoading(false)
-    }).catch(() => setLoading(false))
+    }).catch(() => {
+      if (gen !== genRef.current) return
+      setLoading(false)
+      setError('Simulation failed to run. Check your connection and try again.')
+    })
   }
 
   if (loading) return (
@@ -88,6 +108,7 @@ export function MonteCarloSection({ retAge, ssTiming, overrides }) {
       <div style={{ fontSize:32, marginBottom:16 }}>◎</div>
       <div style={{ fontSize:15, fontWeight:600, marginBottom:8 }}>Ready to simulate</div>
       <div style={{ fontSize:13, color:'var(--text2)', marginBottom:24 }}>1,000 random market scenarios across your full retirement</div>
+      {error && <div style={{ fontSize:13, color:'var(--red)', marginBottom:16 }}>{error}</div>}
       <button className="btn-primary" onClick={run} style={{ padding:'12px 32px', fontSize:14 }}>
         Run Monte Carlo Simulation
       </button>
@@ -277,12 +298,21 @@ export function StressTestSection({ retAge, ssTiming, overrides }) {
   const [roth, setRoth]       = useState(null)
   const [contrib, setContrib] = useState(null)
   const [loading, setLoading] = useState(false)
+  const [error, setError]     = useState(null)
+  // See MonteCarloSection's genRef comment above — same stale-response
+  // guard and error surfacing (external audit 2026-09-07, finding #13).
+  const genRef = useRef(0)
 
-  useEffect(() => { setData(null); setRoth(null); setContrib(null) }, [retAge, ssTiming, overrides])
+  useEffect(() => {
+    genRef.current++
+    setData(null); setRoth(null); setContrib(null); setError(null); setLoading(false)
+  }, [retAge, ssTiming, overrides])
   const [active, setActive]   = useState('crash_2008')
 
   const run = () => {
+    const gen = ++genRef.current
     setLoading(true)
+    setError(null)
     setData(null); setRoth(null); setContrib(null)
     const stCall = overrides
       ? axios.post('/api/simulation/stress-tests', { ...overrides, ret_age: retAge, ss_timing: ssTiming })
@@ -292,11 +322,16 @@ export function StressTestSection({ retAge, ssTiming, overrides }) {
       axios.post('/api/simulation/roth-conversion', { ...overrides, ret_age: retAge, ss_timing: ssTiming }),
       axios.post('/api/simulation/contribution-sensitivity', { ...overrides, ret_age: retAge, ss_timing: ssTiming })
     ]).then(([st, rc, cs]) => {
+      if (gen !== genRef.current) return // stale — selection changed or a newer run superseded this one
       setData(st.data)
       setRoth(rc.data)
       setContrib(cs.data)
       setLoading(false)
-    }).catch(() => setLoading(false))
+    }).catch(() => {
+      if (gen !== genRef.current) return
+      setLoading(false)
+      setError('Stress test failed to run. Check your connection and try again.')
+    })
   }
 
   if (loading) return (
@@ -309,6 +344,7 @@ export function StressTestSection({ retAge, ssTiming, overrides }) {
       <div style={{ fontSize:32, marginBottom:16 }}>⊗</div>
       <div style={{ fontSize:15, fontWeight:600, marginBottom:8 }}>Ready to stress test</div>
       <div style={{ fontSize:13, color:'var(--text2)', marginBottom:24 }}>Run your portfolio through 2008, 1970s stagflation, and the lost decade</div>
+      {error && <div style={{ fontSize:13, color:'var(--red)', marginBottom:16 }}>{error}</div>}
       <button className="btn-primary" onClick={run} style={{ padding:'12px 32px', fontSize:14 }}>
         Run Stress Tests
       </button>
