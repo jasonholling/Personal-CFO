@@ -42,6 +42,19 @@ def compute_net_worth(accounts: List[Dict]) -> Dict:
                 if at in types:
                     result[cat] += acc["balance"]
                     break
+            else:
+                # An account_type that matches none of the CATEGORIES lists
+                # (a stale/mistyped value from a hand-edited Quicken mapping,
+                # a direct API/DB write, or a future account type this list
+                # hasn't caught up with yet) used to just vanish here —
+                # counted in the plain accounts list and its balance, but
+                # silently missing from total_assets/net_worth, with nothing
+                # in the UI to say so. That's the exact same class of bug
+                # this module's own docstring describes fixing for the
+                # report/snapshot paths, just one level deeper: fold it into
+                # "other" so a whole account's balance can't quietly drop out
+                # of net worth.
+                result["other"] += acc["balance"]
     result["total_assets"] = sum(result[c] for c in CATEGORIES)
     result["net_worth"]    = result["total_assets"] - result["liabilities"]
     return result

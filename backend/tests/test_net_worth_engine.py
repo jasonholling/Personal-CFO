@@ -21,6 +21,25 @@ class TestComputeNetWorth:
         assert result["total_assets"] == 210000
         assert result["net_worth"] == 207000
 
+    def test_unrecognized_account_type_falls_back_to_other(self):
+        """Regression: an account_type matching none of CATEGORIES' lists
+        (a stale/mistyped value from a hand-edited Quicken mapping, a direct
+        API/DB write, or a type this list hasn't caught up with yet) used to
+        just vanish — present in the plain accounts list with its balance
+        intact, but silently missing from every category and from
+        total_assets/net_worth, with nothing in the UI to say so. Found via
+        a bug-hunt sandbox where a mistyped 401k type ("pretax_401k" instead
+        of "401k") silently dropped $650K from a $1.05M total. It must land
+        in "other" instead."""
+        accounts = [
+            {"account_type": "pretax_401k", "owner": "jason", "balance": 650000},
+            {"account_type": "checking", "owner": "joint", "balance": 10000},
+        ]
+        result = compute_net_worth(accounts)
+        assert result["other"] == 650000
+        assert result["total_assets"] == 660000
+        assert result["net_worth"] == 660000
+
     def test_education_and_daf_included_in_total(self):
         """Regression: the report's old copy of this logic had no
         'education'/'daf' bucket, so 529s and DAF accounts were silently
