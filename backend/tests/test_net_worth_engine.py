@@ -4,7 +4,7 @@ Regression coverage for the "three pages showed three different net worth
 numbers for the same accounts" bug this module was extracted to fix."""
 import pytest
 
-from net_worth_engine import compute_net_worth, emergency_fund_check, EMERGENCY_FUND_MIN_MONTHS, EMERGENCY_FUND_FULL_MONTHS
+from net_worth_engine import compute_net_worth, effective_monthly_expenses, emergency_fund_check, EMERGENCY_FUND_MIN_MONTHS, EMERGENCY_FUND_FULL_MONTHS
 
 
 class TestComputeNetWorth:
@@ -157,3 +157,33 @@ class TestEmergencyFundCheck:
         result = emergency_fund_check(accounts, monthly_expenses=5000)
         assert result["liquid_assets"] == 0
         assert result["status"] == "underfunded"
+
+
+class TestEffectiveMonthlyExpenses:
+    """Regression: /api/cfo-briefing and /api/financial-runway used to feed
+    emergency_fund_check() the coarse Settings estimate (inputs.
+    current_monthly_expenses) even after the household built out a real,
+    itemized Monthly Cash Flow plan — /api/financial-runway even computed
+    the correct cash-flow summary in the same request and still didn't use
+    it for this. Same accounts, same liquid assets, a materially different
+    "months covered"/status depending only on which number was read."""
+
+    def test_prefers_cash_flow_once_it_has_data(self):
+        inputs = {"current_monthly_expenses": 9000}
+        cash_flow = {"has_data": True, "monthly_expenses": 3400}
+        assert effective_monthly_expenses(inputs, cash_flow) == 3400
+
+    def test_falls_back_to_settings_when_cash_flow_not_started(self):
+        inputs = {"current_monthly_expenses": 9000}
+        cash_flow = {"has_data": False, "monthly_expenses": 0}
+        assert effective_monthly_expenses(inputs, cash_flow) == 9000
+
+    def test_falls_back_to_settings_when_cash_flow_is_income_only(self):
+        """has_data is true once any income item exists, even with zero
+        expense items — that shouldn't zero out the emergency-fund target."""
+        inputs = {"current_monthly_expenses": 9000}
+        cash_flow = {"has_data": True, "monthly_expenses": 0}
+        assert effective_monthly_expenses(inputs, cash_flow) == 9000
+
+    def test_handles_missing_cash_flow_summary(self):
+        assert effective_monthly_expenses({"current_monthly_expenses": 9000}, None) == 9000

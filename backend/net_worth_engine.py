@@ -68,6 +68,25 @@ EMERGENCY_FUND_MIN_MONTHS  = 3
 EMERGENCY_FUND_FULL_MONTHS = 6
 
 
+def effective_monthly_expenses(inputs: Dict, cash_flow_summary: Dict = None) -> float:
+    """Prefer the itemized Monthly Cash Flow total over the coarse
+    `current_monthly_expenses` Settings estimate, once one exists.
+
+    Found via a bug-hunt sandbox: after building out a real Monthly Cash
+    Flow plan (actual line items — $3,400/mo), the Emergency Fund check
+    (and /api/financial-runway, which computes this exact cash-flow summary
+    for its own response in the same request and then didn't use it here)
+    kept silently using the old $9,000/mo Settings guess instead — same
+    accounts, same liquid assets, but a materially different "months
+    covered" (4.4 vs. the correct 11.8) and status ("adequate" vs.
+    "funded") depending on which number happened to still be there. Once
+    the household has entered actual expense line items, those are more
+    accurate than a single manually-typed estimate, so they should win."""
+    if cash_flow_summary and cash_flow_summary.get("has_data") and cash_flow_summary.get("monthly_expenses", 0) > 0:
+        return cash_flow_summary["monthly_expenses"]
+    return inputs.get("current_monthly_expenses", 0)
+
+
 def emergency_fund_check(accounts, monthly_expenses: float) -> Dict:
     liquid_assets = sum(
         a["balance"] for a in accounts

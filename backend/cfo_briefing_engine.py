@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
 from debt_engine import DEBT_TYPES
-from net_worth_engine import compute_net_worth, emergency_fund_check
+from net_worth_engine import compute_net_worth, effective_monthly_expenses, emergency_fund_check
 
 
 def _age_in_days(timestamp: Optional[str]) -> Optional[int]:
@@ -33,7 +33,7 @@ def build_cfo_briefing(
     dollar gap. The UI can safely mask it through its existing privacy mode.
     """
     net_worth = compute_net_worth(accounts)
-    emergency = emergency_fund_check(accounts, inputs.get("current_monthly_expenses", 0))
+    emergency = emergency_fund_check(accounts, effective_monthly_expenses(inputs, cash_flow))
     priorities = []
 
     def add(priority, title, detail, destination, amount=None):

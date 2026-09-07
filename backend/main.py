@@ -682,9 +682,9 @@ def create_assumption_review(body: AssumptionReview):
 
 @app.get("/api/financial-runway")
 def financial_runway():
-    from net_worth_engine import compute_net_worth, emergency_fund_check
+    from net_worth_engine import compute_net_worth, effective_monthly_expenses, emergency_fund_check
     conn=get_db(); inputs_row=conn.execute("SELECT * FROM planning_inputs WHERE id=1").fetchone(); accounts=[dict(r) for r in conn.execute("SELECT * FROM accounts").fetchall()]; cash=[dict(r) for r in conn.execute("SELECT * FROM cash_flow_items").fetchall()]; life_events=_get_active_life_events(conn); surplus_allocations=_get_relevant_surplus_allocations(conn); conn.close()
-    inputs=dict(inputs_row) if inputs_row else {}; retirement=run_retirement_projection(inputs,accounts,ret_ages=[60],life_events=life_events,surplus_allocations=surplus_allocations) if inputs else {"scenarios":[]}; age60=next((s for s in retirement["scenarios"] if s["label"]=="age_60_early"),{}); emergency=emergency_fund_check(accounts,inputs.get("current_monthly_expenses",0)); networth=compute_net_worth(accounts); flow=summarize_cash_flow(cash)
+    inputs=dict(inputs_row) if inputs_row else {}; retirement=run_retirement_projection(inputs,accounts,ret_ages=[60],life_events=life_events,surplus_allocations=surplus_allocations) if inputs else {"scenarios":[]}; age60=next((s for s in retirement["scenarios"] if s["label"]=="age_60_early"),{}); flow=summarize_cash_flow(cash); emergency=emergency_fund_check(accounts,effective_monthly_expenses(inputs,flow)); networth=compute_net_worth(accounts)
     return {"net_worth":round(networth["net_worth"]),"emergency":emergency,"cash_flow":flow,"retirement":{"percent_funded":age60.get("percent_funded"),"projected_surplus":age60.get("projected_surplus"),"retirement_age":60},"account_count":len(accounts)}
 
 @app.get("/api/calendar/export")
@@ -1034,11 +1034,13 @@ def get_emergency_fund():
     conn = get_db()
     inputs_row = conn.execute("SELECT * FROM planning_inputs WHERE id=1").fetchone()
     accounts   = [dict(r) for r in conn.execute("SELECT * FROM accounts").fetchall()]
+    cash_flow_items = [dict(r) for r in conn.execute("SELECT * FROM cash_flow_items").fetchall()]
     conn.close()
     if not inputs_row:
         raise HTTPException(status_code=400, detail="Planning inputs not set yet")
-    from net_worth_engine import emergency_fund_check
-    return emergency_fund_check(accounts, dict(inputs_row).get("current_monthly_expenses", 0))
+    from net_worth_engine import effective_monthly_expenses, emergency_fund_check
+    inputs = dict(inputs_row)
+    return emergency_fund_check(accounts, effective_monthly_expenses(inputs, summarize_cash_flow(cash_flow_items)))
 
 @app.get("/api/cfo-briefing")
 def get_cfo_briefing():
