@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react'
 import axios from 'axios'
 import Lock from './components/Lock'
 import AuthSetup from './components/AuthSetup'
+import WelcomeModal from './components/WelcomeModal'
 import Dashboard from './pages/Dashboard'
 import Accounts from './pages/Accounts'
 import RetirementProjection from './pages/RetirementProjection'
@@ -81,12 +82,23 @@ export default function App() {
   const [page, setPage] = useState('dashboard')
   const { privacyMode, toggle: togglePrivacy } = usePrivacyMode()
   const [authState, setAuthState] = useState(null) // null = checking
+  const [showWelcome, setShowWelcome] = useState(false)
 
   useEffect(() => {
     axios.get('/api/auth/status')
       .then(r => setAuthState(r.data))
       .catch(() => setAuthState({ auth_enabled: false, authenticated: true, webauthn_registered: false }))
   }, [])
+
+  // First-run guidance: auto-show once the app is actually usable (past
+  // auth) if the household has zero accounts and hasn't dismissed it
+  // before. Also reachable anytime via the sidebar's "Getting Started" link.
+  useEffect(() => {
+    if (!authState || authState.setup_required || (authState.auth_enabled && !authState.authenticated)) return
+    axios.get('/api/accounts').then(r => {
+      if (r.data.length === 0 && !localStorage.getItem('pcfo_welcome_dismissed')) setShowWelcome(true)
+    }).catch(() => {})
+  }, [authState])
 
   if (authState === null) return null // avoid a flash of the unlocked app while checking
   if (authState.setup_required) {
@@ -109,9 +121,22 @@ export default function App() {
     <div className="app-shell">
       <aside className="sidebar">
         <div className="sidebar-logo" style={{ display:'flex', justifyContent:'space-between', alignItems:'center' }}>
-          <div>
-            <span className="logo-mark">CFO</span>
-            <span className="logo-text">Personal</span>
+          <div className="logo-lockup">
+            <svg className="logo-icon" width="28" height="28" viewBox="0 0 28 28" fill="none" aria-hidden="true">
+              <rect width="28" height="28" rx="8" fill="url(#logoBg)" />
+              <path d="M6 18.5L11.5 12.5L15.5 16L22 8.5" stroke="white" strokeWidth="2.1" strokeLinecap="round" strokeLinejoin="round" />
+              <path d="M22 13V8.5H17.5" stroke="white" strokeWidth="2.1" strokeLinecap="round" strokeLinejoin="round" />
+              <defs>
+                <linearGradient id="logoBg" x1="0" y1="28" x2="28" y2="0" gradientUnits="userSpaceOnUse">
+                  <stop style={{ stopColor: 'var(--accent)' }} />
+                  <stop offset="1" style={{ stopColor: 'var(--accent2)' }} />
+                </linearGradient>
+              </defs>
+            </svg>
+            <div className="logo-wordmark">
+              <span className="logo-text">Personal</span>
+              <span className="logo-mark">CFO</span>
+            </div>
           </div>
           <div style={{ display:'flex', gap:6, flexShrink:0 }}>
             {authState?.auth_enabled && (
@@ -170,10 +195,19 @@ export default function App() {
           </div>
         </nav>
         <div className="sidebar-footer">
-          <div className="sidebar-footer-text">All data stays local</div>
-          <div className="sidebar-footer-sub">Your Mac only</div>
+          <button
+            onClick={() => setShowWelcome(true)}
+            className="sidebar-footer-text"
+            style={{ background:'transparent', border:'none', padding:0, textAlign:'left', cursor:'pointer', color:'var(--text2)' }}
+            onMouseEnter={e => e.currentTarget.style.color='var(--accent)'}
+            onMouseLeave={e => e.currentTarget.style.color='var(--text2)'}
+          >
+            Getting Started
+          </button>
+          <div className="sidebar-footer-sub">All data stays local, your Mac only</div>
         </div>
       </aside>
+      {showWelcome && <WelcomeModal onNavigate={setPage} onClose={() => setShowWelcome(false)} />}
       <main className="main-content">
         {/* key forces a remount on privacy-mode toggle so every page's
             local fmt()/fmtK() re-evaluate against the new flag — see

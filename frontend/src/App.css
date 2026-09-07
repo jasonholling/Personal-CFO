@@ -18,21 +18,38 @@
 .sidebar-logo {
   padding: 0 20px 28px;
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: 8px;
+}
+
+.logo-lockup {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.logo-icon {
+  flex-shrink: 0;
+  filter: drop-shadow(0 2px 8px rgba(79, 156, 249, 0.35));
+}
+
+.logo-wordmark {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.05;
 }
 
 .logo-mark {
   font-family: var(--font-display);
-  font-size: 20px;
-  color: var(--accent);
-  letter-spacing: 2px;
+  font-size: 19px;
+  color: var(--text);
+  letter-spacing: 0.5px;
 }
 
 .logo-text {
-  font-size: 11px;
-  font-weight: 500;
-  letter-spacing: 0.1em;
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.14em;
   text-transform: uppercase;
   color: var(--text3);
 }
@@ -106,8 +123,7 @@
 
 @media (max-width: 700px) {
   .sidebar { width: 56px; min-width: 56px; }
-  .nav-label, .logo-text, .sidebar-footer-text, .sidebar-footer-sub { display: none; }
-  .logo-mark { font-size: 16px; }
+  .nav-label, .logo-wordmark, .sidebar-footer-text, .sidebar-footer-sub { display: none; }
   .sidebar-logo { padding: 0 16px 24px; justify-content: center; }
   .main-content { padding: 20px 16px;   overflow-y: auto;
 }
