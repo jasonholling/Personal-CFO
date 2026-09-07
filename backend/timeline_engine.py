@@ -102,6 +102,17 @@ def build_timeline(jason_age: int, justin_age: int, ret_age: int,
     )
 
 
+def healthcare_for_age(age: int, healthcare_pre: float, healthcare_post: float) -> float:
+    """The pre/post-Medicare healthcare split every withdrawal-phase
+    consumer applies identically: full cost before 65, the (typically
+    lower) Medicare-supplement cost from 65 on. Extracted (consolidation
+    follow-up, 2026-09-07, item 9's duplicate-formula inventory) from 5
+    independent copies of this exact conditional across
+    run_retirement_projection, _run_single, run_swr_analysis,
+    run_roth_conversion_analysis, and run_tax_efficiency_simulation."""
+    return healthcare_pre if age < 65 else healthcare_post
+
+
 def build_cumulative_inflation(inflation: float, retire_yrs: int,
                                 inflation_mults: Optional[List[float]] = None) -> List[float]:
     """cum_inflation[0] == 1.0 (today's/effective_start_age's dollars);

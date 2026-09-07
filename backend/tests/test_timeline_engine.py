@@ -10,7 +10,18 @@ event years.
 import pytest
 
 from projection_engine import CURRENT_YEAR
-from timeline_engine import build_cumulative_inflation, build_timeline
+from timeline_engine import build_cumulative_inflation, build_timeline, healthcare_for_age
+
+
+class TestHealthcareForAge:
+    def test_pre_medicare_below_65(self):
+        assert healthcare_for_age(64, healthcare_pre=20000, healthcare_post=5000) == 20000
+
+    def test_post_medicare_at_65(self):
+        assert healthcare_for_age(65, healthcare_pre=20000, healthcare_post=5000) == 5000
+
+    def test_post_medicare_above_65(self):
+        assert healthcare_for_age(80, healthcare_pre=20000, healthcare_post=5000) == 5000
 
 
 class TestBuildTimelineNormalCase:

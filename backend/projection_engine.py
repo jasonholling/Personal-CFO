@@ -16,7 +16,7 @@ import datetime
 import math
 
 from annual_engine import AccountState, DEFAULT_ORDER, marginal_bracket_tax_model, simulate_withdrawal_year
-from timeline_engine import CURRENT_YEAR, Timeline, build_cumulative_inflation, build_timeline
+from timeline_engine import CURRENT_YEAR, Timeline, build_cumulative_inflation, build_timeline, healthcare_for_age
 
 COLLEGE_COST_INFLATION = 0.04
 COLLEGE_YEARS          = 4
@@ -683,7 +683,7 @@ def run_retirement_projection(inputs: Dict, accounts: List[Dict], ret_ages: List
                         year_need = income_at_ret * ((1 + inflation) ** yr) + healthcare_post_at_ret * ((1 + inflation) ** yr)
                     healthcare_inflated = healthcare_this_year * ((1 + inflation) ** yr)
                 else:
-                    healthcare_this_year = healthcare_pre_at_ret if age < 65 else healthcare_post_at_ret
+                    healthcare_this_year = healthcare_for_age(age, healthcare_pre_at_ret, healthcare_post_at_ret)
                     healthcare_inflated  = healthcare_this_year * ((1 + inflation) ** yr)
                     year_need = income_at_ret * ((1 + inflation) ** yr) + healthcare_inflated
 

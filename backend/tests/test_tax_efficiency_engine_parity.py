@@ -35,9 +35,10 @@ from annual_engine import (
     DEFAULT_ORDER,
     ROTH_FIRST_ORDER,
     flat_rate_tax_model,
+    no_tax_model,
     simulate_withdrawal_year,
 )
-from simulation_engine import _cash_available_offsets_need, _ordered_draw
+from simulation_engine import _cash_available_offsets_need, _optimal_draw, _ordered_draw
 
 TAX_PRETAX = 0.22
 TAX_TAXABLE = 0.15
@@ -148,6 +149,79 @@ def test_roth_first_matches_shared_engine(label, pretax, roth, taxable, hsa, rem
     got = _ordered_draw(pretax, roth, taxable, hsa, remaining, ROTH_FIRST_ORDER, TAX_PRETAX, TAX_TAXABLE)
     want_p, want_r, want_t, want_h, want_unmet, want_tax = _via_shared_engine(
         pretax, roth, taxable, hsa, remaining, ROTH_FIRST_ORDER)
+    got_p, got_r, got_t, got_h, got_remaining, got_tax = got
+    assert got_p == pytest.approx(want_p, abs=0.01)
+    assert got_r == pytest.approx(want_r, abs=0.01)
+    assert got_t == pytest.approx(want_t, abs=0.01)
+    assert got_h == pytest.approx(want_h, abs=0.01)
+    assert max(0.0, got_remaining) == pytest.approx(want_unmet, abs=0.01)
+    assert got_tax == pytest.approx(want_tax, abs=0.01)
+
+
+# ── _optimal_draw parity: a genuinely distinct policy, still shared-ledger ──
+#
+# Item 4 of the 2026-09-07 follow-on task list: "its taxable-gain
+# threshold policy can remain distinct, but it should use the shared
+# ledger conventions for funding, taxes, shortfalls, growth, and
+# transfers." _optimal_draw's 3-phase policy (taxable up to the 0% LTCG
+# threshold, then pretax/roth/hsa, then any taxable remainder above the
+# threshold) is decomposed here into 3 chained simulate_withdrawal_year
+# calls — proving the same gross-up/shortfall/tax conventions apply at
+# every phase, without literally calling the engine in production (same
+# measured performance reason as _ordered_draw).
+
+def _via_shared_engine_optimal(pretax, roth, taxable, hsa, remaining, cap_gains_limit):
+    # Phase 1: taxable, capped at cap_gains_limit, untaxed.
+    virtual_taxable = min(taxable, cap_gains_limit)
+    reserved_taxable = taxable - virtual_taxable
+    result_a = simulate_withdrawal_year(
+        opening=AccountState(taxable=virtual_taxable),
+        spending_need=remaining, guaranteed_income=0.0, life_event_cash=0.0,
+        rmd_amount=0.0, tax_model=no_tax_model(), growth_rate=0.0, order=("taxable",),
+    )
+    taxable_after_a = result_a.closing.taxable + reserved_taxable
+
+    # Phase 2: pretax (taxed), roth, hsa (both untaxed), in that order.
+    result_b = simulate_withdrawal_year(
+        opening=AccountState(pretax=pretax, roth=roth, taxable=0.0, hsa=hsa),
+        spending_need=result_a.unmet_need, guaranteed_income=0.0, life_event_cash=0.0,
+        rmd_amount=0.0, tax_model=flat_rate_tax_model(pretax_rate=TAX_PRETAX, taxable_rate=0.0),
+        growth_rate=0.0, order=("pretax", "roth", "hsa"),
+    )
+
+    # Phase 3: taxable remainder above the threshold, taxed.
+    result_c = simulate_withdrawal_year(
+        opening=AccountState(taxable=taxable_after_a),
+        spending_need=result_b.unmet_need, guaranteed_income=0.0, life_event_cash=0.0,
+        rmd_amount=0.0, tax_model=flat_rate_tax_model(pretax_rate=0.0, taxable_rate=TAX_TAXABLE),
+        growth_rate=0.0, order=("taxable",),
+    )
+
+    total_tax = result_a.total_tax + result_b.total_tax + result_c.total_tax
+    return (result_b.closing.pretax, result_b.closing.roth, result_c.closing.taxable,
+            result_b.closing.hsa, result_c.unmet_need, total_tax)
+
+
+CAP_GAINS_LIMIT = 98_900
+
+OPTIMAL_CASES = [
+    # (label, pretax, roth, taxable, hsa, remaining)
+    ("taxable_fully_covers_within_threshold", 500_000, 200_000, 300_000, 20_000, 40_000),
+    ("need_exceeds_threshold_spills_to_pretax", 500_000, 200_000, 300_000, 20_000, 150_000),
+    ("taxable_below_threshold_exhausts_into_pretax", 500_000, 200_000, 15_000, 0, 40_000),
+    ("no_pretax_roth_hsa_falls_back_to_taxed_taxable_above_threshold",
+     0, 0, 500_000, 0, 150_000),
+    ("every_bucket_exhausted_real_unmet_need", 10_000, 5_000, 3_000, 0, 40_000),
+    ("zero_need_is_a_no_op", 500_000, 200_000, 300_000, 20_000, 0),
+    ("taxable_exactly_at_threshold", 500_000, 200_000, CAP_GAINS_LIMIT, 0, CAP_GAINS_LIMIT),
+]
+
+
+@pytest.mark.parametrize("label,pretax,roth,taxable,hsa,remaining", OPTIMAL_CASES)
+def test_optimal_draw_matches_shared_engine(label, pretax, roth, taxable, hsa, remaining):
+    got = _optimal_draw(pretax, roth, taxable, hsa, remaining, CAP_GAINS_LIMIT, TAX_PRETAX, TAX_TAXABLE)
+    want_p, want_r, want_t, want_h, want_unmet, want_tax = _via_shared_engine_optimal(
+        pretax, roth, taxable, hsa, remaining, CAP_GAINS_LIMIT)
     got_p, got_r, got_t, got_h, got_remaining, got_tax = got
     assert got_p == pytest.approx(want_p, abs=0.01)
     assert got_r == pytest.approx(want_r, abs=0.01)

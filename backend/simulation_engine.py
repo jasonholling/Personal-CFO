@@ -16,7 +16,7 @@ from projection_engine import (
 )
 from annual_engine import (AccountState, DEFAULT_ORDER, ROTH_FIRST_ORDER, marginal_bracket_tax_model, no_tax_model,
                            simulate_conversion, simulate_withdrawal_year)
-from timeline_engine import build_cumulative_inflation, build_timeline
+from timeline_engine import build_cumulative_inflation, build_timeline, healthcare_for_age
 # Module-level, not lazy/per-call — _pretax_marginal_tax_rate below is
 # called once per simulated year per trial (up to ~40 years x 1000 trials
 # per Monte Carlo/SWR request), so a per-call `from X import Y` measurably
@@ -235,7 +235,7 @@ def _run_single(
         # copies since it can just reuse these.
         healthcare_pre  = (phase_inputs or {}).get("healthcare_pre", 0) * ((1 + inflation) ** max(0, withdrawal_start_age - jason_age))
         healthcare_post = (phase_inputs or {}).get("healthcare_post", 0) * ((1 + inflation) ** max(0, withdrawal_start_age - jason_age))
-        hc_this_year = healthcare_pre if age < 65 else healthcare_post
+        hc_this_year = healthcare_for_age(age, healthcare_pre, healthcare_post)
         if phase_inputs and ret_age == 55:
             bridge_years  = phase_inputs.get("bridge_years", 0)
             kids_years    = phase_inputs.get("kids_years", 0)
@@ -1027,7 +1027,7 @@ def run_roth_conversion_analysis(inputs: Dict, accounts: List[Dict], ret_age: in
         age = timeline.age(yr)
 
         # Income this year (portfolio draw + pension + SS if active)
-        hc = healthcare_pre_at_ret if age < 65 else healthcare_post_at_ret
+        hc = healthcare_for_age(age, healthcare_pre_at_ret, healthcare_post_at_ret)
         income_need   = income_at_ret * ((1 + inflation) ** yr) + hc * ((1 + inflation) ** yr)
         year_pen      = pension_annual
         year_jss      = jason_ss * ((1+inflation)**max(0,age-jason_ss_age)) if age >= jason_ss_age else 0
@@ -1202,7 +1202,7 @@ def run_roth_conversion_analysis(inputs: Dict, accounts: List[Dict], ret_age: in
     no_conv_roth = roth_at_ret
     for yr in range(conversion_years):
         age = timeline.age(yr)
-        hc = healthcare_pre_at_ret if age < 65 else healthcare_post_at_ret
+        hc = healthcare_for_age(age, healthcare_pre_at_ret, healthcare_post_at_ret)
         income_need = income_at_ret * ((1 + inflation) ** yr) + hc * ((1 + inflation) ** yr)
         year_pen = pension_annual
         year_jss = jason_ss * ((1+inflation)**max(0,age-jason_ss_age)) if age >= jason_ss_age else 0
@@ -1347,6 +1347,65 @@ def _ordered_draw(pretax, roth, taxable, hsa, remaining, order, tax_pretax_rate,
     return pretax, roth, taxable, hsa, remaining, total_tax
 
 
+def _optimal_draw(pretax, roth, taxable, hsa, remaining, cap_gains_limit, tax_pretax_rate, tax_taxable_rate):
+    """The 'optimal' strategy's own draw policy — genuinely different
+    from `_ordered_draw`'s single fixed bucket order, not just a
+    performance twin of it: taxable up to `cap_gains_limit` at 0% (the
+    LTCG threshold), then pretax/roth/hsa in that order, then any
+    taxable remainder ABOVE the threshold at `tax_taxable_rate`. Same
+    consolidation-follow-up extraction as `_ordered_draw` (item 4 of the
+    2026-09-07 task list: "its taxable-gain threshold policy can remain
+    distinct, but it should use the shared ledger conventions for
+    funding, taxes, shortfalls, growth, and transfers") — this function
+    IS the shared-ledger conventions (gross-up-so-after-tax-proceeds-
+    fund-the-need, unmet need never silently dropped), just not a literal
+    call into `simulate_withdrawal_year` for the same measured
+    performance reason `_ordered_draw` isn't either. Parity-tested
+    against a hand-composed 3-step `simulate_withdrawal_year` chain in
+    test_tax_efficiency_engine_parity.py, the same way `_ordered_draw`
+    is proven equivalent to a single call."""
+    total_tax = 0.0
+    # Phase 1: taxable up to cap_gains_limit, untaxed.
+    if remaining > 0 and taxable > 0:
+        draw = min(remaining, taxable, cap_gains_limit)
+        taxable -= draw
+        remaining -= draw
+    # Phase 2: pretax (taxed, grossed-up), then roth, then hsa (both untaxed).
+    for bucket, rate in (("pretax", tax_pretax_rate), ("roth", 0.0), ("hsa", 0.0)):
+        if remaining <= 0:
+            break
+        bal = pretax if bucket == "pretax" else (roth if bucket == "roth" else hsa)
+        if bal <= 0:
+            continue
+        if rate > 0:
+            gross = remaining / (1 - rate) if rate < 1 else remaining
+            draw = min(gross, bal)
+            tax = draw * rate
+            net = draw - tax
+        else:
+            draw = min(remaining, bal)
+            tax = 0.0
+            net = draw
+        if bucket == "pretax":
+            pretax = bal - draw
+        elif bucket == "roth":
+            roth = bal - draw
+        else:
+            hsa = bal - draw
+        remaining -= net
+        total_tax += tax
+    # Phase 3: taxable again, above the 0% threshold, taxed at tax_taxable_rate.
+    if remaining > 0 and taxable > 0:
+        rate = tax_taxable_rate
+        gross = remaining / (1 - rate) if rate < 1 else remaining
+        draw = min(gross, taxable)
+        tax = draw * rate
+        taxable -= draw
+        total_tax += tax
+        remaining -= (draw - tax)
+    return pretax, roth, taxable, hsa, remaining, total_tax
+
+
 def run_tax_efficiency_simulation(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_timing: str = "early",
                                    life_events: List[Dict] = None,
                                    surplus_allocations: List[Dict] = None) -> Dict:
@@ -1440,7 +1499,7 @@ def run_tax_efficiency_simulation(inputs: Dict, accounts: List[Dict], ret_age: i
             for yr in range(retire_yrs):
                 age = timeline.age(yr)
                 ret = returns[yr]
-                hc  = healthcare_pre_te if age < 65 else healthcare_post_te
+                hc  = healthcare_for_age(age, healthcare_pre_te, healthcare_post_te)
                 year_need  = income_at_ret_te * ((1+inflation)**yr) + hc * ((1+inflation)**yr)
                 year_pen   = pension_annual
                 year_jss   = jason_ss_annual * ((1+inflation)**max(0,age-jason_ss_age)) if age >= jason_ss_age else 0
@@ -1525,40 +1584,22 @@ def run_tax_efficiency_simulation(inputs: Dict, accounts: List[Dict], ret_age: i
                         pretax, roth, taxable, hsa, remaining, _order, TAX_PRETAX, TAX_TAXABLE)
                     tax_this_year += _tax
 
-                else:  # optimal — fill 22% bracket from pretax, rest from taxable/roth
-                    # Draw from taxable first up to capital gains threshold.
+                else:  # optimal — fill 0% LTCG bracket from taxable, then pretax/roth/hsa
                     # 0% LTCG threshold, MFJ 2026 — matches TaxPlanning.jsx's
                     # LTCG_2026 table. (Chain of stale figures here: $89,250
                     # was 2024, then $96,700 — caught 2026-09-05 — was 2025.)
+                    # Extracted to _optimal_draw (consolidation follow-up,
+                    # 2026-09-07, item 4) — a distinct draw POLICY from
+                    # _ordered_draw's fixed bucket order, but the same
+                    # shared-ledger conventions (gross-up, unmet need never
+                    # silently dropped — see that function's docstring for
+                    # the "$98,900 ever funded, reported 100% success
+                    # anyway" bug this already fixed) and the same parity-
+                    # tested-against-the-shared-engine standard.
                     cap_gains_limit = 98900
-                    if remaining > 0 and taxable > 0:
-                        draw = min(remaining, taxable, cap_gains_limit)
-                        taxable -= draw; remaining -= draw
-                        # 0% tax if within threshold — no gross-up needed
-                    if remaining > 0 and pretax > 0:
-                        gross = remaining / (1 - TAX_PRETAX)
-                        draw = min(gross, pretax); pretax -= draw
-                        tax = draw * TAX_PRETAX; tax_this_year += tax; remaining -= (draw - tax)
-                    if remaining > 0 and roth > 0:
-                        draw = min(remaining, roth); roth -= draw; remaining -= draw
-                    if remaining > 0 and hsa > 0:
-                        draw = min(remaining, hsa); hsa -= draw; remaining -= draw
-                    # Above the 0%-bracket cap_gains_limit, taxable never
-                    # got revisited — a household with plenty of taxable
-                    # assets above that threshold but no pretax/roth/hsa
-                    # left had its remaining need silently discarded here,
-                    # with "success" checked only against final balance,
-                    # never against whether spending was actually funded
-                    # (external audit 2026-09-07, reproduced: $1M
-                    # brokerage / $200K spend / 1yr / 0% growth -> only
-                    # $98,900 ever funded, reported 100% success anyway).
-                    # This draw above the threshold is taxed at TAX_TAXABLE,
-                    # same simplified rate the other two strategies already
-                    # use for a taxable draw.
-                    if remaining > 0 and taxable > 0:
-                        gross = remaining / (1 - TAX_TAXABLE)
-                        draw = min(gross, taxable); taxable -= draw
-                        tax = draw * TAX_TAXABLE; tax_this_year += tax; remaining -= (draw - tax)
+                    pretax, roth, taxable, hsa, remaining, _tax = _optimal_draw(
+                        pretax, roth, taxable, hsa, remaining, cap_gains_limit, TAX_PRETAX, TAX_TAXABLE)
+                    tax_this_year += _tax
 
                 if remaining > 0:
                     any_unmet_need = True
