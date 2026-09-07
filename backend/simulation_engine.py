@@ -111,6 +111,65 @@ def _grossed_up_draw(remaining_need, bucket_balance, tax_rate):
     return bucket_balance - draw, tax, remaining_need - (draw - tax)
 
 
+def _swr_year_step(pretax, roth, taxable, hsa, portfolio_draw, event_cash, event_monthly,
+                    rmd, pretax_tax_rate):
+    """SWR's own per-year withdrawal step, extracted (consolidation
+    follow-up, 2026-09-07, item 3) so it can be parity-tested against
+    annual_engine.simulate_withdrawal_year across randomized cases,
+    rather than only asserted correct by inspection. Kept as its own
+    fast, allocation-free implementation — the same measured performance
+    reason as _ordered_draw/_optimal_draw: this loop runs the withdrawal
+    step up to ~32x more often than any other consumer (binary search x
+    1000 trials x ~40yrs), where the shared engine's per-year dataclass/
+    dict allocations stop being free (documented in
+    CALCULATION_CONTRACT.md's run_swr_analysis exception).
+
+    Note SWR's own material assumption (CALCULATION_CONTRACT.md 3.5):
+    `portfolio_draw` is drawn from the portfolio ON TOP OF guaranteed
+    income, which this function never subtracts — SWR answers "how much
+    can I safely withdraw from the portfolio alone," a different
+    question from every other consumer's "given my itemized spending
+    need, do I survive." Guaranteed income only enters this step
+    indirectly, via the caller-supplied `pretax_tax_rate` (priced against
+    the household's real bracket, which includes guaranteed income).
+
+    Draw order (taxable, pretax, hsa, roth) matches
+    annual_engine.DEFAULT_ORDER exactly. Returns (pretax, roth, taxable,
+    hsa, remaining) — remaining > 0 means unmet need this year."""
+    taxable += event_cash
+    remaining = max(0, portfolio_draw - event_monthly) + max(0, -taxable)
+    taxable = max(0, taxable) + max(0, event_monthly - portfolio_draw)
+
+    if rmd > 0:
+        actual_rmd = min(rmd, pretax)
+        pretax -= actual_rmd
+        rmd_tax = actual_rmd * pretax_tax_rate
+        after_tax_rmd = actual_rmd - rmd_tax
+        if after_tax_rmd <= remaining:
+            remaining -= after_tax_rmd
+        else:
+            taxable += after_tax_rmd - remaining
+            remaining = 0
+
+    if remaining > 0 and taxable > 0:
+        draw = min(remaining, taxable); taxable -= draw; remaining -= draw
+    # Previously gated on `rmd == 0`, blocking any further pretax
+    # withdrawal for the rest of the plan once RMD age was reached —
+    # external audit 2026-09-06, same bug as
+    # projection_engine.py/_run_single (see their comments). Grossed up
+    # for tax like the RMD above — this whole loop used to treat every
+    # pretax withdrawal as tax-free (external audit 2026-09-07, same
+    # root cause as _run_single).
+    if remaining > 0 and pretax > 0:
+        pretax, _tax, remaining = _grossed_up_draw(remaining, pretax, pretax_tax_rate)
+    if remaining > 0 and hsa > 0:
+        draw = min(remaining, hsa); hsa -= draw; remaining -= draw
+    if remaining > 0 and roth > 0:
+        draw = min(remaining, roth); roth -= draw; remaining -= draw
+
+    return pretax, roth, taxable, hsa, remaining
+
+
 def _run_single(
     pretax_start, roth_start, taxable_start, hsa_start,
     ret_age, jason_age, justin_age,
@@ -439,40 +498,11 @@ def run_swr_analysis(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_t
                 # RMD
                 rmd = _rmd(pretax, age, _rmd_start)
                 event_cash, event_monthly = _post_retirement_year_effects(post_events, retirement_year + yr)
-                taxable += event_cash
-                remaining = max(0, portfolio_draw - event_monthly) + max(0, -taxable)
-                taxable = max(0, taxable) + max(0, event_monthly - portfolio_draw)
-
                 pretax_tax_rate = _pretax_marginal_tax_rate(year_pen, year_jss, year_uss, rmd,
                                                               inputs.get("state_income_tax_rate", 0))
-
-                if rmd > 0:
-                    actual_rmd = min(rmd, pretax)
-                    pretax -= actual_rmd
-                    rmd_tax = actual_rmd * pretax_tax_rate
-                    after_tax_rmd = actual_rmd - rmd_tax
-                    if after_tax_rmd <= remaining:
-                        remaining -= after_tax_rmd
-                    else:
-                        taxable += after_tax_rmd - remaining
-                        remaining = 0
-
-                if remaining > 0 and taxable > 0:
-                    draw = min(remaining, taxable); taxable -= draw; remaining -= draw
-                # Previously gated on `rmd == 0`, blocking any further
-                # pretax withdrawal for the rest of the plan once RMD age
-                # was reached — external audit 2026-09-06, same bug as
-                # projection_engine.py/_run_single (see their comments).
-                # Grossed up for tax like the RMD above — this whole loop
-                # used to treat every pretax withdrawal as tax-free
-                # (external audit 2026-09-07, same root cause as
-                # _run_single).
-                if remaining > 0 and pretax > 0:
-                    pretax, _tax, remaining = _grossed_up_draw(remaining, pretax, pretax_tax_rate)
-                if remaining > 0 and hsa > 0:
-                    draw = min(remaining, hsa); hsa -= draw; remaining -= draw
-                if remaining > 0 and roth > 0:
-                    draw = min(remaining, roth); roth -= draw; remaining -= draw
+                pretax, roth, taxable, hsa, remaining = _swr_year_step(
+                    pretax, roth, taxable, hsa, portfolio_draw, event_cash, event_monthly,
+                    rmd, pretax_tax_rate)
 
                 # Fail if the portfolio is fully depleted, OR if spending
                 # need went unmet this year even though buckets still held
