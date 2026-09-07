@@ -16,6 +16,7 @@ import datetime
 import math
 
 from annual_engine import AccountState, DEFAULT_ORDER, marginal_bracket_tax_model, simulate_withdrawal_year
+from annual_inputs import build_annual_income_inputs
 from timeline_engine import CURRENT_YEAR, Timeline, build_cumulative_inflation, build_timeline, healthcare_for_age
 
 COLLEGE_COST_INFLATION = 0.04
@@ -642,6 +643,7 @@ def run_retirement_projection(inputs: Dict, accounts: List[Dict], ret_ages: List
             # (withdrawal_start_age == ret_age in that case).
             mort_age      = timeline.end_age
             retire_years  = timeline.retire_yrs
+            cum_inflation = build_cumulative_inflation(inflation, retire_years)
 
             healthcare_pre       = inputs.get("healthcare_pre_medicare", 0)
             healthcare_post      = inputs.get("healthcare_post_medicare", 0)
@@ -675,6 +677,26 @@ def run_retirement_projection(inputs: Dict, accounts: List[Dict], ret_ages: List
                 age = timeline.age(yr)
                 calendar_year = timeline.calendar_year(yr)
 
+                # Shared annual-input builder (consolidation, 2026-09-07):
+                # Social Security (COLA'd from each spouse's own claim
+                # age) and signed life-event offsets, computed once here
+                # instead of duplicated inline below. Healthcare is
+                # consolidated too, EXCEPT inside the ret_age==55
+                # bridge/kids branch just below, which applies a
+                # genuinely different, deliberate policy (family/kids
+                # healthcare, bridge-job phase) this consolidation is
+                # instructed to preserve rather than erase.
+                income = build_annual_income_inputs(
+                    timeline, yr, cum_inflation, inflation,
+                    healthcare_pre_at_start=healthcare_pre_at_ret, healthcare_post_at_start=healthcare_post_at_ret,
+                    jason_ss_annual=jason_ss_annual, jason_ss_age=jason_ss_age,
+                    justin_ss_annual=justin_ss_annual, justin_ss_age=justin_ss_age,
+                    post_life_events=post_life_events, post_retirement_year_effects=_post_retirement_year_effects,
+                )
+                life_event_cash_this_year = income.life_event_cash
+                life_event_monthly_this_year = income.life_event_monthly
+                justin_age_this_year = income.justin_age
+
                 # Income need this year (includes healthcare, phased for age 55)
                 if ret_age == 55:
                     kids_still_home = yr < kids_years
@@ -700,8 +722,7 @@ def run_retirement_projection(inputs: Dict, accounts: List[Dict], ret_ages: List
                         year_need = income_at_ret * ((1 + inflation) ** yr) + healthcare_post_at_ret * ((1 + inflation) ** yr)
                     healthcare_inflated = healthcare_this_year * ((1 + inflation) ** yr)
                 else:
-                    healthcare_this_year = healthcare_for_age(age, healthcare_pre_at_ret, healthcare_post_at_ret)
-                    healthcare_inflated  = healthcare_this_year * ((1 + inflation) ** yr)
+                    healthcare_inflated  = income.healthcare
                     year_need = income_at_ret * ((1 + inflation) ** yr) + healthcare_inflated
 
                 # Life events landing in the withdrawal phase — generic
@@ -709,28 +730,18 @@ def run_retirement_projection(inputs: Dict, accounts: List[Dict], ret_ages: List
                 # delta adjusts this year's need directly (positive delta
                 # is extra income, so it reduces need); a one-time delta
                 # lands in the taxable bucket below instead of the income
-                # need, same as rmd_reinvested's treatment.
-                life_event_cash_this_year, life_event_monthly_this_year = _post_retirement_year_effects(
-                    post_life_events, calendar_year
-                )
+                # need, same as rmd_reinvested's treatment. Computed above
+                # via the shared builder for both branches.
                 year_need -= life_event_monthly_this_year
 
-                # Fixed income sources
-                year_pen = pension_annual  # frozen pension, no COLA
-                year_jss = (jason_ss_annual * ((1 + inflation) ** max(0, age - jason_ss_age))
-                            if age >= jason_ss_age else 0)
-                # `age` above is Jason's age this year (age = ret_age + yr).
-                # justin_ss_age is JUSTIN's own claiming age, so it must be
-                # compared against Justin's own current age, not Jason's —
-                # comparing it against `age` directly (as this used to)
-                # started/stopped Justin's spousal benefit off by the
-                # couple's age gap whenever jason_age != justin_age
-                # (external audit 2026-09-06). justin_age_this_year matches
-                # the same "justin_age" figure already recorded per-row
-                # below (age - (jason_age - justin_age)).
-                justin_age_this_year = timeline.justin_age_at(age)
-                year_uss = (justin_ss_annual * ((1 + inflation) ** max(0, justin_age_this_year - justin_ss_age))
-                            if justin_age_this_year >= justin_ss_age else 0)
+                # Fixed income sources. Pension is frozen/no-COLA — a
+                # deliberate, consumer-specific policy this consolidation
+                # preserves rather than folding into the shared builder
+                # (see annual_inputs.py's module docstring). Social
+                # Security is the shared builder's output.
+                year_pen = pension_annual
+                year_jss = income.jason_ss
+                year_uss = income.justin_ss
                 fixed_income = year_pen + year_jss + year_uss
 
                 # RMD on pre-tax bucket
