@@ -93,35 +93,40 @@ export default function Settings() {
         <Row label="Child 2 Name"><TextInput value={form.kid2_name} onChange={v => set('kid2_name', v)} /></Row>
       </Section>
 
-      <Section title="Ages">
+      <Section title={`${p1} — Age, Income & Retirement`}>
         <Row label={`${p1}'s Current Age`}><NumInput value={form.jason_age} onChange={v => set('jason_age', v)} /></Row>
-        <Row label={`${p2}'s Current Age`}><NumInput value={form.justin_age} onChange={v => set('justin_age', v)} /></Row>
-        <Row label={`${k1}'s Current Age`}><NumInput value={form.kid1_age ?? 0} onChange={v => set('kid1_age', v)} /></Row>
-        <Row label={`${k2}'s Current Age`}><NumInput value={form.kid2_age ?? 0} onChange={v => set('kid2_age', v)} /></Row>
-      </Section>
-
-      <Section title="Return & Inflation Assumptions">
-        <Row label="Inflation Rate"><NumInput value={form.inflation_rate} onChange={v => set('inflation_rate', v)} pct suffix="%" /></Row>
-        <Row label="Pre-Retirement Return" hint="Expected portfolio growth until retirement"><NumInput value={form.expected_return_pre_retirement} onChange={v => set('expected_return_pre_retirement', v)} pct suffix="%" /></Row>
-        <Row label="Post-Retirement Return" hint="Expected portfolio growth during retirement"><NumInput value={form.expected_return_post_retirement} onChange={v => set('expected_return_post_retirement', v)} pct suffix="%" /></Row>
-        <Row label="State Income-Tax Rate" hint="Optional planning estimate applied to taxable retirement distributions; enter 0% if not using one"><NumInput value={form.state_income_tax_rate ?? 0} onChange={v => set('state_income_tax_rate', Math.min(0.25, Math.max(0, v)))} pct suffix="%" /></Row>
-      </Section>
-
-      <Section title="Retirement Income Goal">
-        <Row label="Annual Income Goal (today's $)" hint="What you want to spend per year in retirement"><NumInput value={form.retirement_income_today_dollars} onChange={v => set('retirement_income_today_dollars', v)} prefix="$" /></Row>
-        <Row label="Planning Horizon" hint="Age through which retirement income is projected; this is an assumption, not a longevity prediction"><NumInput value={form.retirement_end_age ?? 99} onChange={v => set('retirement_end_age', Math.min(110, Math.max(70, Math.round(v))))} suffix="age" /></Row>
-      </Section>
-
-      <Section title="Current Spending">
-        <Row label="Current Monthly Expenses" hint="Actual current spending — used for the Emergency Fund check, separate from your retirement income goal above"><NumInput value={form.current_monthly_expenses ?? 0} onChange={v => set('current_monthly_expenses', v)} prefix="$" suffix="/mo" /></Row>
-      </Section>
-
-      <Section title="Income">
         <Row label="W2 Base Salary" hint="Used for 401k contribution calculations"><NumInput value={form.w2_salary ?? 0} onChange={v => set('w2_salary', v)} prefix="$" /></Row>
+        <Row label={`${p1}'s Contribution Rate`} hint="Employee % → goes to Roth 401k">
+          <NumInput value={form.employee_401k_pct ?? 0.06} onChange={v => set('employee_401k_pct', v)} pct suffix="%" />
+        </Row>
+        <Row label={`${p1}'s Employer Contribution Rate`} hint="Match + non-elective → goes pre-tax">
+          <NumInput value={form.employer_401k_pct ?? 0.03} onChange={v => set('employer_401k_pct', v)} pct suffix="%" />
+        </Row>
+        <Row label={`${p1}'s Total Annual 401k`} hint="Calculated from salary × rates">
+          <span style={{ fontSize:13, color:'var(--text2)' }}>
+            ~${(((form.employee_401k_pct ?? 0.06) + (form.employer_401k_pct ?? 0.03)) * (form.w2_salary ?? 0)).toLocaleString('en-US', {maximumFractionDigits:0})}/yr
+          </span>
+        </Row>
+        <Row label="Annual RSU Value (gross)" hint="0 if none this year"><NumInput value={form.annual_rsu_value} onChange={v => set('annual_rsu_value', v)} prefix="$" /></Row>
+        <Row label="Annual Bonus" hint="As % of salary — scales with raises, unlike RSU above"><NumInput value={form.annual_bonus_pct ?? 0} onChange={v => set('annual_bonus_pct', v)} pct suffix="%" /></Row>
+        {((form.annual_bonus_pct ?? 0) > 0 || (form.annual_rsu_value ?? 0) > 0) && (
+          <div style={{ padding:'10px 12px', background:'rgba(251,191,36,0.08)', borderRadius:8, marginTop:8, fontSize:12, color:'var(--amber)' }}>
+            ⚠ RSU/Bonus above are already assumed invested automatically each year toward retirement. If you've
+            also assigned this same money on the Assign Surplus page (e.g. under "Taxable investing"), it will be
+            counted twice — pick one place to describe it, not both.
+          </div>
+        )}
+        <Row label={`${p1} SS at 62 (early)`}><NumInput value={form.jason_social_security} onChange={v => set('jason_social_security', v)} prefix="$" suffix="/yr" /></Row>
+        <Row label={`${p1} SS at 67 (delayed)`}><NumInput value={form.jason_ss_delayed ?? 0} onChange={v => set('jason_ss_delayed', v)} prefix="$" suffix="/yr" /></Row>
+        <div style={{ padding:'10px 12px', background:'var(--bg3)', borderRadius:8, marginTop:8, fontSize:12, color:'var(--text2)' }}>
+          {p1}'s own retirement age is chosen interactively as a scenario (55/60/65/etc.) on the Retirement
+          Projection and Stress Test pages, not fixed here as a single planning assumption.
+        </div>
       </Section>
 
-      <Section title={`${p2}'s Income & Retirement (if working full-time)`}>
-        <div style={{ fontSize:11, color:'var(--text3)', marginBottom:12 }}>
+      <Section title={`${p2} — Age, Income & Retirement (if working full-time)`}>
+        <Row label={`${p2}'s Current Age`}><NumInput value={form.justin_age} onChange={v => set('justin_age', v)} /></Row>
+        <div style={{ fontSize:11, color:'var(--text3)', margin:'12px 0' }}>
           Leave everything below at $0/unset if this household has one primary income — none of it changes any number.
         </div>
         <Row label={`${p2}'s W2 Base Salary`} hint="A separate, independent income and 401k — not combined with the salary above"><NumInput value={form.justin_w2_salary ?? 0} onChange={v => set('justin_w2_salary', v)} prefix="$" /></Row>
@@ -134,6 +139,9 @@ export default function Settings() {
         </Row>
         <Row label={`${p2}'s Annual RSU Value (gross)`} hint="0 if none this year"><NumInput value={form.justin_annual_rsu_value ?? 0} onChange={v => set('justin_annual_rsu_value', v)} prefix="$" /></Row>
         <Row label={`${p2}'s Annual Bonus`} hint="As % of salary"><NumInput value={form.justin_annual_bonus_pct ?? 0} onChange={v => set('justin_annual_bonus_pct', v)} pct suffix="%" /></Row>
+        <Row label={`${p2} Spousal SS at 67`} hint={`50% of ${p1}'s FRA benefit — or ${p2}'s own independent benefit, if entered directly`}>
+          <NumInput value={form.justin_social_security ?? 0} onChange={v => set('justin_social_security', v)} prefix="$" suffix="/yr" />
+        </Row>
         <Row label={`${p2}'s Retirement Age`} hint={`0 = assume ${p2} retires the same year as ${p1} (the old default). Set a specific age for an independent retirement date — e.g. ${p2} keeps working/contributing past, or stops well before, whichever age you're viewing for ${p1}.`}>
           <NumInput value={form.justin_ret_age ?? 0} onChange={v => set('justin_ret_age', Math.max(0, Math.round(v)))} suffix="age" />
         </Row>
@@ -152,45 +160,35 @@ export default function Settings() {
         </div>
       </Section>
 
-      <Section title="401k">
-        <Row label="Pre-Tax % of Total 401k Balance" hint={`Balance from Quicken × this % = pre-tax bucket. Roth = ${(roth_pct*100).toFixed(1)}%`}>
+      <Section title="Return & Inflation Assumptions">
+        <Row label="Inflation Rate"><NumInput value={form.inflation_rate} onChange={v => set('inflation_rate', v)} pct suffix="%" /></Row>
+        <Row label="Pre-Retirement Return" hint="Expected portfolio growth until retirement"><NumInput value={form.expected_return_pre_retirement} onChange={v => set('expected_return_pre_retirement', v)} pct suffix="%" /></Row>
+        <Row label="Post-Retirement Return" hint="Expected portfolio growth during retirement"><NumInput value={form.expected_return_post_retirement} onChange={v => set('expected_return_post_retirement', v)} pct suffix="%" /></Row>
+        <Row label="State Income-Tax Rate" hint="Optional planning estimate applied to taxable retirement distributions; enter 0% if not using one"><NumInput value={form.state_income_tax_rate ?? 0} onChange={v => set('state_income_tax_rate', Math.min(0.25, Math.max(0, v)))} pct suffix="%" /></Row>
+      </Section>
+
+      <Section title="Retirement Income Goal">
+        <Row label="Annual Income Goal (today's $)" hint="What you want to spend per year in retirement"><NumInput value={form.retirement_income_today_dollars} onChange={v => set('retirement_income_today_dollars', v)} prefix="$" /></Row>
+        <Row label="Planning Horizon" hint="Age through which retirement income is projected; this is an assumption, not a longevity prediction"><NumInput value={form.retirement_end_age ?? 99} onChange={v => set('retirement_end_age', Math.min(110, Math.max(70, Math.round(v))))} suffix="age" /></Row>
+      </Section>
+
+      <Section title="Current Spending">
+        <Row label="Current Monthly Expenses" hint="Actual current spending — used for the Emergency Fund check, separate from your retirement income goal above"><NumInput value={form.current_monthly_expenses ?? 0} onChange={v => set('current_monthly_expenses', v)} prefix="$" suffix="/mo" /></Row>
+      </Section>
+
+      <Section title="Household 401k Balance Split &amp; HSA">
+        <Row label="Pre-Tax % of Total 401k Balance" hint={`Combined balance from Quicken (both spouses' 401ks) × this % = pre-tax bucket. Roth = ${(roth_pct*100).toFixed(1)}%`}>
           <NumInput value={pretax_pct} onChange={v => set('pretax_401k_pct', Math.min(1, Math.max(0, v)))} pct suffix="%" />
         </Row>
         <Row label="Roth % (calculated)" hint="Auto = 100% minus pre-tax %">
           <span style={{ fontSize:13, fontWeight:600, color:'var(--accent)' }}>{(roth_pct*100).toFixed(1)}%</span>
         </Row>
-        <Row label="Your Contribution Rate" hint="Employee % → goes to Roth 401k">
-          <NumInput value={form.employee_401k_pct ?? 0.06} onChange={v => set('employee_401k_pct', v)} pct suffix="%" />
-        </Row>
-        <Row label="Employer Contribution Rate" hint="Match + non-elective → goes pre-tax">
-          <NumInput value={form.employer_401k_pct ?? 0.03} onChange={v => set('employer_401k_pct', v)} pct suffix="%" />
-        </Row>
-        <Row label="Total Annual 401k" hint="Calculated from salary × rates">
-          <span style={{ fontSize:13, color:'var(--text2)' }}>
-            ~${(((form.employee_401k_pct ?? 0.06) + (form.employer_401k_pct ?? 0.03)) * (form.w2_salary ?? 0)).toLocaleString('en-US', {maximumFractionDigits:0})}/yr
-          </span>
-        </Row>
-        <Row label="Annual HSA Contribution"><NumInput value={form.annual_hsa_contribution} onChange={v => set('annual_hsa_contribution', v)} prefix="$" /></Row>
-        <Row label="Annual RSU Value (gross)" hint="0 if none this year"><NumInput value={form.annual_rsu_value} onChange={v => set('annual_rsu_value', v)} prefix="$" /></Row>
-        <Row label="Annual Bonus" hint="As % of salary — scales with raises, unlike RSU above"><NumInput value={form.annual_bonus_pct ?? 0} onChange={v => set('annual_bonus_pct', v)} pct suffix="%" /></Row>
-        {((form.annual_bonus_pct ?? 0) > 0 || (form.annual_rsu_value ?? 0) > 0) && (
-          <div style={{ padding:'10px 12px', background:'rgba(251,191,36,0.08)', borderRadius:8, marginTop:8, fontSize:12, color:'var(--amber)' }}>
-            ⚠ RSU/Bonus above are already assumed invested automatically each year toward retirement. If you've
-            also assigned this same money on the Assign Surplus page (e.g. under "Taxable investing"), it will be
-            counted twice — pick one place to describe it, not both.
-          </div>
-        )}
+        <Row label="Annual HSA Contribution" hint="Household/family HSA, not split per person"><NumInput value={form.annual_hsa_contribution} onChange={v => set('annual_hsa_contribution', v)} prefix="$" /></Row>
       </Section>
 
-      <Section title="Social Security">
-        <Row label={`${p1} SS at 62 (early)`}><NumInput value={form.jason_social_security} onChange={v => set('jason_social_security', v)} prefix="$" suffix="/yr" /></Row>
-        <Row label={`${p1} SS at 67 (delayed)`}><NumInput value={form.jason_ss_delayed ?? 0} onChange={v => set('jason_ss_delayed', v)} prefix="$" suffix="/yr" /></Row>
-        <Row label={`${p2} Spousal SS at 67`} hint={`50% of ${p1}'s FRA benefit`}>
-          <NumInput value={form.justin_social_security ?? 0} onChange={v => set('justin_social_security', v)} prefix="$" suffix="/yr" />
-        </Row>
-      </Section>
-
-      <Section title="Kids — 529 Contributions">
+      <Section title="Kids — Ages &amp; 529 Contributions">
+        <Row label={`${k1}'s Current Age`}><NumInput value={form.kid1_age ?? 0} onChange={v => set('kid1_age', v)} /></Row>
+        <Row label={`${k2}'s Current Age`}><NumInput value={form.kid2_age ?? 0} onChange={v => set('kid2_age', v)} /></Row>
         <Row label={`${k1} 529 Monthly`}><NumInput value={form.abby_529_monthly ?? 0} onChange={v => set('abby_529_monthly', v)} prefix="$" suffix="/mo" /></Row>
         <Row label={`${k2} 529 Monthly`}><NumInput value={form.cooper_529_monthly ?? 0} onChange={v => set('cooper_529_monthly', v)} prefix="$" suffix="/mo" /></Row>
         <Row label="Annual Tuition &amp; Fees" hint="Current cost — update each fall · inflates at 5%/yr in projections"><NumInput value={form.unl_annual_cost ?? 0} onChange={v => set('unl_annual_cost', v)} prefix="$" suffix="/yr" /></Row>
@@ -207,18 +205,24 @@ export default function Settings() {
         <Row label="Pension at Age 65" hint="Monthly × 12"><NumInput value={form.pension_65 ?? 0} onChange={v => set('pension_65', v)} prefix="$" suffix="/yr" /></Row>
       </Section>
 
-      <Section title="Life Insurance Coverage">
+      <Section title={`${p1} — Life Insurance`}>
         <p style={{ fontSize:12, color:'var(--text3)', marginTop:-8, marginBottom:12 }}>
           Detailed per-policy tracking (insurer, policy #, premium) lives on the Risk Management page. These totals feed the insurance-gap calculations here.
         </p>
-        <Row label={`${p1} — Basic coverage`}><NumInput value={form.jason_life_basic ?? 0} onChange={v => set('jason_life_basic', v)} prefix="$" /></Row>
-        <Row label={`${p1} — Supplemental coverage`}><NumInput value={form.jason_life_supplemental ?? 0} onChange={v => set('jason_life_supplemental', v)} prefix="$" /></Row>
-        <Row label={`${p1} — Term coverage`}><NumInput value={form.jason_life_term ?? 0} onChange={v => set('jason_life_term', v)} prefix="$" /></Row>
-        <Row label={`${p2} — Universal life`}><NumInput value={form.justin_life_ul ?? 0} onChange={v => set('justin_life_ul', v)} prefix="$" /></Row>
-        <Row label={`${p2} — Whole life`}><NumInput value={form.justin_life_whole ?? 0} onChange={v => set('justin_life_whole', v)} prefix="$" /></Row>
-        <Row label={`${p2} — Employer-sponsored coverage`}><NumInput value={form.person2_life_employer ?? 0} onChange={v => set('person2_life_employer', v)} prefix="$" /></Row>
-        <Row label={`${p2} — Term coverage`}><NumInput value={form.justin_life_term ?? 0} onChange={v => set('justin_life_term', v)} prefix="$" /></Row>
-        <Row label={`Kids — Employer dependent (${k1} + ${k2} combined)`}><NumInput value={form.justin_life_kids ?? 0} onChange={v => set('justin_life_kids', v)} prefix="$" /></Row>
+        <Row label="Basic coverage"><NumInput value={form.jason_life_basic ?? 0} onChange={v => set('jason_life_basic', v)} prefix="$" /></Row>
+        <Row label="Supplemental coverage"><NumInput value={form.jason_life_supplemental ?? 0} onChange={v => set('jason_life_supplemental', v)} prefix="$" /></Row>
+        <Row label="Term coverage"><NumInput value={form.jason_life_term ?? 0} onChange={v => set('jason_life_term', v)} prefix="$" /></Row>
+      </Section>
+
+      <Section title={`${p2} — Life Insurance`}>
+        <Row label="Universal life"><NumInput value={form.justin_life_ul ?? 0} onChange={v => set('justin_life_ul', v)} prefix="$" /></Row>
+        <Row label="Whole life"><NumInput value={form.justin_life_whole ?? 0} onChange={v => set('justin_life_whole', v)} prefix="$" /></Row>
+        <Row label="Employer-sponsored coverage"><NumInput value={form.person2_life_employer ?? 0} onChange={v => set('person2_life_employer', v)} prefix="$" /></Row>
+        <Row label="Term coverage"><NumInput value={form.justin_life_term ?? 0} onChange={v => set('justin_life_term', v)} prefix="$" /></Row>
+      </Section>
+
+      <Section title="Kids — Life Insurance">
+        <Row label={`Employer dependent (${k1} + ${k2} combined)`}><NumInput value={form.justin_life_kids ?? 0} onChange={v => set('justin_life_kids', v)} prefix="$" /></Row>
       </Section>
 
       <Section title="Disability &amp; Other Insurance">
