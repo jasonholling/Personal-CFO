@@ -1,11 +1,18 @@
 # Calculation engine consolidation — handoff
 
+**PAUSED FOR REVIEW as of this snapshot.** Per Jason's explicit
+instruction: implementation is paused here, the branch is pushed exactly
+as-is, and no further changes are being made while this snapshot is
+reviewed.
+
+**Exact commit SHA at pause:** `07ac84dbce35d49685e269764c1aebc95caa0c62`
+— confirmed identical to `origin/codex/consolidate-calculation-engine`
+(nothing local left unpushed).
+
 **Baseline:** `ec61309e6749d74ee31a02070aa46fd238a8ffd5` (verified identical to
 `origin/main` and local `main` at the time this branch was created).
-**Branch:** `codex/consolidate-calculation-engine`, 29 commits, pushed but
-**not merged into `main`** (per instruction — awaiting Jason's re-review;
-several large changes have landed since the last review point — see
-below).
+**Branch:** `codex/consolidate-calculation-engine`, 29 commits, pushed,
+**not merged into `main`**.
 
 *This is the seventh revision of this document. The first (6 commits)
 covered Phases 1–4 partial + a documented SWR exception. The second (7
@@ -102,11 +109,27 @@ not exhaustively for every consumer.
 **In short, after both passes: items 1, 3, 4, 5, and 9 are done; items 6
 and 8 are substantially already satisfied by earlier work in this
 branch (not net-new, but genuinely covering the ask); items 2 and 7
-remain real, open work.** Item 2 needs a genuine shared annual-input
-builder beyond the one piece (`healthcare_for_age`) extracted so far.
-Item 7 was previously scoped and deliberately declined without a
-specific motivating bug — that reasoning still stands unless Jason wants
-it revisited regardless.
+remain open — both deliberately deferred, per Jason's own framing, not
+dropped:**
+
+- **Item 2 (shared annual-input builder) remains part of the intended
+  consolidation and should follow this review.** `healthcare_for_age` is
+  one piece; the real remaining scope is the duplicated income/timing
+  calculations (spending need, SS, pension, life-event offsets) that
+  caused several of the earlier independent-review findings in the first
+  place — consolidating this is meant to close off that whole class of
+  bug, not just tidy formatting.
+- **Item 7 (Education/Kids) is deferred pending review of the
+  overlapping education calculations specifically** — not declined.
+  Different outputs (Education's college-drawdown chart vs. Kids'
+  age-60 timeline) can share underlying mechanics without being forced
+  into one shape; before extending the shared-timeline abstraction
+  there, the next step is identifying the PRECISE overlap and writing
+  acceptance tests for it, the same discipline that made the Phase 5
+  saving-phase extraction safe (that extraction worked specifically
+  because the two implementations were already proven to agree before
+  the shared function existed — the same standard should apply to
+  whatever of drawdown/rollover/custodial/timeline is tackled next).
 
 ## A third follow-up review found a systemic timeline bug — also fixed
 
