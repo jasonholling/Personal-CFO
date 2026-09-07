@@ -834,6 +834,60 @@ def run_retirement_projection(inputs: Dict, accounts: List[Dict], ret_ages: List
     return {"scenarios": scenarios, "generated_at": datetime.datetime.now().isoformat()}
 
 
+def _project_529_saving_phase(starting_balance, monthly_contribution, years_to_college,
+                               years_until_parent_retires, edu_return=0.07,
+                               extra_years_of_contributions=0):
+    """529 balance at the moment college starts: `starting_balance` grows
+    for the full `years_to_college`, while `monthly_contribution` compounds
+    monthly for as long as contributions actually run (capped by whichever
+    comes first — the college start, or the parent's assumed retirement,
+    same PARENT_RETIREMENT_AGE_ASSUMPTION cutoff both callers already
+    apply), then that accumulated sum sits and compounds untouched for
+    whatever's left of years_to_college.
+
+    Calculation-engine consolidation Phase 5: previously
+    run_education_projection (inside its year-by-year saving-phase loop,
+    evaluated at its last iteration) and run_kids_projection (as a direct
+    closed-form call) each computed this exact figure independently —
+    verified to already agree by
+    TestEducationAndKidsProjectionsAgreeOn529AtCollege in
+    test_projection_engine.py, which is what made unifying them safe: this
+    function reproduces both existing implementations' numbers exactly,
+    it isn't introducing new behavior. Only the two functions' genuinely
+    duplicated saving-phase formula moves here — run_education_projection's
+    own year-by-year loop (needed for its chart) and run_kids_projection's
+    drawdown/rollover/timeline math (which run_education_projection
+    doesn't even share conceptually — Kids' timeline runs to age 60,
+    Education's chart stops after college) are NOT touched: both are
+    dense, already audit-hardened, off-by-one-sensitive code with no
+    matching duplication to remove, and forcing them into one shape for
+    its own sake was explicitly scoped out (see CALCULATION_CONTRACT.md's
+    Phase 5 section).
+
+    `extra_years_of_contributions` supports run_education_projection's
+    `continue_contributions_during_college` option, which lets
+    contributions run past college's start (they still can't run past the
+    college-start point WITHIN this function's own saving-phase figure,
+    since contributions after college has started fund the drawdown, not
+    this balance — see `contribution_years` below, capped at
+    years_to_college for the FV math even though the returned
+    contribution_years itself may exceed it, matching
+    run_education_projection's own `contribution_years` field, which the
+    drawdown loop also needs uncapped).
+
+    Returns (balance_at_college, contribution_years) — contribution_years
+    is the raw (possibly college-window-extended) figure callers may need
+    downstream; the balance calculation itself only ever counts
+    contributions up to college's start."""
+    contribution_window = years_to_college + extra_years_of_contributions
+    contribution_years = min(contribution_window, years_until_parent_retires)
+    contribution_years_before_college = min(contribution_years, years_to_college)
+    years_dormant = max(0, years_to_college - contribution_years_before_college)
+    fv_contrib_at_stop = _fv_annuity_monthly(monthly_contribution, edu_return, contribution_years_before_college)
+    balance = _fv(starting_balance, edu_return, years_to_college) + _fv(fv_contrib_at_stop, edu_return, years_dormant)
+    return balance, contribution_years
+
+
 def run_education_projection(inputs: Dict, accounts: List[Dict],
                               continue_contributions_during_college: bool = False,
                               surplus_529_monthly: Dict[str, float] = None) -> Dict:
@@ -887,8 +941,19 @@ def run_education_projection(inputs: Dict, accounts: List[Dict],
         # implementations risks exactly the kind of calc-drift bug this
         # codebase has been bitten by before, so the chart simulation below
         # is now the single source of truth for both.
-        contribution_window = years_to_college + (COLLEGE_YEARS if continue_contributions_during_college else 0)
-        contribution_years  = min(contribution_window, years_until_parent_retires)
+        #
+        # projected_529 (the balance at the moment college starts) comes
+        # from _project_529_saving_phase — shared with run_kids_projection's
+        # own version of this exact figure (calculation-engine
+        # consolidation Phase 5). The year-by-year `yearly` chart below
+        # still needs its own loop (interim balances, not just the final
+        # one), and reproduces this same closed form at its last iteration
+        # by construction — verified by test_education_yearly_chart_
+        # agrees_with_shared_saving_phase_helper.
+        extra_years = COLLEGE_YEARS if continue_contributions_during_college else 0
+        projected_529, contribution_years = _project_529_saving_phase(
+            balance_529, monthly_contrib, years_to_college, years_until_parent_retires,
+            edu_return, extra_years_of_contributions=extra_years)
 
         # Saving-phase balance at each year boundary, computed in closed
         # form rather than iteratively adding monthly_contrib*12 once a
@@ -911,8 +976,6 @@ def run_education_projection(inputs: Dict, accounts: List[Dict],
             fv_contrib_now       = _fv(fv_contrib_at_stop, edu_return, years_dormant)
             bal = _fv(balance_529, edu_return, years_elapsed) + fv_contrib_now
             yearly.append({"year_label": f"Age {current_age+yr+1}", "balance": round(bal), "phase": "saving"})
-
-        projected_529 = bal if years_to_college > 0 else balance_529  # balance at the moment college starts
 
         # College-years drawdown still needs a year-by-year loop (costs are
         # withdrawn annually, so there's no clean closed form once
@@ -1037,23 +1100,18 @@ def run_kids_projection(accounts: List[Dict], inputs: Dict = None,
         ("Cooper", kid2_age, cooper_529_mo),
     ]:
         years_to_18 = 18 - current_age
-        # See module-level comment above: 529 contributions stop at whichever
-        # comes first, college (18) or the parent's assumed retirement.
-        contribution_years_529 = min(years_to_18, years_until_parent_retires)
 
         bal_529  = sum(a["balance"] for a in accounts if a["account_type"]=="529"      and a["owner"]==child.lower())
         bal_roth = sum(a["balance"] for a in accounts if a["account_type"]=="roth_ira" and a["owner"]==child.lower())
         bal_cust = sum(a["balance"] for a in accounts if a["account_type"]=="custodial" and a["owner"]==child.lower())
         bonds    = sum(a["balance"] for a in accounts if a["account_type"]=="other"    and a["owner"]==child.lower() and "bond" in a["name"].lower())
 
-        # Contributions compound monthly for however many years they're
-        # actually active (contribution_years_529), then that accumulated
-        # sum just sits and compounds normally for whatever's left of
-        # years_to_18 — identical to the original formula whenever the
-        # retirement cutoff doesn't bind (contribution_years_529 ==
-        # years_to_18, dormant years = 0).
-        fv_529_contrib_at_stop = _fv_annuity_monthly(monthly_529, edu_return, contribution_years_529)
-        proj_529_at_18 = _fv(bal_529, edu_return, years_to_18) + _fv(fv_529_contrib_at_stop, edu_return, years_to_18 - contribution_years_529)
+        # Shared with run_education_projection's own saving-phase figure —
+        # see _project_529_saving_phase's docstring (calculation-engine
+        # consolidation Phase 5). 529 contributions stop at whichever comes
+        # first, college (18) or the parent's assumed retirement.
+        proj_529_at_18, contribution_years_529 = _project_529_saving_phase(
+            bal_529, monthly_529, years_to_18, years_until_parent_retires, edu_return)
 
         # Drawdown 100% of annual costs
         unl_base_kid = inputs.get("unl_annual_cost", UNL_CURRENT_ANNUAL)

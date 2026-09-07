@@ -14,7 +14,8 @@ from projection_engine import (
     run_kids_projection,
     run_insurance_analysis,
     pension_for_age,
-    _fv, _fv_annuity, _fv_growing_annuity, _pv_annuity,
+    _fv, _fv_annuity, _fv_annuity_monthly, _fv_growing_annuity, _pv_annuity,
+    _project_529_saving_phase,
     PARENT_RETIREMENT_AGE_ASSUMPTION,
     BOND_MAX_GROWTH_YEARS,
     CURRENT_YEAR,
@@ -1096,6 +1097,69 @@ class TestEducationAndKidsProjectionsAgreeOn529AtCollege:
         kid_abby = next(k for k in kid["kids"] if k["child"] == "Abby")
         assert edu_abby["contributions_stop_in_years"] == edu_abby["years_to_college"]
         assert edu_abby["projected_529_at_college"] == kid_abby["529"]["at_18"]
+
+
+class TestSharedSavingPhaseHelper:
+    """Calculation-engine consolidation Phase 5: run_education_projection
+    and run_kids_projection now both call _project_529_saving_phase for
+    their shared "529 balance at the moment college/18 starts" figure,
+    instead of each independently reimplementing the same monthly-
+    compounding-then-dormant-growth formula (verified to already agree —
+    see TestEducationAndKidsProjectionsAgreeOn529AtCollege above, which is
+    what made this extraction safe in the first place)."""
+
+    def test_matches_education_projection_headline_number(self, sample_inputs, sample_accounts):
+        inputs = {**sample_inputs, "jason_age": 45, "kid1_age": 8, "abby_529_monthly": 300}
+        edu = run_education_projection(inputs, sample_accounts)
+        edu_abby = next(g for g in edu["goals"] if g["child"] == "Abby")
+        balance_529 = sum(a["balance"] for a in sample_accounts
+                           if a["account_type"] == "529" and a["owner"] == "abby")
+        years_to_college = 18 - 8
+        years_until_parent_retires = max(0, PARENT_RETIREMENT_AGE_ASSUMPTION - 45)
+        balance, contribution_years = _project_529_saving_phase(
+            balance_529, 300, years_to_college, years_until_parent_retires)
+        assert round(balance) == edu_abby["projected_529_at_college"]
+        assert contribution_years == edu_abby["contributions_stop_in_years"]
+
+    def test_matches_kids_projection_headline_number(self, sample_inputs, sample_accounts):
+        inputs = {**sample_inputs, "jason_age": 45, "kid1_age": 8, "abby_529_monthly": 300}
+        kid = run_kids_projection(sample_accounts, inputs)
+        kid_abby = next(k for k in kid["kids"] if k["child"] == "Abby")
+        balance_529 = sum(a["balance"] for a in sample_accounts
+                           if a["account_type"] == "529" and a["owner"] == "abby")
+        years_to_college = 18 - 8
+        years_until_parent_retires = max(0, PARENT_RETIREMENT_AGE_ASSUMPTION - 45)
+        balance, _ = _project_529_saving_phase(balance_529, 300, years_to_college, years_until_parent_retires)
+        assert round(balance) == kid_abby["529"]["at_18"]
+
+    def test_zero_years_to_college_returns_starting_balance(self):
+        balance, contribution_years = _project_529_saving_phase(50000, 300, 0, 10)
+        assert balance == 50000
+        assert contribution_years == 0
+
+    def test_extra_years_of_contributions_extends_contribution_years_but_not_the_pre_college_balance(self):
+        """continue_contributions_during_college support: contributions
+        past college's start fund the drawdown, not this saving-phase
+        balance — the returned contribution_years reflects the extension
+        (for the drawdown loop to use), but the balance itself must be
+        identical to the no-extension case."""
+        no_extension, cy_no_ext = _project_529_saving_phase(10000, 200, 5, 20, extra_years_of_contributions=0)
+        with_extension, cy_ext = _project_529_saving_phase(10000, 200, 5, 20, extra_years_of_contributions=4)
+        assert no_extension == with_extension
+        assert cy_ext == cy_no_ext + 4
+
+    def test_parent_retirement_cutoff_caps_contribution_years(self):
+        """years_until_parent_retires binding (1 year left, 8 years to
+        college) must cap the contribution years, not just the final
+        balance — reproduces the exact external-audit scenario that
+        originally caught run_kids_projection ignoring this cutoff."""
+        balance, contribution_years = _project_529_saving_phase(0, 100, 8, 1)
+        assert contribution_years == 1
+        # Independently hand-calculated: $100/mo compounds for exactly 1
+        # year at 7%, then that lump sum sits untouched (no further
+        # contributions) compounding for the remaining 7 years to college.
+        expected = _fv_annuity_monthly(100, 0.07, 1) * (1.07 ** 7)
+        assert balance == pytest.approx(expected, abs=0.01)
 
 
 class TestRunKidsProjection:

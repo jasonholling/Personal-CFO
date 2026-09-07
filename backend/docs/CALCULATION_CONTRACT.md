@@ -346,3 +346,52 @@ both the same wrong way" mistake, since it only proves equivalence
 between the two implementations, not correctness against first
 principles (that's `test_annual_engine_reference.py`'s job for the
 engine itself).
+
+## 5. Phase 5 — Education/Kids consolidation: scoped, not the whole thing
+
+`run_education_projection` and `run_kids_projection` (both
+projection_engine.py) duplicate three distinct pieces of math: (1) the
+529 saving-phase projection to the moment college/18 starts, (2) the
+college-years drawdown (annual cost inflation, contributions that may
+continue into college, a SECURE 2.0 529→Roth rollover capped at
+$35,000), and (3) a full account-by-account timeline out to age 60/22
+(Kids only — Education has no equivalent, it stops after college).
+
+**Only (1) was consolidated**, into `_project_529_saving_phase`, used by
+both functions. This was the actual literal duplication — both
+functions independently computed the exact same "starting balance grows
+for N years, monthly contributions compound for as many of those years
+as they're actually active (capped by the college date or the parent's
+retirement, whichever binds), then the accumulated sum sits and
+compounds untouched for whatever's left" formula, already proven to
+agree by `TestEducationAndKidsProjectionsAgreeOn529AtCollege` (a
+pre-existing regression test from an external audit that caught
+`run_kids_projection` ignoring the parent-retirement cutoff entirely).
+That pre-existing agreement is what made the extraction safe: the new
+function had to reproduce two independently-audited implementations
+exactly, not invent new behavior — verified via a 21-scenario golden
+diff (7 input variants × `run_education_projection` ×
+`run_education_projection(continue_contributions_during_college=True)` ×
+`run_kids_projection`) showing **zero differences**, plus new tests in
+`TestSharedSavingPhaseHelper` (test_projection_engine.py) that pin the
+helper's behavior independently of either consumer.
+
+**(2) and (3) were deliberately left alone.** Both are dense,
+already-audit-hardened, off-by-one-sensitive code (the file's own
+comments document several previously-shipped bugs in exactly this kind
+of timing/boundary logic — a rollover double-counted in two accounts at
+once, a timeline off by one year of compounding, a headline number that
+disagreed with its own chart by a factor of the growth rate). Critically,
+they aren't actually the SAME calculation duplicated twice the way (1)
+was: Kids' age-60 account timeline has no Education equivalent at all,
+and Education's drawdown tracks an unclamped "worst deficit" figure
+across the 4 college years that Kids' drawdown doesn't compute. Forcing
+these into one shared shape would mean inventing a common abstraction
+that doesn't already exist in proven, agreed-upon behavior on both
+sides — the opposite of what made (1) safe. This matches the prior
+session's own assessment (see `git log` — "the remaining work there is
+code-sharing for its own sake, not a bug fix") and Jason's own prior
+decision to leave adjacent Kids/Education work (>2-kids support) out of
+scope given how bug-hardened this pair of functions already is. Revisit
+only if a real bug (not a duplication-for-its-own-sake concern) is found
+in either's drawdown/timeline logic.
