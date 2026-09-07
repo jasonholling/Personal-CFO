@@ -177,11 +177,36 @@ def _run_single(
     _rmd_start     = rmd_start_age(jason_age)
     any_unmet_need = False
 
+    # A true cumulative inflation index, built once up front — cum_inflation[k]
+    # is the accumulated price-growth factor from the start of retirement
+    # through the start of year k (cum_inflation[0] == 1.0, today's dollars).
+    # Every inflated figure below used to be computed as
+    # (1 + eff_inf)**yr — using THIS year's inflation_mult (which some
+    # stress scenarios, e.g. stagflation_1970s, deliberately change
+    # partway through the horizon) raised to the power of ALL elapsed
+    # years. That retroactively re-derives the entire price history from
+    # whatever rate happens to be in effect this year, instead of
+    # accumulating it — a rate that drops next year doesn't just slow
+    # future growth, it silently erases the compounding already "banked"
+    # from earlier, higher-inflation years (external audit 2026-09-07,
+    # reproduced: spending step from $100,000 to $112,000 to $106,090 as
+    # inflation eased, an actual DECREASE in nominal spending need that
+    # should never happen just because the inflation *rate* slowed).
+    # Reduces to the exact original (1+inflation)**yr whenever inf_mult is
+    # constant across the whole horizon — true for every stress scenario
+    # except stagflation_1970s and for ordinary Monte Carlo, so this is a
+    # zero-behavior-change fix for the overwhelming majority of runs.
+    cum_inflation = [1.0]
+    for k in range(retire_yrs):
+        k_mult = inflation_mults[k] if inflation_mults and k < len(inflation_mults) else 1.0
+        cum_inflation.append(cum_inflation[-1] * (1 + inflation * k_mult))
+
     for yr in range(retire_yrs):
         age      = ret_age + yr
         ret      = annual_returns[yr] if yr < len(annual_returns) else random.gauss(post_ret, PORT_STD)
         inf_mult = inflation_mults[yr] if inflation_mults and yr < len(inflation_mults) else 1.0
         eff_inf  = inflation * inf_mult
+        cum_inf  = cum_inflation[yr]
 
         # healthcare_pre/healthcare_post used to only get read out of
         # phase_inputs inside the `ret_age == 55` branch below, so every
@@ -203,18 +228,18 @@ def _run_single(
             hc_kids       = phase_inputs.get("healthcare_kids", 0) * ((1 + inflation) ** max(0, ret_age - jason_age))
             if yr < bridge_years:
                 hc_this_year = 0
-                year_need = max(0, income_at_ret*(1+eff_inf)**yr + kids_cost*(1+eff_inf)**yr - bridge_income*(1+eff_inf)**yr)
+                year_need = max(0, income_at_ret*cum_inf + kids_cost*cum_inf - bridge_income*cum_inf)
             elif yr < kids_years and age < 65:
                 hc_this_year = hc_kids
-                year_need = income_at_ret*(1+eff_inf)**yr + kids_cost*(1+eff_inf)**yr + hc_kids*(1+eff_inf)**yr
+                year_need = income_at_ret*cum_inf + kids_cost*cum_inf + hc_kids*cum_inf
             elif age < 65:
                 hc_this_year = healthcare_pre
-                year_need = income_at_ret*(1+eff_inf)**yr + healthcare_pre*(1+eff_inf)**yr
+                year_need = income_at_ret*cum_inf + healthcare_pre*cum_inf
             else:
                 hc_this_year = healthcare_post
-                year_need = income_at_ret*(1+eff_inf)**yr + healthcare_post*(1+eff_inf)**yr
+                year_need = income_at_ret*cum_inf + healthcare_post*cum_inf
         else:
-            year_need = income_at_ret * ((1 + eff_inf) ** yr) + hc_this_year * ((1 + eff_inf) ** yr)
+            year_need = income_at_ret * cum_inf + hc_this_year * cum_inf
 
         # Life events active in the withdrawal phase — same treatment as
         # projection_engine.run_retirement_projection's yearly loop: a
@@ -224,8 +249,14 @@ def _run_single(
         life_event_cash, life_event_monthly = _post_retirement_year_effects(post_life_events or [], calendar_year)
         year_need -= life_event_monthly
 
+        # SS COLA is relative to each person's OWN claim year, not to the
+        # start of retirement — accumulated the same true way as year_need
+        # above (cum_inflation[yr] / cum_inflation[claim_yr] instead of
+        # (1+eff_inf)**years_since_claim, same "retroactively erases
+        # earlier inflation" bug when inf_mult varies over the horizon).
         year_pen  = pension_annual  # frozen pension, no COLA
-        year_jss  = (jason_ss_annual * ((1 + eff_inf) ** max(0, age - jason_ss_age))
+        yr_claim_jason = max(0, jason_ss_age - ret_age)
+        year_jss  = (jason_ss_annual * (cum_inflation[yr] / cum_inflation[yr_claim_jason])
                      if age >= jason_ss_age else 0)
         # justin_ss_age is JUSTIN's own claiming age, so it has to be
         # compared against Justin's own current age, not Jason's `age` —
@@ -234,7 +265,8 @@ def _run_single(
         # (external audit 2026-09-06, same bug as
         # projection_engine.run_retirement_projection's yearly loop).
         justin_age_this_year = age - (jason_age - justin_age)
-        year_uss  = (justin_ss_annual * ((1 + eff_inf) ** max(0, justin_age_this_year - justin_ss_age))
+        yr_claim_justin = max(0, justin_ss_age - ret_age + (jason_age - justin_age))
+        year_uss  = (justin_ss_annual * (cum_inflation[yr] / cum_inflation[yr_claim_justin])
                      if justin_age_this_year >= justin_ss_age else 0)
         fixed     = year_pen + year_jss + year_uss
         net_need  = max(0, year_need - fixed)

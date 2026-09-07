@@ -252,6 +252,38 @@ class TestWithdrawalWaterfallReconciliationFixes:
         )
         assert survived is False
 
+    def test_run_single_accumulates_inflation_instead_of_recomputing_it(self):
+        """Regression (external audit 2026-09-07): year_need used to be
+        income_at_ret * (1+eff_inf)**yr, using THIS YEAR's inflation_mult
+        raised to the power of all elapsed years — so when a stress
+        scenario's inflation_mult drops partway through (e.g.
+        stagflation_1970s reverting to 1.0 after 10 years), the drop
+        retroactively erased compounding already "banked" from earlier,
+        higher-inflation years instead of just slowing future growth.
+        With inflation_mults=[3.0, 3.0, 1.0] and inflation=0.10 (30%, 30%,
+        10% effective), spending need must be non-decreasing year over
+        year: $100,000 -> $130,000 -> $169,000 (accumulated through years
+        0-1's 30% rate; year 2's own dropped rate only affects year 3+).
+        The pre-fix formula would have computed year 2's need as
+        100,000*(1.10)**2 = $121,000 — LOWER than year 1's $130,000, an
+        actual decrease in nominal spending need from slowing inflation."""
+        huge_taxable = 10_000_000
+        _, balances, pretax_bals, roth_bals, taxable_bals = _run_single(
+            pretax_start=0, roth_start=0, taxable_start=huge_taxable, hsa_start=0,
+            ret_age=60, jason_age=60, justin_age=60,
+            pension_annual=0, jason_ss_annual=0, jason_ss_age=200,
+            income_at_ret=100000, inflation=0.10, post_ret=0.0,
+            annual_returns=[0.0, 0.0, 0.0], inflation_mults=[3.0, 3.0, 1.0],
+            justin_ss_age=200,
+        )
+        draw0 = huge_taxable - taxable_bals[0]
+        draw1 = taxable_bals[0] - taxable_bals[1]
+        draw2 = taxable_bals[1] - taxable_bals[2]
+        assert draw0 == pytest.approx(100000, abs=1)
+        assert draw1 == pytest.approx(130000, abs=1)
+        assert draw2 == pytest.approx(169000, abs=1)
+        assert draw2 > draw1 > draw0  # must never decrease as inflation eases
+
     def test_run_single_taxes_pretax_withdrawals(self):
         """Regression (external audit 2026-09-07): _run_single treated
         every withdrawal, RMDs included, as tax-free — unlike
