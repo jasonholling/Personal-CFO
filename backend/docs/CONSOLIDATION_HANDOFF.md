@@ -2,17 +2,49 @@
 
 **Baseline:** `ec61309e6749d74ee31a02070aa46fd238a8ffd5` (verified identical to
 `origin/main` and local `main` at the time this branch was created).
-**Branch:** `codex/consolidate-calculation-engine`, 20 commits, pushed but
+**Branch:** `codex/consolidate-calculation-engine`, 22 commits, pushed but
 **not merged into `main`** (per instruction — awaiting Jason's re-review;
-see the two independent-review notes below before assuming this is close
-to merge-ready).
+see the three independent-review notes below before assuming this is
+close to merge-ready).
 
-*This is the fourth revision of this document. The first (6 commits)
+*This is the fifth revision of this document. The first (6 commits)
 covered Phases 1–4 partial + a documented SWR exception. The second (7
 more commits) finished Phase 4, did a scoped Phase 5, and ran Phase 6 for
 the first time. The third (4 more commits) covers an independent review
-finding 4 genuine bugs. This revision (3 more commits) covers that same
-reviewer's follow-up pass finding 2 more.*
+finding 4 genuine bugs. The fourth (3 more commits) covers that same
+reviewer's follow-up pass finding 2 more. This revision (2 more commits)
+covers a THIRD follow-up finding one more — this time systemic, not
+localized.*
+
+## A third follow-up review found a systemic timeline bug — also fixed
+
+The same reviewer's third pass found that `run_retirement_projection`'s
+own past-ret_age fix (`withdrawal_start_age = max(ret_age, jason_age)`,
+from a much earlier session) was never propagated to ANY other
+withdrawal-phase consumer — Monte Carlo, Stress Tests, SWR, Roth
+conversion, and tax-efficiency all still used the raw, possibly-past
+`ret_age` for their own simulated horizon. A household selecting an
+already-past retirement age (e.g. a "what if I'd retired at 55"
+sensitivity column while actually 65 today) got a wildly different
+number of spending years, SS/healthcare timing, and conversion window in
+each tool. Full before/after numbers: `CALCULATION_CONTRACT.md` section
+8. Fixed in all 5 functions with the same pattern the reference
+implementation already used; full suite re-verified green (767 tests,
+97.47% coverage).
+
+**This is the third review pass in a row to find real bugs — and unlike
+the first two (each 1-2 fairly localized issues), this one was
+systemic, present in 5 functions at once, from a fix that was made once
+in one place years ago and simply never generalized.** That's a
+different kind of signal than "a fix introduced an adjacent bug" — it
+suggests the underlying pattern (a correctness property established in
+one reference implementation, silently assumed elsewhere without being
+mechanically enforced or tested) may recur again in places not yet
+reviewed. Worth being direct about: three rounds of real findings, the
+last one systemic, is a stronger case for a deliberate comprehensive
+sweep of the remaining surface than for a fourth reactive round. Still
+Jason's call, not decided here — but the case for it has gotten
+stronger each time, not weaker.
 
 ## Independent review found 4 real bugs — fixed, not disputed
 
@@ -236,9 +268,10 @@ check.
 
 ### Phase 7 — This handoff, verification
 
-- Backend: **761 passed**, **97.47% coverage** (floor 95%) — after both
-  independent-review follow-ups; was 680/97.45% right after Phase 6,
-  685/97.46% after the first review's fixes.
+- Backend: **767 passed**, **97.47% coverage** (floor 95%) — after all
+  three independent-review follow-ups; was 680/97.45% right after Phase
+  6, 685/97.46% after the first review's fixes, 761/97.47% after the
+  second.
 - Frontend: **13 passed** (unchanged — no frontend code touched this
   session), build succeeds (`vite build`, same pre-existing >500kB chunk
   warning as before, unrelated).
@@ -268,17 +301,21 @@ check.
 ## Recommended next steps, in priority order
 
 1. **Jason: decide whether to keep reviewing reactively or run one
-   broader systematic sweep next** — two review passes in a row each
-   found real bugs (4, then 2 more, several in code the previous fix had
-   just touched). That pattern suggests there may be more of the same
-   shape still latent rather than that the well is dry; a deliberate,
-   comprehensive pass over the remaining consumers might find them faster
-   than a third reactive round. Not decided here — Jason's call.
-2. A review pass on all 6 independent-review fixes together (commits
-   `7ccb43e`, `520e2a6`, `f18c6b0`, `00e85f9`, `cfbc64f`, `e6c0056`) —
-   each prior review caught real bugs in code that had already passed
-   its own golden diffs and test suite, which is exactly the situation to
-   not assume is resolved just because it's fixed and tested again now.
+   broader systematic sweep next.** Three review passes in a row have
+   now each found real bugs (4, then 2 more, then a systemic one present
+   in 5 functions at once). The third finding in particular — a fix made
+   once in `run_retirement_projection` years ago, never generalized to
+   its 5 siblings — is the kind of pattern most likely to recur
+   elsewhere unreviewed. The case for a deliberate, comprehensive sweep
+   over the remaining surface (rather than a fourth reactive round) is
+   stronger now than after either prior round. Not decided here —
+   Jason's call.
+2. A review pass on all 7 independent-review fixes together (commits
+   `7ccb43e`, `520e2a6`, `f18c6b0`, `00e85f9`, `cfbc64f`, `e6c0056`,
+   `19ee3e9`) — each prior review caught real bugs in code that had
+   already passed its own golden diffs and test suite, which is exactly
+   the situation to not assume is resolved just because it's fixed and
+   tested again now.
 3. **Jason: sanity-check the Roth Conversion planner's new numbers**
    against real household data before this branch merges — the tax-gap
    fix AND the Roth-fallback/growth-timing fixes from the independent
