@@ -78,7 +78,7 @@ function KidView({ kid }) {
         />
         <TimelineRow
           label="Roth IRA"
-          contrib="$50"
+          contrib={fmt(roth.monthly_contribution)}
           note="Your contribution to 18"
           current={roth.current}
           at18={roth.at_18}
@@ -166,7 +166,7 @@ function KidView({ kid }) {
             </LineChart>
           </ResponsiveContainer>
           <div style={{ fontSize:11, color:'var(--text3)', marginTop:8 }}>
-            $50/mo until 18 · 529 rollover at 22 · 7% growth to 60
+            {fmt(roth.monthly_contribution)}/mo until 18 · 529 rollover at 22 · 7% growth to 60
           </div>
         </div>
       </div>
@@ -207,7 +207,7 @@ export default function Kids() {
       </div>
       {!hasAccounts && (
         <div style={{ padding:'12px 16px', background:'rgba(251,191,36,0.08)', border:'1px solid rgba(251,191,36,0.2)', borderRadius:8, marginBottom:20, fontSize:13, color:'var(--amber)' }}>
-          ⚠ No account balances found — import from Quicken or add accounts manually. Projections below show contribution growth only from a \/bin/sh starting balance.
+          ⚠ No account balances found — import from Quicken or add accounts manually. Projections below show contribution growth only from a $0 starting balance.
         </div>
       )}
 
