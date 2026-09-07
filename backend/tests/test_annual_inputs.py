@@ -250,6 +250,43 @@ class TestIntegrationDepletedAccountsAcrossPastRetirementUnequalAgesAndANegative
                 assert getattr(r.closing, bucket) >= 0.0
 
 
+# ── Performance-exception parity ────────────────────────────────────────
+# run_swr_analysis's success_at_withdrawal inner loop and
+# run_tax_efficiency_simulation's run_strategy inner loop both run their
+# own inline SS-COLA formula rather than calling
+# build_annual_income_inputs(), as a documented performance exception
+# (both loops run N=1000-trial Monte-Carlo-style, matching the same
+# rationale annual_engine.py's module docstring already documents for
+# SWR's _swr_year_step). These tests prove the two formulas actually
+# agree, rather than just asserting it in a comment.
+
+class TestPerformanceExceptionParity:
+    def test_swr_and_tax_efficiencys_inline_ss_formula_matches_the_shared_builder(self):
+        timeline = build_timeline(jason_age=63, justin_age=60, ret_age=60, retirement_end_age=66)
+        cum_inflation = build_cumulative_inflation(0.025, timeline.retire_yrs)
+        jason_ss_annual, jason_ss_age = 22000, 62  # already claiming, before effective_start_age
+        justin_ss_annual, justin_ss_age = 12000, 63  # starts mid-horizon, in Justin's own terms
+
+        for yr in range(timeline.retire_yrs):
+            age = timeline.effective_start_age + yr
+            justin_age_this_year = timeline.justin_age_at(age)
+
+            # The exact inline formula both hot loops use.
+            inline_jss = (jason_ss_annual * ((1 + 0.025) ** max(0, age - jason_ss_age))
+                          if age >= jason_ss_age else 0)
+            inline_uss = (justin_ss_annual * ((1 + 0.025) ** max(0, justin_age_this_year - justin_ss_age))
+                          if justin_age_this_year >= justin_ss_age else 0)
+
+            result = build_annual_income_inputs(
+                timeline, yr, cum_inflation, 0.025,
+                healthcare_pre_at_start=0, healthcare_post_at_start=0,
+                jason_ss_annual=jason_ss_annual, jason_ss_age=jason_ss_age,
+                justin_ss_annual=justin_ss_annual, justin_ss_age=justin_ss_age,
+            )
+            assert result.jason_ss == pytest.approx(inline_jss)
+            assert result.justin_ss == pytest.approx(inline_uss)
+
+
 class TestIntegrationPastRetirementSelectionWithIncomeExceedingSpending:
     """Jason 70, Justin 68, requested retirement at 60 (already past --
     effective_start_age clamps to 70), both spouses already well past
