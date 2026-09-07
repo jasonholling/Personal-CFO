@@ -14,7 +14,7 @@ from projection_engine import (
     _fv, _fv_annuity, _fv_annuity_monthly, _rmd, pension_for_age, rmd_start_age,
     _split_life_events, _post_retirement_year_effects, _post_retirement_asset_sale_events
 )
-from annual_engine import AccountState, DEFAULT_ORDER, marginal_bracket_tax_model, simulate_withdrawal_year
+from annual_engine import AccountState, DEFAULT_ORDER, marginal_bracket_tax_model, no_tax_model, simulate_withdrawal_year
 # Module-level, not lazy/per-call — _pretax_marginal_tax_rate below is
 # called once per simulated year per trial (up to ~40 years x 1000 trials
 # per Monte Carlo/SWR request), so a per-call `from X import Y` measurably
@@ -1605,7 +1605,33 @@ def run_survivor_scenario(inputs: Dict, accounts: List[Dict], ret_age: int = 60,
         # plan would be silently reported as "survives".
         if depleted_age is None and bal <= 0 and draw > 0:
             depleted_age = age
-        bal_after  = max(0, (bal - draw) * (1 + post_ret))
+        # Migrated onto the shared withdrawal engine (backend/annual_engine.py,
+        # calculation-engine consolidation Phase 4): a single untaxed
+        # "taxable" bucket holding the whole post-payout portfolio, no RMD,
+        # no_tax_model() (this function has never modeled the MFJ->single
+        # tax-bracket jump — see the recommendation text below). One real
+        # behavior change inherited from the shared engine, not previously
+        # possible in the hand-rolled version: a year where guaranteed
+        # income (pension+SS) exceeds survivor need now sweeps the surplus
+        # into the portfolio as savings, same as every other migrated
+        # consumer, instead of silently discarding it. Verified via golden
+        # diff against the pre-migration implementation across 8 synthetic
+        # scenarios (tools/capture_survivor_golden.py) — none of them
+        # happen to exercise a surplus year, so none of the golden numbers
+        # moved; a real household whose guaranteed income outgrows a
+        # reduced survivor need late in retirement will now see a higher
+        # ending balance than before.
+        result = simulate_withdrawal_year(
+            opening=AccountState(taxable=max(0.0, bal)),
+            spending_need=need,
+            guaranteed_income=guaranteed,
+            life_event_cash=0.0,
+            rmd_amount=0.0,
+            tax_model=no_tax_model(),
+            growth_rate=post_ret,
+            order=("taxable",),
+        )
+        bal_after = result.closing.total()
         schedule.append({"age": age, "starting_balance": round(bal), "draw": round(draw), "ending_balance": round(bal_after)})
         if bal_after <= 0 and depleted_age is None and bal > 0:
             depleted_age = age
