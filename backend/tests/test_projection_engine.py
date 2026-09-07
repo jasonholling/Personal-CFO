@@ -704,6 +704,27 @@ class TestAssetSaleAndRsuBridgeAt55:
         b = next(s for s in baseline["scenarios"] if s["ss_timing"] == "early")
         assert w["taxable_at_retirement"] > b["taxable_at_retirement"]
 
+    def test_asset_sales_apply_to_every_retirement_age_not_just_55(self, sample_inputs, sample_accounts):
+        """Regression: this used to run inside `if ret_age == 55:`, so a
+        sale scheduled for any age other than exactly 55 was invisible in
+        every single scenario — including the 55 column itself if the
+        sale_age was set after 55 (e.g. 56), since that column's own
+        "already happened" check (sale_age <= ret_age) also failed. Found
+        via a bug-hunt sandbox reproducing a real case: a business sale at
+        age 56 counted in zero of the 55-67 scenario columns. Must now
+        apply from the sale's age onward, same as a life event would."""
+        base_inputs = {**sample_inputs, "jason_age": 45}
+        inputs = {**base_inputs, "asset2_sale_age": 56, "asset2_sale_net": 75000}
+        baseline = run_retirement_projection(base_inputs, sample_accounts, ret_ages=[55, 56, 60])
+        with_sale = run_retirement_projection(inputs, sample_accounts, ret_ages=[55, 56, 60])
+        b = {s["retirement_age"]: s for s in baseline["scenarios"] if s["ss_timing"] == "early"}
+        w = {s["retirement_age"]: s for s in with_sale["scenarios"] if s["ss_timing"] == "early"}
+        # Retiring at 55 is before the sale happens (56) — no effect yet.
+        assert w[55]["taxable_at_retirement"] == pytest.approx(b[55]["taxable_at_retirement"])
+        # Retiring at 56 or 60 is at/after the sale — proceeds must show up.
+        assert w[56]["taxable_at_retirement"] > b[56]["taxable_at_retirement"]
+        assert w[60]["taxable_at_retirement"] > b[60]["taxable_at_retirement"]
+
 
 class TestRunEducationProjection:
     def test_returns_two_goals(self, sample_inputs, sample_accounts):

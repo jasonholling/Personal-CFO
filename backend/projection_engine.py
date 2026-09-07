@@ -437,23 +437,33 @@ def run_retirement_projection(inputs: Dict, accounts: List[Dict], ret_ages: List
             if annual_rsu > 0:
                 taxable_at_ret += _fv_annuity(annual_rsu * 0.65, pre_ret, years_to_retire)
 
-            if ret_age == 55:
-                # Sale proceeds for the bridge-to-55 scenario — both sales
-                # happen before/at 55.
-                asset1_sale_age = inputs.get("asset1_sale_age", 0)
-                asset1_sale_net = inputs.get("asset1_sale_net", 0)
-                asset1_app      = inputs.get("asset1_appreciation", 0.03)
-                if asset1_sale_age and asset1_sale_age <= ret_age:
-                    yrs_asset1 = max(0, asset1_sale_age - jason_age)
-                    yrs_to_grow = years_to_retire - yrs_asset1
-                    asset1_proceeds = asset1_sale_net * ((1 + asset1_app) ** yrs_asset1)
-                    taxable_at_ret  += asset1_proceeds * ((1 + pre_ret) ** yrs_to_grow)
-                asset2_sale_age = inputs.get("asset2_sale_age", 0)
-                asset2_sale_net = inputs.get("asset2_sale_net", 0)
-                if asset2_sale_age and asset2_sale_age <= ret_age:
-                    yrs_asset2    = max(0, asset2_sale_age - jason_age)
-                    yrs_to_grow    = years_to_retire - yrs_asset2
-                    taxable_at_ret += asset2_sale_net * ((1 + pre_ret) ** yrs_to_grow)
+            # Sale proceeds — a sale is real regardless of which retirement
+            # age this scenario column happens to be modeling, same as life
+            # events just below ("generic for every ret_age, not just the
+            # age-55 bridge case"). This used to run only inside an
+            # `if ret_age == 55:` gate, written back when 55 was the only
+            # bridge scenario that needed it — but that left every other
+            # age (56-67) silently ignoring these proceeds entirely, and
+            # even within the 55 branch a sale_age set *after* 55 (e.g. 56)
+            # failed the "already happened" check and was dropped there
+            # too, so it was possible for an asset sale to count in exactly
+            # zero scenarios (found via a bug-hunt sandbox, confirmed
+            # against this app's real data: a sale_age of 56 meant this
+            # $75K+ never appeared in any of the 55-67 columns).
+            asset1_sale_age = inputs.get("asset1_sale_age", 0)
+            asset1_sale_net = inputs.get("asset1_sale_net", 0)
+            asset1_app      = inputs.get("asset1_appreciation", 0.03)
+            if asset1_sale_age and asset1_sale_age <= ret_age:
+                yrs_asset1 = max(0, asset1_sale_age - jason_age)
+                yrs_to_grow = years_to_retire - yrs_asset1
+                asset1_proceeds = asset1_sale_net * ((1 + asset1_app) ** yrs_asset1)
+                taxable_at_ret  += asset1_proceeds * ((1 + pre_ret) ** yrs_to_grow)
+            asset2_sale_age = inputs.get("asset2_sale_age", 0)
+            asset2_sale_net = inputs.get("asset2_sale_net", 0)
+            if asset2_sale_age and asset2_sale_age <= ret_age:
+                yrs_asset2    = max(0, asset2_sale_age - jason_age)
+                yrs_to_grow    = years_to_retire - yrs_asset2
+                taxable_at_ret += asset2_sale_net * ((1 + pre_ret) ** yrs_to_grow)
 
             # Life events dated before retirement (compounded above) —
             # generic for every ret_age, not just the age-55 bridge case.
