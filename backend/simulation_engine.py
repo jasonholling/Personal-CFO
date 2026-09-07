@@ -166,9 +166,25 @@ def _run_single(
     "success" (external audit 2026-09-06, same root cause as
     projection_engine.py's on_track fix).
     """
-    mort_age   = max(ret_age + 1, min(110, int(retirement_end_age or 99)))
-    retire_yrs = mort_age - ret_age
-    retirement_year = CURRENT_YEAR + max(0, ret_age - jason_age)
+    # withdrawal_start_age anchors every forward-looking age/year/horizon
+    # computation below to whichever is later: the selected ret_age (the
+    # normal, still-in-the-future case) or the household's actual current
+    # age (the already-past-that-age case — e.g. selecting a sensitivity
+    # comparison at age 55 while actually 65 today). Mirrors
+    # projection_engine.run_retirement_projection's own
+    # withdrawal_start_age exactly (independent review, 2026-09-07 follow-
+    # up: this shared function, and every other simulation_engine.py
+    # consumer, still used raw ret_age for its OWN timeline — a household
+    # selecting a past retirement age got a wildly different simulated
+    # horizon here than in the main projection, which fixed this same gap
+    # in an earlier session. `ret_age` itself is left untouched below for
+    # genuinely age-55-specific POLICY (the bridge-job/kids-at-home
+    # branch) — that's a selection, not a timeline, same precedent as
+    # pension_annual using raw ret_age via the caller's pension_for_age).
+    withdrawal_start_age = max(ret_age, jason_age)
+    mort_age   = max(withdrawal_start_age + 1, min(110, int(retirement_end_age or 99)))
+    retire_yrs = mort_age - withdrawal_start_age
+    retirement_year = CURRENT_YEAR + (withdrawal_start_age - jason_age)
 
     pretax  = pretax_start
     roth    = roth_start
@@ -207,7 +223,7 @@ def _run_single(
         cum_inflation.append(cum_inflation[-1] * (1 + inflation * k_mult))
 
     for yr in range(retire_yrs):
-        age      = ret_age + yr
+        age      = withdrawal_start_age + yr
         ret      = annual_returns[yr] if yr < len(annual_returns) else random.gauss(post_ret, PORT_STD)
         inf_mult = inflation_mults[yr] if inflation_mults and yr < len(inflation_mults) else 1.0
         eff_inf  = inflation * inf_mult
@@ -222,15 +238,15 @@ def _run_single(
         # the age-55 branch below still owns the bridge-job/kids-at-home
         # phasing, but no longer needs its own separate hc_pre/hc_post
         # copies since it can just reuse these.
-        healthcare_pre  = (phase_inputs or {}).get("healthcare_pre", 0) * ((1 + inflation) ** max(0, ret_age - jason_age))
-        healthcare_post = (phase_inputs or {}).get("healthcare_post", 0) * ((1 + inflation) ** max(0, ret_age - jason_age))
+        healthcare_pre  = (phase_inputs or {}).get("healthcare_pre", 0) * ((1 + inflation) ** max(0, withdrawal_start_age - jason_age))
+        healthcare_post = (phase_inputs or {}).get("healthcare_post", 0) * ((1 + inflation) ** max(0, withdrawal_start_age - jason_age))
         hc_this_year = healthcare_pre if age < 65 else healthcare_post
         if phase_inputs and ret_age == 55:
             bridge_years  = phase_inputs.get("bridge_years", 0)
             kids_years    = phase_inputs.get("kids_years", 0)
-            kids_cost     = phase_inputs.get("kids_annual_cost", 0) * ((1 + inflation) ** max(0, ret_age - jason_age))
-            bridge_income = phase_inputs.get("bridge_income", 0) * ((1 + inflation) ** max(0, ret_age - jason_age))
-            hc_kids       = phase_inputs.get("healthcare_kids", 0) * ((1 + inflation) ** max(0, ret_age - jason_age))
+            kids_cost     = phase_inputs.get("kids_annual_cost", 0) * ((1 + inflation) ** max(0, withdrawal_start_age - jason_age))
+            bridge_income = phase_inputs.get("bridge_income", 0) * ((1 + inflation) ** max(0, withdrawal_start_age - jason_age))
+            hc_kids       = phase_inputs.get("healthcare_kids", 0) * ((1 + inflation) ** max(0, withdrawal_start_age - jason_age))
             if yr < bridge_years:
                 hc_this_year = 0
                 year_need = max(0, income_at_ret*cum_inf + kids_cost*cum_inf - bridge_income*cum_inf)
@@ -281,8 +297,16 @@ def _run_single(
         # formula exactly whenever a claim age is during/after retirement
         # (pre_ret_cola == 1).
         year_pen  = pension_annual  # frozen pension, no COLA
-        jason_pre_ret_cola = (1 + inflation) ** max(0, ret_age - jason_ss_age)
-        yr_claim_jason = max(0, jason_ss_age - ret_age)
+        # Pre-retirement COLA (and the claim-year index below) is relative
+        # to withdrawal_start_age, not raw ret_age — the same fix as the
+        # timeline above applies here too (independent review, 2026-09-07
+        # second follow-up): a household currently 65 selecting a past
+        # ret_age of 55 has already accrued 65-minus-claim-age years of
+        # COLA by the time this loop actually starts (at 65), not
+        # 55-minus-claim-age (which could even be negative, wrongly
+        # zeroing out pre-loop COLA that's real).
+        jason_pre_ret_cola = (1 + inflation) ** max(0, withdrawal_start_age - jason_ss_age)
+        yr_claim_jason = max(0, jason_ss_age - withdrawal_start_age)
         year_jss  = (jason_ss_annual * jason_pre_ret_cola * (cum_inflation[yr] / cum_inflation[yr_claim_jason])
                      if age >= jason_ss_age else 0)
         # justin_ss_age is JUSTIN's own claiming age, so it has to be
@@ -292,8 +316,8 @@ def _run_single(
         # (external audit 2026-09-06, same bug as
         # projection_engine.run_retirement_projection's yearly loop).
         justin_age_this_year = age - (jason_age - justin_age)
-        justin_pre_ret_cola = (1 + inflation) ** max(0, (ret_age - (jason_age - justin_age)) - justin_ss_age)
-        yr_claim_justin = max(0, justin_ss_age - ret_age + (jason_age - justin_age))
+        justin_pre_ret_cola = (1 + inflation) ** max(0, (withdrawal_start_age - (jason_age - justin_age)) - justin_ss_age)
+        yr_claim_justin = max(0, justin_ss_age - withdrawal_start_age + (jason_age - justin_age))
         year_uss  = (justin_ss_annual * justin_pre_ret_cola * (cum_inflation[yr] / cum_inflation[yr_claim_justin])
                      if justin_age_this_year >= justin_ss_age else 0)
         fixed     = year_pen + year_jss + year_uss
@@ -385,8 +409,13 @@ def run_swr_analysis(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_t
     hsa_at_ret     = _scenario["hsa_at_retirement"]
     portfolio = pretax_at_ret + roth_at_ret + taxable_at_ret + hsa_at_ret
 
-    end_age = max(ret_age + 1, min(110, int(inputs.get("retirement_end_age") or 99)))
-    retire_yrs = end_age - ret_age
+    # Same fix as _run_single/run_monte_carlo/run_stress_tests
+    # (independent review, 2026-09-07 second follow-up): a household
+    # selecting an already-past ret_age must simulate forward from its
+    # actual current age, not re-run the years already behind it.
+    withdrawal_start_age = max(ret_age, jason_age)
+    end_age = max(withdrawal_start_age + 1, min(110, int(inputs.get("retirement_end_age") or 99)))
+    retire_yrs = end_age - withdrawal_start_age
     N          = 1000
     _rmd_start = rmd_start_age(jason_age)
 
@@ -408,7 +437,7 @@ def run_swr_analysis(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_t
             survived = True
 
             for yr in range(retire_yrs):
-                age = ret_age + yr
+                age = withdrawal_start_age + yr
                 ret = returns[yr]
 
                 # Guaranteed income this year
@@ -525,16 +554,20 @@ def run_swr_analysis(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_t
     # block (external audit 2026-09-07, reproduced: primary age 67, spouse
     # age 57, spouse claiming at 62 — 5 years still to wait — reported as
     # "$20K guaranteed income on day one").
+    # "Day one" here means the day the withdrawal-phase loop above
+    # actually starts (withdrawal_start_age), not the nominal (possibly
+    # already-past) ret_age — same fix as the loop itself (independent
+    # review, 2026-09-07 second follow-up).
     year_gap          = jason_age - justin_age
-    justin_age_at_ret = ret_age - year_gap
-    years_until_jason_claims  = max(0, jason_ss_age - ret_age)
+    justin_age_at_ret = withdrawal_start_age - year_gap
+    years_until_jason_claims  = max(0, jason_ss_age - withdrawal_start_age)
     years_until_justin_claims = max(0, justin_ss_age - justin_age_at_ret)
     years_to_ss    = max(years_until_jason_claims, years_until_justin_claims)  # both active
     # Jason's own age once both SS streams are active — replaces the old
     # ss_start_age = max(jason_ss_age, justin_ss_age), which mixed two
     # different people's raw claim ages together with no age-gap
     # adjustment and wasn't even a meaningful single "age" for the couple.
-    ss_start_age   = ret_age + years_to_ss
+    ss_start_age   = withdrawal_start_age + years_to_ss
     guaranteed_first_year = (
         pension_annual +
         jason_ss_annual * ((1 + inflation) ** years_to_ss) +
@@ -542,7 +575,7 @@ def run_swr_analysis(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_t
     )
     # Also track day-one guaranteed (pension only if retiring before SS)
     guaranteed_day_one = pension_annual
-    if ret_age >= jason_ss_age:
+    if withdrawal_start_age >= jason_ss_age:
         guaranteed_day_one += jason_ss_annual
     if justin_age_at_ret >= justin_ss_age:
         guaranteed_day_one += justin_ss
@@ -625,13 +658,24 @@ def run_monte_carlo(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_ti
     taxable_at_ret = _scenario["taxable_at_retirement"]
     hsa_at_ret     = _scenario["hsa_at_retirement"]
 
-    end_age = max(ret_age + 1, min(110, int(inputs.get("retirement_end_age") or 99)))
-    retire_yrs = end_age - ret_age
+    # withdrawal_start_age: same fix as _run_single's own (independent
+    # review, 2026-09-07 second follow-up) — end_age/retire_yrs/the chart's
+    # own age labels must anchor to whichever is later, ret_age or the
+    # household's actual current age, or a past-ret_age selection reports
+    # a wildly wrong number of simulated years and mislabeled ages on the
+    # chart even though _run_single's own internal loop is now correct.
+    withdrawal_start_age = max(ret_age, jason_age)
+    end_age = max(withdrawal_start_age + 1, min(110, int(inputs.get("retirement_end_age") or 99)))
+    retire_yrs = end_age - withdrawal_start_age
     N = 1000
 
     # Withdrawal-phase life events, split once outside the N-run loop —
     # the pre-retirement half was already folded into the bucket values
-    # above via run_retirement_projection.
+    # above via run_retirement_projection. retirement_year is already
+    # correct unchanged: years_to_ret == withdrawal_start_age - jason_age
+    # in both branches (years_to_ret is already max(0, ret_age-jason_age),
+    # which equals withdrawal_start_age-jason_age whether or not the
+    # clamp binds).
     retirement_year = CURRENT_YEAR + years_to_ret
     _, post_life_events = _split_life_events(life_events, retirement_year)
     post_life_events = post_life_events + _post_retirement_asset_sale_events(inputs, jason_age, ret_age)
@@ -675,7 +719,7 @@ def run_monte_carlo(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_ti
     success_rate = round(successes / N * 100, 1)
 
     # Percentile bands — every 2 years for chart
-    ages = list(range(ret_age, end_age))
+    ages = list(range(withdrawal_start_age, end_age))
     p10, p25, p50, p75, p90 = [], [], [], [], []
     for yr in range(retire_yrs):
         vals = sorted(b[yr] if yr < len(b) else 0 for b in all_balances)
@@ -697,7 +741,7 @@ def run_monte_carlo(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_ti
     depletion_age = end_age
     for i, bal in enumerate(median_run):
         if bal <= 0:
-            depletion_age = ret_age + i
+            depletion_age = withdrawal_start_age + i
             break
 
     return {
@@ -752,8 +796,13 @@ def run_stress_tests(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_t
     taxable_at_ret = _scenario["taxable_at_retirement"]
     hsa_at_ret     = _scenario["hsa_at_retirement"]
 
-    end_age = max(ret_age + 1, min(110, int(inputs.get("retirement_end_age") or 99)))
-    retire_yrs = end_age - ret_age
+    # Same fix as run_monte_carlo's own withdrawal_start_age (independent
+    # review, 2026-09-07 second follow-up) — end_age/retire_yrs and every
+    # chart/depletion-age label below must anchor to whichever is later,
+    # ret_age or the household's actual current age.
+    withdrawal_start_age = max(ret_age, jason_age)
+    end_age = max(withdrawal_start_age + 1, min(110, int(inputs.get("retirement_end_age") or 99)))
+    retire_yrs = end_age - withdrawal_start_age
 
     # Withdrawal-phase life events, split once — the pre-retirement half
     # is already folded into the bucket values above.
@@ -789,7 +838,7 @@ def run_stress_tests(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_t
         "label": f"Base Case ({post_ret * 100:g}% every year)",
         "survived": base_survived,
         "final_balance": base_bals[-1],
-        "chart": [{"age": ret_age+i, "balance": b} for i, b in enumerate(base_bals) if i%2==0],
+        "chart": [{"age": withdrawal_start_age+i, "balance": b} for i, b in enumerate(base_bals) if i%2==0],
     }}
 
     for key, scenario in SCENARIOS.items():
@@ -872,7 +921,7 @@ def run_stress_tests(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_t
         dep_age = end_age
         for i, b in enumerate(bals):
             if b <= 0:
-                dep_age = ret_age + i
+                dep_age = withdrawal_start_age + i
                 break
 
         results[key] = {
@@ -882,8 +931,8 @@ def run_stress_tests(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_t
             "final_balance": bals[-1],
             "depletion_age": dep_age,
             "lowest_balance": min(bals),
-            "lowest_balance_age": ret_age + bals.index(min(bals)),
-            "chart": [{"age": ret_age+i, "balance": b, "base": base_bals[i]}
+            "lowest_balance_age": withdrawal_start_age + bals.index(min(bals)),
+            "chart": [{"age": withdrawal_start_age+i, "balance": b, "base": base_bals[i]}
                       for i, b in enumerate(bals) if i%2==0],
         }
 
@@ -958,7 +1007,13 @@ def run_roth_conversion_analysis(inputs: Dict, accounts: List[Dict], ret_age: in
     roth    = roth_at_ret
     taxable = taxable_at_ret
 
-    conversion_years = RMD_START_AGE - ret_age
+    # withdrawal_start_age: same fix as every other withdrawal-phase
+    # consumer in this file (independent review, 2026-09-07 second
+    # follow-up) — a household selecting an already-past ret_age must
+    # start its conversion window from its actual current age, not
+    # re-open a window that (nominally) started years ago.
+    withdrawal_start_age = max(ret_age, jason_age)
+    conversion_years = RMD_START_AGE - withdrawal_start_age
 
     # Pre-inflate today's-dollars figures to the retirement start date —
     # the yearly loop below then inflates further by `yr` each year. This
@@ -983,7 +1038,7 @@ def run_roth_conversion_analysis(inputs: Dict, accounts: List[Dict], ret_age: in
     post_events = post_events + _post_retirement_asset_sale_events(inputs, jason_age, ret_age)
 
     for yr in range(conversion_years):
-        age = ret_age + yr
+        age = withdrawal_start_age + yr
 
         # Income this year (portfolio draw + pension + SS if active)
         hc = healthcare_pre_at_ret if age < 65 else healthcare_post_at_ret
@@ -1160,7 +1215,7 @@ def run_roth_conversion_analysis(inputs: Dict, accounts: List[Dict], ret_age: in
     # fallback" vs. "neither," not conversions in isolation.
     no_conv_roth = roth_at_ret
     for yr in range(conversion_years):
-        age = ret_age + yr
+        age = withdrawal_start_age + yr
         hc = healthcare_pre_at_ret if age < 65 else healthcare_post_at_ret
         income_need = income_at_ret * ((1 + inflation) ** yr) + hc * ((1 + inflation) ** yr)
         year_pen = pension_annual
@@ -1358,8 +1413,13 @@ def run_tax_efficiency_simulation(inputs: Dict, accounts: List[Dict], ret_age: i
     taxable_start = _s["taxable_at_retirement"]
     hsa_start     = _s["hsa_at_retirement"]
 
-    end_age = max(ret_age + 1, min(110, int(inputs.get("retirement_end_age") or 99)))
-    retire_yrs = end_age - ret_age
+    # Same fix as every other withdrawal-phase consumer in this file
+    # (independent review, 2026-09-07 second follow-up) — a household
+    # selecting an already-past ret_age must simulate forward from its
+    # actual current age.
+    withdrawal_start_age = max(ret_age, jason_age)
+    end_age = max(withdrawal_start_age + 1, min(110, int(inputs.get("retirement_end_age") or 99)))
+    retire_yrs = end_age - withdrawal_start_age
     N = 1000
     TAX_PRETAX   = 0.22
     TAX_TAXABLE  = 0.15
@@ -1391,7 +1451,7 @@ def run_tax_efficiency_simulation(inputs: Dict, accounts: List[Dict], ret_age: i
             any_unmet_need = False
 
             for yr in range(retire_yrs):
-                age = ret_age + yr
+                age = withdrawal_start_age + yr
                 ret = returns[yr]
                 hc  = healthcare_pre_te if age < 65 else healthcare_post_te
                 year_need  = income_at_ret_te * ((1+inflation)**yr) + hc * ((1+inflation)**yr)

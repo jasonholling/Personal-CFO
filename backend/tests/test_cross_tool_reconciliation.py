@@ -277,3 +277,116 @@ class TestCompletedLifeEventsNotReplayedInWithdrawalPhase:
         with_past = run_tax_efficiency_simulation(household, sample_accounts, ret_age=self.RET_AGE,
                                                    ss_timing="early", life_events=past_event)
         assert baseline == with_past
+
+
+class TestPastRetirementAgeTimelineConsistency:
+    """Independent review, 2026-09-07, third follow-up: a household
+    selecting an already-past retirement age (e.g. currently 65,
+    comparing against a "what if I'd retired at 55" sensitivity column)
+    must simulate forward from its ACTUAL current age in every consumer,
+    the same way run_retirement_projection's own withdrawal_start_age =
+    max(ret_age, jason_age) has done since an earlier session — every
+    OTHER simulation_engine.py consumer (_run_single via Monte Carlo/
+    Stress, SWR, Roth conversion, tax-efficiency) still used raw ret_age
+    for its own timeline, so a past-ret_age selection got a wildly
+    different simulated horizon in each one (more spending years, wrong
+    SS/healthcare/RMD timing, a reopened conversion window that should
+    already be behind the household).
+
+    Reproduces the review's exact scenario: both spouses currently 65,
+    selecting ret_age 55, end age 69 (so a correct simulation is 4 years:
+    ages 65-68), $2M taxable-only, $100K/yr spending, zero returns/
+    inflation/pension/SS/healthcare/contributions. Deterministic returns
+    (monkeypatched random.gauss) throughout. The acceptance test is that
+    selecting the past age 55 now produces IDENTICAL results to
+    selecting the household's actual current age 65 — not a specific
+    hardcoded number, since that's the real invariant being restored,
+    but the review's own reported age-65 figures are pinned too so a
+    regression shows up as a changed number, not just a changed
+    equality."""
+
+    PAST_RET_AGE = 55
+    CURRENT_AGE = 65
+
+    @pytest.fixture
+    def scenario_inputs(self, sample_inputs):
+        return {
+            **sample_inputs, "jason_age": self.CURRENT_AGE, "justin_age": self.CURRENT_AGE,
+            "retirement_income_today_dollars": 100000,
+            "inflation_rate": 0.0, "expected_return_pre_retirement": 0.0,
+            "expected_return_post_retirement": 0.0,
+            "jason_social_security": 0, "jason_ss_delayed": 0, "justin_social_security": 0,
+            "healthcare_pre_medicare": 0, "healthcare_post_medicare": 0,
+            "pension_55": 0, "pension_60": 0, "pension_65": 0,
+            "w2_salary": 0, "employee_401k_pct": 0, "employer_401k_pct": 0,
+            "annual_401k_contribution": 0, "annual_hsa_contribution": 0,
+            "retirement_end_age": 69,
+        }
+
+    @pytest.fixture
+    def scenario_accounts(self):
+        return [{"id": 1, "name": "Brokerage", "account_type": "taxable", "owner": "joint", "balance": 2_000_000}]
+
+    def test_retirement_projection(self, scenario_inputs, scenario_accounts):
+        proj = run_retirement_projection(scenario_inputs, scenario_accounts, ret_ages=[self.PAST_RET_AGE])
+        s = next(x for x in proj["scenarios"] if x["label"] == f"age_{self.PAST_RET_AGE}_early")
+        assert len(s["yearly_detail"]) == 4
+        assert s["yearly_detail"][0]["jason_age"] == self.CURRENT_AGE
+        assert s["yearly_detail"][-1]["portfolio_balance"] == pytest.approx(1_600_000, abs=1)
+
+    def test_monte_carlo_matches_current_age_selection(self, scenario_inputs, scenario_accounts, monkeypatch):
+        import random as random_module
+        monkeypatch.setattr(random_module, "gauss", lambda mu, sigma: mu)
+
+        past = run_monte_carlo(scenario_inputs, scenario_accounts, ret_age=self.PAST_RET_AGE, ss_timing="early")
+        current = run_monte_carlo(scenario_inputs, scenario_accounts, ret_age=self.CURRENT_AGE, ss_timing="early")
+        assert past["median_final_balance"] == pytest.approx(current["median_final_balance"], abs=1)
+        assert past["median_final_balance"] == pytest.approx(1_600_000, abs=1)
+        assert past["chart"][0]["age"] == self.CURRENT_AGE
+
+    def test_stress_tests_matches_current_age_selection(self, scenario_inputs, scenario_accounts, monkeypatch):
+        import random as random_module
+        monkeypatch.setattr(random_module, "gauss", lambda mu, sigma: mu)
+        # Stress's own named scenarios (e.g. early_sequence, stagflation)
+        # need a horizon longer than 4 years to build their override
+        # sequences regardless of what's being tested here — extend it,
+        # matching both selections identically.
+        inputs = {**scenario_inputs, "retirement_end_age": 80}
+
+        past = run_stress_tests(inputs, scenario_accounts, ret_age=self.PAST_RET_AGE, ss_timing="early")
+        current = run_stress_tests(inputs, scenario_accounts, ret_age=self.CURRENT_AGE, ss_timing="early")
+        assert past["scenarios"]["base"]["final_balance"] == pytest.approx(
+            current["scenarios"]["base"]["final_balance"], abs=1)
+        assert past["scenarios"]["base"]["chart"][0]["age"] == self.CURRENT_AGE
+
+    def test_swr_matches_current_age_selection(self, scenario_inputs, scenario_accounts):
+        # No gauss monkeypatch here: SWR's binary search is itself
+        # deterministic given random.seed(42) inside the function, and
+        # its search-precision floor (not exactly $2M/4yrs due to the
+        # binary search's step count against a 1000-trial success rate)
+        # is besides the point — the invariant under test is that both
+        # selections land on the SAME figure, whatever it is.
+        past = run_swr_analysis(scenario_inputs, scenario_accounts, ret_age=self.PAST_RET_AGE, ss_timing="early")
+        current = run_swr_analysis(scenario_inputs, scenario_accounts, ret_age=self.CURRENT_AGE, ss_timing="early")
+        assert past["safe_withdrawal_annual"] == pytest.approx(current["safe_withdrawal_annual"], abs=1)
+        assert past["safe_withdrawal_annual"] == pytest.approx(383_273, abs=1)
+
+    def test_roth_conversion_matches_current_age_selection(self, scenario_inputs, scenario_accounts):
+        past = run_roth_conversion_analysis(scenario_inputs, scenario_accounts,
+                                             ret_age=self.PAST_RET_AGE, ss_timing="early")
+        current = run_roth_conversion_analysis(scenario_inputs, scenario_accounts,
+                                                ret_age=self.CURRENT_AGE, ss_timing="early")
+        assert past["schedule"][0]["age"] == current["schedule"][0]["age"] == self.CURRENT_AGE
+
+    def test_tax_efficiency_matches_current_age_selection(self, scenario_inputs, scenario_accounts, monkeypatch):
+        import random as random_module
+        monkeypatch.setattr(random_module, "gauss", lambda mu, sigma: mu)
+
+        past = run_tax_efficiency_simulation(scenario_inputs, scenario_accounts,
+                                              ret_age=self.PAST_RET_AGE, ss_timing="early")
+        current = run_tax_efficiency_simulation(scenario_inputs, scenario_accounts,
+                                                 ret_age=self.CURRENT_AGE, ss_timing="early")
+        for strategy in ("taxable_first", "roth_first", "optimal"):
+            assert (past["strategies"][strategy]["median_final_balance"]
+                    == pytest.approx(current["strategies"][strategy]["median_final_balance"], abs=1))
+        assert past["strategies"]["taxable_first"]["median_final_balance"] == pytest.approx(1_529_412, abs=1)
