@@ -167,6 +167,9 @@ class AnnualResult:
         CALCULATION_CONTRACT.md section 3:
           - opening + external_income + growth - draws - taxes - net
             transfers == closing (aggregate).
+          - EACH bucket individually reconciles from its own opening
+            balance, growth, draws, credits, and recorded transfers —
+            not just the grand total (see per-bucket check below).
           - Transfers net to zero (what leaves from_bucket, net of any tax
             paid on the transfer, arrives at to_bucket — see
             simulate_conversion's contract).
@@ -182,6 +185,44 @@ class AnnualResult:
                            ("taxable", self.closing.taxable), ("hsa", self.closing.hsa)):
             if val < -tol:
                 return f"closing.{name} is negative: {val}"
+
+        # Per-bucket check (independent review, 2026-09-07): the aggregate
+        # identity below only proves the GRAND TOTAL is conserved — it
+        # cannot catch a bug (or a corrupted/hand-built AnnualResult) that
+        # moves money from one bucket to another without recording a
+        # matching Transfer, since the total would still be exactly
+        # right. Reproduced: manually zeroing pretax and crediting the
+        # same amount to roth, with no Transfer entry, passed the
+        # aggregate-only check. Every bucket's closing balance must equal
+        # opening + growth - draws - transfers_out + transfers_in, plus
+        # the two non-draw, non-transfer credits simulate_withdrawal_year
+        # can land in taxable specifically: a surplus sweep (guaranteed
+        # income + life-event cash exceeding need) and any after-tax RMD
+        # excess reinvested there. Both are derivable from already-public
+        # fields rather than needing new ones: the surplus sweep is
+        # exactly `external_income - spending_funded` whenever that's
+        # positive (it's <= 0 in every shortfall year, by construction —
+        # spending_funded can only exceed external_income when a draw
+        # covered the gap, never the reverse), and `rmd_reinvested` is
+        # already a named field.
+        surplus_credit = max(0.0, self.external_income - self.spending_funded)
+        for bucket, opening_val, closing_val in (
+            ("pretax", self.opening.pretax, self.closing.pretax),
+            ("roth", self.opening.roth, self.closing.roth),
+            ("taxable", self.opening.taxable, self.closing.taxable),
+            ("hsa", self.opening.hsa, self.closing.hsa),
+        ):
+            credits = self.growth.get(bucket, 0.0)
+            if bucket == "taxable":
+                credits += surplus_credit + self.rmd_reinvested
+            transfers_out = sum(t.amount for t in self.transfers if t.from_bucket == bucket)
+            transfers_in = sum(t.amount for t in self.transfers if t.to_bucket == bucket)
+            expected = opening_val + credits - self.draws.get(bucket, 0.0) - transfers_out + transfers_in
+            if abs(closing_val - expected) > tol:
+                return (f"bucket mismatch: closing.{bucket}={closing_val:.2f} expected={expected:.2f} "
+                        f"(opening={opening_val:.2f} +credits={credits:.2f} "
+                        f"-draws={self.draws.get(bucket, 0.0):.2f} "
+                        f"-transfers_out={transfers_out:.2f} +transfers_in={transfers_in:.2f})")
 
         total_growth = sum(self.growth.values())
         total_tax = self.total_tax
@@ -366,6 +407,7 @@ def simulate_conversion(
 
     remaining_tax = tax_cost
     taxes = dict(result.taxes_paid)
+    transfers = list(result.transfers) + [Transfer("pretax", "roth", amount, "conversion")]
     for bucket in tax_funding_order:
         if remaining_tax <= 0:
             break
@@ -373,6 +415,19 @@ def simulate_conversion(
         pay = min(remaining_tax, bal)
         setattr(closing, bucket, bal - pay)
         remaining_tax -= pay
+        # Recorded as a transfer to the "tax" sink (money leaving the
+        # system, same convention a draw's tax already uses implicitly)
+        # so reconcile()'s per-bucket check below has a complete paper
+        # trail for every bucket this function touches — independent
+        # review, 2026-09-07: reconcile() previously verified only the
+        # AGGREGATE total, so an unrecorded movement between two buckets
+        # (any bug that shifted money from one bucket to another without
+        # a matching transfer) passed silently as long as the grand total
+        # was still right. This is the fix, not a new source of bugs: pay
+        # is always >= 0 by construction (min(remaining_tax, bal), both
+        # non-negative).
+        if pay > 0:
+            transfers.append(Transfer(bucket, "tax", pay, "conversion_tax"))
     # Any tax that couldn't be funded from tax_funding_order is paid from
     # the conversion itself as a last resort (reduces the Roth-bound
     # amount) — surfaced via a distinct "conversion_shortfall" tax entry
@@ -381,10 +436,9 @@ def simulate_conversion(
     if remaining_tax > 0:
         closing.roth -= remaining_tax
         taxes["conversion_shortfall"] = remaining_tax
+        transfers.append(Transfer("roth", "tax", remaining_tax, "conversion_shortfall"))
 
     taxes["conversion"] = taxes.get("conversion", 0.0) + (tax_cost - remaining_tax if remaining_tax > 0 else tax_cost)
-
-    transfers = list(result.transfers) + [Transfer("pretax", "roth", amount, "conversion")]
 
     return AnnualResult(
         opening=result.opening,

@@ -309,10 +309,18 @@ def test_conversion_moves_full_amount_tax_paid_from_taxable():
     assert converted.closing.roth == pytest.approx(10_000)
     assert converted.closing.taxable == pytest.approx(17_800)
     assert converted.taxes_paid["conversion"] == pytest.approx(2_200)
-    assert len(converted.transfers) == 1
+    # Two transfers, not one (independent review, 2026-09-07): the
+    # conversion itself (pretax -> roth), AND the tax funded out of
+    # taxable to a "tax" sink — recorded so reconcile()'s per-bucket
+    # check has a complete paper trail for taxable's own drop from
+    # 20,000 to 17,800, not just the conversion's principal movement.
+    assert len(converted.transfers) == 2
     assert converted.transfers[0].from_bucket == "pretax"
     assert converted.transfers[0].to_bucket == "roth"
     assert converted.transfers[0].amount == pytest.approx(10_000)
+    assert converted.transfers[1].from_bucket == "taxable"
+    assert converted.transfers[1].to_bucket == "tax"
+    assert converted.transfers[1].amount == pytest.approx(2_200)
     assert converted.reconcile() is None
 
 
@@ -418,10 +426,37 @@ def test_reconcile_flags_negative_closing_balance():
 
 def test_reconcile_flags_aggregate_mismatch_when_money_appears_from_nowhere():
     """Directly corrupt closing balances (money appears with no matching
-    inflow) — the aggregate identity must catch it even though every
-    individual field looks locally valid."""
+    inflow, in a single bucket with nothing else changed) — reconcile()
+    must catch it. Caught by the per-bucket check specifically (added
+    2026-09-07, independent review), which runs before — and is strictly
+    more specific than — the aggregate identity: a single bucket growing
+    with no offsetting change anywhere is exactly the shape a per-bucket
+    check is designed to catch first."""
     good = _base_result()
     broken_closing = dataclasses.replace(good.closing, taxable=good.closing.taxable + 5_000)
     broken = dataclasses.replace(good, closing=broken_closing)
     err = broken.reconcile()
-    assert err is not None and "aggregate mismatch" in err
+    assert err is not None and "bucket mismatch" in err
+
+
+def test_reconcile_flags_an_unrecorded_transfer_between_buckets():
+    """The aggregate identity alone CANNOT catch this: move money from
+    pretax to roth without recording a Transfer — the grand total is
+    still exactly right, so a purely aggregate check passes (independent
+    review, 2026-09-07, reproduced against the pre-fix reconcile()). The
+    per-bucket check catches it because pretax's own closing balance no
+    longer matches opening + growth - draws - transfers for pretax alone,
+    even though the sum across all four buckets is untouched."""
+    opening = AccountState(pretax=100, roth=0, taxable=0, hsa=0)
+    good = simulate_withdrawal_year(
+        opening, spending_need=0, guaranteed_income=0,
+        life_event_cash=0, rmd_amount=0, tax_model=no_tax_model(),
+        growth_rate=0.0,
+    )
+    assert good.reconcile() is None
+    # Move $100 from pretax to roth with no Transfer recorded.
+    broken_closing = dataclasses.replace(good.closing, pretax=0, roth=100)
+    broken = dataclasses.replace(good, closing=broken_closing)
+    assert broken.closing.total() == good.closing.total()  # aggregate is untouched
+    err = broken.reconcile()
+    assert err is not None and "bucket mismatch" in err and "pretax" in err
