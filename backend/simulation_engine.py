@@ -14,6 +14,14 @@ from projection_engine import (
     _fv, _fv_annuity, _fv_annuity_monthly, _rmd, pension_for_age, rmd_start_age,
     _split_life_events, _post_retirement_year_effects, _post_retirement_asset_sale_events
 )
+# Module-level, not lazy/per-call — _pretax_marginal_tax_rate below is
+# called once per simulated year per trial (up to ~40 years x 1000 trials
+# per Monte Carlo/SWR request), so a per-call `from X import Y` measurably
+# slowed the whole suite (112s -> 164s) the first time this was wired in
+# as a lazy import matching projection_engine.py's own pattern. No import
+# cycle here (retirement_tools_engine imports FROM projection_engine, not
+# from this module), so there's no reason for it to be lazy in this file.
+from retirement_tools_engine import marginal_rate as _marginal_rate, STD_DEDUCTION_MFJ_2026 as _STD_DEDUCTION
 
 # Historical return parameters (annual, nominal)
 EQUITY_MEAN   = 0.09    # ~9% long-run US equity (conservative)
@@ -71,6 +79,35 @@ SCENARIOS = {
 }
 
 
+def _pretax_marginal_tax_rate(year_pen, year_jss, year_uss, rmd, state_tax_rate=0.0):
+    """Same estimate run_retirement_projection's own withdrawal waterfall
+    already uses for a year's pretax withdrawal — the current MFJ bracket
+    table plus the household's state rate, applied to guaranteed income
+    (pension + 85%-taxable SS) plus this year's RMD. Shared here so every
+    withdrawal loop in this file prices a pretax dollar the same way
+    run_retirement_projection does, instead of each one either inventing
+    its own flat approximation or (until this fix) treating pretax
+    withdrawals as tax-free entirely (external audit 2026-09-07 — Monte
+    Carlo/Stress Tests/SWR did the latter)."""
+    taxable_income_est = max(0, year_pen + (year_jss + year_uss) * 0.85 + rmd - _STD_DEDUCTION)
+    return min(0.90, _marginal_rate(taxable_income_est) + max(0, state_tax_rate or 0))
+
+
+def _grossed_up_draw(remaining_need, bucket_balance, tax_rate):
+    """Draw from a taxed bucket so its AFTER-TAX proceeds (not the gross
+    withdrawal) cover remaining_need — the pattern already established in
+    run_retirement_projection's waterfall and reused piecemeal elsewhere
+    in this file. Returns (new_bucket_balance, tax_paid, new_remaining_need).
+    tax_rate == 0 degenerates to a plain untaxed draw."""
+    if tax_rate <= 0:
+        draw = min(remaining_need, bucket_balance)
+        return bucket_balance - draw, 0.0, remaining_need - draw
+    gross = remaining_need / (1 - tax_rate)
+    draw  = min(gross, bucket_balance)
+    tax   = draw * tax_rate
+    return bucket_balance - draw, tax, remaining_need - (draw - tax)
+
+
 def _run_single(
     pretax_start, roth_start, taxable_start, hsa_start,
     ret_age, jason_age, justin_age,
@@ -83,6 +120,7 @@ def _run_single(
     justin_ss_annual: float = JUSTIN_SPOUSAL_ANNUAL,
     justin_ss_age: float = JUSTIN_SPOUSAL_AGE,
     retirement_end_age: int = 99,
+    state_tax_rate: float = 0.0,
 ) -> Tuple[bool, List[float], List[float]]:
     """
     Run a single retirement simulation.
@@ -93,6 +131,17 @@ def _run_single(
     these once outside the N-run Monte Carlo loop rather than re-splitting
     life_events on every single simulated run. Defaults to None/no-op so
     every existing call site is unaffected.
+
+    state_tax_rate: added on top of the estimated federal marginal rate
+    for pretax withdrawals — every draw here used to move money between
+    buckets with NO tax modeling at all, as if every dollar (RMDs
+    included) were tax-free, unlike run_retirement_projection's own
+    waterfall (external audit 2026-09-07, reproduced: $1M IRA / $100K
+    spend / 1yr / 0% growth ended at $900,000 here vs. the deterministic
+    projection's correctly-taxed $888,889). Now uses the same
+    _pretax_marginal_tax_rate/_grossed_up_draw helpers as the rest of this
+    file. Defaults to 0.0 (added federal-only if a caller doesn't pass a
+    state rate) so this is purely additive for existing callers.
 
     justin_ss_annual/justin_ss_age: default to the module-level fallback
     constants (both 0) only for backward compatibility with any caller that
@@ -199,13 +248,17 @@ def _run_single(
         taxable = max(0, taxable)
         taxable += max(0, fixed - year_need)
 
+        pretax_tax_rate = _pretax_marginal_tax_rate(year_pen, year_jss, year_uss, rmd, state_tax_rate)
+
         if rmd > 0:
             actual_rmd = min(rmd, pretax)
             pretax -= actual_rmd
-            if actual_rmd <= remaining:
-                remaining -= actual_rmd
+            rmd_tax = actual_rmd * pretax_tax_rate
+            after_tax_rmd = actual_rmd - rmd_tax
+            if after_tax_rmd <= remaining:
+                remaining -= after_tax_rmd
             else:
-                taxable += actual_rmd - remaining
+                taxable += after_tax_rmd - remaining
                 remaining = 0
 
         if remaining > 0 and taxable > 0:
@@ -217,9 +270,12 @@ def _run_single(
         # reached even with plenty of pretax balance and a large unmet
         # need left — external audit 2026-09-06, same bug as
         # projection_engine.py's withdrawal waterfall (see its comment).
+        # Grossed up so its after-tax proceeds (not the gross withdrawal)
+        # cover `remaining` — this and the RMD tax above used to be
+        # entirely untaxed, unlike run_retirement_projection's own
+        # waterfall (external audit 2026-09-07).
         if remaining > 0 and pretax > 0:
-            draw = min(remaining, pretax)
-            pretax -= draw; remaining -= draw
+            pretax, tax_paid, remaining = _grossed_up_draw(remaining, pretax, pretax_tax_rate)
 
         if remaining > 0 and hsa > 0:
             draw = min(remaining, hsa)
@@ -340,13 +396,18 @@ def run_swr_analysis(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_t
                 remaining = max(0, portfolio_draw - event_monthly) + max(0, -taxable)
                 taxable = max(0, taxable) + max(0, event_monthly - portfolio_draw)
 
+                pretax_tax_rate = _pretax_marginal_tax_rate(year_pen, year_jss, year_uss, rmd,
+                                                              inputs.get("state_income_tax_rate", 0))
+
                 if rmd > 0:
                     actual_rmd = min(rmd, pretax)
                     pretax -= actual_rmd
-                    if actual_rmd <= remaining:
-                        remaining -= actual_rmd
+                    rmd_tax = actual_rmd * pretax_tax_rate
+                    after_tax_rmd = actual_rmd - rmd_tax
+                    if after_tax_rmd <= remaining:
+                        remaining -= after_tax_rmd
                     else:
-                        taxable += actual_rmd - remaining
+                        taxable += after_tax_rmd - remaining
                         remaining = 0
 
                 if remaining > 0 and taxable > 0:
@@ -355,8 +416,12 @@ def run_swr_analysis(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_t
                 # pretax withdrawal for the rest of the plan once RMD age
                 # was reached — external audit 2026-09-06, same bug as
                 # projection_engine.py/_run_single (see their comments).
+                # Grossed up for tax like the RMD above — this whole loop
+                # used to treat every pretax withdrawal as tax-free
+                # (external audit 2026-09-07, same root cause as
+                # _run_single).
                 if remaining > 0 and pretax > 0:
-                    draw = min(remaining, pretax); pretax -= draw; remaining -= draw
+                    pretax, _tax, remaining = _grossed_up_draw(remaining, pretax, pretax_tax_rate)
                 if remaining > 0 and hsa > 0:
                     draw = min(remaining, hsa); hsa -= draw; remaining -= draw
                 if remaining > 0 and roth > 0:
@@ -530,6 +595,7 @@ def run_monte_carlo(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_ti
             justin_ss_annual=justin_ss_annual,
             justin_ss_age=justin_ss_age,
             retirement_end_age=end_age,
+            state_tax_rate=inputs.get("state_income_tax_rate", 0),
         )
         if survived: successes += 1
         all_balances.append(balances)
@@ -644,6 +710,7 @@ def run_stress_tests(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_t
         justin_ss_annual=justin_ss_annual,
         justin_ss_age=justin_ss_age,
         retirement_end_age=end_age,
+        state_tax_rate=inputs.get("state_income_tax_rate", 0),
     )
 
     results = {"base": {
@@ -726,6 +793,7 @@ def run_stress_tests(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_t
             justin_ss_annual=run_justin_ss,
             justin_ss_age=justin_ss_age,
             retirement_end_age=end_age,
+            state_tax_rate=inputs.get("state_income_tax_rate", 0),
         )
 
         # Find depletion age

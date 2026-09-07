@@ -234,7 +234,11 @@ class TestWithdrawalWaterfallReconciliationFixes:
             annual_returns=[0.0],
         )
         assert survived is True
-        assert pretax_bals[0] == pytest.approx(2_000_000 - 500000, rel=0.01)
+        # Since the external audit 2026-09-07 fix, pretax withdrawals here
+        # are grossed up for tax (previously untaxed) — drawing enough
+        # gross to net $500K costs more than $500K of pretax balance, so
+        # the ending balance is lower than a naive $2M - $500K.
+        assert pretax_bals[0] < 2_000_000 - 500000
 
     def test_run_single_fails_when_need_genuinely_cannot_be_met(self):
         """Sanity check the fix didn't overshoot: a plan with far too little
@@ -247,6 +251,26 @@ class TestWithdrawalWaterfallReconciliationFixes:
             annual_returns=[0.0],
         )
         assert survived is False
+
+    def test_run_single_taxes_pretax_withdrawals(self):
+        """Regression (external audit 2026-09-07): _run_single treated
+        every withdrawal, RMDs included, as tax-free — unlike
+        run_retirement_projection's own waterfall. Reproduces the audit's
+        exact case: $1M pretax, $100K spend, one year, no other income,
+        0% growth. With no pension/SS, taxable_income_est is $0, landing
+        in the 10% bracket — the deterministic projection's own figure
+        ($888,889 after $11,111 tax) is the correct answer; the bug's
+        $900,000 (fully untaxed) must no longer be produced."""
+        survived, balances, *_ = _run_single(
+            pretax_start=1_000_000, roth_start=0, taxable_start=0, hsa_start=0,
+            ret_age=60, jason_age=60, justin_age=60,
+            pension_annual=0, jason_ss_annual=0, jason_ss_age=200,
+            income_at_ret=100000, inflation=0.0, post_ret=0.0,
+            annual_returns=[0.0], retirement_end_age=61,
+            justin_ss_age=200,
+        )
+        assert survived is True
+        assert balances[0] == pytest.approx(888889, abs=2)
 
     def test_run_single_spousal_ss_uses_justins_own_age_not_jasons(self):
         """Regression test: justin_ss_age used to be compared against
