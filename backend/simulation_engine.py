@@ -259,9 +259,31 @@ def _run_single(
         # above (cum_inflation[yr] / cum_inflation[claim_yr] instead of
         # (1+eff_inf)**years_since_claim, same "retroactively erases
         # earlier inflation" bug when inf_mult varies over the horizon).
+        #
+        # When a claim age precedes ret_age (early SS claimed before this
+        # retirement scenario even starts — e.g. claim at 62, retire at
+        # 65), yr_claim_jason clamped to 0 dropped the COLA already
+        # accrued in those pre-retirement years entirely: jason_ss_annual
+        # was used as-is at yr=0 instead of compounded forward by
+        # (ret_age - jason_ss_age) years first (independent review,
+        # 2026-09-07 follow-up — reproduced: claim at 62 / retire at 65 /
+        # 3% inflation reported $20,000 at retirement instead of the
+        # $21,855 every other consumer's deterministic formula,
+        # `jason_ss_annual * (1+inflation)**max(0,age-jason_ss_age)`,
+        # already gets right for the identical inputs). This
+        # pre-retirement leg is deterministic (flat `inflation`, not the
+        # per-trial `inflation_mults` — this function only models
+        # stochastic/stress inflation during the WITHDRAWAL horizon
+        # captured by cum_inflation; pre-retirement accumulation is a
+        # separate, already-computed phase everywhere else in this file),
+        # then the post-retirement leg continues to use each trial's own
+        # cum_inflation path exactly as before. Reduces to the original
+        # formula exactly whenever a claim age is during/after retirement
+        # (pre_ret_cola == 1).
         year_pen  = pension_annual  # frozen pension, no COLA
+        jason_pre_ret_cola = (1 + inflation) ** max(0, ret_age - jason_ss_age)
         yr_claim_jason = max(0, jason_ss_age - ret_age)
-        year_jss  = (jason_ss_annual * (cum_inflation[yr] / cum_inflation[yr_claim_jason])
+        year_jss  = (jason_ss_annual * jason_pre_ret_cola * (cum_inflation[yr] / cum_inflation[yr_claim_jason])
                      if age >= jason_ss_age else 0)
         # justin_ss_age is JUSTIN's own claiming age, so it has to be
         # compared against Justin's own current age, not Jason's `age` —
@@ -270,8 +292,9 @@ def _run_single(
         # (external audit 2026-09-06, same bug as
         # projection_engine.run_retirement_projection's yearly loop).
         justin_age_this_year = age - (jason_age - justin_age)
+        justin_pre_ret_cola = (1 + inflation) ** max(0, (ret_age - (jason_age - justin_age)) - justin_ss_age)
         yr_claim_justin = max(0, justin_ss_age - ret_age + (jason_age - justin_age))
-        year_uss  = (justin_ss_annual * (cum_inflation[yr] / cum_inflation[yr_claim_justin])
+        year_uss  = (justin_ss_annual * justin_pre_ret_cola * (cum_inflation[yr] / cum_inflation[yr_claim_justin])
                      if justin_age_this_year >= justin_ss_age else 0)
         fixed     = year_pen + year_jss + year_uss
 
@@ -1192,6 +1215,42 @@ def run_roth_conversion_analysis(inputs: Dict, accounts: List[Dict], ret_age: in
         "any_unmet_need":         any(s["unmet_need"] > 0 for s in schedule),
     }
 
+def _cash_available_offsets_need(year_need, guaranteed_income, life_event_cash, life_event_monthly):
+    """How much of a year's spending need remains after guaranteed income
+    and signed life-event cash (one-time + recurring) are applied, and
+    how much surplus (if any) should be swept into taxable as savings —
+    extracted from run_tax_efficiency_simulation's per-year setup
+    (independent review, 2026-09-07 follow-up) so this exact cash-flow
+    arithmetic is a single testable function instead of inline code with
+    two DIFFERENT ways to get it wrong depending on the sign of the net
+    effect:
+
+    - A negative one-time event large enough to exceed available cash
+      must INCREASE net_need, not just get subtracted from a bucket with
+      nothing tracking the resulting deficit (the first fix, 2026-09-07).
+    - A positive recurring event large enough to exceed the ordinary
+      spending need must be BANKED as savings via the surplus branch, not
+      discarded by flooring the target at 0 before comparing it to cash
+      available (this second fix — the first fix's own
+      `max(0, year_need - life_event_monthly)` introduced this).
+
+    `year_need - life_event_monthly` is deliberately NOT floored at 0 —
+    matches annual_engine.simulate_withdrawal_year's own convention
+    exactly (spending_need is never floored there either; see its
+    cash_available >= spending_need branch), which is what lets a large
+    enough recurring income correctly produce a negative target and flow
+    the entire excess into the surplus branch below.
+
+    Returns (net_need, surplus_credit) — net_need is what's left to draw
+    from the withdrawal-order buckets (always >= 0); surplus_credit is
+    what to add to taxable (0.0 whenever there's a net_need instead)."""
+    cash_available = guaranteed_income + life_event_cash
+    spending_target = year_need - life_event_monthly
+    if cash_available >= spending_target:
+        return 0.0, cash_available - spending_target
+    return spending_target - cash_available, 0.0
+
+
 def _ordered_draw(pretax, roth, taxable, hsa, remaining, order, tax_pretax_rate, tax_taxable_rate):
     """Draw `remaining` need from the four buckets in `order`, taxed/
     grossed-up exactly like annual_engine.simulate_withdrawal_year's own
@@ -1366,13 +1425,23 @@ def run_tax_efficiency_simulation(inputs: Dict, accounts: List[Dict], ret_age: i
                 # shortfall increases what must be drawn from the
                 # buckets below, a surplus is swept into taxable as
                 # savings — never both, never neither.
-                cash_available = guaranteed + life_event_cash
-                spending_target = max(0, year_need - life_event_monthly)
-                if cash_available >= spending_target:
-                    taxable += cash_available - spending_target
-                    net_need = 0.0
-                else:
-                    net_need = spending_target - cash_available
+                # spending_target is NOT floored at 0 — a large enough
+                # recurring life_event_monthly can make it negative (income
+                # exceeding the ordinary spending need), and that excess
+                # must still land in taxable as savings via the surplus
+                # branch below. An earlier version of this fix floored it
+                # at 0, which silently discarded any recurring income
+                # above spending entirely (independent review, 2026-09-07
+                # follow-up — reproduced: $1M pretax-only / $0 ordinary
+                # spending / $10,000/mo recurring income for 24 months
+                # ($240,000 total) ended at ~$980,121, the same as if the
+                # $240,000 had never existed). Matches
+                # annual_engine.simulate_withdrawal_year's own convention
+                # exactly (spending_need is never floored there either —
+                # see its cash_available >= spending_need branch).
+                net_need, surplus_credit = _cash_available_offsets_need(
+                    year_need, guaranteed, life_event_cash, life_event_monthly)
+                taxable += surplus_credit
 
                 # RMD — must take regardless of strategy
                 rmd = _rmd(pretax, age, _rmd_start)

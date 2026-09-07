@@ -23,7 +23,7 @@ from simulation_engine import (
     run_survivor_scenario,
     _run_single,
 )
-from projection_engine import CURRENT_YEAR
+from projection_engine import CURRENT_YEAR, run_retirement_projection
 
 # Every age the Retirement Sensitivity / Simulation pages let you pick,
 # not just the three Settings anchor points.
@@ -135,6 +135,71 @@ class TestRunMonteCarlo:
         baseline  = run_monte_carlo(sample_inputs, sample_accounts, ret_age=58, ss_timing="early")
         with_sale = run_monte_carlo(inputs_sale, sample_accounts, ret_age=58, ss_timing="early")
         assert with_sale["median_final_balance"] > baseline["median_final_balance"]
+
+    def test_ss_claimed_before_retirement_gets_pre_retirement_cola(self, sample_inputs, monkeypatch):
+        """Regression (independent review, 2026-09-07): when SS is claimed
+        BEFORE this retirement scenario even starts (claim age < ret_age
+        — e.g. claim at 62, retire at 67), _run_single's cumulative-
+        inflation formula clamped its claim-year index to 0, dropping
+        every year of COLA that accrued between claiming and retirement
+        entirely. Reproduces the review's exact numbers: claim at 62,
+        retire/current age 67, 1-year horizon, $30K SS input, 3%
+        inflation, $100K spend, $1M brokerage, 0% growth — the
+        deterministic baseline (run_retirement_projection, which has
+        never had this bug) reports $34,778 of SS and ends at $934,778;
+        Monte Carlo with deterministic (0%) simulated returns must match
+        exactly, not report $30K/‑$930,000 as if no COLA had accrued."""
+        import random as random_module
+        monkeypatch.setattr(random_module, "gauss", lambda mu, sigma: 0.0)
+
+        inputs = {
+            **sample_inputs, "jason_age": 67, "justin_age": 67,
+            "retirement_income_today_dollars": 100000, "inflation_rate": 0.03,
+            "expected_return_pre_retirement": 0.0, "expected_return_post_retirement": 0.0,
+            "jason_social_security": 30000, "jason_ss_delayed": 30000, "justin_social_security": 0,
+            "jason_ss_age": 62, "justin_ss_age": 67,
+            "healthcare_pre_medicare": 0, "healthcare_post_medicare": 0,
+            "pension_55": 0, "pension_60": 0, "pension_65": 0,
+            "w2_salary": 0, "annual_401k_contribution": 0, "annual_hsa_contribution": 0,
+            "retirement_end_age": 68,
+        }
+        accounts = [{"name": "Brokerage", "account_type": "taxable", "owner": "joint", "balance": 1_000_000}]
+        mc = run_monte_carlo(inputs, accounts, ret_age=67, ss_timing="early")
+        assert mc["median_final_balance"] == pytest.approx(934778, abs=1)
+
+    def test_ss_claimed_before_retirement_gets_pre_retirement_cola_stress(self, sample_inputs, monkeypatch):
+        """Same fix, checked via run_stress_tests too (not just Monte
+        Carlo) since both consumers share the exact same _run_single code
+        path — a fix that only happened to be visible through one entry
+        point would be exactly the kind of gap this consolidation is
+        supposed to close. run_stress_tests's named scenarios need a
+        multi-year horizon regardless of what's being tested (its longest
+        override sequence needs 10+ years), so this uses a shorter
+        spending need than the Monte Carlo test above to keep the
+        portfolio solvent long enough to compare, checked against
+        run_retirement_projection's own (already-correct) figure for the
+        same inputs rather than a hand-picked number."""
+        import random as random_module
+        monkeypatch.setattr(random_module, "gauss", lambda mu, sigma: 0.0)
+
+        inputs = {
+            **sample_inputs, "jason_age": 67, "justin_age": 67,
+            "retirement_income_today_dollars": 20000, "inflation_rate": 0.03,
+            "expected_return_pre_retirement": 0.0, "expected_return_post_retirement": 0.0,
+            "jason_social_security": 30000, "jason_ss_delayed": 30000, "justin_social_security": 0,
+            "jason_ss_age": 62, "justin_ss_age": 67,
+            "healthcare_pre_medicare": 0, "healthcare_post_medicare": 0,
+            "pension_55": 0, "pension_60": 0, "pension_65": 0,
+            "w2_salary": 0, "annual_401k_contribution": 0, "annual_hsa_contribution": 0,
+            "retirement_end_age": 78,
+        }
+        accounts = [{"name": "Brokerage", "account_type": "taxable", "owner": "joint", "balance": 1_000_000}]
+        proj = run_retirement_projection(inputs, accounts, ret_ages=[67])
+        s = next(x for x in proj["scenarios"] if x["label"] == "age_67_early")
+        expected = s["yearly_detail"][-1]["portfolio_balance"]
+
+        st = run_stress_tests(inputs, accounts, ret_age=67, ss_timing="early")
+        assert st["scenarios"]["base"]["final_balance"] == pytest.approx(expected, abs=1)
 
 
 class TestRunStressTests:
@@ -501,6 +566,42 @@ class TestRunTaxEfficiencySimulation:
             s = result["strategies"][strategy]
             assert s["median_lifetime_tax"] == pytest.approx(28205, abs=5)
             assert s["median_final_balance"] == pytest.approx(871795, abs=10)
+
+    def test_recurring_income_above_spending_is_banked_not_discarded(self, sample_inputs, monkeypatch):
+        """Regression (independent review, 2026-09-07 follow-up): the
+        first fix for negative one-time events introduced
+        `spending_target = max(0, year_need - life_event_monthly)`,
+        flooring at 0 — which silently discarded any RECURRING income
+        above spending instead of banking the excess, the same class of
+        bug as the one-time-event fix but in the opposite direction.
+        Reproduces the review's exact numbers: $1M pretax-only, $0
+        ordinary spending, a $1,000/mo recurring income starting in 2026,
+        2-year horizon (age 60->62) -> must end at exactly $1,024,000
+        ($1M + $1,000 x 12 x 2), matching annual_engine's own
+        surplus-sweep convention (which never floors spending_need at 0
+        either), not the bug's untouched $1,000,000."""
+        import random as random_module
+        monkeypatch.setattr(random_module, "gauss", lambda mu, sigma: 0.0)
+
+        inputs = {
+            **sample_inputs, "jason_age": 60, "justin_age": 58,
+            "retirement_income_today_dollars": 0, "inflation_rate": 0,
+            "expected_return_pre_retirement": 0, "expected_return_post_retirement": 0,
+            "healthcare_pre_medicare": 0, "healthcare_post_medicare": 0,
+            "jason_social_security": 0, "jason_ss_delayed": 0, "justin_social_security": 0,
+            "pension_55": 0, "pension_60": 0, "pension_65": 0,
+            "w2_salary": 0, "annual_401k_contribution": 0, "annual_hsa_contribution": 0,
+            "retirement_end_age": 62,
+        }
+        accounts = [{"name": "IRA", "account_type": "401k", "owner": "jason", "balance": 1_000_000}]
+        events = [{"event_year": 2026, "one_time_cash_delta": 0,
+                   "monthly_cash_flow_delta": 1000, "duration_months": 999}]
+        result = run_tax_efficiency_simulation(inputs, accounts, ret_age=60, ss_timing="early",
+                                                life_events=events)
+        for strategy in ("taxable_first", "roth_first", "optimal"):
+            s = result["strategies"][strategy]
+            assert s["median_final_balance"] == pytest.approx(1_024_000, abs=1)
+            assert s["median_lifetime_tax"] == 0
 
 
 class TestRunContributionSensitivity:
