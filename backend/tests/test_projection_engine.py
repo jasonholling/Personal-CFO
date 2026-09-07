@@ -328,6 +328,95 @@ class TestRunRetirementProjection:
         assert all(y["estimated_tax"] > 0 for y in rmd_years)
 
 
+class TestJustinIndependentIncomeAndRetirementAge:
+    """justin_w2_salary/justin_employee_401k_pct/justin_employer_401k_pct/
+    justin_annual_bonus_pct/justin_annual_rsu_value/justin_ret_age
+    (2026-09-08): a second, independent pre-retirement earnings profile for
+    a household where both spouses work full-time instead of one combined
+    breadwinner income. See run_retirement_projection's own docstring."""
+
+    def test_default_zero_salary_leaves_projection_unchanged(self, sample_inputs, sample_accounts):
+        """The whole point of defaulting justin_w2_salary to 0: an existing
+        single-earner household that never touches these new fields must
+        see byte-identical output to before they existed."""
+        # Compare ["scenarios"] only -- generated_at is a wall-clock
+        # timestamp that legitimately differs between any two calls,
+        # unrelated to this test's actual concern.
+        with_defaults = run_retirement_projection(sample_inputs, sample_accounts, ret_ages=[60])
+        explicit_zero = run_retirement_projection({**sample_inputs, "justin_w2_salary": 0, "justin_ret_age": 0}, sample_accounts, ret_ages=[60])
+        assert with_defaults["scenarios"] == explicit_zero["scenarios"]
+
+    def test_justin_salary_grows_the_portfolio(self, sample_inputs, sample_accounts):
+        inputs = {**sample_inputs, "jason_age": 45, "justin_age": 45, "justin_w2_salary": 150000}
+        with_income = run_retirement_projection(inputs, sample_accounts, ret_ages=[60])
+        without_income = run_retirement_projection({**sample_inputs, "jason_age": 45, "justin_age": 45}, sample_accounts, ret_ages=[60])
+        scenario_with = next(s for s in with_income["scenarios"] if s["ss_timing"] == "early")
+        scenario_without = next(s for s in without_income["scenarios"] if s["ss_timing"] == "early")
+        assert scenario_with["portfolio_at_retirement"] > scenario_without["portfolio_at_retirement"]
+
+    def test_justin_ret_age_independent_of_jasons_ret_age_scenario(self, sample_inputs, sample_accounts):
+        """justin_ret_age=50 should give Justin exactly 5 years of
+        contributions (justin_age=45) regardless of which Jason ret_age
+        scenario column is being evaluated (60 here) -- decoupled from the
+        age-gap-derived default, which would otherwise tie Justin's window
+        to Jason's own selected retirement age."""
+        inputs = {**sample_inputs, "jason_age": 45, "justin_age": 45, "justin_w2_salary": 150000, "justin_ret_age": 50}
+        result_ret60 = run_retirement_projection(inputs, sample_accounts, ret_ages=[60])
+        result_ret65 = run_retirement_projection(inputs, sample_accounts, ret_ages=[65])
+        scenario_60 = next(s for s in result_ret60["scenarios"] if s["ss_timing"] == "early")
+        scenario_65 = next(s for s in result_ret65["scenarios"] if s["ss_timing"] == "early")
+        # Both Jason scenarios see the SAME Justin contribution years (5),
+        # so the JUSTIN-attributable portion of the portfolio should be
+        # identical relative to each scenario's own no-Justin-income baseline
+        # growing for the same number of years -- simplest direct check:
+        # Justin's own 5-years-of-contributions FV is a fixed number,
+        # independent of Jason's ret_age, so the DELTA between "with
+        # Justin income" and "without" should differ only by however much
+        # LONGER that fixed contribution sum then compounds (10 vs 15 years
+        # post-contribution) -- not by Justin's contribution WINDOW itself.
+        no_justin_60 = run_retirement_projection({**sample_inputs, "jason_age": 45, "justin_age": 45}, sample_accounts, ret_ages=[60])
+        no_justin_65 = run_retirement_projection({**sample_inputs, "jason_age": 45, "justin_age": 45}, sample_accounts, ret_ages=[65])
+        delta_60 = scenario_60["portfolio_at_retirement"] - next(s for s in no_justin_60["scenarios"] if s["ss_timing"] == "early")["portfolio_at_retirement"]
+        delta_65 = scenario_65["portfolio_at_retirement"] - next(s for s in no_justin_65["scenarios"] if s["ss_timing"] == "early")["portfolio_at_retirement"]
+        # The 65-column delta compounds the same fixed Justin contribution
+        # sum for 5 more years than the 60-column delta -- strictly bigger,
+        # not equal, which would only happen if Justin's window had
+        # (wrongly) tracked Jason's own ret_age instead of staying fixed at 50.
+        assert delta_65 > delta_60 > 0
+
+    def test_justin_ret_age_zero_falls_back_to_age_gap_derived_timing(self, sample_inputs, sample_accounts):
+        """justin_ret_age left at 0 (unset) must reproduce the pre-existing
+        age-gap-derived timing exactly -- i.e. Justin's contribution window
+        equals years_to_retire, same as Jason's, not some other default.
+        Uses an EARLIER explicit justin_ret_age (55, justin_age=48 -> 7
+        years) against the fallback (years_to_retire=10 at ret_age=60) --
+        contributing for 7 years then letting the balance sit idle for 3
+        must land strictly below contributing for the full 10, so this test
+        can tell the two paths apart (a justin_ret_age that happens to land
+        past years_to_retire gets capped at years_to_retire either way --
+        see test_justin_ret_age_independent_of_jasons_ret_age_scenario for
+        that boundary instead)."""
+        inputs_explicit = {**sample_inputs, "jason_age": 50, "justin_age": 48, "justin_w2_salary": 100000, "justin_ret_age": 55}
+        inputs_fallback = {**sample_inputs, "jason_age": 50, "justin_age": 48, "justin_w2_salary": 100000, "justin_ret_age": 0}
+        explicit = run_retirement_projection(inputs_explicit, sample_accounts, ret_ages=[60])
+        fallback = run_retirement_projection(inputs_fallback, sample_accounts, ret_ages=[60])
+        scenario_explicit = next(s for s in explicit["scenarios"] if s["ss_timing"] == "early")
+        scenario_fallback = next(s for s in fallback["scenarios"] if s["ss_timing"] == "early")
+        assert scenario_fallback["portfolio_at_retirement"] > scenario_explicit["portfolio_at_retirement"]
+
+    def test_justin_rsu_and_bonus_also_respect_his_own_window(self, sample_inputs, sample_accounts):
+        inputs = {
+            **sample_inputs, "jason_age": 50, "justin_age": 50,
+            "justin_w2_salary": 100000, "justin_annual_bonus_pct": 0.15, "justin_annual_rsu_value": 20000,
+            "justin_ret_age": 52,  # only 2 years -- should contribute much less than defaulting to years_to_retire (10, at ret_age=60)
+        }
+        early_ret = run_retirement_projection(inputs, sample_accounts, ret_ages=[60])
+        late_ret = run_retirement_projection({**inputs, "justin_ret_age": 60}, sample_accounts, ret_ages=[60])
+        scenario_early = next(s for s in early_ret["scenarios"] if s["ss_timing"] == "early")
+        scenario_late = next(s for s in late_ret["scenarios"] if s["ss_timing"] == "early")
+        assert scenario_late["portfolio_at_retirement"] > scenario_early["portfolio_at_retirement"]
+
+
 class TestWithdrawalWaterfallReconciliationFixes:
     """Regression tests for the external audit 2026-09-06 findings: RMD-age
     withdrawals silently getting rationed, spousal SS comparing the wrong

@@ -200,6 +200,21 @@ def init_db():
         ("retirement_end_age",       "INTEGER DEFAULT 99"),
         ("state_income_tax_rate",    "REAL DEFAULT 0"),
         ("annual_bonus_pct",         "REAL DEFAULT 0"),  # recurring annual bonus, as a fraction of w2_salary (e.g. 0.20 for 20%) — scales with salary_growth_pct like 401k contributions, unlike the flat-dollar annual_rsu_value
+        # Justin's own pre-retirement earnings profile (2026-09-08) — mirrors
+        # w2_salary/employee_401k_pct/employer_401k_pct/annual_bonus_pct/
+        # annual_rsu_value above, for a household where both spouses work
+        # full-time instead of one combined/breadwinner-shaped income. All
+        # default to 0/unset so an existing single-earner household sees no
+        # behavior change: justin_w2_salary=0 means Justin's contribution
+        # terms are all 0 regardless of the pct fields, and justin_ret_age=0
+        # falls back to the pre-existing age-gap-derived retirement age
+        # (same as every consumer already computed before this existed).
+        ("justin_w2_salary",           "REAL DEFAULT 0"),
+        ("justin_employee_401k_pct",   "REAL DEFAULT 0.06"),
+        ("justin_employer_401k_pct",   "REAL DEFAULT 0.03"),
+        ("justin_annual_bonus_pct",    "REAL DEFAULT 0"),
+        ("justin_annual_rsu_value",    "REAL DEFAULT 0"),
+        ("justin_ret_age",             "INTEGER DEFAULT 0"),  # 0 = not independently set; see run_retirement_projection
     ]
     for col, typedef in migrations:
         if col not in existing_cols:

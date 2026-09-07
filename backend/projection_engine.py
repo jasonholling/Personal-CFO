@@ -400,7 +400,28 @@ def run_retirement_projection(inputs: Dict, accounts: List[Dict], ret_ages: List
     goals are excluded). Unlike life_events, this has no post-retirement
     half at all: the extra money simply stops being contributed the moment
     retirement starts, same as any other 401k/taxable contribution above.
-    Defaults to None/empty so every existing caller is unaffected."""
+    Defaults to None/empty so every existing caller is unaffected.
+
+    Justin's own income (justin_w2_salary/justin_employee_401k_pct/
+    justin_employer_401k_pct/justin_annual_bonus_pct/justin_annual_rsu_value,
+    2026-09-08): a second, independent pre-retirement earnings profile for a
+    household where both spouses work full-time, instead of one combined
+    "breadwinner" income. justin_w2_salary defaults to 0, so this changes
+    nothing for a household that never fills it in. justin_ret_age (0 =
+    unset) independently controls how many years Justin's OWN contributions
+    run, decoupled from whichever Jason ret_age this scenario column is
+    sweeping — 0 falls back to years_to_retire (same age-gap-implied timing
+    every consumer used before this existed).
+
+    What this does NOT do: model Justin continuing to earn (and therefore
+    reducing withdrawal-phase spending need) during years where Jason has
+    already retired but Justin hasn't reached justin_ret_age yet — i.e. no
+    "phased retirement, one spouse still working" bridge income for this
+    general case. bridge_income_55/bridge_years_55 already model a narrower
+    version of exactly that, but only for the ret_age==55 scenario column
+    specifically (a pre-existing, separately-scoped limitation, not
+    introduced here) — see CALCULATION_CONTRACT.md if that gap is worth
+    closing later."""
     salary_growth_pct = inputs.get("_salary_growth_pct", 0.0) if salary_growth_pct is None else salary_growth_pct
     jason_age  = inputs["jason_age"]
     justin_age = inputs["justin_age"]
@@ -434,6 +455,21 @@ def run_retirement_projection(inputs: Dict, accounts: List[Dict], ret_ages: List
     # 401k contributions above do, since a bonus expressed as % of salary
     # naturally grows alongside raises.
     annual_bonus = salary * inputs.get("annual_bonus_pct", 0)
+
+    # Justin's own pre-retirement earnings (2026-09-08) — mirrors the block
+    # above for a household where both spouses work full-time instead of one
+    # combined/breadwinner-shaped income. justin_w2_salary defaults to 0, so
+    # every contribution term below is 0 and an existing single-earner
+    # household sees no change at all. justin_years_to_retire (used below,
+    # per ret_age) is what actually decouples Justin's own accumulation
+    # window from whichever Jason ret_age this scenario column represents.
+    justin_salary  = inputs.get("justin_w2_salary", 0)
+    justin_emp_pct = inputs.get("justin_employee_401k_pct", 0.06)
+    justin_er_pct  = inputs.get("justin_employer_401k_pct", 0.03)
+    justin_annual_401k_roth   = justin_salary * justin_emp_pct
+    justin_annual_401k_pretax = justin_salary * justin_er_pct
+    justin_annual_bonus = justin_salary * inputs.get("justin_annual_bonus_pct", 0)
+    justin_annual_rsu   = inputs.get("justin_annual_rsu_value", 0)
 
     # Pre-tax: traditional 401k slice + Justin IRA
     pretax_start = pretax_401k + sum(
@@ -486,6 +522,43 @@ def run_retirement_projection(inputs: Dict, accounts: List[Dict], ret_ages: List
         # independent copy.
         timeline = build_timeline(jason_age, justin_age, ret_age, inputs.get("retirement_end_age"))
         withdrawal_start_age = timeline.effective_start_age
+
+        # Justin's own accumulation window (2026-09-08) — if justin_ret_age
+        # is set, Justin's contributions run for HIS OWN years-to-retire,
+        # independent of whichever Jason ret_age this scenario column is
+        # sweeping. If unset (0, the default), falls back to years_to_retire
+        # — the same age-gap-implied timing every consumer already used
+        # before this existed, so a household that never fills in Justin's
+        # own retirement age sees identical numbers to before.
+        justin_ret_age = inputs.get("justin_ret_age", 0)
+        justin_years_to_retire = (
+            max(0, justin_ret_age - justin_age) if justin_ret_age else years_to_retire
+        )
+        # Justin's contributions only accrue up through whichever comes
+        # first: his own retirement, or this scenario's own withdrawal
+        # start (years_to_retire) — contributions he'd make WHILE Jason has
+        # already retired but Justin hasn't yet (justin_years_to_retire >
+        # years_to_retire) aren't modeled here, matching this function's
+        # documented scope (no phased-retirement bridge income for the
+        # general case). If Justin retires EARLIER (the more common ask —
+        # a second full-time income with its own, often shorter, runway),
+        # his contribution sum doesn't just stop growing at that point — it
+        # sits invested and keeps compounding for the remaining years until
+        # this scenario's own withdrawal start, same "contributions stop
+        # early, balance keeps compounding" pattern _project_529_saving_phase
+        # already uses for the 529 saving phase.
+        justin_contrib_years = min(justin_years_to_retire, years_to_retire)
+        justin_dormant_years = max(0, years_to_retire - justin_years_to_retire)
+
+        def _justin_contrib_fv(annual_amount):
+            if annual_amount <= 0:
+                return 0.0
+            fv_at_his_stop = (
+                _fv_growing_annuity(annual_amount, pre_ret, salary_growth_pct, justin_contrib_years)
+                if salary_growth_pct else _fv_annuity(annual_amount, pre_ret, justin_contrib_years)
+            )
+            return _fv(fv_at_his_stop, pre_ret, justin_dormant_years)
+
         pension_annual  = pension_for_age(inputs, ret_age)
 
         # Life events split by calendar year relative to this ret_age's
@@ -526,6 +599,15 @@ def run_retirement_projection(inputs: Dict, accounts: List[Dict], ret_ages: List
                 _fv_growing_annuity(annual_401k_roth, pre_ret, salary_growth_pct, years_to_retire)
                 if salary_growth_pct else _fv_annuity(annual_401k_roth, pre_ret, years_to_retire)
             )
+            # Justin's own 401k contributions, over HIS OWN accumulation
+            # window — capped at this scenario's own withdrawal start, then
+            # (if he stops contributing earlier) compounding further
+            # untouched until that point. Existing pretax_start/roth_start
+            # account balances already include both spouses' accounts
+            # regardless of owner, so only the contribution FLOW needs its
+            # own timing here.
+            pretax_contrib_fv += _justin_contrib_fv(justin_annual_401k_pretax)
+            roth_contrib_fv   += _justin_contrib_fv(justin_annual_401k_roth)
             pretax_at_ret = _fv(pretax_start, pre_ret, years_to_retire) + pretax_contrib_fv
             roth_at_ret   = _fv(roth_start,   pre_ret, years_to_retire) + roth_contrib_fv
             taxable_at_ret = _fv(taxable_start, pre_ret, years_to_retire)
@@ -535,6 +617,7 @@ def run_retirement_projection(inputs: Dict, accounts: List[Dict], ret_ages: List
             )
             if annual_rsu > 0:
                 taxable_at_ret += _fv_annuity(annual_rsu * 0.65, pre_ret, years_to_retire)
+            taxable_at_ret += _justin_contrib_fv(justin_annual_rsu * 0.65)
             if annual_bonus > 0:
                 # Same net-of-tax treatment as RSUs above (bonuses are
                 # withheld at a higher supplemental-wage rate in practice,
@@ -549,6 +632,7 @@ def run_retirement_projection(inputs: Dict, accounts: List[Dict], ret_ages: List
                     if salary_growth_pct else _fv_annuity(annual_bonus * 0.65, pre_ret, years_to_retire)
                 )
                 taxable_at_ret += bonus_fv
+            taxable_at_ret += _justin_contrib_fv(justin_annual_bonus * 0.65)
 
             # Sale proceeds — a sale is real regardless of which retirement
             # age this scenario column happens to be modeling, same as life

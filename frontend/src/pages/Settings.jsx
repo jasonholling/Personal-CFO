@@ -120,6 +120,38 @@ export default function Settings() {
         <Row label="W2 Base Salary" hint="Used for 401k contribution calculations"><NumInput value={form.w2_salary ?? 0} onChange={v => set('w2_salary', v)} prefix="$" /></Row>
       </Section>
 
+      <Section title={`${p2}'s Income & Retirement (if working full-time)`}>
+        <div style={{ fontSize:11, color:'var(--text3)', marginBottom:12 }}>
+          Leave everything below at $0/unset if this household has one primary income — none of it changes any number.
+        </div>
+        <Row label={`${p2}'s W2 Base Salary`} hint="A separate, independent income and 401k — not combined with the salary above"><NumInput value={form.justin_w2_salary ?? 0} onChange={v => set('justin_w2_salary', v)} prefix="$" /></Row>
+        <Row label={`${p2}'s Contribution Rate`} hint="Employee % → goes to Roth 401k"><NumInput value={form.justin_employee_401k_pct ?? 0.06} onChange={v => set('justin_employee_401k_pct', v)} pct suffix="%" /></Row>
+        <Row label={`${p2}'s Employer Contribution Rate`} hint="Match + non-elective → goes pre-tax"><NumInput value={form.justin_employer_401k_pct ?? 0.03} onChange={v => set('justin_employer_401k_pct', v)} pct suffix="%" /></Row>
+        <Row label={`${p2}'s Total Annual 401k`} hint="Calculated from salary × rates">
+          <span style={{ fontSize:13, color:'var(--text2)' }}>
+            ~${(((form.justin_employee_401k_pct ?? 0.06) + (form.justin_employer_401k_pct ?? 0.03)) * (form.justin_w2_salary ?? 0)).toLocaleString('en-US', {maximumFractionDigits:0})}/yr
+          </span>
+        </Row>
+        <Row label={`${p2}'s Annual RSU Value (gross)`} hint="0 if none this year"><NumInput value={form.justin_annual_rsu_value ?? 0} onChange={v => set('justin_annual_rsu_value', v)} prefix="$" /></Row>
+        <Row label={`${p2}'s Annual Bonus`} hint="As % of salary"><NumInput value={form.justin_annual_bonus_pct ?? 0} onChange={v => set('justin_annual_bonus_pct', v)} pct suffix="%" /></Row>
+        <Row label={`${p2}'s Retirement Age`} hint={`0 = assume ${p2} retires the same year as ${p1} (the old default). Set a specific age for an independent retirement date — e.g. ${p2} keeps working/contributing past, or stops well before, whichever age you're viewing for ${p1}.`}>
+          <NumInput value={form.justin_ret_age ?? 0} onChange={v => set('justin_ret_age', Math.max(0, Math.round(v)))} suffix="age" />
+        </Row>
+        {(form.justin_w2_salary ?? 0) > 0 && (form.justin_ret_age ?? 0) === 0 && (
+          <div style={{ padding:'10px 12px', background:'rgba(251,191,36,0.08)', borderRadius:8, marginTop:8, fontSize:12, color:'var(--amber)' }}>
+            ⚠ {p2}'s Retirement Age is 0 (unset) — {p2}'s contributions will stop whenever the scenario you're
+            viewing has {p1} retiring, not at {p2}'s own real retirement date. Set an age above for an independent
+            {' '}{p2} retirement timeline.
+          </div>
+        )}
+        <div style={{ padding:'10px 12px', background:'var(--bg3)', borderRadius:8, marginTop:8, fontSize:12, color:'var(--text2)' }}>
+          Note: this models {p2}'s own income and contributions building up before retirement. It does not yet
+          model {p2} continuing to earn (offsetting spending) during years where {p1} has already retired but
+          {' '}{p2} hasn't reached the age above — a "one spouse still working" phase isn't represented in the
+          withdrawal-phase numbers.
+        </div>
+      </Section>
+
       <Section title="401k">
         <Row label="Pre-Tax % of Total 401k Balance" hint={`Balance from Quicken × this % = pre-tax bucket. Roth = ${(roth_pct*100).toFixed(1)}%`}>
           <NumInput value={pretax_pct} onChange={v => set('pretax_401k_pct', Math.min(1, Math.max(0, v)))} pct suffix="%" />
