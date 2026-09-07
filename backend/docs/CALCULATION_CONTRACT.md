@@ -566,3 +566,120 @@ scenario across all 6 consumers, asserting the past-age and current-age
 selections now produce identical results (not just plausible-looking
 ones), with the review's own reported current-age figures pinned so a
 regression changes a number, not just an equality.
+
+## 9. Shared timeline normalizer (`timeline_engine.py`) and the duplicate-formula inventory
+
+Per an explicit consolidation task item (2026-09-07): centralize
+effective start age, retirement year, end age, spouse age offsets,
+claiming years, inflation index, and event years into one shared module
+instead of six independently-maintained copies of the same arithmetic.
+
+### What moved
+
+`timeline_engine.Timeline` / `build_timeline()` is now the single source
+of `effective_start_age = max(ret_age, jason_age)` and everything
+derived from it, used by `run_retirement_projection` (the reference
+implementation this was modeled on — migrated too, not left as a 6th
+independent copy), `_run_single` (Monte Carlo + Stress Tests),
+`run_swr_analysis`, `run_roth_conversion_analysis`,
+`run_tax_efficiency_simulation`, and `run_survivor_scenario`.
+`build_cumulative_inflation()` is the true cumulative-inflation-index
+formula (extracted from `_run_single`, Phase 4) for the one consumer
+whose inflation rate varies year to year (stress scenarios).
+`Timeline.age()`/`.justin_age_at()`/`.calendar_year()`/
+`.claim_year_index()`/`.pre_start_cola()` replace the per-year age/
+age-gap/claim-year formulas that previously appeared verbatim in every
+withdrawal loop in this file.
+
+`ret_age` itself (as opposed to `effective_start_age`) is deliberately
+NOT centralized — `pension_for_age(inputs, ret_age)`, the age-55
+bridge-job/kids-at-home branch, and every "what age did the user pick"
+reporting field are genuine per-consumer POLICY choices, not a timeline
+question, and stay with each caller exactly as before.
+
+### The two adjacent cases — resolved by correcting the reference, not matching it
+
+Both were flagged as "documented adjacent cases" after the past-ret_age
+timeline fix (section 8) and explicitly required to be fixed by
+correcting whichever implementation was wrong, including the reference,
+rather than treating agreement-with-a-known-bug as acceptable:
+
+1. **Asset-sale timing gap.** `_post_retirement_asset_sale_events`'s
+   exclusion check and `run_retirement_projection`'s own accumulation-
+   phase inclusion check both compared `sale_age` against the same raw
+   `ret_age`, which is correct only when `ret_age >= jason_age`. For a
+   sale dated between an already-past selected `ret_age` and the
+   household's real current age (`effective_start_age`) — e.g. `ret_age`
+   55, sale at 60, household actually 65 today — the accumulation-phase
+   check (`sale_age <= ret_age`, i.e. `60 <= 55`) evaluated FALSE, so the
+   sale was never compounded through the accumulation phase at all; the
+   withdrawal-phase function's exclusion check (also `sale_age <=
+   ret_age`) likewise evaluated false, so it wasn't skipped there either
+   — the sale landed exactly once, but as a same-day cash windfall dated
+   "today" (`CURRENT_YEAR + max(0, sale_age - jason_age)`, which
+   collapses to `CURRENT_YEAR` once the sale is in the past) with ZERO
+   years of growth applied for the years between the actual sale and
+   today. Not a double-count or a silent drop — a single count with the
+   wrong amount of compounding, invisible whenever the pre-retirement
+   return happens to be 0% (exactly why an isolated review of the
+   timeline fix alone, using a 0%-return reproduction, wouldn't have
+   surfaced this). Both checks now compare against `effective_start_age`,
+   and the accumulation phase's growth-years formula is generalized to
+   `effective_start_age - sale_age` (previously `years_to_retire -
+   yrs_asset1`, silently 0 whenever `ret_age < jason_age`). Reduces to
+   the exact original formula whenever `ret_age >= jason_age`. Verified
+   with a realistic nonzero pre-retirement return (the test fixture's
+   7%): a $500K sale dated between ret_age 55 and real current age 65
+   now produces byte-identical `taxable_at_retirement` to selecting
+   ret_age 65 directly, including the 5 years of compounding the old
+   code silently omitted.
+2. **Survivor scenario's `death_age` default.** `death_age = ret_age +
+   10` (meant as "10 years into retirement") could default to a death
+   age at or before the household's real current age for a past-ret_age
+   selection — modeling the household as already dead rather than dying
+   10 years from now. Anchored to `effective_start_age + 10` instead.
+
+### Duplicate-formula inventory (item 9)
+
+What's now fully shared, one implementation each: pension interpolation
+(`pension_for_age`), RMD amount and start age (`_rmd`,
+`rmd_start_age`), the withdrawal-year ledger itself
+(`annual_engine.simulate_withdrawal_year`/`simulate_conversion`) for the
+3 consumers migrated onto it, the timeline fields this section covers,
+and (Phase 4) tax-efficiency's ordered-draw bucket mechanics
+(`_ordered_draw`, parity-tested against the shared engine).
+
+What remains duplicated, with reasoning for each:
+
+- **Healthcare pre/post-Medicare phasing** (`healthcare_pre if age < 65
+  else healthcare_post`, or the equivalent) still appears independently
+  in `run_retirement_projection`, `_run_single`, `run_swr_analysis`,
+  `run_roth_conversion_analysis`, and `run_tax_efficiency_simulation` —
+  five copies of a two-line conditional. Not consolidated this pass;
+  a real remaining item, low-risk/low-complexity to extract into a
+  `timeline_engine.healthcare_for_age(age, pre, post)`-style helper
+  whenever this module gets touched again.
+- **Account buckets as four plain floats** (`pretax, roth, taxable, hsa`
+  locals) instead of `annual_engine.AccountState` in `run_swr_analysis`,
+  `run_roth_conversion_analysis`, `run_tax_efficiency_simulation`'s
+  `_ordered_draw` path, and `run_survivor_scenario`'s single-bucket
+  model — the same measured, documented performance exception as
+  tax-efficiency's `_ordered_draw` (section 4: migrating even part of
+  tax-efficiency onto the dataclass-based engine measured ~2.9x slower
+  at its call volume). Not a formula duplicate in the sense of "could
+  silently drift" — each consumer's own arithmetic is either parity-
+  tested against the shared engine already (tax-efficiency) or a
+  genuinely different policy (SWR/Roth/survivor, per CALCULATION_
+  CONTRACT.md's existing material-assumptions list) — but flagged here
+  as the literal duplicate-representation item 9 asked to inventory.
+- **SS COLA formula**: two mathematically-equivalent forms coexist by
+  necessity, not oversight — the flat deterministic
+  `(1+inflation)**max(0,age-claim_age)` (SWR, Roth, tax-efficiency,
+  `run_retirement_projection`) and the cumulative-ratio form via
+  `Timeline.pre_start_cola`/`claim_year_index` (`_run_single` only,
+  since it's the one consumer whose inflation rate varies year to year
+  across the horizon — see section 3.5's material assumption). The flat
+  form is provably a special case of the cumulative form when the rate
+  is constant; duplicating the simpler form where the general one isn't
+  needed is a legibility choice, not a drift risk, since both are now
+  expressed through the same `Timeline` object's fields.
