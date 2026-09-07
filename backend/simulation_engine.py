@@ -14,6 +14,7 @@ from projection_engine import (
     _fv, _fv_annuity, _fv_annuity_monthly, _rmd, pension_for_age, rmd_start_age,
     _split_life_events, _post_retirement_year_effects, _post_retirement_asset_sale_events
 )
+from annual_engine import AccountState, DEFAULT_ORDER, marginal_bracket_tax_model, simulate_withdrawal_year
 # Module-level, not lazy/per-call — _pretax_marginal_tax_rate below is
 # called once per simulated year per trial (up to ~40 years x 1000 trials
 # per Monte Carlo/SWR request), so a per-call `from X import Y` measurably
@@ -138,10 +139,13 @@ def _run_single(
     included) were tax-free, unlike run_retirement_projection's own
     waterfall (external audit 2026-09-07, reproduced: $1M IRA / $100K
     spend / 1yr / 0% growth ended at $900,000 here vs. the deterministic
-    projection's correctly-taxed $888,889). Now uses the same
-    _pretax_marginal_tax_rate/_grossed_up_draw helpers as the rest of this
-    file. Defaults to 0.0 (added federal-only if a caller doesn't pass a
-    state rate) so this is purely additive for existing callers.
+    projection's correctly-taxed $888,889). Now uses
+    annual_engine.simulate_withdrawal_year — the same shared engine
+    run_retirement_projection's waterfall uses — via
+    marginal_bracket_tax_model, priced with the module-level
+    _pretax_marginal_tax_rate helper. Defaults to 0.0 (added federal-only
+    if a caller doesn't pass a state rate) so this is purely additive for
+    existing callers.
 
     justin_ss_annual/justin_ss_age: default to the module-level fallback
     constants (both 0) only for backward compatibility with any caller that
@@ -269,62 +273,39 @@ def _run_single(
         year_uss  = (justin_ss_annual * (cum_inflation[yr] / cum_inflation[yr_claim_justin])
                      if justin_age_this_year >= justin_ss_age else 0)
         fixed     = year_pen + year_jss + year_uss
-        net_need  = max(0, year_need - fixed)
-
-        if life_event_cash:
-            taxable += life_event_cash
 
         # RMD
         rmd = _rmd(pretax, age, _rmd_start)
-        remaining = net_need + max(0, -taxable)
-        taxable = max(0, taxable)
-        taxable += max(0, fixed - year_need)
-
         pretax_tax_rate = _pretax_marginal_tax_rate(year_pen, year_jss, year_uss, rmd, state_tax_rate)
 
-        if rmd > 0:
-            actual_rmd = min(rmd, pretax)
-            pretax -= actual_rmd
-            rmd_tax = actual_rmd * pretax_tax_rate
-            after_tax_rmd = actual_rmd - rmd_tax
-            if after_tax_rmd <= remaining:
-                remaining -= after_tax_rmd
-            else:
-                taxable += after_tax_rmd - remaining
-                remaining = 0
-
-        if remaining > 0 and taxable > 0:
-            draw = min(remaining, taxable)
-            taxable -= draw; remaining -= draw
-
+        # Shared withdrawal-phase step (annual_engine.simulate_withdrawal_year)
+        # — same RMD -> taxable -> grossed-up pretax -> HSA -> Roth order,
+        # growth applied last, as run_retirement_projection's waterfall.
         # Further pretax withdrawal used to be gated on `rmd == 0`, blocking
         # any additional draw for the rest of the plan once RMD age was
         # reached even with plenty of pretax balance and a large unmet
         # need left — external audit 2026-09-06, same bug as
         # projection_engine.py's withdrawal waterfall (see its comment).
-        # Grossed up so its after-tax proceeds (not the gross withdrawal)
-        # cover `remaining` — this and the RMD tax above used to be
-        # entirely untaxed, unlike run_retirement_projection's own
-        # waterfall (external audit 2026-09-07).
-        if remaining > 0 and pretax > 0:
-            pretax, tax_paid, remaining = _grossed_up_draw(remaining, pretax, pretax_tax_rate)
-
-        if remaining > 0 and hsa > 0:
-            draw = min(remaining, hsa)
-            hsa -= draw; remaining -= draw
-
-        if remaining > 0 and roth > 0:
-            draw = min(remaining, roth)
-            roth -= draw; remaining -= draw
-
-        if remaining > 0:
+        # RMD tax and further pretax draws used to be entirely untaxed here,
+        # unlike run_retirement_projection's own waterfall (external audit
+        # 2026-09-07) — both fixes now live once, in the shared engine.
+        year_result = simulate_withdrawal_year(
+            opening=AccountState(pretax=pretax, roth=roth, taxable=taxable, hsa=hsa),
+            spending_need=year_need,
+            guaranteed_income=fixed,
+            life_event_cash=life_event_cash,
+            rmd_amount=rmd,
+            tax_model=marginal_bracket_tax_model(pretax_rate=pretax_tax_rate, taxable_rate=0.0),
+            growth_rate=ret,
+            order=DEFAULT_ORDER,
+        )
+        if year_result.unmet_need > 0:
             any_unmet_need = True
 
-        # Grow at this year's return
-        pretax  = max(0, pretax  * (1 + ret))
-        roth    = max(0, roth    * (1 + ret))
-        taxable = max(0, taxable * (1 + ret))
-        hsa     = max(0, hsa     * (1 + ret))
+        pretax  = year_result.closing.pretax
+        roth    = year_result.closing.roth
+        taxable = year_result.closing.taxable
+        hsa     = year_result.closing.hsa
 
         total = pretax + roth + taxable + hsa
         balances.append(round(total))
