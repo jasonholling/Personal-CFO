@@ -395,3 +395,58 @@ decision to leave adjacent Kids/Education work (>2-kids support) out of
 scope given how bug-hardened this pair of functions already is. Revisit
 only if a real bug (not a duplication-for-its-own-sake concern) is found
 in either's drawdown/timeline logic.
+
+## 6. Independent review findings (2026-09-07) — fixed before merge
+
+An independent review of commit `854855f` (synthetic inputs only, no
+application changes) found 4 real issues in the second session's Phase 4
+work, all fixed. Recorded here because they're exactly the kind of
+mistake this consolidation is supposed to make less likely, not more —
+worth being honest that this pass didn't avoid it the first time:
+
+1. **`run_roth_conversion_analysis`'s migration silently stopped funding
+   spending from Roth.** The order was set to `("taxable", "pretax")`
+   with a comment claiming "this tool has never modeled Roth spending" —
+   false. The pre-migration formula explicitly spilled any shortfall into
+   Roth once pretax couldn't cover both the year's draw and the
+   conversion. Fixed: `order=("taxable", "pretax", "roth")`; `unmet_need`
+   is now surfaced per schedule row and as `total_unmet_need`/
+   `any_unmet_need` in the summary instead of silently dropped. Also
+   applied to the "without conversions" baseline loop (which never
+   modeled Roth spending even before this session), for internal
+   consistency between the two paths being compared.
+2. **Conversion benefit overstated by one year of growth.** `roth_fv_at_73`
+   used `RMD_START_AGE - age` as its compounding exponent, but
+   `simulate_conversion` layers the conversion on top of an ALREADY-grown
+   year — the converted amount already represents its value at the END
+   of year `age`. Fixed: `RMD_START_AGE - age - 1`.
+3. **`run_tax_efficiency_simulation`'s shared per-year setup (not the
+   Phase 4 `_ordered_draw` extraction itself, but the surrounding
+   orchestration none of this session's changes touched) unconditionally
+   credited/debited signed life-event cash to `taxable` without folding
+   it into the spending-need calculation** — a negative one-time expense
+   with `taxable` at or near zero drove the bucket negative with nothing
+   tracking the resulting deficit, silently erased by the year's final
+   `max(0, taxable*(1+ret))` floor. This predates the consolidation
+   (flagged by the reviewer as "a remaining defect, not a new
+   regression"). Fixed to match the cash-available-offsets-need
+   convention every migrated consumer already uses.
+4. **`AnnualResult.reconcile()` only verified the aggregate total, not
+   individual buckets** — a bug (or a hand-corrupted `AnnualResult`) that
+   moved money between two buckets without recording a matching
+   `Transfer` passed silently as long as the grand total was still
+   right. Fixed: `simulate_conversion` now records its tax-funding debits
+   as `Transfer`s too (to a `"tax"` sink), and `reconcile()` verifies
+   each bucket's closing balance against its own opening + growth -
+   draws - transfers_out + transfers_in (plus taxable's two non-transfer
+   credits, the surplus sweep and RMD reinvestment, both already derivable
+   from existing fields). Regression tests:
+   `test_reconcile_flags_an_unrecorded_transfer_between_buckets` in
+   `test_annual_engine_reference.py`.
+
+All four fixes are covered by dedicated regression tests reproducing the
+review's exact numbers (`TestRunRothConversionAnalysis` /
+`TestRunTaxEfficiencySimulation` in `test_simulation_engine.py`), plus a
+Social Security claiming-age/amount cross-tool check added to Phase 6's
+sweep (the review noted it checked pension consistency but not SS
+timing). Full suite re-verified green after all fixes.
