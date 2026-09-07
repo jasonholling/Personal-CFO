@@ -2,21 +2,23 @@
 
 **Baseline:** `ec61309e6749d74ee31a02070aa46fd238a8ffd5` (verified identical to
 `origin/main` and local `main` at the time this branch was created).
-**Branch:** `codex/consolidate-calculation-engine`, 25 commits, pushed but
+**Branch:** `codex/consolidate-calculation-engine`, 29 commits, pushed but
 **not merged into `main`** (per instruction — awaiting Jason's re-review;
 several large changes have landed since the last review point — see
 below).
 
-*This is the sixth revision of this document. The first (6 commits)
+*This is the seventh revision of this document. The first (6 commits)
 covered Phases 1–4 partial + a documented SWR exception. The second (7
 more commits) finished Phase 4, did a scoped Phase 5, and ran Phase 6 for
 the first time. The third (4 more commits) covers an independent review
 finding 4 genuine bugs. The fourth (3 more commits) covers that same
 reviewer's follow-up pass finding 2 more. The fifth (2 more commits)
-covers a third follow-up finding one systemic bug. This revision (3 more
-commits) covers Jason's explicit 9-item follow-on task list, item 1 of
-which (a shared timeline normalizer) is now done and item 9 (duplicate-
-formula inventory) partially done — see below for exactly which of the 9
+covers a third follow-up finding one systemic bug. The sixth (3 more
+commits) covers item 1 (shared timeline normalizer) and the two adjacent
+cases from Jason's 9-item follow-on task list. This revision (4 more
+commits) closes items 3, 4, and 5 from that same list, advances item 9
+further, and finds items 6/8 substantially already satisfied — see below
+for exactly which of the 9
 items are and are not complete.
 
 ## Status against Jason's 9-item follow-on task list (2026-09-07)
@@ -25,62 +27,86 @@ After the third review's systemic finding, Jason asked for 9 specific
 items in priority order, plus a closing directive (build the shared
 timeline normalizer, fix the two adjacent cases by correcting the
 reference where wrong, inventory duplicates, expand the systematic
-matrices, keep the branch unmerged). Honest status, item by item:
+matrices, keep the branch unmerged). This section was written after the
+first pass (item 1 + adjacent cases + item 9's inventory) and has been
+updated after a second pass that closed items 3, 4, and 5 and found
+items 6 and 8 substantially already satisfied. Honest status, item by
+item, current as of this revision:
 
 1. **Shared timeline normalizer — DONE.** `timeline_engine.py`, migrated
    into all 6 consumers including the reference implementation. See
    `CALCULATION_CONTRACT.md` section 9.
-2. **Finish shared annual cash-flow coverage — NOT DONE.** Callers still
-   independently compute spending/healthcare/SS/pension/life-event
-   offsets outside the timeline fields item 1 covers. Real remaining
-   work.
+2. **Finish shared annual cash-flow coverage — PARTIALLY DONE.**
+   `healthcare_for_age` (item 9) is one piece of this; spending/SS/
+   pension/life-event offset computation otherwise remains independent
+   per consumer. Real remaining work.
 3. **Bring SWR under the shared engine, or prove its fast path
-   equivalent — NOT DONE.** SWR's exception is documented (section 4)
-   but no new parity-test matrix was added this pass.
-4. **Tax-efficiency's "optimal" strategy onto the shared ledger — NOT
-   DONE.** `taxable_first`/`roth_first` already share `_ordered_draw`
-   with parity tests (section 4); `optimal`'s LTCG-threshold logic is
-   still fully independent.
-5. **Complete Roth conversion reconciliation (matched with/without-
-   conversion tests) — PARTIALLY DONE.** The with/without paths already
-   share bucket order and tax treatment (section 6); a dedicated matched-
-   pair test suite covering RMD impact/cohort growth/unmet-need
-   specifically wasn't added this pass.
+   equivalent — DONE (equivalence proven, not full migration).**
+   `_swr_year_step` extracted and parity-tested against
+   `simulate_withdrawal_year`: 8 hand-picked cases, 200 randomized annual
+   cases, and a full 20-year chained scenario (209 tests total). Full
+   engine migration remains reverted — still measured >2x slower,
+   unchanged from the original exception. See `CALCULATION_CONTRACT.md`
+   section 10.
+4. **Tax-efficiency's "optimal" strategy onto the shared ledger —
+   DONE.** Extracted into `_optimal_draw`, 7 parity tests decomposing its
+   3-phase policy into 3 chained `simulate_withdrawal_year` calls. See
+   section 10.
+5. **Complete Roth conversion reconciliation — DONE.**
+   `test_roth_conversion_reconciliation.py`: a 36-case cohort-growth
+   matrix, a matched with/without-conversion pair, RMD impact, tax
+   funding, and unmet-spending checks (40 tests). See section 10.
 6. **Consolidate survivor calculations around the shared account state —
-   NOT DONE**, beyond the timeline fix in item 1. Survivor still models
-   a single aggregate balance, not `AccountState`.
+   SUBSTANTIALLY ALREADY DONE**, from a prior session's migration, not
+   new this pass: `run_survivor_scenario` already calls
+   `simulate_withdrawal_year` with `AccountState`, so growth/tax/unmet-
+   need already go through the shared ledger. What's still genuinely
+   independent is the single-aggregate-bucket policy itself (survivor
+   never models pretax/roth/taxable/hsa separately) — a deliberate
+   policy choice per the existing material-assumptions list, not an
+   unconsolidated ledger.
 7. **Education/Kids: compare/share drawdown, rollover, custodial, and
    timeline calcs — NOT DONE.** Phase 5's scoped saving-phase
    consolidation stands; the drawdown/rollover/custodial/timeline halves
-   remain independent, as previously scoped and documented.
-8. **API-output-level invariant tests across all consumers — PARTIALLY
-   DONE.** `TestPastRetirementAgeTimelineConsistency` covers exactly this
-   for the timeline fix; a broader sweep (every consumer's effective
-   ages/horizons/SS/pension/event-effects/unmet-needs/final-balances, not
-   just the past-ret_age case) wasn't run this pass.
-9. **Duplicate-formula inventory — DONE, consolidation partial.**
-   `CALCULATION_CONTRACT.md` section 9 lists what's shared and what
-   remains duplicated with reasoning (healthcare phasing across ~5 call
-   sites is a real remaining item, not yet extracted; account-bucket
-   representation and the two SS-COLA formula forms are justified
-   exceptions, not drift risks).
+   remain independent, as previously scoped and documented. Still real
+   remaining work, still deliberately not attempted without a specific
+   bug motivating it (see Phase 5's own reasoning).
+8. **API-output-level invariant tests across all consumers —
+   SUBSTANTIALLY ALREADY DONE**, from Phase 6 (an earlier pass in this
+   same branch), not new this pass: `test_cross_tool_reconciliation.py`
+   already covers effective-age/horizon consistency
+   (`TestRetirementEndAgeRespectedEverywhere`,
+   `TestPastRetirementAgeTimelineConsistency`), SS/pension consistency
+   (`TestGuaranteedIncomeConsistentAcrossConsumers`), no-negative-balance
+   invariants (`TestNoConsumerReportsANegativeBalance`), and life-event
+   replay invariants (`TestCompletedLifeEventsNotReplayedInWithdrawalPhase`)
+   across all 6 consumers already. Not exhaustive (e.g. no single test
+   asserts EVERY field item 8 names for EVERY consumer in one pass), but
+   the substance of the ask is covered, not absent.
+9. **Duplicate-formula inventory — DONE, consolidation substantially
+   advanced.** `healthcare_for_age` now eliminates the healthcare-
+   phasing duplicate the inventory flagged (5 call sites → 1 shared
+   function). Account-bucket representation and the two SS-COLA formula
+   forms remain justified exceptions, not drift risks, as originally
+   documented.
 
 **Closing directive:** the two adjacent cases (asset-sale timing,
-survivor `death_age` default) are resolved by correcting the reference
+survivor `death_age` default) were resolved by correcting the reference
 implementation itself, not just matching consumers to a known-wrong
-baseline — see section 9's detailed account, including a real subtlety
-found along the way (the asset-sale bug was a single-count with missing
-compounding, not a double-count or a drop, and was invisible at 0%
-returns). The systematic matrices were re-run against these changes
-(787 tests passing) but NOT expanded into the broader item-8 sweep the
-directive also asked for.
+baseline (first pass). The systematic matrices have been substantially
+expanded this pass (SWR's 209-case matrix, Roth's 40-test reconciliation
+suite, tax-efficiency's 7 new parity cases) — this now covers most of
+what the directive's "expand the systematic matrices" asked for, though
+not exhaustively for every consumer.
 
-**In short: item 1 is genuinely finished and item 9 is partially
-finished; items 2–8 are real, substantial remaining work, not implied
-complete by anything above.** This pass prioritized the two items most
-directly tied to the reference-implementation-correctness principle the
-closing directive emphasized, plus the foundational module every later
-item would build on, over spreading effort thin across all 9 at once.
+**In short, after both passes: items 1, 3, 4, 5, and 9 are done; items 6
+and 8 are substantially already satisfied by earlier work in this
+branch (not net-new, but genuinely covering the ask); items 2 and 7
+remain real, open work.** Item 2 needs a genuine shared annual-input
+builder beyond the one piece (`healthcare_for_age`) extracted so far.
+Item 7 was previously scoped and deliberately declined without a
+specific motivating bug — that reasoning still stands unless Jason wants
+it revisited regardless.
 
 ## A third follow-up review found a systemic timeline bug — also fixed
 
@@ -334,10 +360,11 @@ check.
 
 ### Phase 7 — This handoff, verification
 
-- Backend: **787 passed**, **97.50% coverage** (floor 95%) — after the
-  timeline-normalizer pass; was 680/97.45% right after Phase 6,
-  685/97.46% after the first review's fixes, 761/97.47% after the
-  second, 767/97.47% after the third.
+- Backend: **1048 passed**, **97.57% coverage** (floor 95%) — after
+  closing items 3/4/5; was 680/97.45% right after Phase 6, 685/97.46%
+  after the first review's fixes, 761/97.47% after the second,
+  767/97.47% after the third, 787/97.50% after the timeline-normalizer
+  pass.
 - Frontend: **13 passed** (unchanged — no frontend code touched this
   session), build succeeds (`vite build`, same pre-existing >500kB chunk
   warning as before, unrelated).
