@@ -40,10 +40,62 @@ class TestRunSwrAnalysis:
         assert result["total_safe_spend"] >= result["safe_withdrawal_annual"]
 
     def test_justin_ss_age_setting_is_respected(self, sample_inputs, sample_accounts):
-        # ss_start_age = max(jason_ss_age, justin_ss_age); early jason_ss_age=62.
+        """Regression (external audit 2026-09-07): ss_start_age (and the
+        "guaranteed_income_annual"/"guaranteed_income_steadystate" figures
+        derived alongside it) used to compare justin_ss_age directly
+        against Jason's own ret_age/age with no adjustment for the
+        couple's age gap — the same bug already fixed in this function's
+        withdrawal loop, just missed in this summary block. sample_inputs
+        has jason_age=50, justin_age=48 (a 2-year gap); at ret_age=60,
+        Justin is only 58. With justin_ss_age=63, Justin doesn't reach 63
+        until Jason turns 65 — that's the correct "both streams active"
+        age, not the raw max(62, 63)=63 the old bug reported (which
+        wrongly assumed Justin's claim age applied to JASON's own age)."""
         custom = {**sample_inputs, "justin_ss_age": 63}
         result = run_swr_analysis(custom, sample_accounts, ret_age=60, ss_timing="early")
-        assert result["ss_start_age"] == 63
+        assert result["ss_start_age"] == 65
+
+    def test_guaranteed_day_one_respects_spousal_age_gap(self, sample_inputs, sample_accounts):
+        """Regression (external audit 2026-09-07): reproduces the audit's
+        exact case — primary retiring at an age where the spouse (a
+        10-year age gap here) hasn't reached their own SS claiming age
+        yet. guaranteed_income_annual (the "day one" figure) must NOT
+        include the spousal benefit before the spouse has actually
+        reached their own claiming age — proven by comparing against an
+        otherwise-identical household with $0 spousal SS: if the spousal
+        benefit isn't yet active, changing it from $20,000 to $0 must not
+        change guaranteed_income_annual at all."""
+        base = {**sample_inputs, "jason_age": 57, "justin_age": 47,  # 10-year gap
+                "justin_ss_age": 62, "justin_social_security": 0}
+        with_spousal = {**base, "justin_social_security": 20000}
+        r_base = run_swr_analysis(base, sample_accounts, ret_age=67, ss_timing="early")
+        r_with = run_swr_analysis(with_spousal, sample_accounts, ret_age=67, ss_timing="early")
+        # Justin is 57 when Jason retires at 67 (10-yr gap) — 5 years short of 62.
+        assert r_with["justin_ss_annual"] == 20000
+        assert r_with["guaranteed_income_annual"] == r_base["guaranteed_income_annual"]
+
+    def test_safe_withdrawal_rate_not_capped_at_15_percent(self, sample_inputs, sample_accounts):
+        """Regression (external audit 2026-09-07): the binary search's
+        upper bound was a hardcoded portfolio * 0.15 with no expansion —
+        if the true safe rate was actually higher (plausible for a short
+        horizon with no other drag), the search just converged to that
+        fixed ceiling and reported 15% regardless of how much more the
+        plan could actually support. A one-year horizon with a $1M
+        taxable-only portfolio, zero taxes/growth/inflation/guaranteed
+        income should support withdrawing most of the portfolio (survival
+        only requires ending >= $0 after the one modeled year), nowhere
+        near capped at 15%."""
+        inputs = {**sample_inputs, "jason_age": 60, "justin_age": 60,
+                  "inflation_rate": 0, "expected_return_pre_retirement": 0,
+                  "expected_return_post_retirement": 0, "retirement_end_age": 61,
+                  "pension_55": 0, "pension_60": 0, "pension_65": 0,
+                  "jason_social_security": 0, "jason_ss_delayed": 0, "justin_social_security": 0,
+                  "healthcare_pre_medicare": 0, "healthcare_post_medicare": 0,
+                  "w2_salary": 0, "annual_401k_contribution": 0, "annual_hsa_contribution": 0}
+        accounts = [{"name": "Brokerage", "account_type": "taxable", "owner": "joint", "balance": 1_000_000}]
+        result = run_swr_analysis(inputs, accounts, ret_age=60, ss_timing="early")
+        assert result["safe_withdrawal_rate"] > 50.0  # nowhere near the old 15% ceiling
+        assert result["hit_search_limit"] is False
 
     def test_early_vs_delayed_timing_differ(self, sample_inputs, sample_accounts):
         early = run_swr_analysis(sample_inputs, sample_accounts, ret_age=60, ss_timing="early")
@@ -124,12 +176,152 @@ class TestRunRothConversionAnalysis:
         assert with_brokerage["schedule"][0]["taxable_balance"] > 0
         assert without_brokerage["schedule"][0]["taxable_balance"] == 0
 
+    def test_post_retirement_asset_sale_reaches_conversion_schedule(self, sample_inputs, sample_accounts):
+        """Regression (external audit 2026-09-07): this function only saw
+        life_events/asset sales through run_retirement_projection's
+        pre-retirement starting balance — a sale scheduled AFTER
+        retirement (sale_age > ret_age) had zero effect on the conversion
+        schedule, same root cause as the withdrawal-phase gap already
+        fixed in run_retirement_projection/Monte Carlo/stress/SWR."""
+        base_inputs = {**sample_inputs, "jason_age": 60}
+        inputs_sale = {**base_inputs, "asset2_sale_age": 62, "asset2_sale_net": 500000}
+        baseline  = run_roth_conversion_analysis(base_inputs, sample_accounts, ret_age=60, ss_timing="early")
+        with_sale = run_roth_conversion_analysis(inputs_sale, sample_accounts, ret_age=60, ss_timing="early")
+        # The sale lands in the yr=2 row (age 62) — taxable_balance there
+        # (start-of-year, before the sale cash is added) is unaffected,
+        # but the row's own conversion room / taxable_after should differ
+        # once the $500K cash arrives that year.
+        assert with_sale["schedule"][2]["taxable_after"] > baseline["schedule"][2]["taxable_after"]
+
+    def test_spending_does_not_freeze_across_conversion_years(self, sample_inputs):
+        """Regression (external audit 2026-09-07): income_need used to
+        inflate to the retirement date ONCE and then reuse that same
+        frozen value for every single year of the conversion window,
+        instead of continuing to inflate year over year during
+        retirement — "inflates to retirement once, then freezes spending
+        for all conversion years." With no taxable assets (so the full
+        need routes through pretax) and no guaranteed income, each year's
+        base_taxable_income (need minus a constant standard deduction)
+        must strictly increase year over year, not stay flat."""
+        inputs = {**sample_inputs, "jason_age": 60, "justin_age": 60, "inflation_rate": 0.03,
+                  "jason_social_security": 0, "jason_ss_delayed": 0, "justin_social_security": 0,
+                  "pension_55": 0, "pension_60": 0, "pension_65": 0}
+        no_taxable = [{"name": "IRA", "account_type": "401k", "owner": "jason", "balance": 5_000_000}]
+        result = run_roth_conversion_analysis(inputs, no_taxable, ret_age=60, ss_timing="early")
+        needs = [row["base_taxable_income"] for row in result["schedule"][:5]]
+        assert needs == sorted(needs)
+        assert needs[-1] > needs[0]
+
+    def test_no_conversion_baseline_also_spends_down_pretax(self, sample_inputs):
+        """Regression (external audit 2026-09-07): the "without
+        conversions" RMD comparison used to just compound pretax_at_ret
+        with ZERO withdrawals for the whole conversion window, as if the
+        household spent nothing at all — crediting that side with free
+        money made conversions look like they'd caused more of the
+        pretax decline than they really did. With real spending ($100K/yr
+        from a $1M IRA, 0% growth), the "no conversion" baseline must be
+        well below the naive pure-compounded $1,000,000 the bug would
+        have reported, since real spending draws it down over the years
+        regardless of whether any conversions happen."""
+        inputs = {**sample_inputs, "jason_age": 60, "justin_age": 60, "expected_return_post_retirement": 0.0,
+                  "retirement_income_today_dollars": 100000, "inflation_rate": 0.0,
+                  "healthcare_pre_medicare": 0, "healthcare_post_medicare": 0,
+                  "jason_social_security": 0, "jason_ss_delayed": 0, "justin_social_security": 0,
+                  "pension_55": 0, "pension_60": 0, "pension_65": 0}
+        accounts = [{"name": "IRA", "account_type": "401k", "owner": "jason", "balance": 1_000_000}]
+        result = run_roth_conversion_analysis(inputs, accounts, ret_age=60, ss_timing="early")
+        assert result["pretax_at_rmd_age_no_conversion"] < 1_000_000
+
+    def test_conversion_tax_is_funded_from_taxable_not_reported_unfunded(self, sample_inputs):
+        """Regression (external audit 2026-09-07): tax_cost used to be
+        computed and reported but never deducted from any bucket — a
+        conversion "cost" $31,592 in tax while combined assets stayed at
+        $900,000, as if the tax had no funding source. Standard practice
+        pays a Roth conversion's tax from OUTSIDE the IRA (taxable), so a
+        modest taxable balance should now cap how much can be converted —
+        and that same taxable balance must actually shrink by the tax
+        paid, not just report a number nobody paid."""
+        inputs = {**sample_inputs, "jason_age": 60, "justin_age": 60, "expected_return_post_retirement": 0.0,
+                  "retirement_income_today_dollars": 0, "healthcare_pre_medicare": 0, "healthcare_post_medicare": 0,
+                  "jason_social_security": 0, "jason_ss_delayed": 0, "justin_social_security": 0,
+                  "pension_55": 0, "pension_60": 0, "pension_65": 0}
+        accounts = [
+            {"name": "IRA", "account_type": "401k", "owner": "jason", "balance": 1_000_000},
+            {"name": "Brokerage", "account_type": "taxable", "owner": "joint", "balance": 22_000},
+        ]
+        result = run_roth_conversion_analysis(inputs, accounts, ret_age=60, ss_timing="early")
+        year1 = result["schedule"][0]
+        # $22,000 taxable / 22% = $100,000 is the most conversion this
+        # household can actually afford the tax on, regardless of how
+        # much room the 22% bracket itself has.
+        assert year1["optimal_conversion"] == pytest.approx(100000, abs=1)
+        assert year1["tax_cost"] == pytest.approx(22000, abs=1)
+        assert year1["taxable_after"] == pytest.approx(0, abs=1)
+
+    def test_roth_conversion_never_goes_negative(self, sample_inputs, sample_accounts):
+        """Regression (external audit 2026-09-07): the "shortfall spills
+        into Roth" term (when pretax can't cover both its own spending
+        draw and the conversion in the same year) had no floor, so a
+        large enough shortfall could report a genuinely negative Roth
+        balance. A thin pretax balance against a large spending need,
+        with the RMD-start horizon giving many conversion years to
+        accumulate shortfalls, must never drive any schedule row's
+        roth_after below zero."""
+        thin_accounts = [
+            {"name": "IRA", "account_type": "401k", "owner": "jason", "balance": 5_000},
+            {"name": "Roth", "account_type": "roth_ira", "owner": "jason", "balance": 1_000},
+        ]
+        inputs = {**sample_inputs, "jason_age": 60, "justin_age": 60, "retirement_income_today_dollars": 300000}
+        result = run_roth_conversion_analysis(inputs, thin_accounts, ret_age=60, ss_timing="early")
+        assert all(row["roth_after"] >= 0 for row in result["schedule"])
+
 
 class TestRunTaxEfficiencySimulation:
     @pytest.mark.parametrize("age", INTERMEDIATE_AGES)
     def test_intermediate_ages_do_not_crash(self, sample_inputs, sample_accounts, age):
         result = run_tax_efficiency_simulation(sample_inputs, sample_accounts, ret_age=age, ss_timing="early")
         assert result is not None
+
+    def test_spending_inflates_to_retirement_before_the_yearly_loop(self, sample_inputs, monkeypatch):
+        """Regression (external audit 2026-09-07): year_need used to
+        inflate income_today only by `yr` (years INTO retirement),
+        omitting the years BETWEEN today and retirement entirely — a
+        household retiring 10 years from now with 3% inflation should
+        enter retirement needing $134,392 (from $100,000 today), not
+        $100,000. Verified indirectly: with 0% growth and a huge taxable
+        balance (so it never runs low enough to matter), the first year's
+        withdrawal (grossed up at the 15% taxable-first rate) reveals
+        exactly what year_need was computed as."""
+        import random as random_module
+        monkeypatch.setattr(random_module, "gauss", lambda mu, sigma: 0.0)
+        inputs = {
+            **sample_inputs, "jason_age": 50, "justin_age": 50,
+            "retirement_income_today_dollars": 100000, "inflation_rate": 0.03,
+            "expected_return_pre_retirement": 0.0, "expected_return_post_retirement": 0.0,
+            "healthcare_pre_medicare": 0, "healthcare_post_medicare": 0,
+            "jason_social_security": 0, "jason_ss_delayed": 0, "justin_social_security": 0,
+            "pension_55": 0, "pension_60": 0, "pension_65": 0,
+            "w2_salary": 0, "annual_401k_contribution": 0, "annual_hsa_contribution": 0,
+            "retirement_end_age": 61,
+        }
+        accounts = [{"name": "Brokerage", "account_type": "taxable", "owner": "joint", "balance": 10_000_000}]
+        result = run_tax_efficiency_simulation(inputs, accounts, ret_age=60, ss_timing="early")
+        # income_at_ret = 100,000 * 1.03**10 = 134,391.64; grossed at 15%:
+        # 134,391.64 / 0.85 = 158,107.81 drawn from the $10M taxable bucket.
+        ending = result["strategies"]["taxable_first"]["median_final_balance"]
+        assert ending == pytest.approx(9_841_892, abs=5)
+
+    def test_post_retirement_asset_sale_improves_outcome(self, sample_inputs, sample_accounts):
+        """Regression (external audit 2026-09-07): this function only saw
+        life_events/asset sales through run_retirement_projection's
+        pre-retirement starting balance — a sale scheduled AFTER
+        retirement had zero effect on the strategy comparison."""
+        base_inputs = {**sample_inputs, "jason_age": 60, "retirement_end_age": 65}
+        inputs_sale = {**base_inputs, "asset2_sale_age": 62, "asset2_sale_net": 500000}
+        baseline  = run_tax_efficiency_simulation(base_inputs, sample_accounts, ret_age=60, ss_timing="early")
+        with_sale = run_tax_efficiency_simulation(inputs_sale, sample_accounts, ret_age=60, ss_timing="early")
+        assert with_sale["strategies"]["taxable_first"]["median_final_balance"] > \
+            baseline["strategies"]["taxable_first"]["median_final_balance"]
 
     def test_reported_tax_actually_reduces_ending_balance(self, sample_inputs, monkeypatch):
         """Regression (external audit 2026-09-07): tax_this_year accumulated
@@ -166,6 +358,40 @@ class TestRunTaxEfficiencySimulation:
         assert taxable_first["median_final_balance"] == pytest.approx(871795, abs=10)
         assert taxable_first["median_final_balance"] < 900000
 
+    def test_optimal_strategy_funds_spending_above_the_ltcg_cap(self, sample_inputs, monkeypatch):
+        """Regression (external audit 2026-09-07): the "optimal" strategy
+        drew taxable only up to the 0%-LTCG cap_gains_limit ($98,900), then
+        moved on to pretax/roth/hsa and never came back to taxable for the
+        rest — with those three buckets empty, any spending need above the
+        cap was silently discarded. success_rate checked only the ending
+        balance, never whether spending was actually funded, so this
+        reported 100% success while $101,100 of a $200,000 need per year
+        just never happened. Reproduces the audit's exact case: $1M
+        taxable-only, $200K/yr spend, 1 year, 0% growth."""
+        import random as random_module
+        monkeypatch.setattr(random_module, "gauss", lambda mu, sigma: 0.0)
+
+        inputs = {
+            **sample_inputs, "jason_age": 60, "justin_age": 60,
+            "retirement_income_today_dollars": 200000, "inflation_rate": 0,
+            "expected_return_pre_retirement": 0, "expected_return_post_retirement": 0,
+            "healthcare_pre_medicare": 0, "healthcare_post_medicare": 0,
+            "jason_social_security": 0, "jason_ss_delayed": 0, "justin_social_security": 0,
+            "pension_55": 0, "pension_60": 0, "pension_65": 0,
+            "w2_salary": 0, "annual_401k_contribution": 0, "annual_hsa_contribution": 0,
+            "retirement_end_age": 61,
+        }
+        accounts = [{"name": "Brokerage", "account_type": "taxable", "owner": "joint", "balance": 1_000_000}]
+        result = run_tax_efficiency_simulation(inputs, accounts, ret_age=60, ss_timing="early")
+
+        optimal = result["strategies"]["optimal"]
+        # $98,900 at 0% + the remaining $101,100 grossed up at 15% LTCG:
+        # $101,100 / 0.85 = $118,941 gross, $17,841 tax, ending ~$782,159 —
+        # not the bug's un-funded $901,100 with $0 tax on the shortfall.
+        assert optimal["median_lifetime_tax"] == pytest.approx(17841, abs=5)
+        assert optimal["median_final_balance"] == pytest.approx(782159, abs=10)
+        assert optimal["success_rate"] == 100.0
+
 
 class TestRunContributionSensitivity:
     @pytest.mark.parametrize("age", INTERMEDIATE_AGES)
@@ -184,6 +410,27 @@ class TestRunContributionSensitivity:
         current = result["scenarios"][0]
         assert current["label"] == "Current (10%)"
         assert current["employee_pct"] == 10.0
+        assert current["portfolio_delta"] == 0
+        assert current["portfolio_at_ret"] == result["base_portfolio"]
+
+    def test_current_scenario_zero_delta_even_when_capped_by_irs_limit(self, sample_inputs, sample_accounts):
+        """Regression (external audit 2026-09-07): the prior fix
+        (test_current_scenario_reflects_real_employee_pct) doesn't
+        exercise this — sample_inputs' $150K salary at 10% ($15,000/yr)
+        never comes near the IRS catch-up limit. At a high enough salary
+        (audit's exact repro: $500K salary, 10% current contribution,
+        jason_age 50 -> $32,500 catch-up limit), "Current"'s own
+        annual_employee gets capped to $32,500 while the delta reference
+        used to stay the un-capped salary*emp_pct_base ($50,000) —
+        producing a nonzero "Current" delta against ITSELF, with no
+        setting changed. The Current row must always net to exactly zero,
+        regardless of whether the cap binds."""
+        inputs = {**sample_inputs, "jason_age": 50, "w2_salary": 500000, "employee_401k_pct": 0.10,
+                  "expected_return_pre_retirement": 0.0}
+        result = run_contribution_sensitivity(inputs, sample_accounts, ret_age=60)
+        current = result["scenarios"][0]
+        assert current["label"] == "Current (10%)"
+        assert current["annual_employee"] == 32500  # capped, not the uncapped $50,000
         assert current["portfolio_delta"] == 0
         assert current["portfolio_at_ret"] == result["base_portfolio"]
 
@@ -373,6 +620,55 @@ class TestRunSurvivorScenario:
         result = run_survivor_scenario(sample_inputs, sample_accounts, ret_age=60, deceased="jason", death_age=70)
         assert result["has_data"] is True
         assert result["deceased"] == "jason"
+
+    def test_death_year_spending_is_not_double_counted(self, sample_inputs):
+        """Regression (external audit 2026-09-07): death_row["portfolio_
+        balance"] (the baseline's END-OF-YEAR figure for the death year)
+        already reflects a full year of both-alive spending — the
+        survivor's own loop used to ALSO start spending at that same age,
+        double-counting that year. The survivor's first modeled year must
+        be death_jason_age + 1, and its starting_balance must equal
+        portfolio_at_death exactly (no extra draw already applied)."""
+        inputs = {**sample_inputs, "jason_age": 50, "justin_age": 50,
+                  "retirement_income_today_dollars": 100000, "inflation_rate": 0.03,
+                  "expected_return_pre_retirement": 0.0, "expected_return_post_retirement": 0.0,
+                  "healthcare_pre_medicare": 0, "healthcare_post_medicare": 0,
+                  "jason_social_security": 0, "jason_ss_delayed": 0, "justin_social_security": 0,
+                  "pension_55": 0, "pension_60": 0, "pension_65": 0,
+                  "jason_life_basic": 0, "jason_life_supplemental": 0, "jason_life_term": 0}
+        accounts = [{"name": "Brokerage", "account_type": "taxable", "owner": "joint", "balance": 1_000_000}]
+        result = run_survivor_scenario(inputs, accounts, ret_age=60, deceased="jason", death_age=60,
+                                        survivor_need_factor=1.0)
+        assert result["life_insurance_payout"] == 0
+        assert result["schedule"][0]["age"] == 61
+        assert result["schedule"][0]["starting_balance"] == result["portfolio_at_death"]
+
+    def test_pension_does_not_get_cola_in_survivor_schedule(self, sample_inputs):
+        """Regression (external audit 2026-09-07): pension is frozen (no
+        COLA) everywhere else in this app, but the survivor loop applied
+        COLA to the combined pension+SS guaranteed total — inflating the
+        supposedly-frozen pension right along with need, which (with a
+        pension sized to just cover year-one need) would mean the draw
+        never grows and the plan trivially "survives" forever. With the
+        fix, a frozen pension falls further behind rising need every
+        year, so draws must strictly increase over time."""
+        # jason_age == ret_age == death_age: no pre-retirement years, so
+        # income_need_at_death == income_today exactly (years_since_today
+        # == 0) — makes the "pension sized to ~ cover year-one need" setup
+        # exact instead of needing to pre-compute retirement-date inflation.
+        inputs = {**sample_inputs, "jason_age": 60, "justin_age": 60,
+                  "retirement_income_today_dollars": 138423, "inflation_rate": 0.03,
+                  "expected_return_pre_retirement": 0.0, "expected_return_post_retirement": 0.0,
+                  "healthcare_pre_medicare": 0, "healthcare_post_medicare": 0,
+                  "jason_social_security": 0, "jason_ss_delayed": 0, "justin_social_security": 0,
+                  "pension_55": 0, "pension_60": 138423, "pension_65": 138423,
+                  "jason_life_basic": 0, "jason_life_supplemental": 0, "jason_life_term": 0}
+        accounts = [{"name": "Brokerage", "account_type": "taxable", "owner": "joint", "balance": 1_000_000}]
+        result = run_survivor_scenario(inputs, accounts, ret_age=60, deceased="jason", death_age=60,
+                                        survivor_need_factor=1.0)
+        draws = [row["draw"] for row in result["schedule"][:10]]
+        assert draws[0] < 10000  # pension ~ covers year-one need almost exactly
+        assert draws[-1] > draws[0] + 1000  # need outpaces the frozen pension over time
 
     def test_life_insurance_payout_included_for_jason(self, sample_inputs, sample_accounts):
         inputs = {**sample_inputs, "jason_life_basic": 425000, "jason_life_supplemental": 1000000, "jason_life_term": 500000}

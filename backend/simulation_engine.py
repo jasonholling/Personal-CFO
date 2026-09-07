@@ -479,8 +479,27 @@ def run_swr_analysis(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_t
                 successes += 1
         return successes / N
 
-    # Binary search for the withdrawal amount that hits target_success
-    lo, hi = 0, portfolio * 0.15  # search between 0 and 15% of portfolio
+    # Binary search for the withdrawal amount that hits target_success.
+    # The upper bound used to be a hardcoded portfolio * 0.15 with no
+    # expansion — if the TRUE safe withdrawal rate was actually higher
+    # than 15% (plausible for a short horizon, strong guaranteed income,
+    # or event cash covering most of retirement), the search just
+    # converged to that fixed ceiling and silently reported 15% as "the"
+    # safe rate instead of the real, higher number (external audit
+    # 2026-09-07, reproduced: $1M brokerage, one modeled retirement year,
+    # no taxes/returns/inflation -> true safe spend is most of the $1M,
+    # not the $150K the old fixed cap reported). Expand hi by doubling
+    # until it actually fails target_success (bounded so this can't loop
+    # forever), then binary-search within that real bracket.
+    lo, hi = 0, portfolio * 0.15 if portfolio > 0 else 0
+    hit_search_limit = False
+    if portfolio > 0:
+        expansions = 0
+        while success_at_withdrawal(hi) >= target_success and expansions < 12:
+            lo = hi
+            hi *= 2
+            expansions += 1
+        hit_search_limit = expansions >= 12
     for _ in range(20):
         mid = (lo + hi) / 2
         rate = success_at_withdrawal(mid)
@@ -492,10 +511,25 @@ def run_swr_analysis(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_t
     safe_withdrawal = lo
     safe_withdrawal_rate = safe_withdrawal / portfolio if portfolio > 0 else 0
 
-    # Guaranteed income steady-state (once all income sources active)
-    # Show pension + SS as they'll be in the first full year all sources are running
-    ss_start_age   = max(jason_ss_age, justin_ss_age)  # age when both SS streams active
-    years_to_ss    = max(0, ss_start_age - ret_age)
+    # Guaranteed income steady-state (once all income sources active).
+    # justin_ss_age is JUSTIN's own claiming age — comparing it against
+    # ret_age (Jason's retirement age) directly, with no adjustment for
+    # the couple's age gap, is the same class of bug already fixed in the
+    # withdrawal loop just above (and in _run_single/
+    # run_retirement_projection) — just missed here, in this summary-only
+    # block (external audit 2026-09-07, reproduced: primary age 67, spouse
+    # age 57, spouse claiming at 62 — 5 years still to wait — reported as
+    # "$20K guaranteed income on day one").
+    year_gap          = jason_age - justin_age
+    justin_age_at_ret = ret_age - year_gap
+    years_until_jason_claims  = max(0, jason_ss_age - ret_age)
+    years_until_justin_claims = max(0, justin_ss_age - justin_age_at_ret)
+    years_to_ss    = max(years_until_jason_claims, years_until_justin_claims)  # both active
+    # Jason's own age once both SS streams are active — replaces the old
+    # ss_start_age = max(jason_ss_age, justin_ss_age), which mixed two
+    # different people's raw claim ages together with no age-gap
+    # adjustment and wasn't even a meaningful single "age" for the couple.
+    ss_start_age   = ret_age + years_to_ss
     guaranteed_first_year = (
         pension_annual +
         jason_ss_annual * ((1 + inflation) ** years_to_ss) +
@@ -505,7 +539,7 @@ def run_swr_analysis(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_t
     guaranteed_day_one = pension_annual
     if ret_age >= jason_ss_age:
         guaranteed_day_one += jason_ss_annual
-    if ret_age >= justin_ss_age:
+    if justin_age_at_ret >= justin_ss_age:
         guaranteed_day_one += justin_ss
 
     total_safe_spend    = safe_withdrawal + guaranteed_day_one
@@ -529,6 +563,7 @@ def run_swr_analysis(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_t
         "target_success_rate":       round(target_success * 100),
         "retirement_age":            ret_age,
         "ss_timing":                 ss_timing,
+        "hit_search_limit":          hit_search_limit,
     }
 
 
@@ -867,6 +902,17 @@ def run_roth_conversion_analysis(inputs: Dict, accounts: List[Dict], ret_age: in
     inflation    = inputs["inflation_rate"]
     post_ret     = inputs["expected_return_post_retirement"]
     income_today = inputs["retirement_income_today_dollars"]
+    # Healthcare wasn't modeled in this function's spending need at all —
+    # every other withdrawal-phase loop in this file (run_tax_efficiency_
+    # simulation, _run_single, run_swr_analysis) adds it, so leaving it
+    # out here understated real spending and overstated how much 22%-
+    # bracket room was actually available for a genuine conversion
+    # (external audit 2026-09-07). Doesn't attempt the age-55 bridge-job/
+    # kids-at-home phase modeling _run_single has — that's a separate,
+    # larger scope than this fix; the simple pre/post-Medicare split
+    # already matches run_tax_efficiency_simulation's own treatment.
+    healthcare_pre  = inputs.get("healthcare_pre_medicare", 0)
+    healthcare_post = inputs.get("healthcare_post_medicare", 0)
     jason_age    = inputs["jason_age"]
     justin_age   = inputs["justin_age"]
     pension_annual = pension_for_age(inputs, ret_age)
@@ -909,17 +955,45 @@ def run_roth_conversion_analysis(inputs: Dict, accounts: List[Dict], ret_age: in
 
     conversion_years = RMD_START_AGE - ret_age
 
+    # Pre-inflate today's-dollars figures to the retirement start date —
+    # the yearly loop below then inflates further by `yr` each year. This
+    # used to inflate income_need by years_to_ret ONCE and then reuse that
+    # SAME value for every year of the conversion window, effectively
+    # freezing spending at the retirement-year figure for the whole
+    # horizon instead of continuing to inflate year over year (external
+    # audit 2026-09-07 — "inflates to retirement once, then freezes
+    # spending for all conversion years").
+    income_at_ret        = income_today * ((1 + inflation) ** years_to_ret)
+    healthcare_pre_at_ret  = healthcare_pre  * ((1 + inflation) ** years_to_ret)
+    healthcare_post_at_ret = healthcare_post * ((1 + inflation) ** years_to_ret)
+
+    # Post-retirement life events and Settings-page asset sales — this
+    # loop used to have no way to see either, unlike run_retirement_
+    # projection/Monte Carlo/stress/SWR, which all apply them during the
+    # withdrawal phase. A $500K sale dated after retirement produced
+    # identical Roth-conversion output with or without it (external audit
+    # 2026-09-07).
+    retirement_year = CURRENT_YEAR + years_to_ret
+    _, post_events = _split_life_events(life_events, retirement_year)
+    post_events = post_events + _post_retirement_asset_sale_events(inputs, jason_age, ret_age)
+
     for yr in range(conversion_years):
         age = ret_age + yr
 
         # Income this year (portfolio draw + pension + SS if active)
-        income_need   = income_today * ((1 + inflation) ** years_to_ret)
+        hc = healthcare_pre_at_ret if age < 65 else healthcare_post_at_ret
+        income_need   = income_at_ret * ((1 + inflation) ** yr) + hc * ((1 + inflation) ** yr)
         year_pen      = pension_annual
         year_jss      = jason_ss * ((1+inflation)**max(0,age-jason_ss_age)) if age >= jason_ss_age else 0
         justin_age_this_year = age - (jason_age - justin_age)
         year_uss      = justin_ss * ((1+inflation)**max(0,justin_age_this_year-justin_ss_age)) if justin_age_this_year >= justin_ss_age else 0
         guaranteed    = year_pen + year_jss + year_uss
-        portfolio_draw = max(0, income_need - guaranteed)
+
+        calendar_year = retirement_year + yr
+        life_event_cash, life_event_monthly = _post_retirement_year_effects(post_events, calendar_year)
+        if life_event_cash:
+            taxable += life_event_cash
+        portfolio_draw = max(0, income_need - guaranteed - life_event_monthly)
 
         # Spending draws from taxable brokerage before pretax — same
         # preference order as the household's actual withdrawal waterfall
@@ -944,16 +1018,40 @@ def run_roth_conversion_analysis(inputs: Dict, accounts: List[Dict], ret_age: in
         # Room in 22% bracket
         room_in_22 = max(0, BRACKET_TOP_22 - base_taxable)
 
-        # Optimal conversion = fill 22% bracket
-        optimal_conversion = min(room_in_22, pretax)
+        # Standard practice: pay the conversion's tax bill from OUTSIDE
+        # the IRA (taxable/brokerage), not from the IRA itself — otherwise
+        # you're taxed on money that never makes it into Roth at all. This
+        # used to compute tax_cost but never deduct it from anything —
+        # lifetime_tax-style reporting with no funding source, the same
+        # class of bug as run_tax_efficiency_simulation's unfunded
+        # withdrawals (external audit 2026-09-07, reproduced: $1M IRA /
+        # $100K spend / 0% growth reported $31,592 year-one conversion tax
+        # while leaving $900,000 combined assets, and eventually a
+        # negative $500,000 Roth balance from the uncapped spending
+        # fallback below). Cap the conversion itself by what its own tax
+        # bill can actually afford from remaining taxable, rather than
+        # ever leaving a tax bill unfunded.
+        taxable_available_for_tax = max(0, taxable - taxable_draw)
+        max_conversion_affordable = (taxable_available_for_tax / TAX_BRACKET_22) if TAX_BRACKET_22 > 0 else float("inf")
 
-        # Tax cost of conversion
+        # Optimal conversion = fill 22% bracket, capped by what's actually
+        # affordable (funds available, and a tax bill that can be paid).
+        optimal_conversion = min(room_in_22, pretax, max_conversion_affordable)
+
+        # Tax cost of conversion — always <= taxable_available_for_tax by
+        # construction above, so taxable never needs an unmet-need signal
+        # or a negative floor here the way pretax/roth still might below.
         tax_cost = optimal_conversion * TAX_BRACKET_22
 
-        # Project balances
+        # Project balances. roth_after floored at 0 — the "shortfall
+        # spills into Roth" term below (when pretax can't cover both its
+        # own spending draw and the conversion) previously had no floor,
+        # so a large enough shortfall could report a NEGATIVE Roth
+        # balance rather than the account simply running out (external
+        # audit 2026-09-07).
         pretax_after   = max(0, (pretax - pretax_draw - optimal_conversion) * (1 + post_ret))
-        roth_after     = (roth + optimal_conversion - max(0, pretax_draw - max(0, pretax - optimal_conversion))) * (1 + post_ret)
-        taxable_after  = max(0, (taxable - taxable_draw) * (1 + post_ret))
+        roth_after     = max(0, (roth + optimal_conversion - max(0, pretax_draw - max(0, pretax - optimal_conversion))) * (1 + post_ret))
+        taxable_after  = max(0, (taxable - taxable_draw - tax_cost) * (1 + post_ret))
 
         yrs_to_rmd   = max(0, RMD_START_AGE - age)
         roth_fv_73   = optimal_conversion * ((1 + post_ret) ** yrs_to_rmd)
@@ -984,7 +1082,40 @@ def run_roth_conversion_analysis(inputs: Dict, accounts: List[Dict], ret_age: in
 
     total_conversions  = sum(s["optimal_conversion"] for s in schedule)
     total_tax_cost     = sum(s["tax_cost"] for s in schedule)
-    estimated_rmd_base = _rmd(pretax_at_ret * ((1+post_ret)**conversion_years), RMD_START_AGE, RMD_START_AGE)
+
+    # "Without conversions" RMD baseline — used to just compound
+    # pretax_at_ret with ZERO withdrawals for the whole conversion
+    # window, as if the household spent nothing at all during that time.
+    # That's not a fair comparison to the with-conversions path above
+    # (which DOES spend down pretax for real living expenses every year)
+    # — crediting the no-conversion side with spending nothing made
+    # conversions look like they'd caused more of the pretax decline than
+    # they actually did, overstating the apparent RMD reduction
+    # attributable to converting (external audit 2026-09-07). Re-run the
+    # identical spending pattern (same income/guaranteed income/life
+    # events), with conversions forced to zero, so only the conversion
+    # policy differs between the two paths.
+    no_conv_pretax  = pretax_at_ret
+    no_conv_taxable = taxable_at_ret
+    for yr in range(conversion_years):
+        age = ret_age + yr
+        hc = healthcare_pre_at_ret if age < 65 else healthcare_post_at_ret
+        income_need = income_at_ret * ((1 + inflation) ** yr) + hc * ((1 + inflation) ** yr)
+        year_pen = pension_annual
+        year_jss = jason_ss * ((1+inflation)**max(0,age-jason_ss_age)) if age >= jason_ss_age else 0
+        justin_age_this_year = age - (jason_age - justin_age)
+        year_uss = justin_ss * ((1+inflation)**max(0,justin_age_this_year-justin_ss_age)) if justin_age_this_year >= justin_ss_age else 0
+        guaranteed = year_pen + year_jss + year_uss
+        calendar_year = retirement_year + yr
+        life_event_cash, life_event_monthly = _post_retirement_year_effects(post_events, calendar_year)
+        if life_event_cash:
+            no_conv_taxable += life_event_cash
+        portfolio_draw = max(0, income_need - guaranteed - life_event_monthly)
+        taxable_draw = min(portfolio_draw, no_conv_taxable)
+        pretax_draw  = portfolio_draw - taxable_draw
+        no_conv_pretax  = max(0, (no_conv_pretax - pretax_draw) * (1 + post_ret))
+        no_conv_taxable = max(0, (no_conv_taxable - taxable_draw) * (1 + post_ret))
+    estimated_rmd_base = _rmd(no_conv_pretax, RMD_START_AGE, RMD_START_AGE)
 
     total_tax_avoided = sum(s["tax_avoided_at_73"] for s in schedule)
     net_lifetime_benefit = total_tax_avoided - total_tax_cost
@@ -997,7 +1128,10 @@ def run_roth_conversion_analysis(inputs: Dict, accounts: List[Dict], ret_age: in
         "net_lifetime_benefit":   round(net_lifetime_benefit),
         "estimated_rmd_without_conversions": round(estimated_rmd_base),
         "estimated_rmd_with_conversions":    round(_rmd(pretax, RMD_START_AGE, RMD_START_AGE)),
-        "pretax_at_rmd_age_no_conversion":   round(pretax_at_ret * ((1+post_ret)**conversion_years)),
+        # Same fix as estimated_rmd_base above — this used to be pure
+        # compounding with no withdrawals subtracted, the identical bug
+        # duplicated in a second field.
+        "pretax_at_rmd_age_no_conversion":   round(no_conv_pretax),
         "pretax_at_rmd_age_with_conversion": round(pretax),
         "roth_at_rmd_age_with_conversion":   round(roth),
         "conversion_years":       conversion_years,
@@ -1024,6 +1158,21 @@ def run_tax_efficiency_simulation(inputs: Dict, accounts: List[Dict], ret_age: i
     income_today = inputs["retirement_income_today_dollars"]
     healthcare_pre  = inputs.get("healthcare_pre_medicare", 0)
     healthcare_post = inputs.get("healthcare_post_medicare", 0)
+
+    # income_today/healthcare_pre/healthcare_post are today's-dollars
+    # estimates — this loop used to inflate them only by `yr` (years INTO
+    # retirement), omitting the years BETWEEN today and retirement
+    # entirely, unlike run_retirement_projection's income_at_ret (which
+    # inflates by years_to_retire before the yearly loop inflates further)
+    # and _run_single's identical treatment. A household retiring 10 years
+    # from now with 3% inflation should enter retirement with a $134,392
+    # target (from $100,000 today), not $100,000 (external audit
+    # 2026-09-07). Matches run_roth_conversion_analysis's own
+    # years_to_ret_te-style pre-inflation, kept consistent across both.
+    years_to_ret_te      = max(0, ret_age - jason_age)
+    income_at_ret_te     = income_today * ((1 + inflation) ** years_to_ret_te)
+    healthcare_pre_te    = healthcare_pre * ((1 + inflation) ** years_to_ret_te)
+    healthcare_post_te   = healthcare_post * ((1 + inflation) ** years_to_ret_te)
 
     pension_annual = pension_for_age(inputs, ret_age)
     jason_ss_early  = inputs.get("jason_social_security", JASON_SS_EARLY)
@@ -1052,10 +1201,19 @@ def run_tax_efficiency_simulation(inputs: Dict, accounts: List[Dict], ret_age: i
     all_returns = [[random.gauss(post_ret, PORT_STD) for _ in range(retire_yrs)] for _ in range(N)]
     _rmd_start = rmd_start_age(jason_age)
 
+    # Post-retirement life events and Settings-page asset sales — this
+    # loop had no way to see either, unlike run_retirement_projection/
+    # Monte Carlo/stress/SWR, which all apply them during the withdrawal
+    # phase (external audit 2026-09-07).
+    retirement_year_te = CURRENT_YEAR + years_to_ret_te
+    _, post_events_te = _split_life_events(life_events, retirement_year_te)
+    post_events_te = post_events_te + _post_retirement_asset_sale_events(inputs, jason_age, ret_age)
+
     def run_strategy(strategy):
         """strategy: 'taxable_first', 'roth_first', 'optimal'"""
         total_taxes = []
         final_balances = []
+        unmet_flags = []
 
         for returns in all_returns:
             pretax  = pretax_start
@@ -1063,18 +1221,24 @@ def run_tax_efficiency_simulation(inputs: Dict, accounts: List[Dict], ret_age: i
             taxable = taxable_start
             hsa     = hsa_start
             lifetime_tax = 0
+            any_unmet_need = False
 
             for yr in range(retire_yrs):
                 age = ret_age + yr
                 ret = returns[yr]
-                hc  = healthcare_pre if age < 65 else healthcare_post
-                year_need  = income_today * ((1+inflation)**yr) + hc * ((1+inflation)**yr)
+                hc  = healthcare_pre_te if age < 65 else healthcare_post_te
+                year_need  = income_at_ret_te * ((1+inflation)**yr) + hc * ((1+inflation)**yr)
                 year_pen   = pension_annual
                 year_jss   = jason_ss_annual * ((1+inflation)**max(0,age-jason_ss_age)) if age >= jason_ss_age else 0
                 justin_age_this_year = age - (jason_age - justin_age)
                 year_uss   = justin_ss * ((1+inflation)**max(0,justin_age_this_year-justin_ss_age)) if justin_age_this_year >= justin_ss_age else 0
                 guaranteed = year_pen + year_jss + year_uss
-                net_need   = max(0, year_need - guaranteed)
+
+                calendar_year_te = retirement_year_te + yr
+                life_event_cash, life_event_monthly = _post_retirement_year_effects(post_events_te, calendar_year_te)
+                if life_event_cash:
+                    taxable += life_event_cash
+                net_need   = max(0, year_need - guaranteed - life_event_monthly)
 
                 # RMD — must take regardless of strategy
                 rmd = _rmd(pretax, age, _rmd_start)
@@ -1151,6 +1315,25 @@ def run_tax_efficiency_simulation(inputs: Dict, accounts: List[Dict], ret_age: i
                         draw = min(remaining, roth); roth -= draw; remaining -= draw
                     if remaining > 0 and hsa > 0:
                         draw = min(remaining, hsa); hsa -= draw; remaining -= draw
+                    # Above the 0%-bracket cap_gains_limit, taxable never
+                    # got revisited — a household with plenty of taxable
+                    # assets above that threshold but no pretax/roth/hsa
+                    # left had its remaining need silently discarded here,
+                    # with "success" checked only against final balance,
+                    # never against whether spending was actually funded
+                    # (external audit 2026-09-07, reproduced: $1M
+                    # brokerage / $200K spend / 1yr / 0% growth -> only
+                    # $98,900 ever funded, reported 100% success anyway).
+                    # This draw above the threshold is taxed at TAX_TAXABLE,
+                    # same simplified rate the other two strategies already
+                    # use for a taxable draw.
+                    if remaining > 0 and taxable > 0:
+                        gross = remaining / (1 - TAX_TAXABLE)
+                        draw = min(gross, taxable); taxable -= draw
+                        tax = draw * TAX_TAXABLE; tax_this_year += tax; remaining -= (draw - tax)
+
+                if remaining > 0:
+                    any_unmet_need = True
 
                 lifetime_tax += tax_this_year
                 pretax  = max(0, pretax  * (1 + ret))
@@ -1160,6 +1343,7 @@ def run_tax_efficiency_simulation(inputs: Dict, accounts: List[Dict], ret_age: i
 
             total_taxes.append(round(lifetime_tax))
             final_balances.append(round(pretax + roth + taxable + hsa))
+            unmet_flags.append(any_unmet_need)
 
         taxes_sorted = sorted(total_taxes)
         bals_sorted  = sorted(final_balances)
@@ -1168,7 +1352,13 @@ def run_tax_efficiency_simulation(inputs: Dict, accounts: List[Dict], ret_age: i
             "p10_lifetime_tax":       taxes_sorted[int(N*0.10)],
             "p90_lifetime_tax":       taxes_sorted[int(N*0.90)],
             "median_final_balance":   bals_sorted[N//2],
-            "success_rate":           round(sum(1 for b in final_balances if b > 0) / N * 100, 1),
+            # A trial with money left but an unmet spending year in
+            # between (the "optimal" strategy's fall-through gap above,
+            # before this fix) used to still count as a success — checked
+            # only the ending balance, never whether every year's need was
+            # actually funded (external audit 2026-09-07, same root cause
+            # as _run_single's on_track fix).
+            "success_rate":           round(sum(1 for b, unmet in zip(final_balances, unmet_flags) if b > 0 and not unmet) / N * 100, 1),
         }
 
     taxable_first = run_strategy('taxable_first')
@@ -1257,12 +1447,25 @@ def run_contribution_sensitivity(inputs: Dict, accounts: List[Dict], ret_age: in
     base_surplus   = base_scenario["projected_surplus"]
     base_portfolio = base_scenario["portfolio_at_retirement"]
 
+    # Every scenario's own annual_employee is capped at the IRS limit —
+    # the reference point for "how much extra is this scenario
+    # contributing" must be capped the exact same way, or the "Current"
+    # row disagrees with itself: at a high enough salary (e.g. $500K at
+    # 10% = $50,000/yr, above the $32,500 catch-up limit), "Current"'s own
+    # annual_employee gets capped to $32,500 while the un-capped
+    # salary * emp_pct_base ($50,000) was used as the delta reference,
+    # producing a nonzero "Current" delta against itself — the base
+    # projection's own $1.65M portfolio and "Current"'s reported $1.475M
+    # disagreeing with no setting having changed at all (external audit
+    # 2026-09-07).
+    current_annual_employee = min(salary * emp_pct_base, catch_up_limit)
+
     for label, emp_pct in contribution_scenarios:
         annual_employee = min(salary * emp_pct, catch_up_limit)
         annual_employer = salary * er_pct
         annual_total    = annual_employee + annual_employer
-        monthly_cost    = (annual_employee - salary * emp_pct_base) / 12
-        monthly_spending_cut = max(0, (annual_employee - salary * emp_pct_base) * (1 - 0.32) / 12)
+        monthly_cost    = (annual_employee - current_annual_employee) / 12
+        monthly_spending_cut = max(0, (annual_employee - current_annual_employee) * (1 - 0.32) / 12)
 
         # Extra (or reduced) Roth contributions vs. the real current rate,
         # compounded to retirement — signed, not clamped to a minimum of 0.
@@ -1272,7 +1475,7 @@ def run_contribution_sensitivity(inputs: Dict, accounts: List[Dict], ret_age: in
         # 0 like every other below-current scenario would then also show
         # (external audit 2026-09-07 — "10%, current, and reductions all
         # showed the same portfolio").
-        extra_annual    = annual_employee - salary * emp_pct_base
+        extra_annual    = annual_employee - current_annual_employee
         extra_fv_at_ret = _fv_annuity(extra_annual, pre_ret, years_to_ret)
 
         # For age 55: contributions stop at retirement (no employer match on extra)
@@ -1382,17 +1585,37 @@ def run_survivor_scenario(inputs: Dict, accounts: List[Dict], ret_age: int = 60,
     starting_balance     = portfolio_at_death + payout
     survivor_ss_annual   = max(inputs.get("jason_social_security", 0), inputs.get("justin_social_security", 0))
     pension_annual       = death_row["pension"]  # 100% J&S assumption already baked into this figure
-    years_since_ret      = death_row["year"] - (2026 + max(0, ret_age - jason_age))
+    # Total years from TODAY to the death year, not just from retirement
+    # to death — the old years_since_ret omitted the years between today
+    # and retirement entirely, understating income_need_at_death by
+    # exactly the same "missing pre-retirement inflation" bug already
+    # fixed elsewhere in this file for run_tax_efficiency_simulation
+    # (external audit 2026-09-07).
+    years_since_today    = death_row["year"] - CURRENT_YEAR
     income_today         = inputs["retirement_income_today_dollars"]
-    income_need_at_death = income_today * ((1 + inflation) ** years_since_ret) * survivor_need_factor
-    guaranteed_at_death  = pension_annual + survivor_ss_annual
+    income_need_at_death = income_today * ((1 + inflation) ** years_since_today) * survivor_need_factor
 
     schedule = []
     bal = starting_balance
     depleted_age = None
-    for i, age in enumerate(range(death_jason_age, end_age)):
-        need       = income_need_at_death * ((1 + inflation) ** i)
-        guaranteed = guaranteed_at_death * ((1 + inflation) ** i)
+    # The baseline's death_row["portfolio_balance"] is an END-OF-YEAR
+    # figure — it already reflects a full year of BOTH spouses' spending
+    # for the death year itself. Starting the survivor's own (reduced)
+    # spending pattern at that SAME age double-counted that year's
+    # spending: once implicitly (baked into portfolio_at_death), once
+    # explicitly (this loop's first iteration). The survivor's distinct
+    # spending pattern only actually applies from the year AFTER death
+    # (external audit 2026-09-07, reproduced: baseline age 60 ends at
+    # $865,608 after spending $134,392; survivor age 60 then spent
+    # another $100,000 in the same nominal year).
+    for i, age in enumerate(range(death_jason_age + 1, end_age)):
+        need       = income_need_at_death * ((1 + inflation) ** (i + 1))
+        # Pension is frozen (no COLA) everywhere else in this app — only
+        # Social Security gets an annual COLA. guaranteed_at_death used to
+        # apply COLA to the combined pension+SS total, inflating the
+        # (supposedly frozen) pension portion right along with SS
+        # (external audit 2026-09-07).
+        guaranteed = pension_annual + survivor_ss_annual * ((1 + inflation) ** (i + 1))
         draw       = max(0, need - guaranteed)
         # Catch the edge case where the portfolio is already at (or below)
         # zero going into this year and there's still a real gap to cover —
@@ -1411,9 +1634,16 @@ def run_survivor_scenario(inputs: Dict, accounts: List[Dict], ret_age: int = 60,
 
     additional_insurance_needed = 0
     if not survives:
-        net_need  = max(0, income_need_at_death - guaranteed_at_death)
+        # Day-one (pre-COLA) guaranteed figure — same today's-dollars
+        # approximation this capitalized-need estimate already made
+        # before the death-year-boundary fix above.
+        guaranteed_day_one = pension_annual + survivor_ss_annual
+        net_need  = max(0, income_need_at_death - guaranteed_day_one)
         real_rate = ((1 + post_ret) / (1 + inflation) - 1) if post_ret != inflation else 0.0001
-        cap_need  = _pv_annuity(net_need, real_rate, end_age - death_jason_age)
+        # Years remaining is now end_age - (death_jason_age + 1), matching
+        # the loop's actual range above (the death year itself is no
+        # longer part of the survivor's own spending window).
+        cap_need  = _pv_annuity(net_need, real_rate, end_age - death_jason_age - 1)
         additional_insurance_needed = max(0, round(cap_need - starting_balance))
 
     if survives:
