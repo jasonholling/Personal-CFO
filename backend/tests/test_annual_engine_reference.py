@@ -143,6 +143,7 @@ def test_rmd_grossed_up_draw_matches_hand_calculation():
     assert result.total_tax == pytest.approx(7_500)
     assert result.closing.pretax == pytest.approx(12_500)
     assert result.unmet_need == pytest.approx(0)
+    assert result.rmd_reinvested == pytest.approx(0)  # fully consumed by need, nothing left over
     assert result.reconcile() is None
 
 
@@ -161,6 +162,7 @@ def test_rmd_excess_over_need_is_reinvested_in_taxable():
     assert result.taxes_paid["rmd"] == pytest.approx(6_000)
     assert result.closing.pretax == pytest.approx(0)
     assert result.closing.taxable == pytest.approx(44_000)
+    assert result.rmd_reinvested == pytest.approx(44_000)
     assert result.unmet_need == pytest.approx(0)
     assert result.reconcile() is None
 

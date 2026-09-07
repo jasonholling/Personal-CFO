@@ -145,6 +145,9 @@ class AnnualResult:
     growth: Dict[str, float] = field(default_factory=dict)      # growth $ applied per bucket, post-withdrawal
     closing: AccountState = field(default_factory=AccountState)
     unmet_need: float = 0.0
+    rmd_reinvested: float = 0.0          # after-tax RMD excess swept to taxable, reported separately
+                                          # from the surplus sweep for callers that display it (e.g.
+                                          # run_retirement_projection's per-year table)
 
     @property
     def spending_funded(self) -> float:
@@ -253,6 +256,7 @@ def simulate_withdrawal_year(
 
     cash_available = guaranteed_income + life_event_cash
     spending_funded = 0.0
+    rmd_reinvested = 0.0
 
     if cash_available >= spending_need:
         surplus = cash_available - spending_need
@@ -274,7 +278,8 @@ def simulate_withdrawal_year(
             spending_funded += after_tax_rmd
             remaining -= after_tax_rmd
         else:
-            taxable += after_tax_rmd - remaining
+            rmd_reinvested = after_tax_rmd - remaining
+            taxable += rmd_reinvested
             spending_funded += remaining
             remaining = 0.0
 
@@ -329,6 +334,7 @@ def simulate_withdrawal_year(
         growth=growth,
         closing=closing,
         unmet_need=unmet_need,
+        rmd_reinvested=rmd_reinvested,
     )
 
 
@@ -391,4 +397,5 @@ def simulate_conversion(
         growth=dict(result.growth),
         closing=closing,
         unmet_need=result.unmet_need,
+        rmd_reinvested=result.rmd_reinvested,
     )
