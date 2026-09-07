@@ -469,6 +469,18 @@ def run_swr_analysis(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_t
             hsa     = hsa_at_ret
             survived = True
 
+            # SS formula below is the same one annual_inputs.
+            # build_annual_income_inputs() generalizes — deliberately
+            # kept inline as a documented performance exception (see
+            # annual_engine.py's module docstring on SWR's fast path):
+            # this loop runs N times per binary-search iteration, and is
+            # algebraically equivalent to the shared builder's output for
+            # every case this tool exercises (no stress inflation_mults
+            # apply here; healthcare is already baked into
+            # annual_withdrawal_today by the earlier run_retirement_
+            # projection call rather than computed per-year here).
+            # test_annual_inputs.py's TestPerformanceExceptionParity
+            # verifies this equivalence directly against the builder.
             for yr in range(retire_yrs):
                 age = timeline.age(yr)
                 ret = returns[yr]
@@ -1045,21 +1057,32 @@ def run_roth_conversion_analysis(inputs: Dict, accounts: List[Dict], ret_age: in
     retirement_year = CURRENT_YEAR + years_to_ret
     _, post_events = _split_life_events(life_events, retirement_year)
     post_events = post_events + _post_retirement_asset_sale_events(inputs, jason_age, timeline.effective_start_age)
+    # Shared annual-input builder (consolidation, 2026-09-07): same SS
+    # COLA and life-event formulas this function's own comment history
+    # documents fixing inline, now sourced from annual_inputs.py instead
+    # of a fifth independent copy. No stress inflation_mults apply to
+    # this tool, so a flat (mults=None) cum_inflation array is exactly
+    # equivalent to the pre-existing `(1+inflation)**yr` shortcut.
+    cum_inflation = build_cumulative_inflation(inflation, conversion_years)
 
     for yr in range(conversion_years):
         age = timeline.age(yr)
 
+        income = build_annual_income_inputs(
+            timeline, yr, cum_inflation, inflation,
+            healthcare_pre_at_start=healthcare_pre_at_ret, healthcare_post_at_start=healthcare_post_at_ret,
+            jason_ss_annual=jason_ss, jason_ss_age=jason_ss_age,
+            justin_ss_annual=justin_ss, justin_ss_age=justin_ss_age,
+            post_life_events=post_events, post_retirement_year_effects=_post_retirement_year_effects,
+        )
         # Income this year (portfolio draw + pension + SS if active)
-        hc = healthcare_for_age(age, healthcare_pre_at_ret, healthcare_post_at_ret)
-        income_need   = income_at_ret * ((1 + inflation) ** yr) + hc * ((1 + inflation) ** yr)
+        income_need   = income_at_ret * ((1 + inflation) ** yr) + income.healthcare
         year_pen      = pension_annual
-        year_jss      = jason_ss * ((1+inflation)**max(0,age-jason_ss_age)) if age >= jason_ss_age else 0
-        justin_age_this_year = timeline.justin_age_at(age)
-        year_uss      = justin_ss * ((1+inflation)**max(0,justin_age_this_year-justin_ss_age)) if justin_age_this_year >= justin_ss_age else 0
+        year_jss      = income.jason_ss
+        year_uss      = income.justin_ss
         guaranteed    = year_pen + year_jss + year_uss
 
-        calendar_year = retirement_year + yr
-        life_event_cash, life_event_monthly = _post_retirement_year_effects(post_events, calendar_year)
+        life_event_cash, life_event_monthly = income.life_event_cash, income.life_event_monthly
 
         # Migrated onto the shared withdrawal engine (backend/annual_engine.py,
         # calculation-engine consolidation Phase 4). Previously this
@@ -1225,15 +1248,19 @@ def run_roth_conversion_analysis(inputs: Dict, accounts: List[Dict], ret_age: in
     no_conv_roth = roth_at_ret
     for yr in range(conversion_years):
         age = timeline.age(yr)
-        hc = healthcare_for_age(age, healthcare_pre_at_ret, healthcare_post_at_ret)
-        income_need = income_at_ret * ((1 + inflation) ** yr) + hc * ((1 + inflation) ** yr)
+        income = build_annual_income_inputs(
+            timeline, yr, cum_inflation, inflation,
+            healthcare_pre_at_start=healthcare_pre_at_ret, healthcare_post_at_start=healthcare_post_at_ret,
+            jason_ss_annual=jason_ss, jason_ss_age=jason_ss_age,
+            justin_ss_annual=justin_ss, justin_ss_age=justin_ss_age,
+            post_life_events=post_events, post_retirement_year_effects=_post_retirement_year_effects,
+        )
+        income_need = income_at_ret * ((1 + inflation) ** yr) + income.healthcare
         year_pen = pension_annual
-        year_jss = jason_ss * ((1+inflation)**max(0,age-jason_ss_age)) if age >= jason_ss_age else 0
-        justin_age_this_year = timeline.justin_age_at(age)
-        year_uss = justin_ss * ((1+inflation)**max(0,justin_age_this_year-justin_ss_age)) if justin_age_this_year >= justin_ss_age else 0
+        year_jss = income.jason_ss
+        year_uss = income.justin_ss
         guaranteed = year_pen + year_jss + year_uss
-        calendar_year = retirement_year + yr
-        life_event_cash, life_event_monthly = _post_retirement_year_effects(post_events, calendar_year)
+        life_event_cash, life_event_monthly = income.life_event_cash, income.life_event_monthly
         # Same shared-engine migration and same tax fix as the with-
         # conversions loop above, applied to the baseline — otherwise the
         # comparison would still be apples-to-oranges (a correctly-taxed
@@ -1519,6 +1546,17 @@ def run_tax_efficiency_simulation(inputs: Dict, accounts: List[Dict], ret_age: i
             lifetime_tax = 0
             any_unmet_need = False
 
+            # SS/healthcare/life-event formulas below are the same ones
+            # annual_inputs.build_annual_income_inputs() generalizes —
+            # deliberately kept inline rather than migrated, as a
+            # documented performance exception matching
+            # run_swr_analysis's own precedent (annual_engine.py's module
+            # docstring): this loop runs N=1000 * retire_yrs * 3
+            # strategies times per call, and both are algebraically
+            # equivalent to the shared builder's output for every case
+            # this tool exercises (no stress inflation_mults apply here).
+            # test_annual_inputs.py's TestPerformanceExceptionParity
+            # verifies this equivalence directly against the builder.
             for yr in range(retire_yrs):
                 age = timeline.age(yr)
                 ret = returns[yr]
