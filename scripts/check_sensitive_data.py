@@ -34,6 +34,9 @@ SENSITIVE_STRINGS = [
     "27996", "38033", "36496", "8792", "22588", "173.33", "251.33",
     "25470", "25464", "331837", "89639", "190000", "2526375", "985913", "79058",
     "0.756", "2975", "4245",
+    # 2026-09-07: real RMD figures from a live sanity-check run leaked into
+    # a doc comment before being caught during the pre-sharing audit below
+    "292324", "292,324", "115509", "115,509",
     # Real names / employer / insurers / places
     "Holling-Karas", "Cheryl Karas", "ConAgra", "Aflac", "SBLI", "MetLife",
     "EMC National", "NY Life", "Battlecreek", "Omaha",

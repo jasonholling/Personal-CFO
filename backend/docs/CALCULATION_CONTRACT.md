@@ -892,9 +892,11 @@ real `cfo.db` (read-only, no API/auth involved) at retirement ages 55,
 60, and 65. All three produced internally consistent, sane output --
 `total_tax_avoided - total_tax_cost == net_lifetime_benefit` exactly,
 `total_unmet_need == 0` in every case, RMDs and pretax/Roth balances
-moved in the expected direction (RMD at 75 dropped from [real household figure removed pre-sharing] to
-[real household figure removed pre-sharing] under the age-60 conversion schedule), no negative or NaN
-figures anywhere in the output. No further changes needed here.
+moved in the expected direction under the age-60 conversion schedule,
+no negative or NaN figures anywhere in the output. (Real figures from
+this check are intentionally not reproduced here -- this doc is
+tracked source, not the gitignored `cfo.db`.) No further changes needed
+here.
 
 **Status: with item 2 closed, all 9 items from Jason's follow-on list
 are now resolved** -- 1, 2, 3, 4, 5, 9 done; 6 and 8 substantially
