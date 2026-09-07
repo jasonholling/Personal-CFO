@@ -95,19 +95,28 @@ export default function QuickenImport({ onImportComplete }) {
       )}
 
       {status === 'success' && result && (
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12, marginTop: 4 }}>
-          {[
-            ['Net Worth', fmt(result.net_worth)],
-            ['Total Assets', fmt(result.total_assets)],
-            ['Investments', fmt(result.investments)],
-            ['Accounts', `${result.accounts_created} new · ${result.accounts_updated} updated`],
-          ].map(([label, value]) => (
-            <div key={label} style={{ background: 'var(--bg3)', borderRadius: 8, padding: '10px 14px' }}>
-              <div className="label" style={{ marginBottom: 4 }}>{label}</div>
-              <div style={{ fontWeight: 600, fontSize: 13 }}>{value}</div>
+        <>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12, marginTop: 4 }}>
+            {[
+              ['Net Worth', fmt(result.net_worth)],
+              ['Total Assets', fmt(result.total_assets)],
+              ['Investments', fmt(result.investments)],
+              ['Accounts', `${result.accounts_created} new · ${result.accounts_updated} updated`],
+            ].map(([label, value]) => (
+              <div key={label} style={{ background: 'var(--bg3)', borderRadius: 8, padding: '10px 14px' }}>
+                <div className="label" style={{ marginBottom: 4 }}>{label}</div>
+                <div style={{ fontWeight: 600, fontSize: 13 }}>{value}</div>
+              </div>
+            ))}
+          </div>
+          {result.accounts_skipped_invalid_type?.length > 0 && (
+            <div style={{ marginTop: 12, color: 'var(--amber)', fontSize: 13 }}>
+              ⚠ Skipped {result.accounts_skipped_invalid_type.length} account{result.accounts_skipped_invalid_type.length > 1 ? 's' : ''} with
+              an unrecognized account_type — not counted above, not in net worth. Fix the mapping in
+              quicken_account_map.local.json and re-import: {result.accounts_skipped_invalid_type.map(a => `${a.name} (${a.account_type})`).join(', ')}
             </div>
-          ))}
-        </div>
+          )}
+        </>
       )}
     </div>
   )

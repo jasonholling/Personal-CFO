@@ -1,7 +1,7 @@
 from fastapi import FastAPI, HTTPException, UploadFile, File, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response as FastAPIResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from typing import Optional, List, Dict
 import sqlite3
 import json
@@ -167,6 +167,24 @@ class Account(BaseModel):
     expense_ratio: float = 0       # annual fraction, e.g. 0.0004 for 0.04% — investment accounts only
     monthly_rental_income: float = 0    # real_estate accounts only, rental properties
     monthly_rental_expenses: float = 0  # real_estate accounts only, rental properties (taxes, insurance, maintenance, etc — not the mortgage payment, which lives on the separate mortgage liability account)
+
+    # account_type used to be an unchecked str: a value outside
+    # net_worth_engine.VALID_ACCOUNT_TYPES (a typo, a legacy value, a name
+    # that reads as plausible but isn't a real dropdown option — e.g.
+    # "pretax_401k" instead of "401k") wasn't rejected here, it just went
+    # on to be silently invisible to net worth, and to every retirement/
+    # Monte Carlo/stress-test number (projection_engine.py's bucketing has
+    # no fallback at all), while still showing up normally on the Accounts
+    # page — found via a bug-hunt sandbox where exactly that mistake
+    # dropped $650K from both net worth and a retirement projection with
+    # no error anywhere. Reject it at the door instead.
+    @field_validator("account_type")
+    @classmethod
+    def _account_type_must_be_known(cls, v):
+        from net_worth_engine import VALID_ACCOUNT_TYPES
+        if v not in VALID_ACCOUNT_TYPES:
+            raise ValueError(f"Unknown account_type '{v}' — must be one of {sorted(VALID_ACCOUNT_TYPES)}")
+        return v
 
 class CashFlowItem(BaseModel):
     id: Optional[int] = None
@@ -1123,6 +1141,15 @@ async def import_quicken(file: UploadFile = File(...)):
     accounts = parse_quicken_networth_csv(text)
     if not accounts:
         raise HTTPException(status_code=400, detail="No accounts found. Export the Net Worth Summary report from Quicken.")
+    # quicken_account_map.local.json is hand-maintained and gitignored — a
+    # typo'd account_type there (this import path builds accounts directly
+    # from raw SQL, bypassing the Account model's validation entirely)
+    # would otherwise import successfully and then be silently invisible to
+    # net worth and every retirement/Monte Carlo number, with nothing in
+    # this response to say so. Skip and report those explicitly instead.
+    from net_worth_engine import VALID_ACCOUNT_TYPES
+    invalid = [acc for acc in accounts if acc['account_type'] not in VALID_ACCOUNT_TYPES]
+    accounts = [acc for acc in accounts if acc['account_type'] in VALID_ACCOUNT_TYPES]
     conn = get_db()
     updated = created = 0
     for acc in accounts:
@@ -1146,7 +1173,9 @@ async def import_quicken(file: UploadFile = File(...)):
     conn.close()
     summary = get_net_worth_summary(accounts)
     return {"status": "success", "accounts_created": created, "accounts_updated": updated,
-            "total_accounts": len(accounts), **summary}
+            "total_accounts": len(accounts),
+            "accounts_skipped_invalid_type": [{"name": a["name"], "account_type": a["account_type"]} for a in invalid],
+            **summary}
 
 # Snapshots
 @app.post("/api/snapshot")

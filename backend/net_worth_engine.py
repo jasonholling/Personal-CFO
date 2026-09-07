@@ -25,6 +25,29 @@ CATEGORIES = {
 
 KIDS_OWNERS = {"abby", "cooper"}
 
+# Canonical set of account_type values this app actually knows how to
+# categorize anywhere (net worth, retirement/Monte Carlo projections,
+# allocation, debt payoff). Built from CATEGORIES + DEBT_TYPES so it can't
+# drift from the bucketing logic above.
+#
+# Unlike compute_net_worth's own "other" fallback (added after a
+# bug-hunt sandbox found a mistyped account_type silently dropping an
+# account's balance from net worth), projection_engine.py's pretax/roth/
+# taxable/hsa bucketing checks account_type with exact string equality and
+# has no fallback at all — an account_type outside this set doesn't land
+# in "other" there, it's just invisible to every retirement/Monte Carlo/
+# stress-test number, silently, while still showing up normally on the
+# Accounts and (now) Net Worth pages. The account_type field itself has no
+# backend whitelist (main.py's Account model declared it as a bare `str`),
+# and the Quicken importer's account-type mapping
+# (quicken_account_map.local.json) is hand-maintained and gitignored, so a
+# typo there is a live risk, not just a hypothetical one. This set is used
+# to validate account_type at both entry points (manual Accounts form,
+# Quicken import) instead of only guarding net worth after the fact.
+VALID_ACCOUNT_TYPES = frozenset(
+    {t for types in CATEGORIES.values() for t in types} | DEBT_TYPES
+)
+
 
 def compute_net_worth(accounts: List[Dict]) -> Dict:
     result = {cat: 0.0 for cat in CATEGORIES}

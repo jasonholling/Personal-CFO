@@ -56,6 +56,30 @@ class TestAccountsCrud:
         remaining = client.get("/api/accounts").json()
         assert not any(a["id"] == created["id"] for a in remaining)
 
+    def test_create_rejects_unrecognized_account_type(self, client):
+        """Regression: account_type used to be an unchecked str — a value
+        outside VALID_ACCOUNT_TYPES (e.g. "pretax_401k" instead of the real
+        "401k") wasn't rejected here, it just went on to silently vanish
+        from net worth and every retirement/Monte Carlo number later,
+        found via a bug-hunt sandbox. Must 422 instead of silently
+        succeeding with a balance that then goes uncounted everywhere."""
+        r = client.post("/api/accounts", json={
+            "name": "Mistyped 401k", "account_type": "pretax_401k", "owner": "jason",
+            "institution": "", "balance": 650000, "notes": None,
+        })
+        assert r.status_code == 422
+
+    def test_update_rejects_unrecognized_account_type(self, client):
+        created = client.post("/api/accounts", json={
+            "name": "Valid", "account_type": "401k", "owner": "jason",
+            "institution": "", "balance": 1000, "notes": None,
+        }).json()
+        r = client.put(f"/api/accounts/{created['id']}", json={
+            "name": "Valid", "account_type": "pretax_401k", "owner": "jason",
+            "institution": "", "balance": 1000, "notes": None,
+        })
+        assert r.status_code == 422
+
 
 class TestAccountFreshness:
     def test_fresh_with_no_accounts(self, client):
@@ -346,6 +370,38 @@ class TestQuickenImport:
             files={"file": ("networth.csv", csv_content, "text/csv")},
         )
         assert r.status_code == 400
+
+    def test_import_skips_and_reports_unrecognized_mapped_account_type(self, client, monkeypatch):
+        """Regression: this import path builds accounts straight from raw
+        SQL, bypassing the Account model's account_type validation
+        entirely — a typo in the hand-maintained, gitignored
+        quicken_account_map.local.json (e.g. mapping to "pretax_401k"
+        instead of the real "401k") used to import successfully and then
+        be silently invisible to net worth and every retirement/Monte
+        Carlo number, with nothing in the response to say so. The bad
+        mapping must be skipped and named in the response, and a
+        correctly-mapped account in the same file must still import."""
+        import quicken_importer
+        monkeypatch.setattr(quicken_importer, "_account_map", lambda: {
+            "401k mistyped": ("pretax_401k", "jason"),
+            "checking ok": ("checking", "joint"),
+        })
+        csv_content = (
+            "Net Worth Summary\n---\n"
+            'Retirement,401k Mistyped,"650,000.00"\n'
+            'Checking,Checking OK,"1,000.00"\n'
+        )
+        r = client.post(
+            "/api/import/quicken",
+            files={"file": ("networth.csv", csv_content, "text/csv")},
+        )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["accounts_created"] == 1
+        assert body["accounts_skipped_invalid_type"] == [{"name": "401k Mistyped", "account_type": "pretax_401k"}]
+        accounts = client.get("/api/accounts").json()
+        assert not any(a["name"] == "401k Mistyped" for a in accounts)
+        assert any(a["name"] == "Checking OK" for a in accounts)
 
 
 class TestAnnualReport:
