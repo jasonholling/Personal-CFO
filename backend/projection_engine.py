@@ -161,6 +161,24 @@ def _split_life_events(life_events: List[Dict], retirement_year: int):
         if event.get("target_debt_account_id"):
             continue
         event_year = int(event["event_year"])
+        # An event dated before CURRENT_YEAR already happened — its cash
+        # impact is already baked into today's account balances (the
+        # accounts table's `balance` fields), so replaying it into the
+        # projection double-counts it (external audit 2026-09-06: $100,000
+        # currently invested + a $100,000 life event dated last year
+        # inflated portfolio_at_retirement by another ~$100,000+, as if the
+        # windfall happened twice). An event dated in CURRENT_YEAR itself is
+        # NOT skipped — this app only tracks whole years, not exact dates,
+        # so "dated this year" can't be distinguished from "already
+        # reflected in the current balance" the way a truly past year can;
+        # we treat the current year as still in progress and keep modeling
+        # it, consistent with CURRENT_YEAR being the first compounding year
+        # everywhere else in this engine (e.g. _pre_retirement_taxable_add).
+        # Skipping it here (rather than only in run_retirement_projection)
+        # fixes every consumer of this shared classifier at once, including
+        # simulation_engine.py's Monte Carlo/stress/SWR runs.
+        if event_year < CURRENT_YEAR:
+            continue
         one_time = float(event.get("one_time_cash_delta") or 0)
         monthly  = float(event.get("monthly_cash_flow_delta") or 0)
         duration_months = max(0, int(event.get("duration_months") or 0))
@@ -426,6 +444,22 @@ def run_retirement_projection(inputs: Dict, accounts: List[Dict], ret_ages: List
 
     for ret_age in (ret_ages if ret_ages is not None else [55, 60, 65]):
         years_to_retire = max(0, ret_age - jason_age)
+        # The retirement-age button list is a fixed [55..67] range shown
+        # regardless of the household's actual current age — someone
+        # jason_age=65 can still pick ret_age=55. years_to_retire correctly
+        # clamps to 0 for that case (already past that age), but the
+        # withdrawal-phase loop below used to label every row's age
+        # starting from ret_age itself (55, 56, 57, ...) instead of the
+        # household's REAL current age — a fictional decade-younger
+        # household, with Social Security claiming ages evaluated against
+        # that fictional timeline instead of the real one, so SS that's
+        # actually already due got modeled as still years away (external
+        # audit 2026-09-06). withdrawal_start_age anchors the yearly loop's
+        # age labeling (and the mortality/retire_years window below it) to
+        # whichever is later: the selected ret_age (the normal, still-in-
+        # the-future case, where this is just ret_age unchanged) or the
+        # household's actual current age (the already-past-that-age case).
+        withdrawal_start_age = max(ret_age, jason_age)
         pension_annual  = pension_for_age(inputs, ret_age)
 
         # Life events split by calendar year relative to this ret_age's
@@ -546,8 +580,15 @@ def run_retirement_projection(inputs: Dict, accounts: List[Dict], ret_ages: List
             # The planning horizon belongs to the household, not a hidden
             # engine constant. Keep a reasonable guardrail so a typo cannot
             # produce a negative/implausible drawdown period.
-            mort_age      = max(ret_age + 1, min(110, int(inputs.get("retirement_end_age") or 99)))
-            retire_years  = mort_age - ret_age
+            # Anchored to withdrawal_start_age, not ret_age, for the same
+            # reason as above — otherwise an already-past ret_age would
+            # compute retire_years from the wrong (younger, fictional)
+            # starting point and run the withdrawal loop years past the
+            # household's real mortality/planning-horizon age. Identical to
+            # the old `ret_age`-based formula whenever ret_age >= jason_age
+            # (withdrawal_start_age == ret_age in that case).
+            mort_age      = max(withdrawal_start_age + 1, min(110, int(inputs.get("retirement_end_age") or 99)))
+            retire_years  = mort_age - withdrawal_start_age
 
             healthcare_pre       = inputs.get("healthcare_pre_medicare", 0)
             healthcare_post      = inputs.get("healthcare_post_medicare", 0)
@@ -578,7 +619,7 @@ def run_retirement_projection(inputs: Dict, accounts: List[Dict], ret_ages: List
 
             yearly = []
             for yr in range(retire_years):
-                age = ret_age + yr
+                age = withdrawal_start_age + yr
                 calendar_year = CURRENT_YEAR + yr + years_to_retire
 
                 # Income need this year (includes healthcare, phased for age 55)
@@ -1024,19 +1065,44 @@ def run_kids_projection(accounts: List[Dict], inputs: Dict = None,
     kid2_age = inputs.get("kid2_age", 0)
     child_names = {"Abby": inputs.get("kid1_name", "Child 1"), "Cooper": inputs.get("kid2_name", "Child 2")}
 
+    # 529 contributions stop at whichever comes first: the child turning 18,
+    # or the parent hitting the same PARENT_RETIREMENT_AGE_ASSUMPTION cutoff
+    # run_education_projection already applies to its own 529 contributions
+    # (contribution_years = min(contribution_window, years_until_parent_retires)
+    # there). This function used to ignore the parent's retirement entirely
+    # and contribute all the way to 18 regardless — for a parent close to (or
+    # past) that cutoff, that meant Education and Kids projected wildly
+    # different 529-at-college balances for the literal same inputs (external
+    # audit 2026-09-06: parent age 59, $100/mo, $0 starting balance —
+    # Education (correctly capped at 1 more contribution year) predicted
+    # $1,990; Kids (contributing for all 8 years to age 18) predicted
+    # $12,820). Same rule, same constant, both functions now agree.
+    jason_age = inputs.get("jason_age", 45)
+    years_until_parent_retires = max(0, PARENT_RETIREMENT_AGE_ASSUMPTION - jason_age)
+
     kids = []
     for child, current_age, monthly_529 in [
         ("Abby",   kid1_age, abby_529_mo),
         ("Cooper", kid2_age, cooper_529_mo),
     ]:
         years_to_18 = 18 - current_age
+        # See module-level comment above: 529 contributions stop at whichever
+        # comes first, college (18) or the parent's assumed retirement.
+        contribution_years_529 = min(years_to_18, years_until_parent_retires)
 
         bal_529  = sum(a["balance"] for a in accounts if a["account_type"]=="529"      and a["owner"]==child.lower())
         bal_roth = sum(a["balance"] for a in accounts if a["account_type"]=="roth_ira" and a["owner"]==child.lower())
         bal_cust = sum(a["balance"] for a in accounts if a["account_type"]=="custodial" and a["owner"]==child.lower())
         bonds    = sum(a["balance"] for a in accounts if a["account_type"]=="other"    and a["owner"]==child.lower() and "bond" in a["name"].lower())
 
-        proj_529_at_18 = _fv(bal_529, edu_return, years_to_18) + _fv_annuity_monthly(monthly_529, edu_return, years_to_18)
+        # Contributions compound monthly for however many years they're
+        # actually active (contribution_years_529), then that accumulated
+        # sum just sits and compounds normally for whatever's left of
+        # years_to_18 — identical to the original formula whenever the
+        # retirement cutoff doesn't bind (contribution_years_529 ==
+        # years_to_18, dormant years = 0).
+        fv_529_contrib_at_stop = _fv_annuity_monthly(monthly_529, edu_return, contribution_years_529)
+        proj_529_at_18 = _fv(bal_529, edu_return, years_to_18) + _fv(fv_529_contrib_at_stop, edu_return, years_to_18 - contribution_years_529)
 
         # Drawdown 100% of annual costs
         unl_base_kid = inputs.get("unl_annual_cost", UNL_CURRENT_ANNUAL)
@@ -1045,8 +1111,15 @@ def run_kids_projection(accounts: List[Dict], inputs: Dict = None,
         for yr in range(COLLEGE_YEARS):
             cost = annual_cost_at_18 * ((1 + COLLEGE_COST_INFLATION) ** yr)
             bal_after = max(0, bal_after * (1 + edu_return) - cost)
-        proj_529_at_22 = round(bal_after)
         roth_rollover  = min(bal_after, 35000)
+        # A rollover is a real transfer — money moved from the 529 into the
+        # Roth, not money that magically exists in both places. This used
+        # to add roth_rollover into the Roth balance below while STILL
+        # reporting the pre-rollover bal_after as proj_529_at_22 (external
+        # audit 2026-09-06: a $10,000 529 growing to $13,108 with no college
+        # costs showed that same $13,108 rolled into the Roth AND still sitting
+        # in the 529). Net it out of the 529's own headline number here.
+        proj_529_at_22 = round(bal_after - roth_rollover)
 
         proj_roth_at_18 = _fv(bal_roth, roth_return, years_to_18) + _fv_annuity_monthly(kids_roth_mo, roth_return, years_to_18)
         years_18_to_60  = 42
@@ -1054,7 +1127,20 @@ def run_kids_projection(accounts: List[Dict], inputs: Dict = None,
         proj_roth_at_60 = _fv(proj_roth_at_22, roth_return, years_18_to_60 - 4)
 
         proj_cust_at_18 = _fv(bal_cust, edu_return, years_to_18) + _fv_annuity_monthly(kids_cust_mo, edu_return, years_to_18)
-        proj_cust_at_24 = _fv(bal_cust, edu_return, 24 - current_age) + _fv_annuity_monthly(kids_cust_mo, edu_return, 24 - current_age)
+        # Grown from the (already contributions-stop-at-18) age-18 value,
+        # not from a separate formula that kept contributing all the way to
+        # 24 — that separate formula used to disagree with the timeline
+        # below (which has always stopped custodial contributions at 18,
+        # same as every other per-kid contribution in this file), producing
+        # a bigger headline number than the account timeline ever actually
+        # showed (external audit 2026-09-06: $28,404 headline vs. $19,770 in
+        # the timeline for the same $100/mo, age-10 inputs). Custodial
+        # accounts have no "still earning income" assumption tied to
+        # college like the 529/Roth kid contributions don't either — 18 is
+        # simply where every other kid-contribution figure in this file
+        # already stops, so the headline now matches instead of the other
+        # way around.
+        proj_cust_at_24 = _fv(proj_cust_at_18, edu_return, 24 - 18)
         proj_bonds_at_18 = _fv(bonds, 0.04, years_to_18) if bonds > 0 else 0
         # Nothing in this model actually spends the custodial account or
         # the savings bonds — unlike the 529 (drawn down for college) and
@@ -1073,38 +1159,76 @@ def run_kids_projection(accounts: List[Dict], inputs: Dict = None,
         proj_cust_at_60 = _fv(proj_cust_at_24, edu_return, 60 - 24)
         proj_bonds_at_60 = _fv(bonds, 0.04, bond_growth_years) if bonds > 0 else 0
 
-        # Timeline to 24
+        # Timeline to 24. yr==0 (age == current_age, i.e. "right now") must
+        # record the actual starting balances completely un-grown — this
+        # used to apply a full year of growth (and a contribution) at yr==0
+        # too, as if a year had already elapsed before the timeline even
+        # starts, which silently added one extra year of compounding to
+        # every later entry (the same class of bug as the roth_to_60 chart
+        # fix below: e.g. this made the age-18 timeline entry disagree with
+        # proj_529_at_18/proj_cust_at_18, which are computed directly via
+        # _fv/_fv_annuity_monthly and were never subject to this off-by-
+        # one). Every activity branch below is now skipped on yr==0 and the
+        # age boundary for "still contributing" moved from `age < 18` to
+        # `age <= 18` to compensate — the transition that LANDS exactly on
+        # 18 is the contribution-years-th (or years_to_18-th) transition,
+        # not one before it, once yr==0 no longer double-counts.
         timeline = []
         r_bal = bal_roth
         c_529 = bal_529
         c_cust = bal_cust
         for yr in range(24 - current_age + 1):
             age = current_age + yr
-            if age < 18:
-                c_529 = c_529*(1+edu_return) + monthly_529*12
-            elif age < 22:
-                yr_in_college = age - 18
-                unl_base = inputs.get('unl_annual_cost', UNL_CURRENT_ANNUAL)
-                cost = unl_base*((1+COLLEGE_COST_INFLATION)**(years_to_18+yr_in_college))
-                c_529 = max(0, c_529*(1+edu_return) - cost)
-            else:
-                c_529 = c_529*(1+edu_return)
-            if age < 18:
-                r_bal = r_bal*(1+roth_return) + kids_roth_mo*12
-            elif age == 22:
-                r_bal = r_bal*(1+roth_return) + roth_rollover
-            else:
-                r_bal = r_bal*(1+roth_return)
-            c_cust = c_cust*(1+edu_return) + (kids_cust_mo*12 if age < 18 else 0)
+            if yr > 0:
+                if age <= 18:
+                    # `yr` is years elapsed since current_age, i.e. exactly
+                    # which contribution year this transition represents —
+                    # same parent-retirement cutoff as proj_529_at_18 above.
+                    c_529 = c_529*(1+edu_return) + (monthly_529*12 if yr <= contribution_years_529 else 0)
+                elif age <= 22:
+                    yr_in_college = age - 1 - 18
+                    unl_base = inputs.get('unl_annual_cost', UNL_CURRENT_ANNUAL)
+                    cost = unl_base*((1+COLLEGE_COST_INFLATION)**(years_to_18+yr_in_college))
+                    c_529 = max(0, c_529*(1+edu_return) - cost)
+                    if age == 22:
+                        # The rollover leaves the 529 for the Roth at this
+                        # exact point (see roth_rollover netting above) —
+                        # must decrease here too, not just compound
+                        # untouched, or the timeline shows the same dollars
+                        # sitting in both accounts at once (external audit
+                        # 2026-09-06).
+                        c_529 = max(0, c_529 - roth_rollover)
+                else:
+                    c_529 = c_529*(1+edu_return)
+                if age <= 18:
+                    r_bal = r_bal*(1+roth_return) + kids_roth_mo*12
+                elif age == 22:
+                    r_bal = r_bal*(1+roth_return) + roth_rollover
+                else:
+                    r_bal = r_bal*(1+roth_return)
+                c_cust = c_cust*(1+edu_return) + (kids_cust_mo*12 if age <= 18 else 0)
             timeline.append({"age": age, "roth": round(r_bal), "529": round(c_529), "custodial": round(c_cust)})
 
+        # yr==0 (age 18) must record proj_roth_at_18 itself, un-grown — this
+        # used to grow `r` by one year BEFORE checking/recording age 18,
+        # so the age-18 entry (and every entry after it, including the
+        # age-60 entry against which proj_roth_at_60 is compared) carried
+        # one extra year of compounding versus the summary figures above,
+        # off by exactly a factor of (1+roth_return) (external audit
+        # 2026-09-06: $171,443 summary vs. $183,444 chart at "age 60" for a
+        # $10,000/no-further-contributions starting point — a 7% gap
+        # matching roth_return exactly). Skipping the growth step on yr==0
+        # makes this loop apply exactly `years_18_to_60` compoundings by the
+        # time yr reaches years_18_to_60, identical to proj_roth_at_60's
+        # own (4 + (years_18_to_60-4)) = years_18_to_60 total compoundings.
         roth_to_60 = []
         r = proj_roth_at_18
         for yr in range(years_18_to_60+1):
             age = 18 + yr
-            r = r*(1+roth_return)
-            if age == 22:
-                r += roth_rollover
+            if yr > 0:
+                r = r*(1+roth_return)
+                if age == 22:
+                    r += roth_rollover
             if age % 5 == 0 or age == 18 or age == 22:
                 roth_to_60.append({"age": age, "balance": round(r),
                                    "note": "529 rollover" if age == 22 and roth_rollover > 0 else None})

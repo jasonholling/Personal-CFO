@@ -250,6 +250,46 @@ class TestRunRetirementProjection:
         baseline_scenario = next(s for s in baseline["scenarios"] if s["ss_timing"] == "early")
         assert scenario["portfolio_at_retirement"] == baseline_scenario["portfolio_at_retirement"]
 
+    def test_past_retirement_age_uses_household_real_current_age(self, sample_inputs, sample_accounts):
+        """Regression test (external audit 2026-09-06): the retirement-age
+        button list is a fixed [55..67] range shown regardless of the
+        household's actual current age, so someone jason_age=65 can still
+        select ret_age=55 — an already-passed age. years_to_retire
+        correctly clamps to 0, but the withdrawal-phase loop used to label
+        every row's age starting from ret_age (55, 56, ...) instead of the
+        household's real current age, making a 65-year-old look 10 years
+        younger and pushing SS claiming ages (jason_ss_age=62 in
+        sample_inputs) further into the fictional future than they really
+        are."""
+        inputs = {**sample_inputs, "jason_age": 65}
+        result = run_retirement_projection(inputs, sample_accounts, ret_ages=[55])
+        scenario = next(s for s in result["scenarios"] if s["ss_timing"] == "early")
+        yearly = scenario["yearly_detail"]
+        # The very first withdrawal-phase row must be labeled with the
+        # household's real current age, not the selected (already-passed)
+        # ret_age.
+        assert yearly[0]["jason_age"] == 65
+        # jason_ss_age=62 in sample_inputs is already in the past relative
+        # to a real age of 65 — SS should show up in year 1, not 10+ years
+        # "in the future" from a fictional age-55 start.
+        assert yearly[0]["social_security"] > 0
+        # retire_years/mort_age must also anchor to the real current age —
+        # otherwise the loop would run 44 years (99-55) from a starting
+        # age of 65, ending at a nonsensical age 108 instead of stopping at
+        # the real mortality/planning-horizon age (99 by default).
+        assert yearly[-1]["jason_age"] == 98
+
+    def test_normal_future_retirement_age_is_unaffected_by_the_anchor_fix(self, sample_inputs, sample_accounts):
+        """Guard against the fix above overshooting: whenever ret_age is
+        still in the future (the overwhelmingly normal case, and what every
+        other test in this class already exercises), the withdrawal loop's
+        age labeling must be completely unchanged — still anchored to
+        ret_age itself, not jason_age."""
+        inputs = {**sample_inputs, "jason_age": 50}
+        result = run_retirement_projection(inputs, sample_accounts, ret_ages=[60])
+        scenario = next(s for s in result["scenarios"] if s["ss_timing"] == "early")
+        assert scenario["yearly_detail"][0]["jason_age"] == 60
+
     def test_rmd_start_age_75_for_someone_born_1960_or_later(self, sample_inputs, sample_accounts):
         """Regression test (external audit 2026-09-05): RMDs were hardcoded
         to start at 73 for everyone. SECURE Act 2.0 bumps that to 75 for
@@ -577,6 +617,41 @@ class TestLifeEventsInRetirementProjection:
         w = next(s for s in with_event["scenarios"] if s["ss_timing"] == "early")
         assert w["portfolio_at_retirement"] == b["portfolio_at_retirement"]
         assert w["projected_surplus"] == b["projected_surplus"]
+
+    def test_past_dated_event_does_not_double_count_into_the_projection(self, sample_inputs, sample_accounts):
+        """Regression test (external audit 2026-09-06): a life event dated
+        BEFORE CURRENT_YEAR already happened and is already reflected in
+        today's account balances — replaying it into the projection
+        double-counts it. $100,000 currently in the taxable account plus a
+        $100,000 one-time life event dated last year must NOT raise
+        portfolio_at_retirement by another ~$100,000+."""
+        accounts = [dict(a) for a in sample_accounts]
+        for a in accounts:
+            if a["account_type"] == "taxable":
+                a["balance"] = 100000
+        events = [{"event_year": CURRENT_YEAR - 1, "one_time_cash_delta": 100000,
+                   "monthly_cash_flow_delta": 0, "duration_months": 0}]
+        baseline = run_retirement_projection(sample_inputs, accounts, ret_ages=[60])
+        with_event = run_retirement_projection(sample_inputs, accounts, ret_ages=[60], life_events=events)
+        b = next(s for s in baseline["scenarios"] if s["ss_timing"] == "early")
+        w = next(s for s in with_event["scenarios"] if s["ss_timing"] == "early")
+        assert w["portfolio_at_retirement"] == b["portfolio_at_retirement"]
+
+    def test_event_dated_in_current_year_still_counts(self, sample_inputs, sample_accounts):
+        """Boundary case: CURRENT_YEAR itself is NOT treated as "past" — this
+        app only tracks whole years, so a CURRENT_YEAR event is treated as
+        not-yet-happened and still compounds into the projection, same as
+        before this fix."""
+        pre_ret = sample_inputs["expected_return_pre_retirement"]
+        events = [{"event_year": CURRENT_YEAR, "one_time_cash_delta": 10000,
+                   "monthly_cash_flow_delta": 0, "duration_months": 0}]
+        baseline = run_retirement_projection(sample_inputs, sample_accounts, ret_ages=[60])
+        with_event = run_retirement_projection(sample_inputs, sample_accounts, ret_ages=[60], life_events=events)
+        b = next(s for s in baseline["scenarios"] if s["ss_timing"] == "early")
+        w = next(s for s in with_event["scenarios"] if s["ss_timing"] == "early")
+        years_to_retire = 10  # jason_age=50, ret_age=60
+        expected_delta = 10000 * ((1 + pre_ret) ** years_to_retire)
+        assert abs((w["portfolio_at_retirement"] - b["portfolio_at_retirement"]) - expected_delta) <= 1
 
     def test_generic_across_every_retirement_age_not_just_55(self, sample_inputs, sample_accounts):
         """Regression guard: life events used to only be prototyped against
@@ -919,6 +994,44 @@ class TestRunEducationProjection:
             assert (g["funding_gap"] > 0) == g["depleted_during_college"]
 
 
+class TestEducationAndKidsProjectionsAgreeOn529AtCollege:
+    """Regression tests (external audit 2026-09-06): run_education_projection
+    and run_kids_projection project the same underlying 529 account and
+    should reach the same balance at college for the same inputs. Root
+    cause was run_kids_projection ignoring the parent's assumed retirement
+    cutoff entirely — Education already stopped 529 contributions at
+    whichever came first (college or PARENT_RETIREMENT_AGE_ASSUMPTION);
+    Kids contributed all the way to 18 regardless."""
+
+    def test_agree_when_parent_retirement_cutoff_binds(self, sample_inputs, sample_accounts):
+        """Parent age 59, child age 10, $100/mo, $0 starting balance — the
+        exact reported case: 1 year of contributions left before the parent's
+        assumed retirement (60), not the full 8 years to college."""
+        inputs = {**sample_inputs, "jason_age": 59, "kid1_age": 10, "abby_529_monthly": 100}
+        edu = run_education_projection(inputs, sample_accounts)
+        kid = run_kids_projection(sample_accounts, inputs)
+        edu_abby = next(g for g in edu["goals"] if g["child"] == "Abby")
+        kid_abby = next(k for k in kid["kids"] if k["child"] == "Abby")
+        assert edu_abby["projected_529_at_college"] == kid_abby["529"]["at_18"]
+        # Sanity: the cutoff actually bound (contributions stop well before
+        # the 8 years to college), otherwise this test wouldn't be
+        # distinguishing the fixed behavior from the old bug at all.
+        assert edu_abby["contributions_stop_in_years"] == 1
+        assert edu_abby["contributions_stop_in_years"] < edu_abby["years_to_college"]
+
+    def test_agree_when_college_is_the_binding_constraint(self, sample_inputs, sample_accounts):
+        """When the parent is nowhere near retirement, college start (not
+        retirement) is the binding constraint for both functions, and they
+        should still agree."""
+        inputs = {**sample_inputs, "jason_age": 40, "kid1_age": 10, "abby_529_monthly": 100}
+        edu = run_education_projection(inputs, sample_accounts)
+        kid = run_kids_projection(sample_accounts, inputs)
+        edu_abby = next(g for g in edu["goals"] if g["child"] == "Abby")
+        kid_abby = next(k for k in kid["kids"] if k["child"] == "Abby")
+        assert edu_abby["contributions_stop_in_years"] == edu_abby["years_to_college"]
+        assert edu_abby["projected_529_at_college"] == kid_abby["529"]["at_18"]
+
+
 class TestRunKidsProjection:
     def test_returns_two_kids(self, sample_inputs, sample_accounts):
         result = run_kids_projection(sample_accounts, sample_inputs)
@@ -1024,6 +1137,80 @@ class TestRunKidsProjection:
         # a $0 cost would — if the bug were still present, both would be
         # identical (the config value would be ignored either way).
         assert abby_real["529"]["at_22"] < abby_zero["529"]["at_22"]
+
+    def test_529_to_roth_rollover_is_a_real_transfer_not_double_counted(self, sample_inputs, sample_accounts):
+        """Regression test (external audit 2026-09-06): a $10,000 529
+        starting AT age 18 with no college costs and no further
+        contributions grows to $13,108 by age 22 (10000 * 1.07**4) — the
+        full amount rolls over under the SECURE 2.0 cap. The rollover must
+        actually leave the 529 (proj_529_at_22 nets it out) rather than
+        being added to the Roth while the 529 still reports the same
+        balance."""
+        inputs = {**sample_inputs, "kid1_age": 18, "kid2_age": 8,
+                  "unl_annual_cost": 0, "abby_529_monthly": 0, "kids_roth_monthly": 0}
+        accounts = sample_accounts + [
+            {"id": 90, "name": "Abby 529", "account_type": "529", "owner": "abby",
+             "balance": 10000, "institution": "", "notes": ""},
+        ]
+        result = run_kids_projection(accounts, inputs)
+        abby = next(k for k in result["kids"] if k["child"] == "Abby")
+        expected_at_22 = round(10000 * (1.07 ** 4))
+        assert abby["529"]["at_18"] == 10000
+        assert abby["roth"]["529_rollover"] == expected_at_22  # under the $35k cap, so fully rolled
+        # The 529 must NOT still report the rolled-over amount.
+        assert abby["529"]["at_22"] == 0
+        # And the timeline's own 529 balance must actually drop at the
+        # rollover year rather than just keep compounding untouched.
+        timeline_by_age = {t["age"]: t for t in abby["timeline"]}
+        pre_rollover_529 = timeline_by_age[21]["529"]
+        post_rollover_529 = timeline_by_age[22]["529"]
+        assert post_rollover_529 < pre_rollover_529
+        assert post_rollover_529 == 0
+
+    def test_custodial_headline_at_24_is_consistent_with_timeline_stop_at_18(self, sample_inputs, sample_accounts):
+        """Regression test (external audit 2026-09-06): the custodial
+        headline (proj_cust_at_24) used to keep contributing all the way to
+        24, while the account timeline (c_cust) has always stopped
+        contributions at 18 like every other kid-contribution figure in
+        this file — a $100/mo, age-10 kid showed $28,404 in the headline vs.
+        $19,770 in the timeline for the same nominal age (44% apart). The
+        headline must now be grown from the (contributions-stop-at-18)
+        age-18 value forward to 24, not from a separate all-the-way-to-24
+        formula, bringing the two back within a few percent of each other
+        — the small remaining gap is the timeline's coarser annual-lump-sum
+        compounding vs. the headline's monthly-annuity compounding, a
+        separate (and much smaller) modeling-granularity difference, not
+        the contributions-continue-past-18 bug being fixed here."""
+        inputs = {**sample_inputs, "kid1_age": 10, "kids_custodial_monthly": 100}
+        result = run_kids_projection(sample_accounts, inputs)
+        abby = next(k for k in result["kids"] if k["child"] == "Abby")
+        timeline_at_24 = next(t for t in abby["timeline"] if t["age"] == 24)["custodial"]
+        headline_at_24 = abby["custodial"]["at_24"]
+        assert headline_at_24 > timeline_at_24 > 0
+        assert abs(headline_at_24 - timeline_at_24) / timeline_at_24 < 0.10
+
+    def test_roth_chart_at_60_matches_summary_proj_roth_at_60(self, sample_inputs, sample_accounts):
+        """Regression test (external audit 2026-09-06): starting with
+        $10,000 at age 18 and no further contributions, the age-60 SUMMARY
+        figure (proj_roth_at_60) showed $171,443 while the CHART data
+        (roth_to_60) showed $183,444 at the same nominal age — exactly 7%
+        higher, matching roth_return, because the chart applied one extra
+        year of compounding before recording its age-18 starting point.
+        Both must use the identical starting-point convention."""
+        inputs = {**sample_inputs, "kid1_age": 18, "kid2_age": 8,
+                  "unl_annual_cost": 0, "abby_529_monthly": 0, "kids_roth_monthly": 0}
+        accounts = sample_accounts + [
+            {"id": 91, "name": "Abby Roth IRA", "account_type": "roth_ira", "owner": "abby",
+             "balance": 10000, "institution": "", "notes": ""},
+        ]
+        result = run_kids_projection(accounts, inputs)
+        abby = next(k for k in result["kids"] if k["child"] == "Abby")
+        chart_at_60 = next(c for c in abby["roth_to_60"] if c["age"] == 60)
+        assert chart_at_60["balance"] == abby["roth"]["at_60"]
+        # And the chart's own age-18 entry must be the raw starting balance,
+        # not already grown by a year.
+        chart_at_18 = next(c for c in abby["roth_to_60"] if c["age"] == 18)
+        assert chart_at_18["balance"] == round(abby["roth"]["at_18"])
 
 
 class TestSurplus529ContributionsInEducationAndKidsProjections:
