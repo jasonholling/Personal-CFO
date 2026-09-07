@@ -11,8 +11,22 @@ let container, root
 // PBKDF2 (310,000 iterations) + AES-GCM over >1MB do real, non-trivial
 // work under crypto.subtle — a microtask-only flush isn't enough to wait
 // for them to settle, unlike the pure-mock axios flushes elsewhere in this
-// suite. Wait on a real timer instead.
-const flush = async () => { await act(async () => { await new Promise(r => setTimeout(r, 50)) }) }
+// suite. A single fixed-delay sleep flaked in CI (real observed failure,
+// 2026-09-07): the component's `status` state only ever updates once to a
+// terminal value ('...downloaded.' or 'Export failed: ...'/'Restore
+// failed: ...' — no intermediate "encrypting..." state exists to
+// accidentally match early), so poll for that terminal text instead of
+// guessing a fixed delay long enough for a >1MB PBKDF2+AES-GCM operation
+// on a runner that might be slower or more loaded than this machine.
+const flush = async () => {
+  const start = Date.now()
+  while (Date.now() - start < 10000) {
+    if (/downloaded\.|failed/i.test(container.textContent)) return
+    await act(async () => { await new Promise(r => setTimeout(r, 25)) })
+  }
+  // Fall through on timeout — the caller's own assertion produces a real
+  // failure message rather than this helper silently doing nothing.
+}
 const click = async text => {
   const button = [...container.querySelectorAll('button')].find(b => b.textContent.trim() === text)
   expect(button, text).toBeTruthy()
