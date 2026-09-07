@@ -568,24 +568,41 @@ def run_retirement_projection(inputs: Dict, accounts: List[Dict], ret_ages: List
             # full account): a sale dated between an already-past
             # ret_age and the household's real current age used to fall
             # through both this check AND that function's own exclusion,
-            # vanishing entirely. yrs_to_grow is measured to
-            # effective_start_age too (not years_to_retire, which is 0
-            # in the past-ret_age case) — this reduces to the exact
-            # original formula whenever ret_age >= jason_age
-            # (effective_start_age == ret_age there).
+            # vanishing entirely.
+            #
+            # yrs_to_grow is measured as (years from TODAY to
+            # effective_start_age) minus (years from TODAY to the sale,
+            # floored at 0) — a follow-up correction (independent review,
+            # 2026-09-07, fourth pass) to the fix above, which measured
+            # yrs_to_grow as `effective_start_age - sale_age` directly.
+            # That silently credited pre-retirement INVESTMENT RETURN for
+            # calendar years already in the past whenever the sale
+            # predated jason_age (reproduced: age 65 today, retiring at
+            # 70, a sale at 60 with 10% returns added $259,374 instead of
+            # the correct $161,051 — 10 years of compounding instead of
+            # the actual 5 remaining accumulation years to retirement).
+            # This formula reduces to the exact original
+            # `years_to_retire - yrs_assetN` whenever ret_age >=
+            # jason_age (max(0, effective_start_age-jason_age) ==
+            # years_to_retire there), and gives 0 growth years (proceeds
+            # added at face value, not zero — see the inclusion check
+            # above) for a sale that's already behind TODAY even in the
+            # past-ret_age case, rather than inventing a historical
+            # reconstruction this app has no data to support.
+            years_from_today_to_start = max(0, timeline.effective_start_age - jason_age)
             asset1_sale_age = inputs.get("asset1_sale_age", 0)
             asset1_sale_net = inputs.get("asset1_sale_net", 0)
             asset1_app      = inputs.get("asset1_appreciation", 0.03)
             if asset1_sale_age and asset1_sale_age <= timeline.effective_start_age:
                 yrs_asset1 = max(0, asset1_sale_age - jason_age)
-                yrs_to_grow = timeline.effective_start_age - asset1_sale_age
+                yrs_to_grow = years_from_today_to_start - yrs_asset1
                 asset1_proceeds = asset1_sale_net * ((1 + asset1_app) ** yrs_asset1)
                 taxable_at_ret  += asset1_proceeds * ((1 + pre_ret) ** yrs_to_grow)
             asset2_sale_age = inputs.get("asset2_sale_age", 0)
             asset2_sale_net = inputs.get("asset2_sale_net", 0)
             if asset2_sale_age and asset2_sale_age <= timeline.effective_start_age:
                 yrs_asset2    = max(0, asset2_sale_age - jason_age)
-                yrs_to_grow    = timeline.effective_start_age - asset2_sale_age
+                yrs_to_grow    = years_from_today_to_start - yrs_asset2
                 taxable_at_ret += asset2_sale_net * ((1 + pre_ret) ** yrs_to_grow)
 
             # Life events dated before retirement (compounded above) —

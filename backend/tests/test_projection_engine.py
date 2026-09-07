@@ -930,9 +930,12 @@ class TestAssetSaleAndRsuBridgeAt55:
         (also <= ret_age) — both compared against the wrong (too-early)
         boundary, so the sale vanished entirely rather than being counted
         exactly once. Household currently 65, selecting ret_age 55, a
-        $500K sale at 60 (between the two) must show up exactly once,
-        with the same total (balance + proceeds, no pre-sale-to-today
-        growth omitted) as selecting the real current age directly."""
+        $500K sale at 60 (between the two) must show up exactly once, at
+        the same total as selecting the real current age directly (both
+        land the sale at face value with zero growth years, since the
+        sale is already behind "today" in both selections — see
+        TestAssetSaleGrowthYearsHandCalculated below for the exact
+        growth-years arithmetic this equality relies on)."""
         inputs = {**sample_inputs, "jason_age": 65, "justin_age": 65,
                   "asset2_sale_age": 60, "asset2_sale_net": 500000}
         past = run_retirement_projection(inputs, sample_accounts, ret_ages=[55])
@@ -946,6 +949,120 @@ class TestAssetSaleAndRsuBridgeAt55:
                                              sample_accounts, ret_ages=[55])
         n = next(s for s in no_sale["scenarios"] if s["label"] == "age_55_early")
         assert p["taxable_at_retirement"] > n["taxable_at_retirement"]
+
+
+class TestAssetSaleGrowthYearsHandCalculated:
+    """Independent review, 2026-09-07, fourth follow-up: the past-ret_age
+    inclusion fix above (TestAssetSaleAndRsuBridgeAt55) changed the
+    growth-years EXPONENT to `effective_start_age - sale_age` directly —
+    which, for a sale predating jason_age, silently credited investment
+    return for calendar years already in the past whenever ret_age was
+    still in the future (reproduced: age 65 today, retiring at 70, a
+    sale at 60 with 10% returns added $259,374 instead of the correct
+    $161,051 — 10 years of compounding instead of the actual 5 remaining
+    accumulation years). These tests hand-calculate the expected delta
+    independently (not derived by running the code first) across both
+    assets, past/current/future sale dates, and past/current/future
+    retirement selections, with a nonzero pre-retirement return — the
+    prior regression test only ever compared two calls using the SAME
+    (buggy) formula against each other, so it could not have caught
+    this. Correct formula: yrs_to_grow = max(0, effective_start_age -
+    jason_age) - max(0, sale_age - jason_age) — years from TODAY to the
+    effective retirement start, minus years from today to the sale (0 if
+    the sale already happened) — which reduces to the pre-independent-
+    review-fix formula (`years_to_retire - yrs_assetN`) exactly whenever
+    ret_age >= jason_age."""
+
+    BASE = {
+        "jason_age": 65, "justin_age": 65, "retirement_income_today_dollars": 0,
+        "inflation_rate": 0.0, "expected_return_pre_retirement": 0.10,
+        "expected_return_post_retirement": 0.0,
+        "jason_social_security": 0, "jason_ss_delayed": 0, "justin_social_security": 0,
+        "jason_ss_age": 62, "justin_ss_age": 67, "healthcare_pre_medicare": 0, "healthcare_post_medicare": 0,
+        "pension_55": 0, "pension_60": 0, "pension_65": 0,
+        "annual_hsa_contribution": 0, "annual_rsu_value": 0, "pretax_401k_pct": 1.0,
+        "employee_401k_pct": 0, "employer_401k_pct": 0, "w2_salary": 0,
+        "retirement_end_age": 95, "state_income_tax_rate": 0,
+    }
+    ACCOUNTS = [{"id": 1, "name": "Brokerage", "account_type": "taxable", "owner": "joint", "balance": 500_000}]
+
+    def _delta(self, ret_age, overrides):
+        inputs = {**self.BASE, **overrides}
+        no_sale = {**inputs, "asset1_sale_age": 0, "asset1_sale_net": 0,
+                   "asset2_sale_age": 0, "asset2_sale_net": 0}
+        with_sale = run_retirement_projection(inputs, self.ACCOUNTS, ret_ages=[ret_age])
+        without = run_retirement_projection(no_sale, self.ACCOUNTS, ret_ages=[ret_age])
+        label = f"age_{ret_age}_early"
+        w = next(s for s in with_sale["scenarios"] if s["label"] == label)
+        n = next(s for s in without["scenarios"] if s["label"] == label)
+        return w["taxable_at_retirement"] - n["taxable_at_retirement"]
+
+    def test_asset1_past_sale_future_retirement(self):
+        # jason=65, ret=70 (future), sale at 60 (past): 0 pre-sale
+        # appreciation years (floored), 5 real accumulation years left
+        # (70-65) at 10% -> 100,000 * 1.10^5 = 161,051.
+        delta = self._delta(70, {"asset1_sale_age": 60, "asset1_sale_net": 100_000,
+                                  "asset1_appreciation": 0.03})
+        assert delta == pytest.approx(161_051, abs=1)
+
+    def test_asset1_future_sale_future_retirement(self):
+        # jason=65, ret=70, sale at 68 (future, between today and
+        # retirement): 3 years of 3% pre-sale appreciation, then 2
+        # remaining years (70-68) of 10% post-sale growth.
+        # 100,000 * 1.03^3 = 109,272.70; * 1.10^2 = 132,219.97 -> 132,220.
+        delta = self._delta(70, {"asset1_sale_age": 68, "asset1_sale_net": 100_000,
+                                  "asset1_appreciation": 0.03})
+        assert delta == pytest.approx(132_220, abs=1)
+
+    def test_asset2_sale_exactly_at_retirement_gets_zero_growth_years(self):
+        # jason=65, ret=70, sale at 70 (exactly at retirement): 5 years
+        # to the sale, 0 years remaining to grow after it -> face value.
+        delta = self._delta(70, {"asset2_sale_age": 70, "asset2_sale_net": 100_000})
+        assert delta == pytest.approx(100_000, abs=1)
+
+    def test_asset2_past_sale_current_age_retirement(self):
+        # jason=65, ret=65 (retiring today): a past sale (60) gets 0
+        # accumulation years regardless of the 10% return -- there is no
+        # "future" left to grow into, and no historical years are
+        # credited for the sale-to-today gap.
+        delta = self._delta(65, {"asset2_sale_age": 60, "asset2_sale_net": 100_000})
+        assert delta == pytest.approx(100_000, abs=1)
+
+    def test_asset1_past_retirement_selection_with_sale_in_the_deep_past(self):
+        # jason=65, ret=60 (already past -> effective_start_age=65),
+        # sale at 50 (even further in the past): floors to 0 pre-sale
+        # appreciation years AND 0 growth years (years_from_today_to_
+        # start is 0 in the past-ret_age case) -> pure face value.
+        delta = self._delta(60, {"asset1_sale_age": 50, "asset1_sale_net": 100_000,
+                                  "asset1_appreciation": 0.03})
+        assert delta == pytest.approx(100_000, abs=1)
+
+    def test_matches_the_original_formula_exactly_when_retirement_is_in_the_future(self):
+        """The corrected formula must reduce to the untouched pre-
+        independent-review formula (years_to_retire - yrs_assetN) for
+        every ordinary future-retirement case -- not just the specific
+        numbers above. Cross-checks 5 sale-age/ret-age/return
+        combinations against that original formula computed independently
+        in this test (not imported from the implementation)."""
+        cases = [
+            # jason_age, ret_age, sale_age, sale_net, pre_ret
+            (50, 65, 40, 200_000, 0.06),   # sale before jason_age
+            (50, 65, 50, 200_000, 0.06),   # sale exactly at jason_age
+            (50, 65, 58, 200_000, 0.06),   # sale between jason_age and ret_age
+            (50, 65, 65, 200_000, 0.06),   # sale exactly at ret_age
+            (45, 67, 55, 300_000, 0.08),   # a different age/return combo entirely
+        ]
+        for jason_age, ret_age, sale_age, sale_net, pre_ret in cases:
+            years_to_retire = max(0, ret_age - jason_age)
+            yrs_asset2 = max(0, sale_age - jason_age)
+            original_formula_delta = sale_net * ((1 + pre_ret) ** (years_to_retire - yrs_asset2))
+            got = self._delta(ret_age, {
+                "jason_age": jason_age, "justin_age": jason_age,
+                "expected_return_pre_retirement": pre_ret,
+                "asset2_sale_age": sale_age, "asset2_sale_net": sale_net,
+            })
+            assert got == pytest.approx(original_formula_delta, abs=1), (
+                f"jason_age={jason_age} ret_age={ret_age} sale_age={sale_age}")
 
 
 class TestRunEducationProjection:
