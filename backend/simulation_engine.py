@@ -1199,6 +1199,14 @@ def run_survivor_scenario(inputs: Dict, accounts: List[Dict], ret_age: int = 60,
         return {"has_data": False}
     death_jason_age = death_row["jason_age"]  # snap to an actual modeled year
 
+    # Every other simulation in this file (run_monte_carlo/run_stress_tests/
+    # run_swr_analysis/run_tax_efficiency_simulation) reads the household's
+    # actual retirement_end_age instead of hardcoding 99 — this function
+    # didn't, so a survivor plan was modeled and reported against a
+    # mortality age that could be years off from what the rest of the app
+    # (and the household's own Settings) uses.
+    end_age = max(death_jason_age + 1, min(110, int(inputs.get("retirement_end_age") or 99)))
+
     if deceased == "jason":
         payout = (inputs.get("jason_life_basic", 0) + inputs.get("jason_life_supplemental", 0)
                   + inputs.get("jason_life_term", 0))
@@ -1219,7 +1227,7 @@ def run_survivor_scenario(inputs: Dict, accounts: List[Dict], ret_age: int = 60,
     schedule = []
     bal = starting_balance
     depleted_age = None
-    for i, age in enumerate(range(death_jason_age, 100)):
+    for i, age in enumerate(range(death_jason_age, end_age)):
         need       = income_need_at_death * ((1 + inflation) ** i)
         guaranteed = guaranteed_at_death * ((1 + inflation) ** i)
         draw       = max(0, need - guaranteed)
@@ -1242,13 +1250,13 @@ def run_survivor_scenario(inputs: Dict, accounts: List[Dict], ret_age: int = 60,
     if not survives:
         net_need  = max(0, income_need_at_death - guaranteed_at_death)
         real_rate = ((1 + post_ret) / (1 + inflation) - 1) if post_ret != inflation else 0.0001
-        cap_need  = _pv_annuity(net_need, real_rate, 99 - death_jason_age)
+        cap_need  = _pv_annuity(net_need, real_rate, end_age - death_jason_age)
         additional_insurance_needed = max(0, round(cap_need - starting_balance))
 
     if survives:
         recommendation = (
             f"If {deceased} dies at {death_age}, the ${payout:,.0f} life insurance payout plus the portfolio "
-            f"(${portfolio_at_death:,.0f} at that point) covers the survivor's needs through age 99, assuming "
+            f"(${portfolio_at_death:,.0f} at that point) covers the survivor's needs through age {end_age}, assuming "
             f"living costs drop to {survivor_need_factor*100:.0f}% of the couple's target and Social Security "
             f"switches to the higher of the two benefits. This doesn't account for the tax-bracket jump from "
             f"filing jointly to filing single, which would add real drag on top of this."
@@ -1265,6 +1273,7 @@ def run_survivor_scenario(inputs: Dict, accounts: List[Dict], ret_age: int = 60,
         "has_data": True,
         "deceased": deceased,
         "death_age": death_jason_age if deceased == "jason" else death_age,
+        "survivor_end_age": end_age,
         "portfolio_at_death": round(portfolio_at_death),
         "life_insurance_payout": round(payout),
         "starting_balance_after_payout": round(starting_balance),

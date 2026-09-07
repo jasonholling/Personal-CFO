@@ -258,6 +258,33 @@ class TestRunSurvivorScenario:
         result = run_survivor_scenario(sample_inputs, sample_accounts, ret_age=60, deceased="jason", death_age=None)
         assert result["has_data"] is True
 
+    def test_respects_retirement_end_age_instead_of_hardcoded_99(self, sample_inputs, sample_accounts):
+        """Regression: every other simulation function in this file (Monte
+        Carlo, stress tests, SWR, tax efficiency) reads inputs[
+        "retirement_end_age"] instead of hardcoding 99 — this one didn't,
+        found via a bug-hunt sandbox where the household's actual
+        retirement_end_age (95) had no effect on the survivor scenario's
+        modeled horizon, insurance-gap math, or its "through age 99" text.
+        A thin plan modeled to a shorter horizon needs strictly less
+        additional insurance than the same plan modeled to a longer one."""
+        thin_inputs = {**sample_inputs, "jason_life_basic": 0, "jason_life_supplemental": 0, "jason_life_term": 0,
+                       "retirement_income_today_dollars": 300000}
+        accounts = [a for a in sample_accounts if a["account_type"] != "401k"]
+
+        short = run_survivor_scenario({**thin_inputs, "retirement_end_age": 90}, accounts, ret_age=60, deceased="jason", death_age=65)
+        long_ = run_survivor_scenario({**thin_inputs, "retirement_end_age": 105}, accounts, ret_age=60, deceased="jason", death_age=65)
+
+        assert short["survivor_end_age"] == 90
+        assert long_["survivor_end_age"] == 105
+        assert short["schedule"][-1]["age"] < long_["schedule"][-1]["age"]
+        assert short["additional_insurance_needed"] < long_["additional_insurance_needed"]
+        assert "through age 90" not in long_["recommendation"]
+
+    def test_default_retirement_end_age_falls_back_to_99(self, sample_inputs, sample_accounts):
+        inputs = {**sample_inputs, "retirement_end_age": None}
+        result = run_survivor_scenario(inputs, sample_accounts, ret_age=60, deceased="jason", death_age=70)
+        assert result["survivor_end_age"] == 99
+
 
 class TestLifeEventsInSimulation:
     """life_events threaded through simulation_engine.py: pre-retirement
