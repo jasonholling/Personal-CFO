@@ -3,6 +3,8 @@ Tests for main.py's FastAPI routes, via TestClient against an isolated
 temp db (see conftest.py's `client`/`temp_db` fixtures — never the real
 cfo.db).
 """
+import json
+
 import auth
 from projection_engine import CURRENT_YEAR
 
@@ -1435,3 +1437,49 @@ class TestCfoOperatingSystem:
         response = client.get("/api/backup/export")
         assert response.status_code == 200
         assert response.json()["format"] == "personal-cfo-backup"
+
+    def test_restore_requires_confirmation(self, client):
+        payload = client.get("/api/backup/export").json()
+        r = client.post("/api/backup/restore", files={"file": ("b.json", json.dumps(payload), "application/json")})
+        assert r.status_code == 400
+
+    def test_restore_round_trips_a_real_export(self, client, sample_inputs, sample_accounts):
+        _seed_planning_inputs(client, sample_inputs)
+        _seed_accounts(client, sample_accounts)
+        payload = client.get("/api/backup/export").json()
+        r = client.post("/api/backup/restore", params={"confirm": "true"},
+                         files={"file": ("b.json", json.dumps(payload), "application/json")})
+        assert r.status_code == 200, r.text
+        assert len(client.get("/api/accounts").json()) == len(sample_accounts)
+
+    def test_restore_rejects_backup_missing_a_table(self, client, sample_inputs, sample_accounts):
+        """Regression (external audit 2026-09-07): a backup payload with
+        `tables: {}` (or any table key simply absent) used to pass
+        validation — which only checked that tables *present* were known
+        names — straight through to a DELETE over every real table,
+        re-inserting only whatever the payload happened to include. A
+        real export with even one table key removed must be rejected
+        outright rather than silently wiping that category, and the
+        existing data must survive the attempt untouched."""
+        _seed_planning_inputs(client, sample_inputs)
+        _seed_accounts(client, sample_accounts)
+        payload = client.get("/api/backup/export").json()
+        del payload["tables"]["accounts"]
+        r = client.post("/api/backup/restore", params={"confirm": "true"},
+                         files={"file": ("b.json", json.dumps(payload), "application/json")})
+        assert r.status_code == 400
+        assert "accounts" in r.json()["detail"]
+        # The rejected restore must not have touched anything.
+        assert len(client.get("/api/accounts").json()) == len(sample_accounts)
+
+    def test_restore_rejects_empty_tables_dict(self, client, sample_inputs, sample_accounts):
+        """The exact reproduction from the audit: {"tables": {}} used to
+        return {"ok": true} while erasing every table."""
+        _seed_planning_inputs(client, sample_inputs)
+        _seed_accounts(client, sample_accounts)
+        bad_payload = {"format": "personal-cfo-backup", "version": 1, "tables": {}}
+        r = client.post("/api/backup/restore", params={"confirm": "true"},
+                         files={"file": ("b.json", json.dumps(bad_payload), "application/json")})
+        assert r.status_code == 400
+        assert len(client.get("/api/accounts").json()) == len(sample_accounts)
+        assert client.get("/api/planning-inputs").status_code == 200

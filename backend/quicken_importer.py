@@ -12,15 +12,22 @@ from typing import List, Dict
 from debt_engine import DEBT_TYPES as LIABILITY_TYPES
 
 
-def _clean_amount(val: str) -> float:
-    """Convert Quicken amount string to float."""
+def _clean_amount(val: str):
+    """Convert a Quicken amount string to float, or None if it can't be
+    parsed. Distinct from a genuine "0.00" — an account paid off or
+    emptied to exactly $0 is real, current data (external audit
+    2026-09-07: this used to return 0.0 for both a real zero AND an
+    unparseable string, and the parse loop below then skipped BOTH cases
+    identically as "zero balance", so re-importing an account that's now
+    genuinely empty left its old nonzero balance in the app untouched —
+    the import silently succeeded without ever reflecting the payoff)."""
     if not val:
-        return 0.0
+        return None
     cleaned = val.replace(',', '').replace('"', '').strip()
     try:
         return float(cleaned)
     except ValueError:
-        return 0.0
+        return None
 
 
 """Public mappings intentionally contain only generic account labels.
@@ -101,8 +108,10 @@ def parse_quicken_networth_csv(csv_content: str) -> List[Dict]:
         clean_name = re.sub(r'^[\s\-]+', '', raw_name).strip()
         amount = _clean_amount(raw_amount)
 
-        # Skip zero balances
-        if amount == 0.0:
+        # Skip rows that genuinely couldn't be parsed — but NOT a real
+        # $0.00 balance, which must still go through and update/zero the
+        # matching account (see _clean_amount's docstring).
+        if amount is None:
             continue
 
         # Skip certain patterns
@@ -125,11 +134,13 @@ def parse_quicken_networth_csv(csv_content: str) -> List[Dict]:
 
         account_type, owner = mapped
 
-        # Make liabilities positive (store as positive, display as negative)
-        if account_type in LIABILITY_TYPES:
-            balance = abs(amount)
-        else:
-            balance = abs(amount)
+        # Make liabilities positive (Quicken exports them negative; this
+        # app stores every liability balance as a positive magnitude —
+        # see debt_engine.py). Assets keep their real sign — this used to
+        # apply the same abs() to both branches (external audit
+        # 2026-09-07), silently flipping a negative asset balance (e.g. an
+        # overdrawn checking account, or a Quicken export quirk) positive.
+        balance = abs(amount) if account_type in LIABILITY_TYPES else amount
 
         accounts.append({
             'name': clean_name,

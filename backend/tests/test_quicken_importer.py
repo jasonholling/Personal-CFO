@@ -26,11 +26,19 @@ class TestCleanAmount:
     def test_strips_commas(self):
         assert _clean_amount("1,234.56") == 1234.56
 
-    def test_empty_string_is_zero(self):
-        assert _clean_amount("") == 0.0
+    def test_empty_string_is_unparseable(self):
+        """Regression (external audit 2026-09-07): this used to return 0.0
+        for an empty string, indistinguishable from a genuine "$0.00"
+        balance — which meant a real zero and a parse failure were treated
+        identically by the caller, silently dropping a real $0 balance
+        the same way it correctly drops unparseable garbage."""
+        assert _clean_amount("") is None
 
-    def test_non_numeric_is_zero(self):
-        assert _clean_amount("n/a") == 0.0
+    def test_non_numeric_is_unparseable(self):
+        assert _clean_amount("n/a") is None
+
+    def test_real_zero_is_not_unparseable(self):
+        assert _clean_amount("0.00") == 0.0
 
     def test_strips_quotes(self):
         assert _clean_amount('"1,000"') == 1000.0
@@ -62,9 +70,36 @@ class TestParseQuickenNetworthCsv:
         assert accounts[0]["account_type"] == "401k"
         assert accounts[0]["owner"] == "person1"
 
-    def test_skips_zero_balance_accounts(self):
+    def test_keeps_a_real_zero_balance_for_a_mapped_account(self, monkeypatch, tmp_path):
+        """Regression (external audit 2026-09-07): a genuinely-zero balance
+        for a recognized/mapped account (e.g. a car loan that's been paid
+        off, or an account emptied out) used to be dropped from the parsed
+        result entirely — the app then never learns the balance changed
+        and keeps showing its old, stale, nonzero balance indefinitely."""
+        local_map = tmp_path / "account-map.json"
+        local_map.write_text(json.dumps({"2024 highlander": ["car_loan", "person1"]}))
+        monkeypatch.setattr(quicken_importer, "_LOCAL_MAP_PATH", str(local_map))
         accounts = parse_quicken_networth_csv(SAMPLE_CSV)
-        assert not any(a["name"] == "2024 Highlander" for a in accounts)
+        highlander = next(a for a in accounts if a["name"] == "2024 Highlander")
+        assert highlander["balance"] == 0.0
+
+    def test_preserves_negative_sign_on_asset_balances(self, monkeypatch, tmp_path):
+        """Regression (external audit 2026-09-07): abs() used to be
+        applied to BOTH the liability and the asset branch — identical
+        code in each — silently flipping a negative asset balance (e.g.
+        an overdrawn checking account) positive."""
+        local_map = tmp_path / "account-map.json"
+        local_map.write_text(json.dumps({"overdrawn checking": ["checking", "person1"]}))
+        monkeypatch.setattr(quicken_importer, "_LOCAL_MAP_PATH", str(local_map))
+        accounts = parse_quicken_networth_csv("Header\n---\nChecking,Overdrawn Checking,-100.00\n")
+        assert accounts[0]["balance"] == -100.0
+
+    def test_liability_balances_stay_positive_magnitude(self, monkeypatch, tmp_path):
+        local_map = tmp_path / "account-map.json"
+        local_map.write_text(json.dumps({"car loan": ["car_loan", "person1"]}))
+        monkeypatch.setattr(quicken_importer, "_LOCAL_MAP_PATH", str(local_map))
+        accounts = parse_quicken_networth_csv("Header\n---\nLoan,Car Loan,-18000.00\n")
+        assert accounts[0]["balance"] == 18000.0
 
     def test_skips_unmapped_accounts(self):
         accounts = parse_quicken_networth_csv(SAMPLE_CSV)

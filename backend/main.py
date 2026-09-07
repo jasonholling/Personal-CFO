@@ -254,6 +254,25 @@ async def restore_backup(file: UploadFile = File(...), confirm: bool = False):
     tables = payload["tables"]
     if any(table not in _BACKUP_TABLES or not isinstance(rows, list) for table, rows in tables.items()):
         raise HTTPException(status_code=400, detail="Backup contains an invalid table")
+    # A legitimate backup (from this app's own /api/backup/export) always
+    # includes every table in _BACKUP_TABLES, even ones with zero rows —
+    # that's how the export is built. Validation used to only check that
+    # tables *present* in the payload were known table names, so a
+    # structurally-valid-but-incomplete payload (missing keys entirely, in
+    # the extreme case an empty {}) passed straight through to a DELETE
+    # over every real table followed by re-inserting only what little (or
+    # nothing) the payload actually contained — a restore that "succeeds"
+    # while silently erasing every table the backup didn't happen to
+    # mention (external audit 2026-09-07, reproduced with literally
+    # {"tables": {}} -> {"ok": true} and an empty accounts/planning_inputs
+    # table afterward). Require every table to be present as a key
+    # (an empty list for a genuinely-empty table is fine and expected —
+    # only a MISSING key indicates a malformed/partial file) before
+    # allowing anything to be deleted.
+    missing = [t for t in _BACKUP_TABLES if t not in tables]
+    if missing:
+        raise HTTPException(status_code=400,
+            detail=f"Backup is missing expected table(s): {', '.join(missing)} — refusing to restore an incomplete backup")
     conn = get_db()
     try:
         conn.execute("BEGIN")
