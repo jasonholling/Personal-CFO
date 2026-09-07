@@ -63,6 +63,32 @@ def test_get_db_returns_row_factory_connection(temp_db):
     conn.close()
 
 
+def test_saved_scenarios_migration_adds_ss_timing_and_assumptions(temp_db):
+    """Regression (external audit 2026-09-07, finding #15): an older
+    saved_scenarios table (pre-dating ss_timing/assumptions_json) must be
+    backfilled by init_saved_scenarios_table() without losing existing
+    rows, and ss_timing must default to 'early' — the implicit behavior
+    every pre-existing row always actually had."""
+    conn = db_module.get_db()
+    conn.execute(
+        "INSERT INTO saved_scenarios (name, retirement_age, summary_json) VALUES (?,?,?)",
+        ("Legacy row", 60, '{"retirement_age": 60}'),
+    )
+    conn.execute("ALTER TABLE saved_scenarios DROP COLUMN ss_timing")
+    conn.execute("ALTER TABLE saved_scenarios DROP COLUMN assumptions_json")
+    conn.commit()
+    conn.close()
+
+    db_module.init_saved_scenarios_table()
+
+    conn = db_module.get_db()
+    row = conn.execute("SELECT * FROM saved_scenarios WHERE name='Legacy row'").fetchone()
+    conn.close()
+    assert row["retirement_age"] == 60  # pre-existing data untouched
+    assert row["ss_timing"] == "early"  # backfilled default
+    assert row["assumptions_json"] is None
+
+
 def test_accounts_table_accepts_insert(temp_db):
     conn = db_module.get_db()
     conn.execute(

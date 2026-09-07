@@ -1507,3 +1507,79 @@ class TestCfoOperatingSystem:
         assert r.status_code == 400
         assert len(client.get("/api/accounts").json()) == len(sample_accounts)
         assert client.get("/api/planning-inputs").status_code == 200
+
+
+class TestSavedScenariosSsTiming:
+    """Regression (external audit 2026-09-07, finding #15): POST
+    /api/saved-scenarios used to hardcode "early" SS claiming regardless
+    of what the caller asked for, and never persisted which timing had
+    actually been used — so a scenario saved under "SS at 67" silently
+    recorded early-claiming numbers with no way to tell after the fact."""
+
+    def _seed(self, client, sample_inputs, sample_accounts):
+        _seed_planning_inputs(client, sample_inputs)
+        _seed_accounts(client, sample_accounts)
+
+    def test_default_ss_timing_is_early(self, client, sample_inputs, sample_accounts):
+        self._seed(client, sample_inputs, sample_accounts)
+        r = client.post("/api/saved-scenarios", json={"name": "Default", "retirement_age": 60})
+        assert r.status_code == 200, r.text
+        saved = next(s for s in client.get("/api/saved-scenarios").json() if s["name"] == "Default")
+        assert saved["ss_timing"] == "early"
+
+    def test_delayed_ss_timing_is_persisted_and_produces_different_numbers(
+        self, client, sample_inputs, sample_accounts
+    ):
+        self._seed(client, sample_inputs, sample_accounts)
+        client.post("/api/saved-scenarios", json={
+            "name": "Early", "retirement_age": 60, "ss_timing": "early",
+        })
+        client.post("/api/saved-scenarios", json={
+            "name": "Delayed", "retirement_age": 60, "ss_timing": "delayed",
+        })
+        rows = {s["name"]: s for s in client.get("/api/saved-scenarios").json()}
+        assert rows["Early"]["ss_timing"] == "early"
+        assert rows["Delayed"]["ss_timing"] == "delayed"
+        # portfolio_at_retirement covers only the pre-retirement accumulation
+        # phase, so it's identical either way — projected_surplus (which
+        # reflects SS income actually received during retirement) is where
+        # early-vs-delayed claiming diverges. Before the fix both rows would
+        # have been computed against the early-claiming scenario regardless
+        # of ss_timing, making this value identical too.
+        assert (
+            rows["Early"]["summary"]["projected_surplus"]
+            != rows["Delayed"]["summary"]["projected_surplus"]
+        )
+
+    def test_assumptions_snapshot_records_retirement_age_and_ss_timing(
+        self, client, sample_inputs, sample_accounts
+    ):
+        self._seed(client, sample_inputs, sample_accounts)
+        client.post("/api/saved-scenarios", json={
+            "name": "Snapshot me", "retirement_age": 62, "ss_timing": "delayed",
+        })
+        saved = next(s for s in client.get("/api/saved-scenarios").json() if s["name"] == "Snapshot me")
+        assert saved["assumptions"] == {"retirement_age": 62, "ss_timing": "delayed"}
+
+    def test_invalid_ss_timing_rejected(self, client, sample_inputs, sample_accounts):
+        self._seed(client, sample_inputs, sample_accounts)
+        r = client.post("/api/saved-scenarios", json={
+            "name": "Bad", "retirement_age": 60, "ss_timing": "yesterday",
+        })
+        assert r.status_code == 400
+
+    def test_saving_over_same_name_updates_ss_timing(self, client, sample_inputs, sample_accounts):
+        """Re-saving under the same name (the ON CONFLICT upsert path) must
+        also overwrite the previously stored ss_timing, not just retirement_age
+        and the summary."""
+        self._seed(client, sample_inputs, sample_accounts)
+        client.post("/api/saved-scenarios", json={
+            "name": "Retire at 60", "retirement_age": 60, "ss_timing": "early",
+        })
+        client.post("/api/saved-scenarios", json={
+            "name": "Retire at 60", "retirement_age": 60, "ss_timing": "delayed",
+        })
+        rows = client.get("/api/saved-scenarios").json()
+        matching = [s for s in rows if s["name"] == "Retire at 60"]
+        assert len(matching) == 1
+        assert matching[0]["ss_timing"] == "delayed"

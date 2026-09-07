@@ -202,6 +202,12 @@ class SurplusAllocation(BaseModel):
 class ScenarioSave(BaseModel):
     name: str
     retirement_age: int = 60
+    # Previously unset — save_scenario() always projected against the
+    # "early" SS scenario regardless of what the user had selected
+    # elsewhere in the app, with no field to say otherwise (external audit
+    # 2026-09-07, finding #15). Matches the "early"/"delayed" vocabulary
+    # used everywhere else (SS_OPTS in Simulation.jsx, utils/scenario.js).
+    ss_timing: str = "early"
 
 class LifeEvent(BaseModel):
     name: str
@@ -491,18 +497,31 @@ def save_surplus_allocation(goal: str, allocation: SurplusAllocation):
 @app.get("/api/saved-scenarios")
 def get_saved_scenarios():
     conn=get_db(); rows=conn.execute("SELECT * FROM saved_scenarios ORDER BY created_at DESC").fetchall(); conn.close()
-    return [{**dict(r), "summary":json.loads(r["summary_json"])} for r in rows]
+    # assumptions_json is nullable (rows saved before finding #15's fix
+    # won't have one) — surface it as `assumptions` when present so the
+    # frontend can show what actually produced this scenario's numbers.
+    return [{**dict(r), "summary":json.loads(r["summary_json"]),
+             "assumptions": json.loads(r["assumptions_json"]) if r["assumptions_json"] else None} for r in rows]
 
 @app.post("/api/saved-scenarios")
 def save_scenario(body: ScenarioSave):
     if not body.name.strip() or body.retirement_age < 50 or body.retirement_age > 75: raise HTTPException(status_code=400,detail="Enter a name and retirement age from 50 to 75")
+    if body.ss_timing not in ("early","delayed"): raise HTTPException(status_code=400,detail="ss_timing must be 'early' or 'delayed'")
     conn=get_db(); inputs=conn.execute("SELECT * FROM planning_inputs WHERE id=1").fetchone(); accounts=[dict(r) for r in conn.execute("SELECT * FROM accounts").fetchall()]
     if not inputs: conn.close(); raise HTTPException(status_code=400,detail="Planning inputs not set")
     life_events=_get_active_life_events(conn)
     surplus_allocations=_get_relevant_surplus_allocations(conn)
-    result=run_retirement_projection(dict(inputs),accounts,ret_ages=[body.retirement_age],life_events=life_events,surplus_allocations=surplus_allocations); scenario=next((s for s in result["scenarios"] if s["ss_timing"]=="early"),None)
+    # Used to hardcode "early" here regardless of body.ss_timing, so a
+    # scenario saved while "SS at 67" was selected everywhere else in the
+    # app was silently projected as if early claiming had been chosen
+    # instead (external audit 2026-09-07, finding #15).
+    result=run_retirement_projection(dict(inputs),accounts,ret_ages=[body.retirement_age],life_events=life_events,surplus_allocations=surplus_allocations); scenario=next((s for s in result["scenarios"] if s["ss_timing"]==body.ss_timing),None)
     summary={k:scenario[k] for k in ("retirement_age","percent_funded","portfolio_at_retirement","projected_surplus","on_track")}
-    conn.execute("INSERT INTO saved_scenarios (name,retirement_age,summary_json) VALUES (?,?,?) ON CONFLICT(name) DO UPDATE SET retirement_age=excluded.retirement_age,summary_json=excluded.summary_json,created_at=datetime('now')",(body.name.strip(),body.retirement_age,json.dumps(summary)));conn.commit();conn.close();return summary
+    # assumptions_json only snapshots retirement_age + ss_timing — see the
+    # comment on init_saved_scenarios_table() in db.py for why What-If
+    # Builder overrides aren't captured here too.
+    assumptions=json.dumps({"retirement_age":body.retirement_age,"ss_timing":body.ss_timing})
+    conn.execute("INSERT INTO saved_scenarios (name,retirement_age,ss_timing,summary_json,assumptions_json) VALUES (?,?,?,?,?) ON CONFLICT(name) DO UPDATE SET retirement_age=excluded.retirement_age,ss_timing=excluded.ss_timing,summary_json=excluded.summary_json,assumptions_json=excluded.assumptions_json,created_at=datetime('now')",(body.name.strip(),body.retirement_age,body.ss_timing,json.dumps(summary),assumptions));conn.commit();conn.close();return summary
 
 @app.get("/api/plan-confidence")
 def get_plan_confidence():
