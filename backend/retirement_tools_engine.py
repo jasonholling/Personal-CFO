@@ -8,7 +8,7 @@ this session (that duplication is exactly what caused bugs before).
 """
 from typing import Dict, List, Optional
 
-from projection_engine import _fv, _pv_annuity, _rmd, rmd_start_age
+from projection_engine import _fv, _pv_annuity, _rmd, rmd_start_age, run_retirement_projection
 
 # 2026 MFJ ordinary brackets (IRS Rev. Proc. 2025-32) — keep in sync with
 # frontend/src/pages/TaxPlanning.jsx's ORDINARY_2026. Two copies (one Python,
@@ -50,12 +50,21 @@ def marginal_rate(taxable_income: float) -> float:
     return ORDINARY_BRACKETS_MFJ_2026[-1][0]
 
 
-def run_rmd_planning(inputs: Dict, accounts: List[Dict]) -> Dict:
+def run_rmd_planning(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_timing: str = "early",
+                      life_events: List[Dict] = None, surplus_allocations: List[Dict] = None) -> Dict:
     """Projects your pretax (401k/IRA) balance to your RMD start age, then
     simulates RMDs year by year, flagging whether the first RMD pushes you
     into a higher bracket than your other retirement income already puts
     you in — that's the signal for whether Roth-converting before then is
-    worth it."""
+    worth it.
+
+    ret_age/ss_timing/life_events/surplus_allocations: same knobs every
+    other retirement-tools call site takes (see get_roth_conversion in
+    main.py) — ret_age defaults to 60, matching the rest of the app's
+    "headline scenario" convention. Threaded through to
+    run_retirement_projection below so the balance this tool projects to
+    RMD age reflects the household's ACTUAL retirement withdrawals, not a
+    balance nothing is ever spent from."""
     jason_age = inputs["jason_age"]
     pre_ret  = inputs["expected_return_pre_retirement"]
     post_ret = inputs["expected_return_post_retirement"]
@@ -74,7 +83,44 @@ def run_rmd_planning(inputs: Dict, accounts: List[Dict]) -> Dict:
     # 73 everywhere in this file, caught by external audit 2026-09-05.
     start_age = rmd_start_age(jason_age)
     years_to_start = max(0, start_age - jason_age)
-    balance_at_start = _fv(pretax_start, pre_ret, years_to_start)
+
+    # Was: balance_at_start = _fv(pretax_start, pre_ret, years_to_start) —
+    # pure growth, no withdrawals subtracted. That meant this tool's
+    # headline "balance at RMD age" (and the RMD computed from it) could
+    # describe money that the household's own retirement plan has already
+    # spent down to zero years before RMD age arrives — e.g. a $1M pretax
+    # balance with $100k/yr spending and 0% returns is fully depleted by
+    # the real projection well before age 75, yet this used to still
+    # report a $40,650 first RMD off an untouched $1M. Caught by external
+    # audit 2026-09-07.
+    #
+    # Fix: read the SAME pretax trajectory run_retirement_projection
+    # produces for this household (the pattern run_roth_conversion_analysis
+    # in simulation_engine.py already follows) instead of independently
+    # compounding today's raw balance. Simplification that remains: once
+    # the real projection actually reaches RMD age it starts subtracting
+    # its own RMDs from the pretax bucket before this function's own
+    # schedule loop below even starts — we take the balance from the LAST
+    # pre-RMD year (start_age - 1) as the base, which is exactly what this
+    # function's own RMD-schedule loop expects to work from. If retirement
+    # happens at or after RMD age, there is no pre-RMD year to read, so we
+    # fall back to the pretax balance at retirement itself (the household
+    # hasn't had any pre-retirement withdrawal years to deplete it in that
+    # case).
+    proj = run_retirement_projection(inputs, accounts, ret_ages=[ret_age],
+                                      life_events=life_events, surplus_allocations=surplus_allocations)
+    scenario = next((s for s in proj["scenarios"] if s["label"] == f"age_{ret_age}_{ss_timing}"), None)
+    if scenario is None:
+        balance_at_start = _fv(pretax_start, pre_ret, years_to_start)
+    elif ret_age >= start_age:
+        balance_at_start = scenario["pretax_at_retirement"]
+    else:
+        pre_rmd_year = next((y for y in scenario["yearly_detail"] if y["jason_age"] == start_age - 1), None)
+        # Projection didn't reach that far (e.g. plan runs past
+        # life_expectancy before start_age - 1) — the pretax bucket at the
+        # household's actual retirement is the best available estimate
+        # rather than falling back to unadjusted compounding.
+        balance_at_start = pre_rmd_year["pretax_balance"] if pre_rmd_year is not None else scenario["pretax_at_retirement"]
 
     # "Other income" once RMDs start — pension + both SS benefits at their
     # steady-state (age-65 pension, since RMDs start well past any
@@ -175,14 +221,33 @@ def pension_vs_lump_sum(monthly_pension: float, lump_sum: float, current_age: in
     implied_rate = _implied_discount_rate(annual_pension, years_receiving, lump_sum, years_until_start)
     favors_lump_sum = lump_sum > pv_today
 
+    # _implied_discount_rate returns None from its "even a near-zero
+    # discount rate can't make the pension worth this little" branch
+    # whenever the pension's own nominal total is already below the lump
+    # sum (e.g. $100/mo * 10yr = $12,000 nominal vs. a $20,000 lump sum) —
+    # no positive rate satisfies PV(pension) = lump_sum because the pension
+    # is structurally the worse deal, full stop. That failure used to be
+    # mislabeled as "implied rate is very high — hard to beat", the exact
+    # opposite conclusion: a search that can't find ANY rate making the
+    # pension worth the lump sum is a signal the lump sum wins, not that
+    # the pension has a great return. Caught by external audit 2026-09-07.
     if implied_rate is not None:
         rate_note = (
             f"The pension is equivalent to investing the lump sum at a guaranteed "
             f"{implied_rate*100:.1f}%/yr — take the lump sum only if you're confident you can beat that "
             f"investing it yourself, after accounting for the guarantee you'd be giving up."
         )
+    elif favors_lump_sum:
+        rate_note = (
+            "No positive discount rate makes the pension worth as much as the lump sum — its total nominal "
+            "payments over the payout period are already less than what's being offered up front, so the lump "
+            "sum is the clear choice here."
+        )
     else:
-        rate_note = "The pension's implied rate is very high — hard to beat by self-investing the lump sum."
+        rate_note = (
+            "The implied break-even rate couldn't be pinned down for these inputs, but the pension is still "
+            "worth more than the lump sum at your assumed discount rate."
+        )
 
     return {
         "present_value_of_pension": round(pv_today),

@@ -308,7 +308,25 @@ def recommend_payoff_strategy(accounts: List[Dict], extra_monthly: float = 0, to
             "Your debts are already close in cost, so tackling the highest rate first is the safe default."
         )
 
-    focus_first = chosen["payoff_order"][0] if chosen["payoff_order"] else None
+    # Was: focus_first = chosen["payoff_order"][0] — the debt that finishes
+    # FIRST chronologically under the chosen payment plan, per
+    # _simulate_payoff's payoff_order (sorted by payoff_month, not by the
+    # avalanche/snowball ordering rule). For a household with one large
+    # debt at 20% APR and one tiny debt at 1% APR, the tiny debt has a
+    # small enough balance to pay off first in time even though avalanche
+    # was correctly selected as the strategy — so this used to recommend
+    # directing extra payments at the 1% debt, contradicting the avalanche
+    # strategy ("highest rate first") it had just chosen. Caught by
+    # external audit 2026-09-07.
+    #
+    # Fix: pick the target debt using the SAME ordering rule as the chosen
+    # strategy (avalanche: highest rate first; snowball: smallest balance
+    # first) instead of whichever happens to be projected to finish first.
+    order_key = (lambda d: d.get("balance", 0)) if use_snowball else (lambda d: -d.get("interest_rate", 0))
+    target_debt = min(debts, key=order_key) if debts else None
+    focus_first = next(
+        (p for p in chosen["payoff_order"] if p["id"] == target_debt["id"]), None
+    ) if target_debt else None
 
     return {
         "has_debt": True,

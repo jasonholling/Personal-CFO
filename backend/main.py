@@ -839,15 +839,18 @@ def post_debt_vs_invest(body: DebtVsInvestRequest):
 
 # ── Retirement tools: RMD planning, pension vs lump sum, backdoor Roth ─────────
 @app.get("/api/retirement-tools/rmd-planning")
-def get_rmd_planning():
+def get_rmd_planning(ret_age: int = 60, ss_timing: str = "early"):
     conn = get_db()
     inputs_row = conn.execute("SELECT * FROM planning_inputs WHERE id=1").fetchone()
     accounts   = [dict(r) for r in conn.execute("SELECT * FROM accounts").fetchall()]
+    life_events = _get_active_life_events(conn)
+    surplus_allocations = _get_relevant_surplus_allocations(conn)
     conn.close()
     if not inputs_row:
         raise HTTPException(status_code=400, detail="Planning inputs not set yet")
     from retirement_tools_engine import run_rmd_planning
-    return run_rmd_planning(dict(inputs_row), accounts)
+    return run_rmd_planning(dict(inputs_row), accounts, ret_age, ss_timing,
+                             life_events=life_events, surplus_allocations=surplus_allocations)
 
 class PensionVsLumpSumRequest(BaseModel):
     monthly_pension: float
