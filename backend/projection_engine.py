@@ -15,6 +15,8 @@ from typing import List, Dict
 import datetime
 import math
 
+from annual_engine import AccountState, DEFAULT_ORDER, marginal_bracket_tax_model, simulate_withdrawal_year
+
 COLLEGE_COST_INFLATION = 0.04
 COLLEGE_YEARS          = 4
 UNL_CURRENT_ANNUAL     = 0  # fallback only — read from inputs at runtime
@@ -683,9 +685,6 @@ def run_retirement_projection(inputs: Dict, accounts: List[Dict], ret_ages: List
                 # RMD on pre-tax bucket
                 rmd = _rmd(pretax, age, jason_rmd_start_age)
 
-                # Net need after fixed income
-                net_need = max(0, year_need - fixed_income)
-
                 # Estimated tax on pretax withdrawals — previously
                 # withdrawal_pretax and reinvested RMD excess were treated
                 # as tax-free, overstating both "after-tax spending" and the
@@ -701,88 +700,41 @@ def run_retirement_projection(inputs: Dict, accounts: List[Dict], ret_ages: List
                 taxable_income_est = max(0, year_pen + (year_jss + year_uss) * 0.85 + rmd - _STD_DED)
                 pretax_tax_rate = min(0.90, _marginal_rate(taxable_income_est) + max(0, float(inputs.get("state_income_tax_rate") or 0)))
 
-                # Draw order: taxable first, then pretax (satisfies RMD minimum),
-                # then roth last (let it compound)
-                withdrawal_taxable = 0.0
-                withdrawal_pretax  = 0.0
-                withdrawal_roth    = 0.0
-                rmd_reinvested     = 0.0
-                pretax_tax_owed    = 0.0
+                # Draw order: taxable first, then pretax (satisfies RMD
+                # minimum), then HSA, then roth last (let it compound).
+                # This is the shared withdrawal-phase step
+                # (annual_engine.simulate_withdrawal_year) — see
+                # docs/CALCULATION_CONTRACT.md. taxable_rate=0 preserves
+                # this engine's existing "no tax modeled on taxable draws"
+                # simplification (CALCULATION_CONTRACT.md 3.1) exactly.
+                year_result = simulate_withdrawal_year(
+                    opening=AccountState(pretax=pretax, roth=roth, taxable=taxable, hsa=hsa),
+                    spending_need=year_need,
+                    guaranteed_income=fixed_income,
+                    life_event_cash=life_event_cash_this_year,
+                    rmd_amount=rmd,
+                    tax_model=marginal_bracket_tax_model(pretax_rate=pretax_tax_rate, taxable_rate=0.0),
+                    growth_rate=post_ret,
+                    order=DEFAULT_ORDER,
+                )
 
-                # Life-event one-time cash arriving exactly this year lands
-                # in the taxable bucket up front — same treatment as
-                # rmd_reinvested below, available for this year's
-                # withdrawal waterfall or just left to compound.
-                if life_event_cash_this_year:
-                    taxable += life_event_cash_this_year
-
-                # A cost beyond taxable assets must be funded by the other
-                # buckets; never erase a negative balance at year-end.
-                remaining_need = net_need + max(0, -taxable)
-                taxable = max(0, taxable)
-                taxable += max(0, fixed_income - year_need)
-
-                # 1. Must take RMD from pretax regardless — its after-tax
-                # value (not the gross amount) is what's actually available
-                # to cover spending or get reinvested.
-                if rmd > 0:
-                    actual_rmd = min(rmd, pretax)
-                    pretax -= actual_rmd
-                    withdrawal_pretax = actual_rmd
-                    rmd_tax = actual_rmd * pretax_tax_rate
-                    pretax_tax_owed += rmd_tax
-                    after_tax_rmd = actual_rmd - rmd_tax
-                    if after_tax_rmd <= remaining_need:
-                        remaining_need -= after_tax_rmd
-                    else:
-                        # RMD exceeds need — after-tax excess reinvested in taxable
-                        rmd_reinvested = after_tax_rmd - remaining_need
-                        taxable += rmd_reinvested
-                        remaining_need = 0
-
-                # 2. Draw from taxable next
-                if remaining_need > 0 and taxable > 0:
-                    draw = min(remaining_need, taxable)
-                    taxable -= draw
-                    withdrawal_taxable += draw
-                    remaining_need -= draw
-
-                # 3. Draw more from pretax if needed — gross up the
-                # withdrawal so its after-tax proceeds (not the gross
-                # amount) cover the remaining need. This used to be gated
-                # on `rmd == 0`, meaning once RMD age was reached (rmd > 0
-                # every year for the rest of the plan), no further pretax
-                # withdrawal was ever allowed again no matter how large the
-                # remaining need or the remaining pretax balance — a real
-                # bug caught by external audit 2026-09-06: a big unmet need
-                # was silently rationed away instead of drawn from a pretax
-                # balance that still had plenty left. The RMD itself was
-                # already withdrawn in step 1 above (and already reduced
-                # `pretax`), so there's no double-counting risk in drawing
-                # more from what remains.
-                if remaining_need > 0 and pretax > 0:
-                    gross_needed = remaining_need / (1 - pretax_tax_rate) if pretax_tax_rate < 1 else remaining_need
-                    draw = min(gross_needed, pretax)
-                    pretax -= draw
-                    withdrawal_pretax += draw
-                    draw_tax = draw * pretax_tax_rate
-                    pretax_tax_owed += draw_tax
-                    remaining_need -= (draw - draw_tax)
-
-                # 4. Draw from HSA (tax-free for medical, eventually anything)
-                withdrawal_hsa = 0.0
-                if remaining_need > 0 and hsa > 0:
-                    draw = min(remaining_need, hsa)
-                    hsa -= draw
-                    withdrawal_hsa = draw
-                    remaining_need -= draw
-
-                # 5. Roth last resort
-                if remaining_need > 0 and roth > 0:
-                    draw = min(remaining_need, roth)
-                    roth -= draw
-                    withdrawal_roth += draw
-                    remaining_need -= draw
+                withdrawal_taxable = year_result.draws.get("taxable", 0.0)
+                # draws["pretax"] includes both the mandatory RMD and any
+                # further discretionary pretax draw; withdrawal_pretax
+                # reports their sum, matching this field's existing
+                # meaning (see yearly.append below).
+                withdrawal_pretax  = year_result.draws.get("pretax", 0.0)
+                withdrawal_hsa     = year_result.draws.get("hsa", 0.0)
+                withdrawal_roth    = year_result.draws.get("roth", 0.0)
+                rmd_reinvested     = year_result.rmd_reinvested
+                # pretax_tax_owed reports tax on pretax draws only (RMD +
+                # discretionary), matching this field's existing meaning —
+                # taxable/hsa/roth draws are untaxed in this model, so
+                # total_tax and the pretax-only tax are the same figure,
+                # but computed explicitly rather than assumed identical
+                # (a future taxable_rate change here shouldn't silently
+                # relabel taxable's own tax as "pretax tax owed").
+                pretax_tax_owed = year_result.taxes_paid.get("rmd", 0.0) + year_result.taxes_paid.get("pretax", 0.0)
 
                 # Whatever's left after every bucket has been tried is
                 # genuine unmet spending need — the plan literally could
@@ -792,15 +744,14 @@ def run_retirement_projection(inputs: Dict, accounts: List[Dict], ret_ages: List
                 # year's spending need was actually met (external audit
                 # 2026-09-06). Surfaced per-year below and rolled into
                 # on_track/percent_funded at the scenario level.
-                unmet_need = remaining_need
+                unmet_need = year_result.unmet_need
 
                 total_withdrawal = withdrawal_taxable + withdrawal_pretax + withdrawal_roth + withdrawal_hsa
 
-                # Grow remaining balances
-                pretax  = max(0, pretax  * (1 + post_ret))
-                roth    = max(0, roth    * (1 + post_ret))
-                taxable = max(0, taxable * (1 + post_ret))
-                hsa     = max(0, hsa     * (1 + post_ret))
+                pretax  = year_result.closing.pretax
+                roth    = year_result.closing.roth
+                taxable = year_result.closing.taxable
+                hsa     = year_result.closing.hsa
 
                 total_portfolio = pretax + roth + taxable + hsa
 

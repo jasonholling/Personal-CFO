@@ -667,6 +667,72 @@ class TestLifeEventsInRetirementProjection:
             assert w["portfolio_at_retirement"] > b["portfolio_at_retirement"], age
 
 
+class TestWithdrawalWaterfallMigratedToSharedAnnualEngine:
+    """Regression tests for the shared-engine migration (see
+    docs/CALCULATION_CONTRACT.md and annual_engine.py). The migration was
+    verified against a captured before/after golden snapshot across 12
+    synthetic scenarios (tools/capture_retirement_golden.py) covering zero
+    returns/inflation, every retirement age 55-67, an already-past
+    retirement age, a large spouse age gap, insufficient funds, an asset
+    sale, the bridge-job/kids-at-home branch, RSU+bonus, salary growth,
+    state tax, and life events. The ONLY material differences found were
+    in the reporting of `withdrawal_taxable`/`withdrawal` for years where
+    a life event's cash flows through the taxable bucket — see the two
+    tests below, which pin down exactly what changed and confirm every
+    balance/unmet_need/on_track figure is byte-identical either way."""
+
+    def test_positive_life_event_cash_that_covers_the_full_need_is_no_longer_reported_as_a_taxable_draw(
+        self, sample_inputs, sample_accounts
+    ):
+        """Before the migration: a large positive life event (e.g. an
+        asset sale) got added directly into the taxable balance BEFORE the
+        waterfall ran, so if it happened to cover that year's whole need,
+        the waterfall's "draw from taxable" step still fired and counted
+        the untouched, just-injected cash as a $ draw from the account.
+        After the migration: life-event cash offsets need the same way
+        guaranteed income does, before any bucket is touched at all — if
+        it fully covers the need, no bucket draw happens, so
+        withdrawal_taxable correctly reads 0. Either way the resulting
+        taxable_balance/portfolio_balance/unmet_need are identical; only
+        the *label* of "was this an account withdrawal" changed, and the
+        new label is the more accurate one."""
+        inputs = {**sample_inputs, "asset1_sale_age": 63, "asset1_sale_net": 400000, "asset1_appreciation": 0.03}
+        result = run_retirement_projection(inputs, sample_accounts, ret_ages=[60])
+        early = next(s for s in result["scenarios"] if s["ss_timing"] == "early")
+        sale_row = next(y for y in early["yearly_detail"] if y["jason_age"] == 63)
+        assert sale_row["life_event_cash"] > 400000  # appreciated from the sale age to age 63
+        assert sale_row["withdrawal_taxable"] == 0
+        assert sale_row["unmet_need"] == 0
+
+    def test_negative_life_event_cash_now_correctly_shows_up_as_a_taxable_withdrawal(
+        self, sample_inputs, sample_accounts
+    ):
+        """Before the migration: a negative life event (a one-time cost)
+        was subtracted directly from the taxable balance before the
+        waterfall ran, so the resulting dollar reduction in the taxable
+        bucket was never recorded in withdrawal_taxable — the balance
+        dropped, but nothing in the per-year table said why. After the
+        migration: a negative life event increases the amount that must
+        be drawn through the ordered waterfall (taxable first), so the
+        exact dollars pulled from taxable to cover it now show up in
+        withdrawal_taxable, matching the closing taxable_balance either
+        way."""
+        # jason_age=50, ret_age=60 -> retirement starts CURRENT_YEAR+10;
+        # date the event a couple years into the withdrawal phase so it
+        # lands in yearly_detail rather than the pre-retirement accumulation.
+        event_year = CURRENT_YEAR + 12
+        events = [{"event_year": event_year, "one_time_cash_delta": -50000,
+                   "monthly_cash_flow_delta": 0, "duration_months": 0}]
+        result = run_retirement_projection(sample_inputs, sample_accounts, ret_ages=[60], life_events=events)
+        early = next(s for s in result["scenarios"] if s["ss_timing"] == "early")
+        event_row = next(y for y in early["yearly_detail"] if y["year"] == event_year)
+        assert event_row["life_event_cash"] == -50000
+        # The 50,000 cost is now visible in withdrawal_taxable, not just
+        # silently absorbed into a lower taxable_balance with no
+        # attribution.
+        assert event_row["withdrawal_taxable"] >= 50000
+
+
 class TestSurplusAllocationsInRetirementProjection:
     """surplus_allocations (from the "Assign Surplus" page's
     surplus_allocations table) are wired into the real projection as a

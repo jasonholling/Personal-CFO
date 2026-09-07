@@ -221,3 +221,47 @@ behavior baked into one policy:
    itemized spending, do I survive." The shared engine's per-year
    spending-need calculator must be optional/overridable so SWR can
    supply a single number instead.
+
+## 4. Migration log
+
+### `run_retirement_projection` → `annual_engine.simulate_withdrawal_year` (Phase 4, first consumer)
+
+The withdrawal-phase waterfall (RMD → taxable → grossed-up pretax → HSA →
+Roth, growth applied last) was replaced with a call to
+`annual_engine.simulate_withdrawal_year` using `DEFAULT_ORDER` and
+`marginal_bracket_tax_model(pretax_rate=pretax_tax_rate, taxable_rate=0.0)`
+— i.e. the exact tax model and draw order this function already used, now
+implemented once instead of duplicated.
+
+**Verification.** `tools/capture_retirement_golden.py` captured this
+function's full output across 12 synthetic scenarios (zero returns/
+inflation, every retirement age 55-67, an already-past retirement age, a
+large spouse age gap, insufficient funds, an asset sale, the bridge-job/
+kids-at-home branch, RSU+bonus, salary growth, state tax, life events)
+before and after the migration; `tools/diff_retirement_golden.py` diffed
+them with a $1 tolerance. All 132 pre-existing `test_projection_engine.py`
+tests continued to pass unchanged.
+
+**One material difference found, and it's a correction, not a
+regression:** `withdrawal_taxable`/`withdrawal` in the per-year table now
+correctly attribute money that flows through the taxable bucket because of
+a life event, in both directions:
+  - A positive life event (e.g. an asset sale) that fully covers a year's
+    need used to still show up as a "$X drawn from taxable" even though
+    the money was never really drawn from the account — it was injected
+    and then immediately reported as spent-from-taxable by the waterfall's
+    bookkeeping. Now it's correctly reported as 0 draw, because the shared
+    engine treats life-event cash as offsetting need directly (same as
+    guaranteed income), before any bucket is touched.
+  - A negative life event (a one-time cost) used to be subtracted directly
+    from the taxable balance *before* the waterfall ran, so the resulting
+    drop in the bucket was invisible in `withdrawal_taxable` — the number
+    went down with no line item saying why. Now that cost correctly shows
+    up as an explicit taxable draw.
+
+In every scenario tested, `taxable_balance`, `portfolio_balance`,
+`unmet_need`, and `on_track` were byte-for-byte identical before and
+after — this is a labeling/attribution fix inside the waterfall's own
+reporting, not a change to any dollar figure a user's plan depends on.
+Regression tests: `TestWithdrawalWaterfallMigratedToSharedAnnualEngine` in
+`tests/test_projection_engine.py`.
