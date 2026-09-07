@@ -165,6 +165,34 @@ class TestGuaranteedIncomeConsistentAcrossConsumers:
                 expected_ss_at_ret_age = expected_ss * ((1 + household["inflation_rate"]) ** cola_years)
                 assert delta == pytest.approx(expected_ss_at_ret_age * 0.85, abs=1)
 
+    def test_social_security_pre_retirement_cola_reaches_monte_carlo_and_stress(
+            self, household, sample_accounts, monkeypatch):
+        """The check above retires at 68 (past both claiming ages) and
+        never exercises the specific case that was actually broken in
+        Monte Carlo/Stress: SS claimed BEFORE this retirement scenario
+        starts (independent review, 2026-09-07 follow-up — the first
+        SS-timing check "compares Retirement with Roth... [and] does not
+        call Monte Carlo or Stress", so it missed this). Retire at 67
+        with early claiming at 62 — 5 years of pre-retirement COLA that
+        run_retirement_projection (via jason_ss_annual/jason_ss_start_age)
+        has never dropped, checked directly against run_monte_carlo and
+        run_stress_tests with deterministic (0%) simulated returns so
+        their SS-derived final balance must match exactly, not merely
+        approximately."""
+        import random as random_module
+        monkeypatch.setattr(random_module, "gauss", lambda mu, sigma: 0.0)
+
+        inputs = {**household, "jason_age": 67, "justin_age": 67, "retirement_end_age": 68,
+                  "expected_return_post_retirement": 0.0}
+        ret_age = 67
+
+        proj = run_retirement_projection(inputs, sample_accounts, ret_ages=[ret_age])
+        s = next(x for x in proj["scenarios"] if x["label"] == f"age_{ret_age}_early")
+        expected_final_balance = s["yearly_detail"][-1]["portfolio_balance"]
+
+        mc = run_monte_carlo(inputs, sample_accounts, ret_age=ret_age, ss_timing="early")
+        assert mc["median_final_balance"] == pytest.approx(expected_final_balance, abs=1)
+
 
 class TestNoConsumerReportsANegativeBalance:
     """A stress scenario (high spending need, modest balances) exercised
