@@ -376,25 +376,40 @@ diff (7 input variants × `run_education_projection` ×
 `TestSharedSavingPhaseHelper` (test_projection_engine.py) that pin the
 helper's behavior independently of either consumer.
 
-**(2) and (3) were deliberately left alone.** Both are dense,
+**(2) was consolidated 2026-09-07, (3) remains deliberately independent.**
+Re-reading both functions closely turned up a real piece of (2) that
+Phase 5 missed: the college-years drawdown loop itself — same
+`COLLEGE_COST_INFLATION`/`UNL_CURRENT_ANNUAL`-driven cost formula, same
+compound-then-subtract-cost recurrence over `COLLEGE_YEARS` — was
+copy-pasted in both functions, differing only in two behavioral flags
+(Education tracks an unclamped "worst deficit" for its funding-gap
+figure; Education can optionally continue contributions into college).
+Extracted into `_project_college_drawdown` (both flags as parameters),
+verified against both existing (already audit-hardened)
+implementations via a 384-scenario golden diff — varying kid ages,
+parent age (including past the contribution cutoff), 529 balances,
+contribution amounts, and `continue_contributions_during_college` —
+**byte-identical, zero differences**, the same discipline that made (1)
+safe in the first place. See
+`tests/test_projection_engine.py::TestSharedCollegeDrawdownHelper` (7
+tests pinning the helper independently of either consumer).
+
+**(3) — Kids' age-60 account timeline — remains deliberately
+independent**, unchanged from the original reasoning: dense,
 already-audit-hardened, off-by-one-sensitive code (the file's own
 comments document several previously-shipped bugs in exactly this kind
 of timing/boundary logic — a rollover double-counted in two accounts at
 once, a timeline off by one year of compounding, a headline number that
-disagreed with its own chart by a factor of the growth rate). Critically,
-they aren't actually the SAME calculation duplicated twice the way (1)
-was: Kids' age-60 account timeline has no Education equivalent at all,
-and Education's drawdown tracks an unclamped "worst deficit" figure
-across the 4 college years that Kids' drawdown doesn't compute. Forcing
-these into one shared shape would mean inventing a common abstraction
-that doesn't already exist in proven, agreed-upon behavior on both
-sides — the opposite of what made (1) safe. This matches the prior
-session's own assessment (see `git log` — "the remaining work there is
-code-sharing for its own sake, not a bug fix") and Jason's own prior
-decision to leave adjacent Kids/Education work (>2-kids support) out of
-scope given how bug-hardened this pair of functions already is. Revisit
-only if a real bug (not a duplication-for-its-own-sake concern) is found
-in either's drawdown/timeline logic.
+disagreed with its own chart by a factor of the growth rate) with no
+Education-side equivalent at all to unify with — Education's chart
+stops after college, it has no age-60 concept. Forcing this into a
+shared shape would mean inventing an abstraction that doesn't already
+exist in proven, agreed-upon behavior on both sides — the opposite of
+what made (1) and (2) safe. This matches Jason's own prior decision to
+leave adjacent Kids/Education work (>2-kids support) out of scope given
+how bug-hardened this pair of functions already is. Revisit only if a
+real bug (not a duplication-for-its-own-sake concern) is found in the
+timeline logic specifically.
 
 ## 6. Independent review findings (2026-09-07) — fixed before merge
 

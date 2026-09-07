@@ -16,9 +16,11 @@ from projection_engine import (
     pension_for_age,
     _fv, _fv_annuity, _fv_annuity_monthly, _fv_growing_annuity, _pv_annuity,
     _project_529_saving_phase,
+    _project_college_drawdown,
     PARENT_RETIREMENT_AGE_ASSUMPTION,
     BOND_MAX_GROWTH_YEARS,
     CURRENT_YEAR,
+    COLLEGE_YEARS,
 )
 
 
@@ -1307,6 +1309,102 @@ class TestSharedSavingPhaseHelper:
         # contributions) compounding for the remaining 7 years to college.
         expected = _fv_annuity_monthly(100, 0.07, 1) * (1.07 ** 7)
         assert balance == pytest.approx(expected, abs=0.01)
+
+
+class TestSharedCollegeDrawdownHelper:
+    """Calculation-engine consolidation, item 7 (2026-09-07):
+    run_education_projection and run_kids_projection now both call
+    _project_college_drawdown for their shared "COLLEGE_YEARS of 529
+    drawdown" recurrence, instead of each independently reimplementing
+    the same compound-then-subtract-cost formula. Verified byte-identical
+    against both existing (already audit-hardened) implementations via a
+    384-scenario golden diff before this extraction was made (kid ages,
+    parent age including past the contribution cutoff, 529 balances,
+    contribution amounts, continue_contributions_during_college) — these
+    tests pin the helper's own behavior independently of either
+    consumer, the same discipline TestSharedSavingPhaseHelper applied to
+    _project_529_saving_phase."""
+
+    def test_matches_education_projection_headline_number(self, sample_inputs, sample_accounts):
+        inputs = {**sample_inputs, "jason_age": 45, "kid1_age": 8, "abby_529_monthly": 300, "unl_annual_cost": 25000}
+        edu = run_education_projection(inputs, sample_accounts)
+        edu_abby = next(g for g in edu["goals"] if g["child"] == "Abby")
+        yearly, worst_deficit, worst_deficit_years_out = _project_college_drawdown(
+            edu_abby["projected_529_at_college"], 300, 0.07, 25000,
+            edu_abby["years_to_college"], edu_abby["contributions_stop_in_years"], track_unclamped=True)
+        assert round(yearly[-1]) == edu_abby["balance_after_college"]
+        expected_gap = -worst_deficit if worst_deficit < 0 else 0
+        assert round(expected_gap) == edu_abby["funding_gap"]
+
+    def test_matches_kids_projection_headline_number(self, sample_inputs, sample_accounts):
+        inputs = {**sample_inputs, "jason_age": 45, "kid1_age": 8, "abby_529_monthly": 300, "unl_annual_cost": 25000}
+        kid = run_kids_projection(sample_accounts, inputs)
+        kid_abby = next(k for k in kid["kids"] if k["child"] == "Abby")
+        years_to_18 = 18 - 8
+        proj_529_at_18 = kid_abby["529"]["at_18"]
+        yearly, _, _ = _project_college_drawdown(proj_529_at_18, 300, 0.07, 25000, years_to_18, years_to_18)
+        bal_after = yearly[-1]
+        roth_rollover = min(bal_after, 35000)
+        assert round(bal_after - roth_rollover) == kid_abby["529"]["at_22"]
+
+    def test_returns_college_years_entries(self):
+        yearly, worst_deficit, worst_deficit_years_out = _project_college_drawdown(
+            10000, 0, 0.07, 25000, 10, 10)
+        assert len(yearly) == COLLEGE_YEARS
+
+    def test_no_track_unclamped_leaves_worst_deficit_at_default(self):
+        """A trajectory that goes broke mid-college must still report
+        worst_deficit == 0.0 (not a negative number) when track_unclamped
+        is off, matching run_kids_projection's own choice not to compute
+        this at all."""
+        yearly, worst_deficit, worst_deficit_years_out = _project_college_drawdown(
+            1000, 0, 0.07, 50000, 10, 10, track_unclamped=False)
+        assert worst_deficit == 0.0
+        assert worst_deficit_years_out == 10
+        assert yearly[-1] == 0  # floored, even though unclamped would be deeply negative
+
+    def test_track_unclamped_reports_real_shortfall(self):
+        # A trajectory this underwater only gets worse each year once
+        # negative (a negative balance still "compounds" further negative,
+        # then loses another year's cost on top) — the worst point is the
+        # LAST college year here, not the first one it goes negative in.
+        yearly, worst_deficit, worst_deficit_years_out = _project_college_drawdown(
+            1000, 0, 0.07, 50000, 10, 10, track_unclamped=True)
+        assert worst_deficit < 0
+        assert worst_deficit_years_out == 10 + COLLEGE_YEARS
+
+    def test_contributions_continue_during_college_adds_a_years_worth_each_active_year(self):
+        """contribution_years extending past years_to_college (the
+        continue_contributions_during_college case) must add a
+        contribution in exactly those college years, and none once
+        contribution_years is exhausted."""
+        # Balance/cost sized so neither trajectory floors at 0 -- a floored
+        # comparison can't distinguish "no contribution" from "a small one".
+        no_contrib, _, _ = _project_college_drawdown(50000, 500, 0.07, 5000, 5, 5)
+        with_contrib, _, _ = _project_college_drawdown(
+            50000, 500, 0.07, 5000, 5, 7, contributions_continue_during_college=True)
+        # First 2 college years get a contribution, matching contribution_years=12
+        # (years_to_college + yr < 12 for yr in {0, 1}); the last 2 don't.
+        assert with_contrib[0] > no_contrib[0]
+        assert with_contrib[1] > no_contrib[1]
+        # Difference collapses once contributions stop in both trajectories —
+        # not exactly equal (the extra contributions' own growth persists),
+        # but the per-year contribution itself is gone from year 2 onward.
+        diff_yr2 = with_contrib[2] - no_contrib[2]
+        diff_yr3 = with_contrib[3] - no_contrib[3]
+        assert diff_yr3 == pytest.approx(diff_yr2 * 1.07, rel=1e-9)
+
+    def test_contributions_continue_flag_off_ignores_contribution_years_headroom(self):
+        """Even if a caller passes a contribution_years that exceeds
+        years_to_college, contributions_continue_during_college=False
+        (run_kids_projection's default) must not apply any college-year
+        contribution — matching Kids' own behavior of never contributing
+        into the 529 once college starts."""
+        no_flag, _, _ = _project_college_drawdown(50000, 500, 0.07, 5000, 10, 20)
+        with_flag, _, _ = _project_college_drawdown(
+            50000, 500, 0.07, 5000, 10, 20, contributions_continue_during_college=True)
+        assert no_flag != with_flag
+        assert no_flag[0] < with_flag[0]
 
 
 class TestRunKidsProjection:

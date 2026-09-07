@@ -950,6 +950,72 @@ def _project_529_saving_phase(starting_balance, monthly_contribution, years_to_c
     return balance, contribution_years
 
 
+def _project_college_drawdown(starting_balance, monthly_contribution, edu_return,
+                               unl_annual_cost, years_to_college, contribution_years,
+                               track_unclamped=False, contributions_continue_during_college=False):
+    """Simulates the COLLEGE_YEARS of 529 drawdown from `starting_balance`
+    (the balance at the moment college starts, e.g. from
+    _project_529_saving_phase). Each year: compound by edu_return, add one
+    year's contribution (`_fv_annuity_monthly` for n=1) if contributions
+    are still active for that year, subtract that year's cost-inflated
+    college cost, floor the displayed balance at 0.
+
+    Calculation-engine consolidation, item 7 (2026-09-07): previously
+    run_education_projection and run_kids_projection each ran this exact
+    recurrence independently (same COLLEGE_COST_INFLATION/UNL_CURRENT_ANNUAL
+    cost formula, same compound-then-subtract-cost shape) with two
+    behavioral differences, now the two flags below. Extracted only after
+    confirming byte-identical output against both existing (already
+    audit-hardened) implementations across a 384-scenario golden diff
+    varying kid ages, parent age (including past the contribution cutoff),
+    529 balances, contribution amounts, and continue_contributions_during_college
+    — see tests/test_projection_engine.py::TestSharedCollegeDrawdownHelper.
+    The age-60 timeline, Roth/custodial/bond tracks, and the 529-to-Roth
+    rollover remain independent per CALCULATION_CONTRACT.md's Phase 5
+    scoping — none of those have an Education-side equivalent to unify with.
+
+    contributions_continue_during_college: run_education_projection's own
+    option (default False, matching run_kids_projection's — Kids never
+    contributes into the 529 once college starts). When True, a college
+    year still gets a contribution if `years_to_college + yr <
+    contribution_years` (contribution_years may exceed years_to_college
+    exactly when this flag pushed it there — see
+    _project_529_saving_phase's extra_years_of_contributions).
+
+    track_unclamped: when True, also tracks the real (unfloored) balance
+    so a genuine shortfall shows up as a negative number instead of
+    vanishing at the floor — run_education_projection's `worst_deficit`.
+    run_kids_projection doesn't need this (its own headline number is
+    just the final floored balance), so it leaves this off and ignores
+    worst_deficit/worst_deficit_years_out.
+
+    Returns (yearly_balances, worst_deficit, worst_deficit_years_out):
+    yearly_balances is a plain list of COLLEGE_YEARS floored balances
+    (one per college year); worst_deficit is the most negative the
+    unclamped balance ever reached (0.0 if track_unclamped is False or it
+    never went negative); worst_deficit_years_out is
+    years_to_college + (the 1-indexed college year it happened in),
+    defaulting to years_to_college if it never went negative."""
+    cost_base = unl_annual_cost * ((1 + COLLEGE_COST_INFLATION) ** years_to_college)
+    bal = starting_balance
+    bal_unclamped = starting_balance
+    worst_deficit = 0.0
+    worst_deficit_years_out = years_to_college
+    yearly_balances = []
+    for yr in range(COLLEGE_YEARS):
+        college_year_index = years_to_college + yr
+        contributing = contributions_continue_during_college and college_year_index < contribution_years
+        contrib_fv = _fv_annuity_monthly(monthly_contribution, edu_return, 1) if contributing else 0
+        cost = cost_base * ((1 + COLLEGE_COST_INFLATION) ** yr)
+        bal_unclamped = bal_unclamped * (1 + edu_return) + contrib_fv - cost
+        bal = max(0, bal * (1 + edu_return) + contrib_fv - cost)
+        if track_unclamped and bal_unclamped < worst_deficit:
+            worst_deficit = bal_unclamped
+            worst_deficit_years_out = years_to_college + yr + 1
+        yearly_balances.append(bal)
+    return yearly_balances, worst_deficit, worst_deficit_years_out
+
+
 def run_education_projection(inputs: Dict, accounts: List[Dict],
                               continue_contributions_during_college: bool = False,
                               surplus_529_monthly: Dict[str, float] = None) -> Dict:
@@ -1055,21 +1121,16 @@ def run_education_projection(inputs: Dict, accounts: List[Dict],
         # 90%-target-at-day-1 snapshot was routinely flagging a "gap" (and
         # recommending more savings) even for a trajectory that already
         # ends college with money left over, which made no sense.
-        bal = projected_529
-        bal_unclamped = projected_529
-        worst_deficit = 0.0
-        worst_deficit_years_out = years_to_college
-        for yr in range(COLLEGE_YEARS):
-            college_year_index = years_to_college + yr
-            contributing = college_year_index < contribution_years
-            contrib_fv = _fv_annuity_monthly(monthly_contrib, edu_return, 1) if contributing else 0
-            cost = annual_cost_start * ((1+COLLEGE_COST_INFLATION)**yr)
-            bal_unclamped = bal_unclamped*(1+edu_return) + contrib_fv - cost
-            bal = max(0, bal*(1+edu_return) + contrib_fv - cost)
-            if bal_unclamped < worst_deficit:
-                worst_deficit = bal_unclamped
-                worst_deficit_years_out = years_to_college + yr + 1
-            yearly.append({"year_label": f"College yr {yr+1}", "balance": round(bal), "phase": "drawdown"})
+        # Shared with run_kids_projection's own drawdown loop — see
+        # _project_college_drawdown's docstring (calculation-engine
+        # consolidation, item 7). unl_base/years_to_college reproduce
+        # this function's own annual_cost_start internally.
+        drawdown_yearly, worst_deficit, worst_deficit_years_out = _project_college_drawdown(
+            projected_529, monthly_contrib, edu_return, unl_base, years_to_college, contribution_years,
+            track_unclamped=True, contributions_continue_during_college=continue_contributions_during_college)
+        bal = drawdown_yearly[-1]
+        for yr, yr_balance in enumerate(drawdown_yearly):
+            yearly.append({"year_label": f"College yr {yr+1}", "balance": round(yr_balance), "phase": "drawdown"})
 
         gap = -worst_deficit if worst_deficit < 0 else 0
         funding_pct = 100 if gap == 0 else max(0, min(100, round((1 - gap / total_cost) * 100) if total_cost > 0 else 0))
@@ -1175,13 +1236,16 @@ def run_kids_projection(accounts: List[Dict], inputs: Dict = None,
         proj_529_at_18, contribution_years_529 = _project_529_saving_phase(
             bal_529, monthly_529, years_to_18, years_until_parent_retires, edu_return)
 
-        # Drawdown 100% of annual costs
+        # Drawdown 100% of annual costs — shared with run_education_projection's
+        # own drawdown loop, see _project_college_drawdown's docstring
+        # (calculation-engine consolidation, item 7). Kids never contributes
+        # into the 529 once college starts (contributions_continue_during_college
+        # left at its default False), and doesn't need the unclamped/
+        # worst-deficit tracking Education uses for its funding-gap figure.
         unl_base_kid = inputs.get("unl_annual_cost", UNL_CURRENT_ANNUAL)
-        annual_cost_at_18 = unl_base_kid * ((1 + COLLEGE_COST_INFLATION) ** years_to_18)
-        bal_after = proj_529_at_18
-        for yr in range(COLLEGE_YEARS):
-            cost = annual_cost_at_18 * ((1 + COLLEGE_COST_INFLATION) ** yr)
-            bal_after = max(0, bal_after * (1 + edu_return) - cost)
+        drawdown_yearly, _, _ = _project_college_drawdown(
+            proj_529_at_18, monthly_529, edu_return, unl_base_kid, years_to_18, contribution_years_529)
+        bal_after = drawdown_yearly[-1]
         roth_rollover  = min(bal_after, 35000)
         # A rollover is a real transfer — money moved from the 529 into the
         # Roth, not money that magically exists in both places. This used

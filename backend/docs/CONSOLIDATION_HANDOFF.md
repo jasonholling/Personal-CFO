@@ -24,12 +24,15 @@ All 9 items are resolved:
    already done from a prior session; the single-aggregate-bucket
    policy remains a deliberate product choice, not an unconsolidated
    ledger.
-7. **Education/Kids drawdown/rollover/custodial/timeline halves —
-   deliberately deferred, not done.** No matching literal duplication
-   to remove (Kids' age-60 timeline has no Education equivalent;
-   Education's drawdown tracks a "worst deficit" figure Kids doesn't
-   compute). Revisit only if a real bug motivates it — see Phase 5's
-   reasoning in `CALCULATION_CONTRACT.md` section 5.
+7. **Education/Kids: the college-years drawdown loop was collapsed
+   2026-09-07** — a real, mechanically-shareable duplication Phase 5
+   missed (same cost-inflation formula, same recurrence, two behavior
+   flags), extracted into `_project_college_drawdown` and verified
+   byte-identical via a 384-scenario golden diff. **The rollover,
+   custodial/Roth/bonds tracks, and Kids' age-60 timeline remain
+   deliberately independent** — no matching literal duplication there,
+   just genuinely different calculations. See `CALCULATION_CONTRACT.md`
+   section 5.
 8. API-output-level invariant tests across all consumers —
    substantially already done via `test_cross_tool_reconciliation.py`.
 9. Duplicate-formula inventory — done, consolidation substantially
