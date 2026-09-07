@@ -265,3 +265,46 @@ after — this is a labeling/attribution fix inside the waterfall's own
 reporting, not a change to any dollar figure a user's plan depends on.
 Regression tests: `TestWithdrawalWaterfallMigratedToSharedAnnualEngine` in
 `tests/test_projection_engine.py`.
+
+### `_run_single` (Monte Carlo + Stress Tests) → `annual_engine.simulate_withdrawal_year`
+
+Same migration, same verification approach
+(`tools/capture_simulation_golden.py`) across 6 synthetic scenarios x 2
+consumers (Monte Carlo, Stress Tests, both seeded/deterministic). Result:
+**zero material differences, bit-for-bit** — this function only returns
+aggregate bucket/portfolio balances, so it never had a per-bucket
+`withdrawal_taxable`-style field to show the reporting-only difference
+found in `run_retirement_projection`.
+
+### `run_swr_analysis`'s inner loop — attempted, reverted, documented as a deliberate exception
+
+`run_swr_analysis`'s `success_at_withdrawal()` closure was migrated onto
+`simulate_withdrawal_year` following the same pattern (reconstructing
+`spending_need = guaranteed + portfolio_draw` and folding `event_monthly`
+into `guaranteed_income`, since SWR's need is expressed as "how much
+beyond guaranteed income" rather than the income+healthcare figure every
+other consumer uses — see section 3.5 above). It passed every existing
+SWR test with identical results. It was **reverted** after measuring
+performance: `test_simulation_engine.py`'s SWR-tagged tests went from
+26.83s to 57.41s (>2x) with the migration in place.
+
+This loop is a legitimate outlier, not a rationalization to skip
+consolidation generally: `success_at_withdrawal` runs inside a binary
+search (up to 12 bracket-expansion + 20 bisection calls =~32 calls) over
+N=1000 simulated trials over ~40 years each — up to ~1.28M simulated
+years for a single SWR request, an order of magnitude more than any other
+consumer's hot path. The shared engine's per-year dataclass/dict
+allocations and closure construction, cheap everywhere else in this
+codebase, are not cheap at that call volume.
+
+**What's still shared, even without going through
+`simulate_withdrawal_year`:** the tax-rate pricing
+(`_pretax_marginal_tax_rate`) and the gross-up arithmetic
+(`_grossed_up_draw`) are the exact same module-level helpers `_run_single`
+uses — the *formulas* are shared and identically maintained in one place;
+only the per-year orchestration (opening→draws→growth→closing as one
+function call) is duplicated here, for a measured, documented reason. If
+`success_at_withdrawal`'s call volume is ever reduced (e.g. a smarter
+search that needs fewer calls, or N reduced), this exception should be
+revisited — it is a performance trade-off, not a permanent architectural
+stance.
