@@ -1170,67 +1170,83 @@ def two_age_spending_need_fn(inputs: Dict, income_today: float, inflation: float
 
     healthcare_pre  = inputs.get("healthcare_pre_medicare", 0)
     healthcare_post = inputs.get("healthcare_post_medicare", 0)
-    healthcare_pre_at_start  = healthcare_pre  * ((1 + inflation) ** phase2_years)
-    healthcare_post_at_start = healthcare_post * ((1 + inflation) ** phase2_years)
-    income_at_start = income_today * ((1 + inflation) ** phase2_years)
-
     healthcare_kids      = inputs.get("healthcare_kids", 0)
     kids_annual_cost     = inputs.get("kids_annual_cost", 0)
     bridge_income        = inputs.get("bridge_income_55", 0)
     bridge_years         = inputs.get("bridge_years_55", 0)
     kids_years           = inputs.get("kids_years_at_home_55", 0)
-    income_at_jason_ret          = income_today   * ((1 + inflation) ** timeline.jason_years_to_retire)
-    healthcare_pre_at_jason_ret  = healthcare_pre  * ((1 + inflation) ** timeline.jason_years_to_retire)
-    healthcare_post_at_jason_ret = healthcare_post * ((1 + inflation) ** timeline.jason_years_to_retire)
-    healthcare_kids_at_jason_ret = healthcare_kids * ((1 + inflation) ** timeline.jason_years_to_retire)
-    kids_annual_cost_at_jason_ret = kids_annual_cost * ((1 + inflation) ** timeline.jason_years_to_retire)
-    bridge_income_at_jason_ret    = bridge_income    * ((1 + inflation) ** timeline.jason_years_to_retire)
+
+    # Every dollar figure's pre-loop compounding anchors to phase2_start
+    # -- the TRUE pre-loop boundary -- never to jason_effective_start_age,
+    # even inside the bridge/kids branch (independent review, 2026-09-08,
+    # third follow-up, P1). Under flat inflation these two anchors always
+    # produced the identical number (compounding the same total number of
+    # years via two different splits is the same arithmetic either way),
+    # which is why the original section-21 design could anchor the
+    # bridge/kids branch to jason_effective_start_age without it
+    # mattering. That equivalence breaks under a VARIABLE per-year rate:
+    # whenever Justin retires first, jason_effective_start_age can fall
+    # strictly after phase2_start_age, meaning the years between them are
+    # already INSIDE the withdrawal loop and must be subject to
+    # inflation_mults like any other loop year -- anchoring to
+    # jason_effective_start_age instead treated that whole span as flat
+    # pre-loop compounding, and (worse) the per-year multiplier was then
+    # rebased to exactly 1.0 at the phase boundary, discarding every year
+    # of already-accumulated elevated inflation outright. Reproduced:
+    # both spouses 53, Justin already retired, Jason retiring at 55,
+    # $100,000 spend, 8% stressed inflation -- year 3 (age 55, the first
+    # bridge year) reverted to $104,040 (the flat, no-stress figure)
+    # instead of the correct $116,640. There is now only ONE dollar
+    # baseline and one cum_inflation[yr] multiplier, shared by both
+    # branches -- jason_yr (below) is used ONLY to compare against
+    # bridge_years/kids_years, a genuinely separate "how long has this
+    # phase been active" duration counter that legitimately does restart
+    # at Jason's own retirement, not a second inflation clock.
+    healthcare_pre_at_start   = healthcare_pre   * ((1 + inflation) ** phase2_years)
+    healthcare_post_at_start  = healthcare_post  * ((1 + inflation) ** phase2_years)
+    healthcare_kids_at_start  = healthcare_kids  * ((1 + inflation) ** phase2_years)
+    kids_annual_cost_at_start = kids_annual_cost * ((1 + inflation) ** phase2_years)
+    bridge_income_at_start    = bridge_income    * ((1 + inflation) ** phase2_years)
+    income_at_start = income_today * ((1 + inflation) ** phase2_years)
 
     # cum_inflation[yr] is the accumulated price-growth factor from
     # phase2_start through the start of loop year yr -- the SAME
     # accumulate-don't-retroactively-erase-history technique
     # build_cumulative_inflation's own docstring explains, needed so a
     # stress scenario's inflation_mults can vary year to year without
-    # silently un-compounding whatever came before. The bridge/kids
-    # branch anchors to jason_effective_start_age instead, which can be
-    # a different (always later-or-equal) starting point than
-    # phase2_start whenever Justin retires first -- rebased via division
-    # (cum_inflation[yr] / cum_inflation[jason_offset]) rather than a
-    # second cumulative-inflation array, since both curves share the
-    # same underlying per-year rate sequence.
+    # silently un-compounding whatever came before. One curve, shared by
+    # both branches -- no rebasing, no second anchor.
     cum_inflation = build_cumulative_inflation(inflation, timeline.retire_yrs, inflation_mults)
-    jason_offset = jason_effective_start_age - (timeline.jason_age + phase2_years)
 
     def need_for_year(age, yr):
-        cum_from_phase2 = cum_inflation[yr]
+        cum = cum_inflation[yr]
         if jason_ret_age == 55 and age >= jason_effective_start_age:
-            jason_yr = age - jason_effective_start_age
-            cum_from_jason = cum_inflation[yr] / cum_inflation[jason_offset]
+            jason_yr = age - jason_effective_start_age  # duration counter only -- see docstring above
             kids_still_home = jason_yr < kids_years
             bridge_active   = jason_yr < bridge_years
             if bridge_active:
                 healthcare_this_year = 0
-                kids_cost = kids_annual_cost_at_jason_ret * cum_from_jason
-                bridge    = bridge_income_at_jason_ret    * cum_from_jason
-                year_need = max(0, income_at_jason_ret * cum_from_jason + kids_cost - bridge)
+                kids_cost = kids_annual_cost_at_start * cum
+                bridge    = bridge_income_at_start    * cum
+                year_need = max(0, income_at_start * cum + kids_cost - bridge)
                 bridge_income_this_year = bridge
             elif kids_still_home and age < 65:
-                healthcare_this_year = healthcare_kids_at_jason_ret
-                kids_cost = kids_annual_cost_at_jason_ret * cum_from_jason
-                year_need = income_at_jason_ret * cum_from_jason + kids_cost + healthcare_kids_at_jason_ret * cum_from_jason
+                healthcare_this_year = healthcare_kids_at_start
+                kids_cost = kids_annual_cost_at_start * cum
+                year_need = income_at_start * cum + kids_cost + healthcare_kids_at_start * cum
                 bridge_income_this_year = 0.0
             elif age < 65:
-                healthcare_this_year = healthcare_pre_at_jason_ret
-                year_need = income_at_jason_ret * cum_from_jason + healthcare_pre_at_jason_ret * cum_from_jason
+                healthcare_this_year = healthcare_pre_at_start
+                year_need = income_at_start * cum + healthcare_pre_at_start * cum
                 bridge_income_this_year = 0.0
             else:
-                healthcare_this_year = healthcare_post_at_jason_ret
-                year_need = income_at_jason_ret * cum_from_jason + healthcare_post_at_jason_ret * cum_from_jason
+                healthcare_this_year = healthcare_post_at_start
+                year_need = income_at_start * cum + healthcare_post_at_start * cum
                 bridge_income_this_year = 0.0
-            healthcare_inflated = healthcare_this_year * cum_from_jason
+            healthcare_inflated = healthcare_this_year * cum
         else:
-            healthcare_inflated = healthcare_for_age(age, healthcare_pre_at_start, healthcare_post_at_start) * cum_from_phase2
-            year_need = income_at_start * cum_from_phase2 + healthcare_inflated
+            healthcare_inflated = healthcare_for_age(age, healthcare_pre_at_start, healthcare_post_at_start) * cum
+            year_need = income_at_start * cum + healthcare_inflated
             bridge_income_this_year = 0.0
         return year_need, healthcare_inflated, bridge_income_this_year
 

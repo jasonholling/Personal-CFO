@@ -234,6 +234,26 @@ class TestPreviouslySkippedScenariosNowRunInTwoAgeMode:
         assert st["scenarios"]["base"]["final_balance"] == 4750000
         assert st["scenarios"]["bridge_job_loss"]["final_balance"] == 4660000
 
+    def test_bridge_job_loss_never_extends_a_shorter_or_zero_bridge(self):
+        """Independent review, 2026-09-08, third follow-up (P2) --
+        reproduced exactly: $30,000/yr bridge income configured but
+        bridge_years_55=0 (no bridge job at all). The buggy version
+        unconditionally set the stressed scenario's bridge duration to
+        2 years regardless of what the household actually configured,
+        INVENTING two years of income a household with 0 bridge years
+        never has -- final_balance ended $60,000 higher than base
+        ($820,000 vs $760,000) instead of identical to it. Fixed: capped
+        at min(override, existing bridge_years_55) -- this scenario
+        models the bridge job ending EARLY, never lasting longer than
+        planned."""
+        inputs = base_inputs(jason_age=55, justin_age=55, retirement_end_age=58,
+                              bridge_income_55=30000, bridge_years_55=0)
+        st = run_stress_tests(inputs, TAXABLE(1000000), jason_ret_age=55, justin_ret_age=55)
+        assert st["scenarios"]["base"]["final_balance"] == 760000
+        assert st["scenarios"]["bridge_job_loss"]["final_balance"] == 760000
+        old_buggy_value = 820000  # matches the independent review's own reported old value
+        assert st["scenarios"]["bridge_job_loss"]["final_balance"] != old_buggy_value
+
     def test_stagflation_applies_variable_inflation_to_spending_need(self):
         """Both spouses 60, retiring together at 62 (2yrs away, so phase2
         starts 2 years of today's-dollar inflation ahead already), 3-year
@@ -250,6 +270,43 @@ class TestPreviouslySkippedScenariosNowRunInTwoAgeMode:
         # than the 6% (2% base * 3.0 -- not this scenario) or a flat 2%
         # base would, so it must differ from the neutral base case.
         assert st["scenarios"]["stagflation_1970s"]["final_balance"] != st["scenarios"]["base"]["final_balance"]
+
+    def test_stagflation_preserves_cumulative_inflation_across_the_phase2_to_bridge_boundary(self):
+        """Independent review, 2026-09-08, third follow-up (P1) --
+        reproduced exactly: both spouses currently 53, Justin already
+        retired (justin_ret_age=53), Jason retiring at 55 -- phase2
+        starts immediately (age53, since Justin already retired), but
+        Jason's own bridge/kids branch doesn't activate until age55, 2
+        years INTO the loop. $100,000 spend, 2% base inflation, 8%
+        stressed (the scenario's own 4x multiplier). The buggy version
+        rebased the cumulative-inflation curve to exactly 1.0 at the
+        phase boundary, discarding the two years of elevated inflation
+        already accumulated -- year 3 (age55, the first bridge year)
+        reverted to $104,040 (income_today * 1.02**2, the flat
+        no-stress pre-loop figure) instead of the correct $116,640
+        (income_today * 1.08**2, continuing the stressed curve from
+        phase2_start). Checked via the year-by-year need directly
+        (two_age_spending_need_fn) since the reviewer's own numbers were
+        about the need sequence itself, then cross-checked against the
+        resulting final_balance."""
+        from projection_engine import two_age_spending_need_fn
+        from timeline_engine import build_two_person_timeline
+
+        timeline = build_two_person_timeline(53, 53, 55, 53, 56)
+        need_fn = two_age_spending_need_fn(
+            {"healthcare_pre_medicare": 0, "healthcare_post_medicare": 0},
+            100000, 0.02, timeline, inflation_mults=[4.0, 4.0, 4.0])
+        needs = [need_fn(timeline.age(yr), yr)[0] for yr in range(3)]
+        assert needs == [100000.0, 108000.0, pytest.approx(116640.0)]
+        old_buggy_year3 = 104040.0  # matches the independent review's own reported old value
+        assert needs[2] != pytest.approx(old_buggy_year3)
+
+        inputs = base_inputs(jason_age=53, justin_age=53, retirement_income_today_dollars=100000,
+                              inflation_rate=0.02, expected_return_post_retirement=0.06, retirement_end_age=56)
+        st = run_stress_tests(inputs, TAXABLE(1000000), jason_ret_age=55, justin_ret_age=53)
+        assert st["scenarios"]["stagflation_1970s"]["final_balance"] == 723751
+        old_buggy_final_balance = 736603  # matches the independent review's own reported old value
+        assert st["scenarios"]["stagflation_1970s"]["final_balance"] != old_buggy_final_balance
 
 
 class TestAdverseReturnsMiddlePhaseAndBoundary:

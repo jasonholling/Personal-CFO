@@ -1270,10 +1270,18 @@ def _run_stress_tests_two_age(inputs: Dict, accounts: List[Dict], jason_ret_age:
         bridge_override = scenario.get("bridge_years_override", None)
 
         # Bridge job loss -- modify inputs copy, same as the single-axis
-        # version's own sim_inputs pattern.
+        # version's own sim_inputs pattern. Capped at the household's own
+        # existing bridge_years_55 -- never extended (independent review,
+        # 2026-09-08, third follow-up, P2): this scenario models the
+        # bridge job ending EARLY, not lasting longer than planned.
+        # Unconditionally setting it to 2 could ADD income for a
+        # household that configured 0 or 1 bridge years, the opposite of
+        # what "bridge job loss" means (reproduced: $30,000/yr bridge
+        # income configured with 0 bridge years -- the stress scenario
+        # invented $60,000 of income the household never actually has).
         sim_inputs = dict(inputs)
         if bridge_override is not None:
-            sim_inputs["bridge_years_55"] = bridge_override
+            sim_inputs["bridge_years_55"] = min(bridge_override, inputs.get("bridge_years_55", 0))
 
         scenario_jason_ss  = jason_ss_annual * ss_mult
         scenario_justin_ss = justin_ss_annual * ss_mult
@@ -1482,10 +1490,17 @@ def run_stress_tests(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_t
         ss_mult    = 1.0 - scenario.get("ss_reduction", 0.0)
         bridge_override = scenario.get("bridge_years_override", None)
 
-        # For bridge job loss — modify inputs copy
+        # For bridge job loss — modify inputs copy. Capped at the
+        # household's own existing bridge_years_55 -- never extended
+        # (independent review, 2026-09-08, third follow-up, P2, found
+        # via the two-age copy of this same code -- the identical bug
+        # was already present here, the copy's source): this scenario
+        # models the bridge job ending EARLY, not lasting longer than
+        # planned. Unconditionally setting it to 2 could ADD income for
+        # a household that configured 0 or 1 bridge years.
         sim_inputs = dict(inputs)
         if bridge_override is not None:
-            sim_inputs["bridge_years_55"] = bridge_override
+            sim_inputs["bridge_years_55"] = min(bridge_override, inputs.get("bridge_years_55", 0))
 
         # For SS reduction
         scenario_ss = jason_ss_annual * ss_mult
