@@ -1293,3 +1293,73 @@ the largest real limitation in this feature area.
 Verified: full backend/frontend suite re-run on the isolated branch
 before merging (see the commit this section was added in for the exact
 count). Branch: `codex/second-earner-output-visibility-and-parity`.
+
+## 17. Survivor insurance-need bug fix; frontend visibility for gap income (2026-09-08, fifth pass)
+
+A fifth review of section 16's closeout found one real bug the earlier
+passes' schedule-level checks never exercised, and correctly flagged
+that "API visibility" and "app visibility" are different claims.
+
+**P1 — `additional_insurance_needed` never subtracted gap income at
+all, independent of everything else this feature already fixed.** The
+survivor loop itself (section 15/16) correctly reduces each year's
+`draw` by `gap_income_this_year`, and the schedule correctly reports
+it — but the separate `additional_insurance_needed`/recommendation
+figure used its own, older formula:
+`_pv_annuity(net_need, real_rate, years) - starting_balance`, where
+`net_need` was a single day-one figure (`income_need_at_death -
+guaranteed_day_one`) that never had gap income subtracted from it at
+all. A household with real future wages between death and the working
+spouse's own retirement reported the IDENTICAL insurance need as a
+household with no such income — the schedule and the headline
+recommendation were answering two different cash-flow scenarios.
+Independent reproduction (both spouses 60, Jason dies at 60, horizon
+70, $100K spend/75% survivor factor/0% everything, Justin $100K salary/
+retirement 65, $135K starting taxable): old formula reported
+**$574,663** regardless of the $65,000/yr × 4 years of real wages;
+correct answer is **$315,000**.
+
+**Fixed:** `additional_insurance_needed` now capitalizes the SAME dated
+per-year `draw` values the survivor schedule itself computed — pulled
+from `schedule` (still the full, unsampled list at this point in the
+function; the `[::2]` display sampling only happens at the return
+statement) and discounted at the nominal `post_ret` rate, not a
+synthetic real/inflation-adjusted rate applied to a single constant
+figure. This automatically inherits gap income's exact end date and
+`salary_growth_pct` escalation, along with every other year-to-year
+variation in need this function already models — there's no longer a
+second, independent formula to keep in sync with the loop.
+`_pv_annuity` is no longer imported into this function (its only
+remaining use here). Verified:
+`test_additional_insurance_needed_reflects_gap_income` reproduces the
+review's exact numbers ($315,000 fixed vs. a reconstructed $574,663 for
+what the old formula would have produced from the same inputs) and
+pins the exact $259,663 gap the bug used to silently drop.
+
+**P2 — API-output closeout ≠ app-visible closeout, now actually
+closed.** Section 16 added `justin_gap_income`/
+`second_earner_net_of_tax_factor` to every consumer's backend response,
+but no frontend code read either field — confirmed by the review via a
+repo-wide search. Fixed: a small reusable `SecondEarnerNote` component
+(`frontend/src/components/SecondEarnerNote.jsx`, renders nothing when
+there's no gap to disclose) now appears next to the relevant result on
+every page that has one — Monte Carlo/SWR/Roth Conversion (all three
+live in `Simulation.jsx`), Stress Tests, Survivor Scenario (gated to
+`deceased !== 'justin'`, matching the backend's own gating), and
+Retirement Projection (`Retirement.jsx`). **Tax Efficiency has no
+frontend page at all** — confirmed via route search, `run_tax_
+efficiency_simulation`'s `/api/simulation/tax-efficiency` endpoint is
+never called from any file in `frontend/src` — so there's nothing to
+wire up there; the backend field stays ready for if/when a consumer of
+that route exists. A new frontend test
+(`SurvivorScenario.test.jsx`, 2 cases) asserts against the actual
+rendered DOM text (`$65,000`, `2 more years`, `65%`) for a mocked
+gap-income response, and that the disclosure is absent when Justin is
+the deceased spouse — a genuine rendered-output assertion, not just a
+check that the mocked data contains the fields.
+
+Verified: full backend/frontend suite re-run on the isolated branch
+before merging (see the commit this section was added in for the exact
+count). Branch: `codex/second-earner-output-visibility-and-parity`
+(same branch as section 16 — these are fixes to that same unmerged
+work, not a new branch).

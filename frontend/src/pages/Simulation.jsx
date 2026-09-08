@@ -6,6 +6,7 @@ import {
 } from 'recharts'
 import { usePersonNames } from '../hooks/usePersonNames'
 import { isPrivacyMode, MASK_CURRENCY } from '../utils/privacy'
+import SecondEarnerNote from '../components/SecondEarnerNote'
 
 const fmt  = (n) => isPrivacyMode() ? MASK_CURRENCY : (n == null ? '—' : new Intl.NumberFormat('en-US', { style:'currency', currency:'USD', maximumFractionDigits:0 }).format(n))
 const fmtK = (n) => {
@@ -139,6 +140,8 @@ export function MonteCarloSection({ retAge, ssTiming, overrides }) {
         <div className="card">
           <div className="label">Portfolio at Retirement</div>
           <div className="number-lg" style={{ color:ACCENT, marginTop:8 }}>{fmtK(data.portfolio_at_retirement)}</div>
+          <SecondEarnerNote amount={data.justin_gap_income_first_year} years={data.justin_gap_years}
+                             factor={data.second_earner_net_of_tax_factor} personLabel={person2Name} />
         </div>
         <div className="card">
           <div className="label">Safe Spending Power</div>
@@ -193,6 +196,8 @@ export function MonteCarloSection({ retAge, ssTiming, overrides }) {
                     {swr.cushion_pct > 0 ? '+' : ''}{swr.cushion_pct}%
                   </span>
                 </div>
+                <SecondEarnerNote amount={swr.justin_gap_income_first_year} years={swr.justin_gap_years}
+                                   factor={swr.second_earner_net_of_tax_factor} personLabel={person2Name} />
               </div>
             )}
           </>) : <div style={{ fontSize:12, color:'var(--text2)', marginTop:8 }}>Run simulation to calculate</div>}
@@ -293,7 +298,7 @@ export function MonteCarloSection({ retAge, ssTiming, overrides }) {
 // `overrides`: see MonteCarloSection's comment above — same What-If
 // Builder wiring, including Roth and contribution comparisons.
 export function StressTestSection({ retAge, ssTiming, overrides }) {
-  const { person1Name } = usePersonNames()
+  const { person1Name, person2Name } = usePersonNames()
   const [data, setData]       = useState(null)
   const [roth, setRoth]       = useState(null)
   const [contrib, setContrib] = useState(null)
@@ -359,6 +364,8 @@ export function StressTestSection({ retAge, ssTiming, overrides }) {
 
   return (
     <div>
+      <SecondEarnerNote amount={data.justin_gap_income_first_year} years={data.justin_gap_years}
+                         factor={data.second_earner_net_of_tax_factor} personLabel={person2Name} />
       {/* Summary cards */}
       <div className="grid-3" style={{ marginBottom:24 }}>
         {stressKeys.map(key => {
@@ -447,6 +454,11 @@ export function StressTestSection({ retAge, ssTiming, overrides }) {
                 RMD: {fmtK(roth.estimated_rmd_without_conversions)} → {fmtK(roth.estimated_rmd_with_conversions)}/yr
               </div>
             </div>
+          </div>
+          <div>
+            <SecondEarnerNote amount={roth.schedule?.[0]?.justin_gap_income}
+                               years={roth.schedule?.filter(r => r.justin_gap_income > 0).length}
+                               factor={roth.second_earner_net_of_tax_factor} personLabel={person2Name} />
           </div>
           <div style={{ overflowX:'auto' }}>
             <table style={{ width:'100%', borderCollapse:'collapse', fontSize:12 }}>

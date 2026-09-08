@@ -2055,7 +2055,7 @@ def run_survivor_scenario(inputs: Dict, accounts: List[Dict], ret_age: int = 60,
     cases covering Justin dying before/during/after his own gap window,
     and a past-selected-ret_age scenario.
     """
-    from projection_engine import run_retirement_projection, _pv_annuity
+    from projection_engine import run_retirement_projection
 
     jason_age  = inputs["jason_age"]
     justin_age = inputs["justin_age"]
@@ -2241,16 +2241,36 @@ def run_survivor_scenario(inputs: Dict, accounts: List[Dict], ret_age: int = 60,
 
     additional_insurance_needed = 0
     if not survives:
-        # Day-one (pre-COLA) guaranteed figure — same today's-dollars
-        # approximation this capitalized-need estimate already made
-        # before the death-year-boundary fix above.
-        guaranteed_day_one = pension_annual + survivor_ss_annual
-        net_need  = max(0, income_need_at_death - guaranteed_day_one)
-        real_rate = ((1 + post_ret) / (1 + inflation) - 1) if post_ret != inflation else 0.0001
-        # Years remaining is now end_age - (death_jason_age + 1), matching
-        # the loop's actual range above (the death year itself is no
-        # longer part of the survivor's own spending window).
-        cap_need  = _pv_annuity(net_need, real_rate, end_age - death_jason_age - 1)
+        # Capitalize the SAME dated cash flows the survivor simulation
+        # loop above actually used (backlog P1, CALCULATION_CONTRACT.md
+        # section 17) — each year's real `draw` from `schedule`, which
+        # already reflects justin_gap_income (its exact end date and
+        # salary_growth_pct escalation), the survivor_need_factor
+        # scaling, and every other year-to-year variation in need — NOT
+        # a flat constant-real-annuity approximation. That approximation
+        # (previously `_pv_annuity(net_need, real_rate, ...)`, net_need
+        # a single day-one figure with no gap income subtracted at all)
+        # silently ignored gap income entirely: a household with real
+        # future wages between death and the working spouse's own
+        # retirement reported the IDENTICAL insurance need as a
+        # household with no such income, understating the fix by
+        # exactly the capitalized value of those missing wages
+        # (independent review, 2026-09-08 — reproduced: $100K spend/
+        # 75% survivor factor/$100K Justin salary through 65/$135K
+        # taxable/0% everything gave $574,663 either way; the correct,
+        # dated-cash-flow answer is $315,000 -- see
+        # test_additional_insurance_needed_reflects_gap_income below).
+        # `schedule` here is still the FULL per-year list (the [::2]
+        # display sampling only happens at the return statement below),
+        # so every year is captured, not just the alternating ones shown
+        # in the API response. Nominal cash flows discounted at the
+        # nominal post_ret rate (not a real/inflation-adjusted rate) --
+        # correct now that flows are dated explicitly rather than
+        # represented as a single constant real figure.
+        cap_need = sum(
+            row["draw"] / ((1 + post_ret) ** (i + 1))
+            for i, row in enumerate(schedule)
+        )
         additional_insurance_needed = max(0, round(cap_need - starting_balance))
 
     if survives:

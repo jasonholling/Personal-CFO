@@ -10,7 +10,7 @@ history) — it's stale as of this closing update.
 
 **2026-09-08 addendum — second-earner (Justin) gap-income feature, a
 separate follow-on effort, NOT part of the 9-item list below.** Full
-detail lives in `CALCULATION_CONTRACT.md` sections 13-16. Status: gap
+detail lives in `CALCULATION_CONTRACT.md` sections 13-17. Status: gap
 income (a working spouse's continued income offsetting withdrawal need
 during the years between the household's own withdrawal start and that
 spouse's own retirement) reaches all 6 withdrawal-phase consumers, via
@@ -21,7 +21,12 @@ and Tax Efficiency's performance-sensitive inner loops — that work
 since merged to `main`** (commit `050a6bd`). A fourth pass (section 16)
 added public-output visibility for the figure across all 6 consumers,
 a cross-consumer public-output parity test, and an explicit timing
-contract for Survivor Scenario — **this piece is on its own isolated
+contract for Survivor Scenario. A fifth pass (section 17) fixed a real
+bug the earlier passes' checks never caught — Survivor's
+`additional_insurance_needed` never subtracted gap income at all, a
+separate formula from the (correct) schedule it sat next to — and
+wired the new fields into actual frontend UI (a prior pass had only
+closed the API-output half). **This piece is on its own isolated
 branch (`codex/second-earner-output-visibility-and-parity`), pushed but
 NOT yet merged, per the same instruction — review before merging.**
 Four larger items remain open and correctly scoped (not

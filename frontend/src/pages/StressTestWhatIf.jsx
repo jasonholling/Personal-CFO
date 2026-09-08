@@ -5,6 +5,7 @@ import { usePersonNames } from '../hooks/usePersonNames'
 import { isPrivacyMode, MASK_CURRENCY } from '../utils/privacy'
 import WhatIf from './WhatIf'
 import { MonteCarloSection, StressTestSection, RET_AGES, SS_OPTS } from './Simulation'
+import SecondEarnerNote from '../components/SecondEarnerNote'
 
 const fmt = (n) => isPrivacyMode() ? MASK_CURRENCY : (n == null ? '—' : new Intl.NumberFormat('en-US', { style:'currency', currency:'USD', maximumFractionDigits:0 }).format(n))
 const GREEN = '#34d399'
@@ -113,6 +114,11 @@ function SurvivorScenarioSection({ retAge }) {
             }}>
               <strong style={{ color: result.survives ? GREEN : RED }}>{result.survives ? '✓ Plan holds up' : '⚠ Plan runs out'}</strong> — {result.recommendation}
             </div>
+            {deceased !== 'justin' && (
+              <SecondEarnerNote amount={result.schedule?.[0]?.justin_gap_income}
+                                 years={result.schedule?.filter(r => r.justin_gap_income > 0).length}
+                                 factor={result.second_earner_net_of_tax_factor} personLabel={person2Name} />
+            )}
             <div className="grid-3">
               <div>
                 <div className="label">Life Insurance Payout</div>

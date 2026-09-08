@@ -971,6 +971,62 @@ class TestWithdrawalWaterfallReconciliationFixes:
 
 
 class TestRunSurvivorScenario:
+    def test_additional_insurance_needed_reflects_gap_income(self, sample_accounts):
+        """Backlog P1 (CALCULATION_CONTRACT.md section 17), independent
+        review finding, 2026-09-08: additional_insurance_needed used to
+        capitalize a flat constant-real-annuity approximation
+        (_pv_annuity(net_need, real_rate, ...)) that never subtracted
+        gap income at all -- a household with real future wages between
+        death and the working spouse's own retirement reported the
+        IDENTICAL insurance need as a household with no such income.
+        Fixed: capitalizes the SAME dated per-year `draw` values
+        (already correctly gap-income-adjusted) the survivor schedule
+        itself used, discounted at the nominal post_ret rate.
+
+        Exact reproduction, hand-calculated by the reviewer: both
+        spouses 60, ret_age 60, Jason dies at 60 (schedule starts at
+        61), horizon 70 (exclusive) -- $100K annual household spending,
+        75% survivor factor, 0% returns/inflation/pension/SS/insurance
+        payout, Justin salary $100K/retirement 65 (net $65K/yr through
+        64), $135K starting taxable. Years 61-64 need $10K/yr
+        ($75K survivor need - $65K wages); years 65-69 need $75K/yr
+        (wages gone). Total need = 4*10000 + 5*75000 = $415,000; minus
+        the $100K available at death = exactly $315,000 -- not the old
+        formula's $574,663, which was identical regardless of whether
+        gap income existed at all."""
+        inputs = {
+            "jason_age": 60, "justin_age": 60,
+            "retirement_income_today_dollars": 100000, "inflation_rate": 0.0,
+            "expected_return_pre_retirement": 0.0, "expected_return_post_retirement": 0.0,
+            "jason_social_security": 0, "jason_ss_delayed": 0, "justin_social_security": 0,
+            "jason_ss_age": 62, "justin_ss_age": 67,
+            "annual_401k_contribution": 0, "annual_roth_contribution": 0, "annual_hsa_contribution": 0,
+            "annual_rsu_value": 0, "annual_bonus_pct": 0, "mortgage_balance": 0,
+            "retirement_end_age": 70,
+            "justin_w2_salary": 100000, "justin_ret_age": 65,
+        }
+        accounts = [{"name": "Brokerage", "account_type": "taxable", "owner": "joint", "balance": 135000}]
+        result = run_survivor_scenario(inputs, accounts, ret_age=60, deceased="jason", death_age=60,
+                                        survivor_need_factor=0.75)
+        assert result["survives"] is False
+        assert result["starting_balance_after_payout"] == 100000
+        assert result["additional_insurance_needed"] == 315000
+
+        # Reconstruct exactly what the OLD (pre-fix) flat-annuity formula
+        # would have produced from this same result's own reported
+        # figures, to demonstrate precisely what the bug dropped: it
+        # never subtracted gap income from net_need at all, so it always
+        # capitalized the full $75,000/yr need for all 9 years
+        # regardless of Justin's real future wages.
+        from projection_engine import _pv_annuity
+        net_need = result["income_need_at_death"]  # no gap income subtracted -- the bug
+        real_rate = 0.0001  # post_ret == inflation == 0 here, so the fallback applies
+        years = 70 - 60 - 1  # end_age - death_jason_age - 1, same as the old code
+        old_buggy_value = max(0, round(_pv_annuity(net_need, real_rate, years) - result["starting_balance_after_payout"]))
+        assert old_buggy_value == 574663  # matches the independent review's own reported old value
+        assert result["additional_insurance_needed"] < old_buggy_value
+        assert old_buggy_value - result["additional_insurance_needed"] == pytest.approx(259663, abs=1)
+
     def test_returns_has_data_true_for_valid_scenario(self, sample_inputs, sample_accounts):
         result = run_survivor_scenario(sample_inputs, sample_accounts, ret_age=60, deceased="jason", death_age=70)
         assert result["has_data"] is True

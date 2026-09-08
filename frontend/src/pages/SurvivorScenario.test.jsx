@@ -117,3 +117,66 @@ describe('Survivor Scenario default death age', () => {
     })
   })
 })
+
+describe('Survivor Scenario second-earner gap-income disclosure (backend/docs/CALCULATION_CONTRACT.md section 17, P2)', () => {
+  // A backend-output closeout isn't the same as a user-visible one --
+  // independent review, 2026-09-08: justin_gap_income/
+  // second_earner_net_of_tax_factor were added to the API response but
+  // nothing in the frontend read them. This asserts against the actual
+  // RENDERED text, not just that the fields exist on the mocked response.
+  const gapSurvivorResult = {
+    has_data: true, deceased: 'jason', death_age: 61, survivor_end_age: 90,
+    portfolio_at_death: 800000, life_insurance_payout: 0,
+    starting_balance_after_payout: 800000, survivor_ss_annual: 0, pension_annual: 0,
+    income_need_at_death: 75000, survivor_need_factor: 0.75, survives: true,
+    depleted_age: null, additional_insurance_needed: 0,
+    recommendation: 'Test recommendation text.',
+    schedule: [
+      { age: 62, starting_balance: 800000, draw: 10000, ending_balance: 795000, justin_gap_income: 65000 },
+      { age: 64, starting_balance: 790000, draw: 10000, ending_balance: 785000, justin_gap_income: 65000 },
+      { age: 66, starting_balance: 780000, draw: 75000, ending_balance: 710000, justin_gap_income: 0 },
+    ],
+    second_earner_net_of_tax_factor: 0.65,
+  }
+
+  it('renders the actual gap-income dollar amount when Justin survives', async () => {
+    localStorage.setItem('cfo_scenario_ret_age', '60')
+    axios.get.mockImplementation(url => Promise.resolve({
+      data: url === '/api/planning-inputs' ? mockPlanningInputs(60, 60)
+          : url === '/api/simulation/survivor-scenario' ? gapSurvivorResult
+          : projections,
+    }))
+    await act(async () => root.render(<StressTestWhatIf />))
+    await flush()
+    await click('Survivor Scenario')
+    await flush()
+    await click('Run Scenario')
+    await flush()
+    // The note counts entries with justin_gap_income > 0 (2 of the 3
+    // mocked schedule rows) and reads the first one's dollar amount.
+    expect(container.textContent).toContain('$65,000')
+    expect(container.textContent).toContain('2 more years')
+    expect(container.textContent).toContain('65%')
+  })
+
+  it('does not render the disclosure when Justin is the one deceased', async () => {
+    localStorage.setItem('cfo_scenario_ret_age', '60')
+    axios.get.mockImplementation(url => Promise.resolve({
+      data: url === '/api/planning-inputs' ? mockPlanningInputs(60, 60)
+          : url === '/api/simulation/survivor-scenario' ? gapSurvivorResult
+          : projections,
+    }))
+    await act(async () => root.render(<StressTestWhatIf />))
+    await flush()
+    await click('Survivor Scenario')
+    await flush()
+    await click('Sam')  // selects deceased='justin'
+    await click('Run Scenario')
+    await flush()
+    // Same mocked schedule (component doesn't re-fetch different data
+    // per deceased selection in this mock), but the disclosure must not
+    // render at all once Justin is the deceased spouse -- the gating is
+    // on the selection itself, not on re-deriving the schedule.
+    expect(container.textContent).not.toContain('continued income')
+  })
+})
