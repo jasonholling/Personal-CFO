@@ -2197,3 +2197,98 @@ confirm the two-age loop's runtime stays in the same range as the
 existing single-axis SWR at matched trial count/horizon/seed, not a
 new claim requiring its own equivalence proof beyond what
 `_swr_year_step` already has.
+
+## 26. Two-age SWR — implementation report (2026-09-08, on `codex/two-age-swr`)
+
+Milestone 1 of 4 (SWR, Roth Conversion, Tax Efficiency, Survivor/
+ownership). Full contract in section 25, written and committed before
+any code. This section is the required accuracy/performance/limitations
+report for the completed implementation.
+
+**What was built:** `jason_ret_age`/`justin_ret_age` on
+`run_swr_analysis`, both required together, delegating to
+`_run_swr_analysis_two_age`. A new, independently-callable
+`_swr_success_rate_two_age` (mirrors `_run_single_two_age`'s own
+precedent — a real function, not a closure, so the search itself is
+directly testable) reuses the exact same allocation-free primitives the
+single-axis version's own documented performance exception already
+established: `_swr_year_step`, `_pretax_marginal_tax_rate`,
+`_rmd`/`rmd_start_age`, `_post_retirement_year_effects`,
+`justin_gap_income_for_year` — plus the shared two-age helpers
+(`two_age_pension_for_year`, `two_age_still_working_income_inputs`,
+`build_two_person_timeline`). No independent second set of formulas, no
+new performance exception. Starting balances come from calling
+`run_two_dimensional_retirement_projection` once and reading its bucket
+fields, the same pattern every other two-age consumer already uses.
+
+**Accuracy — test-first, per instruction:** 10 hand/script-verified
+tests written and committed RED before any implementation code
+(confirmed failing with `TypeError` against the not-yet-existing
+params). Every boundary withdrawal amount was derived by directly
+driving `_swr_year_step` — the existing, unmodified, already-reviewed
+primitive — through its own standalone 50-iteration binary search
+outside any code this milestone wrote, then hand-verified by replaying
+the arithmetic (shown in each test's own docstring). All 10 passed on
+the first implementation attempt — no expected numbers were adjusted to
+fit the code. Covers: either retirement order (both Jason-first and
+Justin-first, proving the still-working-spouse offset is symmetric,
+matching the identical $110,000 boundary both directions), simultaneous
+retirement, an income surplus swept into the portfolio during phase2, a
+zero-balance depleted-account case (boundary exactly $0), and a past
+retirement selection (phase2 starting immediately at the real current
+age). A direct proof (`_swr_year_step` called with the exact converged
+boundary and again $10,000 above it) that a meaningfully higher
+withdrawal fails by exactly the expected shortfall, not just that some
+withdrawal succeeds. 2 more tests verify the summary fields
+(`guaranteed_income_annual` correctly excludes the pension until Jason
+actually retires; `guaranteed_income_steadystate` includes it once he
+has) and confirm `income_target`/`cushion_pct`/`on_track` are present.
+
+**What the search does NOT model, preserved from the single-axis
+version (section 25.1) rather than newly added:** bridge/kids costs and
+per-year healthcare are not part of either version's own withdrawal
+loop — both only ever appear in the final summary's `income_target`
+comparison. Guaranteed income (pension/SS) does not offset the searched
+withdrawal amount directly in either version; it only affects the tax
+rate applied to pretax withdrawals. These are documented, pre-existing
+SWR behaviors this milestone preserves exactly, not scope this branch
+was asked to add.
+
+**Performance:** benchmarked at the same trial count (N=1000), a
+representative multi-decade horizon, and matched inputs against the
+existing single-axis `run_swr_analysis` (5-run average): single-axis
+~1.402s, two-age ~1.361s — the two-age version is not slower; if
+anything marginally faster, consistent with the same pattern already
+observed for two-age Monte Carlo/Stress Tests (no new performance
+exception needed — this reuses `_swr_year_step` exactly as-is).
+
+**Frontend:** SWR already had a UI presence — embedded in
+`MonteCarloSection`'s existing "Safe Spending Power" card, which had
+been left showing "Run simulation to calculate" in two-age mode since
+SWR didn't support it yet. `MonteCarloSection`'s two-age branch now also
+`POST`s to `/api/simulation/swr` alongside Monte Carlo (same `ss_timing`
++ What-If overrides preservation the Monte Carlo call already has,
+same stale-result guard), populating that card with real two-age
+numbers instead of a placeholder. The card's own `SecondEarnerNote`
+usage now goes through the shared `secondEarnerNoteProps()` helper
+(mode-aware amount/years/label, established in section 23) instead of
+hardcoding Justin-only fields. The age-55 bridge-detail sub-branch
+inside that card is now also gated on `data.mode !== 'two_age'`, so a
+stale single-axis `retAge===55` selection can't spuriously render
+single-axis-only bridge/kids UI under a two-age result. Both calculated
+ages are already shown via the page-level "Ages used" label
+(section 23); privacy masking and stale-result invalidation are
+inherited for free from the existing shared `secondEarnerNoteProps`/
+`genRef` machinery, not re-implemented.
+
+**Verified:** full backend suite 1198 passed, 97.55% coverage. Full
+frontend suite 35 passed (was 34), production build succeeds.
+Sensitive-data check passed.
+
+**Explicitly out of scope for this milestone**, unchanged from the
+overall plan: Roth Conversion, Tax Efficiency, Survivor Scenario, real
+payroll-tax modeling, the owner-attributed ledger, heatmaps.
+
+Branch: `codex/two-age-swr`, pushed, **not merged** — per the explicit
+instruction ("Do not merge or start the next milestone until the
+current one is reviewed and approved"), for independent review.
