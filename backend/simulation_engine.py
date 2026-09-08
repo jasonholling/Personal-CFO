@@ -86,7 +86,7 @@ SCENARIOS = {
 }
 
 
-def _pretax_marginal_tax_rate(year_pen, year_jss, year_uss, rmd, state_tax_rate=0.0):
+def _pretax_marginal_tax_rate(year_pen, year_jss, year_uss, rmd, state_tax_rate=0.0, gross_income=0.0):
     """Same estimate run_retirement_projection's own withdrawal waterfall
     already uses for a year's pretax withdrawal — the current MFJ bracket
     table plus the household's state rate, applied to guaranteed income
@@ -95,8 +95,21 @@ def _pretax_marginal_tax_rate(year_pen, year_jss, year_uss, rmd, state_tax_rate=
     run_retirement_projection does, instead of each one either inventing
     its own flat approximation or (until this fix) treating pretax
     withdrawals as tax-free entirely (external audit 2026-09-07 — Monte
-    Carlo/Stress Tests/SWR did the latter)."""
-    taxable_income_est = max(0, year_pen + (year_jss + year_uss) * 0.85 + rmd - _STD_DEDUCTION)
+    Carlo/Stress Tests/SWR did the latter).
+
+    gross_income (2026-09-08, Roth Conversion two-age follow-up, second
+    pass): optional additional ordinary taxable income -- a still-
+    working spouse's gross wages/bonus/RSU -- to fold into the marginal-
+    rate estimate. Defaults to 0, so every existing call site (single-
+    axis and every other two-age consumer, none of which model working
+    income as taxable) is completely unaffected. A household's real
+    marginal bracket for a given year's own pretax draw must reflect
+    ALL of that year's ordinary income, not just guaranteed income/RMD —
+    otherwise a household with substantial working income would price
+    its own withdrawal at an artificially low rate the same year its
+    Roth Conversion bracket-capacity math already correctly counts that
+    income."""
+    taxable_income_est = max(0, year_pen + (year_jss + year_uss) * 0.85 + rmd + gross_income - _STD_DEDUCTION)
     return min(0.90, _marginal_rate(taxable_income_est) + max(0, state_tax_rate or 0))
 
 
@@ -2137,12 +2150,27 @@ def _max_conversion_for_tax_budget(pre_conversion_taxable: float, budget: float,
     (floored at 0) upward, greedily filling each bracket's remaining room
     until the budget runs out, mirroring the same greedy-fill logic
     room_in_22 already expresses as a policy choice, but applied to a
-    dollar budget instead of a bracket-top target."""
+    dollar budget instead of a bracket-top target.
+
+    free_room (independent review, 2026-09-08, Roth Conversion
+    follow-up, second pass): when `pre_conversion_taxable` is negative
+    (this file's own convention for unused standard-deduction room —
+    _incremental_conversion_tax already floors both sides of its own
+    subtraction at 0, so a conversion "fills" that leftover deduction
+    tax-free before any bracket rate applies), this cap used to floor
+    `pre` at 0 and start walking brackets from $0 immediately, silently
+    dropping that free zone — understating how much a low-taxable-
+    income household could actually afford to convert on a given
+    budget, inconsistent with _incremental_conversion_tax's own
+    formula. The free zone costs nothing regardless of budget (even a
+    $0 budget can still afford it), so it's added unconditionally
+    before the budget-constrained bracket walk begins."""
+    free_room = max(0.0, -pre_conversion_taxable)
     if budget <= 0:
-        return 0.0
+        return free_room
     pre = max(0.0, pre_conversion_taxable)
     remaining_budget = budget
-    total_convertible = 0.0
+    total_convertible = free_room
     prev_cap = 0.0
     for rate, cap in brackets:
         if cap <= pre:
@@ -2258,6 +2286,39 @@ def _run_roth_conversion_analysis_two_age(inputs: Dict, accounts: List[Dict], ja
     phase2_duration_years, still_working_income_at_start = two_age_still_working_income_inputs(
         inputs, timeline, _salary_growth_pct)
 
+    # The still-working spouse's GROSS income (salary + bonus + RSU),
+    # for taxable-income/bracket-capacity purposes -- independent
+    # review, 2026-09-08, Roth Conversion follow-up, second pass:
+    # dividing the net spending-offset figure back out by
+    # SECOND_EARNER_NET_OF_TAX_FACTOR (the first pass's approach) only
+    # ever recovered the SALARY component, since
+    # two_age_still_working_income_inputs itself only reads w2_salary/
+    # justin_w2_salary -- bonus and RSU compensation (annual_bonus_pct/
+    # annual_rsu_value, justin_annual_bonus_pct/justin_annual_rsu_value
+    # -- the same fields run_two_dimensional_retirement_projection's own
+    # accumulation-phase math already reads for this exact spouse) never
+    # entered base_taxable at all. Computed independently here (same
+    # later_retiree branching two_age_still_working_income_inputs uses,
+    # since that helper has no gross-including variant), then run
+    # through the same justin_gap_income_for_year per-year lookup every
+    # other two-age gap-income figure already uses -- one shared
+    # per-year formula, just fed a different "at_start" base.
+    if timeline.later_retiree == "justin":
+        _still_working_salary = inputs.get("justin_w2_salary", 0)
+        _still_working_bonus  = _still_working_salary * inputs.get("justin_annual_bonus_pct", 0)
+        _still_working_rsu    = inputs.get("justin_annual_rsu_value", 0)
+    elif timeline.later_retiree == "jason":
+        _still_working_salary = inputs.get("w2_salary", 0)
+        _still_working_bonus  = _still_working_salary * inputs.get("annual_bonus_pct", 0)
+        _still_working_rsu    = inputs.get("annual_rsu_value", 0)
+    else:
+        _still_working_salary = _still_working_bonus = _still_working_rsu = 0.0
+    still_working_gross_income_at_start = (
+        (_still_working_salary + _still_working_bonus + _still_working_rsu)
+        * ((1 + _salary_growth_pct) ** timeline.phase2_start_years)
+        if phase2_duration_years > 0 else 0.0
+    )
+
     schedule = []
     pretax, roth, taxable = pretax_at_start, roth_at_start, taxable_at_start
     for yr in range(conversion_years):
@@ -2274,37 +2335,25 @@ def _run_roth_conversion_analysis_two_age(inputs: Dict, accounts: List[Dict], ja
         life_event_cash, life_event_monthly = _post_retirement_year_effects(post_events, retirement_year_for_events + yr)
         still_working_income_this_year = justin_gap_income_for_year(
             yr, phase2_duration_years, still_working_income_at_start, _salary_growth_pct)
-        # The GROSS wage figure, for taxable-income/bracket-capacity
-        # purposes only -- independent review, 2026-09-08, Roth
-        # Conversion follow-up, P1: still_working_income_this_year is
-        # already NET-of-tax (the existing 65% SECOND_EARNER_NET_OF_
-        # TAX_FACTOR approximation), and that NET figure keeps funding
-        # the spending-need offset exactly as before -- unchanged.
-        # Reproduced: a $500,000 working salary, no other income, ample
-        # assets -- this used to recommend a $243,600 conversion inside
-        # the 22% bracket, when the repo's own deductions/bracket table
-        # says that salary alone already leaves $0 room. Gross wages are
-        # real ordinary taxable income and must reduce bracket capacity
-        # the same way pension/SS/pretax draws already do; the 65%
-        # factor is a SPENDING approximation (net take-home cash), not a
-        # tax-liability one, and applying it twice (once to reduce net
-        # cash, again by pretending gross income is smaller than it is)
-        # would double-count the same tax the factor already implies was
-        # withheld. still_working_income_this_year is exactly linear in
-        # the underlying salary (justin_gap_income_for_year multiplies a
-        # fixed base by a growth factor, nothing else), so dividing back
-        # out the flat NET_OF_TAX_FACTOR recovers the gross figure
-        # exactly, without needing a second, independent salary lookup
-        # (two_age_still_working_income_inputs already resolved which
-        # spouse's w2_salary/justin_w2_salary applies and at what
-        # growth-adjusted level -- this just un-applies the one factor
-        # that shouldn't touch taxable income).
-        gross_wages_this_year = (
-            still_working_income_this_year / SECOND_EARNER_NET_OF_TAX_FACTOR
-            if still_working_income_this_year else 0.0
-        )
+        # The GROSS wage/bonus/RSU figure, for taxable-income/bracket-
+        # capacity purposes only -- section 32/33's contract. NET
+        # spending-need offset above is unchanged. Reused per-year
+        # lookup, different "at_start" base -- see
+        # still_working_gross_income_at_start's own comment above.
+        gross_wages_this_year = justin_gap_income_for_year(
+            yr, phase2_duration_years, still_working_gross_income_at_start, _salary_growth_pct)
 
-        pretax_tax_rate = _pretax_marginal_tax_rate(year_pen, year_jss, year_uss, 0.0, state_tax_rate)
+        # The year's own pretax SPENDING draw is priced at the
+        # household's REAL marginal rate, including gross wages --
+        # independent review, 2026-09-08, Roth Conversion follow-up,
+        # second pass: this used to omit gross_wages_this_year entirely,
+        # so a household with substantial working income priced its own
+        # spending withdrawal at an artificially low rate the same year
+        # its conversion bracket-capacity math (base_taxable, below)
+        # already correctly counted that income -- an internally
+        # inconsistent picture of the same household's same tax year.
+        pretax_tax_rate = _pretax_marginal_tax_rate(year_pen, year_jss, year_uss, 0.0, state_tax_rate,
+                                                      gross_income=gross_wages_this_year)
         base_result = simulate_withdrawal_year(
             opening=AccountState(pretax=pretax, roth=roth, taxable=taxable, hsa=0.0),
             spending_need=year_need - life_event_monthly - still_working_income_this_year,
@@ -2405,7 +2454,14 @@ def _run_roth_conversion_analysis_two_age(inputs: Dict, accounts: List[Dict], ja
         life_event_cash, life_event_monthly = _post_retirement_year_effects(post_events, retirement_year_for_events + yr)
         still_working_income_this_year = justin_gap_income_for_year(
             yr, phase2_duration_years, still_working_income_at_start, _salary_growth_pct)
-        no_conv_pretax_rate = _pretax_marginal_tax_rate(year_pen, year_jss, year_uss, 0.0, state_tax_rate)
+        # Same gross-income-aware rate as the with-conversions loop
+        # above, for the same reason -- keeps the two paths' own
+        # spending-draw taxation apples-to-apples, isolating the
+        # conversion policy as the only real difference between them.
+        no_conv_gross_wages_this_year = justin_gap_income_for_year(
+            yr, phase2_duration_years, still_working_gross_income_at_start, _salary_growth_pct)
+        no_conv_pretax_rate = _pretax_marginal_tax_rate(year_pen, year_jss, year_uss, 0.0, state_tax_rate,
+                                                          gross_income=no_conv_gross_wages_this_year)
         no_conv_result = simulate_withdrawal_year(
             opening=AccountState(pretax=no_conv_pretax, roth=no_conv_roth, taxable=no_conv_taxable, hsa=0.0),
             spending_need=year_need - life_event_monthly - still_working_income_this_year,

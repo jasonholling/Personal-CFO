@@ -2532,6 +2532,22 @@ figure continues to fund the spending-need offset, unchanged. Section
 below now state the corrected rule directly rather than leaving the
 wrong one on the record with a footnote.**
 
+**CORRECTED AGAIN 2026-09-08 (independent review, second follow-up
+pass) — the FIRST correction above was itself incomplete in three
+ways, all now fixed and folded into 30.1-30.3's text directly: (1) the
+gross-income figure only covered salary (derived by dividing the net
+spending-offset figure back out, which structurally can't recover
+bonus/RSU since the underlying helper never reads those fields) — now
+computed directly from salary+bonus+RSU; (2) the SAME gross figure now
+also feeds `_pretax_marginal_tax_rate`'s estimate for the year's own
+ordinary SPENDING withdrawal, not just the conversion's own
+bracket-capacity math — a household's real marginal rate for a given
+tax year can't correctly exclude income that same year's conversion
+math already counts; (3) the progressive-tax affordability cap
+(section 32) was dropping unused standard-deduction room instead of
+treating it as a free zone, understating what a low-income household
+could actually afford. Section 33 has the full detail.**
+
 Milestone 2 of 4 (SWR done and merged, section 25-29). Required by the
 milestone's own instruction: document the working-income tax contract
 BEFORE any implementation code, so bracket-capacity treatment is a
@@ -2569,16 +2585,31 @@ approximation is UNCHANGED and still funds the year's SPENDING-NEED
 OFFSET exactly as before (`justin_gap_income_for_year`'s return value,
 folded into `event_monthly`/`spending_need` the same way life-event
 cash is) — that half of the picture wasn't wrong. What was missing is
-a SEPARATE gross-wage figure, derived by dividing the net figure back
-out (`still_working_income_this_year / SECOND_EARNER_NET_OF_TAX_FACTOR`
-— exact, since the factor is applied as a flat multiplier with no
-other nonlinearity), that now ALSO enters `base_taxable`. The two
-figures serve genuinely different purposes and are BOTH needed, not a
-contradiction: the net figure answers "how much cash does this
-household actually have to spend," the gross figure answers "how much
-ordinary taxable income does this household actually have" — using
-only one of the two for both questions is what produced the original
-bug.
+a SEPARATE gross-income figure that now ALSO enters `base_taxable`.
+**Computed directly from salary + bonus + RSU** (`w2_salary`/
+`justin_w2_salary`, `annual_bonus_pct`/`justin_annual_bonus_pct` —
+applied to salary, and `annual_rsu_value`/`justin_annual_rsu_value` — a
+flat dollar figure), the same input fields `run_two_dimensional_
+retirement_projection`'s own accumulation-phase math already reads for
+this exact spouse — NOT by dividing the net spending-offset figure
+back out, which was tried first and only ever recovered the salary
+component, since the net figure's own source
+(`two_age_still_working_income_inputs`) never reads bonus/RSU inputs
+at all. The gross figure is then run through the same
+`justin_gap_income_for_year` per-year lookup every other two-age
+gap-income figure already uses, just fed a different "at_start" base.
+The two figures (net and gross) serve genuinely different purposes and
+are BOTH needed, not a contradiction: the net figure answers "how much
+cash does this household actually have to spend," the gross figure
+answers "how much ordinary taxable income does this household actually
+have" — using only one of the two for both questions (or an incomplete
+version of the gross one) is what produced the original bugs. The same
+gross figure also now feeds `_pretax_marginal_tax_rate`'s estimate for
+the year's own pretax SPENDING withdrawal (an optional `gross_income`
+parameter, default 0, so every other existing call site across this
+file is unaffected) — a household's real marginal bracket for a given
+tax year has to reflect ALL of that year's ordinary income, not just
+the portion the conversion's own bracket math happens to count.
 
 ### 30.2 How each income source affects bracket capacity — CORRECTED
 
@@ -2915,3 +2946,86 @@ test), build succeeds, sensitive-data check passed.
 
 Branch: `codex/two-age-roth-conversion`, pushed, **still not merged** —
 second review round, awaiting approval before Milestone 3 begins.
+
+## 33. Two-age Roth Conversion — second independent review round (2026-09-08, on `codex/two-age-roth-conversion`)
+
+Second review confirmed the salary and flat-rate-tax reproductions
+fixed, and found three further inconsistencies in the same tax
+treatment, all now fixed.
+
+**P1 — the affordability cap dropped unused deduction room.**
+`_max_conversion_for_tax_budget` floored `pre_conversion_taxable` at 0
+before walking the bracket table, silently discarding the SAME
+unused-standard-deduction free zone `_incremental_conversion_tax`'s
+own formula already accounts for (both sides of its subtraction
+floored at 0, so a conversion "fills" leftover deduction room
+tax-free first). This understated what a low-taxable-income household
+could actually afford, inconsistent with the very tax formula the cap
+is supposed to match — a household with $0 other income, $1,000,000
+pretax, and only $40,000 taxable cash had its affordable conversion
+capped at $228,350 (the bracket-walk alone), when the true figure
+(bracket-walk plus the $32,200 free zone) is $260,550 — which exceeds
+`room_in_22` ($243,600), so `room_in_22` should have been the binding
+constraint all along, not the artificially-low affordability cap.
+Fixed: `free_room = max(0, -pre_conversion_taxable)` is added
+unconditionally (it costs nothing, so even a $0 budget can still
+afford it) before the budget-constrained bracket walk begins.
+
+**P1 — bonus/RSU compensation was still absent from the gross-income
+figure.** The first fix derived the gross-wage figure by dividing the
+net spending-offset figure back out by the 65% factor — exact for
+salary, but structurally incapable of recovering bonus/RSU, since the
+net figure's own source (`two_age_still_working_income_inputs`) never
+reads `annual_bonus_pct`/`annual_rsu_value` (or the `justin_` versions)
+at all. Fixed by computing the gross figure directly from
+salary+bonus+RSU (the same fields `run_two_dimensional_retirement_
+projection`'s own accumulation-phase math already reads for this
+spouse), run through the same `justin_gap_income_for_year` per-year
+lookup every other two-age gap-income figure uses, just with a
+different "at_start" base. Verified: $100,000 RSU alone (no salary)
+now reduces room by exactly the same amount a $100,000 salary alone
+would; a $100,000 salary + 20% bonus + $30,000 RSU ($150,000 gross)
+shows real, additional room reduction beyond the salary-only figure.
+
+**P2 — spending withdrawals still used a tax rate that ignored the
+working salary.** `_pretax_marginal_tax_rate` (which prices the year's
+own ordinary pretax SPENDING draw, not the conversion) never included
+gross wages, even after the first fix added them to `base_taxable` for
+conversion-bracket-capacity purposes — the same household's same tax
+year would show an elevated bracket for its conversion decision but an
+artificially low rate for its own spending withdrawal, an internally
+inconsistent picture. Fixed by adding an optional `gross_income`
+parameter (default 0, so every other existing call site — single-axis
+and every other two-age consumer — is completely unaffected) and
+passing the same gross-wage figure computed above at both call sites
+in the two-age Roth Conversion function (the with-conversions loop and
+the no-conversion baseline, keeping their own spending-draw taxation
+apples-to-apples). Verified directly against the function itself: $0
+gross income prices at the bottom bracket (10%); $500,000 gross income
+(after the standard deduction, landing in the 32% bracket) prices at
+32% — isolated from the full per-year loop's own cash-flow effects,
+which would otherwise confound a same-scenario comparison (gross wages
+affect both the tax rate AND the cash available to spend
+simultaneously, by design).
+
+CALCULATION_CONTRACT.md section 30 corrected again in place (marked
+"CORRECTED AGAIN," not silently rewritten) — the first correction's
+own description of the gross-income derivation is now itself
+corrected to describe the direct salary+bonus+RSU computation, and
+30.2's table/30.1's text now also cover the spending-withdrawal-rate
+consistency fix.
+
+4 new tests (RSU-alone parity with salary, bonus+RSU stacking, a
+direct unit-level rate comparison for the withdrawal-tax fix, and the
+affordability-cap fix reaching the full bracket room instead of an
+artificially low cap) — all passed on first attempt, no adjustment to
+any hand-computed number. The 16 existing tests were unaffected (none
+of them exercised the affordability cap as the binding constraint, so
+that fix changes no prior test's outcome).
+
+**Verified:** full backend suite 1227 passed (1223 + 4 new), 97.62%
+coverage. Sensitive-data check passed. Frontend unaffected (no
+frontend change this round).
+
+Branch: `codex/two-age-roth-conversion`, pushed, **still not merged** —
+third review round, awaiting approval before Milestone 3 begins.

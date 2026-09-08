@@ -22,7 +22,7 @@ currently 65-73 (born 1953-1961) = 73 in this environment's current date.
 
 import pytest
 
-from simulation_engine import run_roth_conversion_analysis
+from simulation_engine import run_roth_conversion_analysis, _pretax_marginal_tax_rate
 
 TAXABLE = lambda balance: [{"name": "Brokerage", "account_type": "taxable", "owner": "joint", "balance": balance}]
 PRETAX = lambda balance: [{"name": "IRA", "account_type": "ira", "owner": "joint", "balance": balance}]
@@ -310,6 +310,103 @@ class TestShortfallReportsUnmetNeed:
         assert r["any_unmet_need"] is True
         assert r["total_unmet_need"] == 100000  # 2 years x 50000
         assert r["total_conversions"] == 0
+
+
+class TestGrossIncomeIncludesBonusAndRsu:
+    """Independent review, 2026-09-08, Roth Conversion follow-up, second
+    pass, P1: the first fix derived the gross-wage figure by dividing
+    the net spending-offset figure back out, which only ever recovered
+    the SALARY component (two_age_still_working_income_inputs itself
+    only reads w2_salary/justin_w2_salary) -- bonus and RSU
+    compensation never entered base_taxable at all. Fixed by computing
+    the gross figure directly from salary+bonus+RSU (the same input
+    fields run_two_dimensional_retirement_projection's own
+    accumulation-phase math already reads for this spouse)."""
+
+    def test_rsu_alone_reduces_room_the_same_way_salary_does(self):
+        """No base salary at all -- $100,000 RSU value only. Gross
+        income = 0+0+100000 = 100000 -> base_taxable=100000-32200=67800
+        -> room=211400-67800=143600, the exact same figure a $100,000
+        W2 salary alone would produce (this file's own
+        TestEitherRetirementOrderIsSymmetric case) -- proving RSU counts
+        identically to salary, not zero."""
+        inputs = base_inputs(retirement_income_today_dollars=50000,
+                              justin_w2_salary=0, justin_annual_rsu_value=100000)
+        r = run_roth_conversion_analysis(inputs, PRETAX(300000) + TAXABLE(500000),
+                                          jason_ret_age=71, justin_ret_age=73)
+        assert r["schedule"][0]["base_taxable_income"] == 67800
+        assert r["schedule"][0]["room_in_22_bracket"] == 143600
+
+    def test_bonus_and_rsu_both_add_to_a_base_salary(self):
+        """$100,000 salary + 20% bonus ($20,000) + $30,000 RSU = 150000
+        gross -> base_taxable=150000-32200=117800 ->
+        room=211400-117800=93600 -- different from (less than) the
+        salary-only $100,000 case's own 143600 room, proving bonus/RSU
+        each add real, additional taxable income on top of salary."""
+        inputs = base_inputs(retirement_income_today_dollars=50000,
+                              justin_w2_salary=100000, justin_annual_bonus_pct=0.20,
+                              justin_annual_rsu_value=30000)
+        r = run_roth_conversion_analysis(inputs, PRETAX(300000) + TAXABLE(500000),
+                                          jason_ret_age=71, justin_ret_age=73)
+        assert r["schedule"][0]["base_taxable_income"] == 117800
+        assert r["schedule"][0]["room_in_22_bracket"] == 93600
+
+
+class TestSpendingWithdrawalRateReflectsWorkingIncome:
+    """Independent review, 2026-09-08, Roth Conversion follow-up, second
+    pass, P2: _pretax_marginal_tax_rate's estimate (used to gross up the
+    year's own pretax SPENDING draw, not the conversion) never included
+    gross wages -- a household with substantial working income priced
+    its own withdrawal at an artificially low rate the same year its
+    conversion bracket-capacity math already correctly counted that
+    income. Direct unit-level verification of the fixed function itself
+    (the cleanest way to isolate this specific change: gross wages
+    affect BOTH the year's real cash flow AND its tax rate
+    simultaneously in the full per-year loop, by design, so comparing
+    two full schedules can't isolate the rate effect alone without also
+    changing the cash flow being taxed)."""
+
+    def test_gross_income_raises_the_marginal_rate(self):
+        # No other income: taxable_income_est=max(0,0-32200)=0 ->
+        # bottom bracket, 10%.
+        rate_without = _pretax_marginal_tax_rate(0, 0, 0, 0.0, 0)
+        assert rate_without == pytest.approx(0.10)
+        # gross_income=500000 -> taxable_income_est=500000-32200=467800,
+        # which falls in the 24%-403550..32%-512450 bracket -> 32%.
+        rate_with = _pretax_marginal_tax_rate(0, 0, 0, 0.0, 0, gross_income=500000)
+        assert rate_with == pytest.approx(0.32)
+
+
+class TestAffordabilityCapIncludesUnusedDeductionRoom:
+    """Independent review, 2026-09-08, Roth Conversion follow-up, second
+    pass, P1: _max_conversion_for_tax_budget floored pre_conversion_
+    taxable at 0 before walking the bracket table, silently dropping
+    the SAME unused-standard-deduction free zone
+    _incremental_conversion_tax's own formula already accounts for
+    (both sides of its subtraction floored at 0, so a conversion
+    "fills" leftover deduction room tax-free first) -- understating how
+    much a low-taxable-income household could actually afford,
+    inconsistent with the very tax formula the cap is supposed to
+    match. $40,000 taxable (a budget deliberately small enough that
+    affordability, not room_in_22, used to bind), $1,000,000 pretax, no
+    income at all (base_taxable=-32200, room_in_22=243600). The old
+    formula (ignoring the $32,200 free zone) capped the affordable
+    conversion at $228,350 -- LESS than the true $243,600 room, so
+    affordability was the (wrongly) binding constraint. The fixed
+    formula affords $260,550 (the same $228,350 bracket-walk PLUS the
+    $32,200 free zone), which now exceeds room_in_22 -- so room_in_22
+    (243600) becomes the correctly-binding constraint again, matching
+    every other zero-income test case in this file."""
+
+    def test_free_deduction_room_lets_the_search_reach_the_full_bracket_room(self):
+        inputs = base_inputs(retirement_income_today_dollars=0)
+        r = run_roth_conversion_analysis(inputs, PRETAX(1000000) + TAXABLE(40000),
+                                          jason_ret_age=71, justin_ret_age=71)
+        y0 = r["schedule"][0]
+        assert y0["base_taxable_income"] == -32200
+        assert y0["room_in_22_bracket"] == 243600
+        assert y0["optimal_conversion"] == 243600
+        assert y0["tax_cost"] == 35932
 
 
 class TestTwoAgeRothConversionModeRequiresBothAges:
