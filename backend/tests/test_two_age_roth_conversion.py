@@ -25,7 +25,7 @@ import pytest
 from simulation_engine import run_roth_conversion_analysis
 
 TAXABLE = lambda balance: [{"name": "Brokerage", "account_type": "taxable", "owner": "joint", "balance": balance}]
-PRETAX = lambda balance: [{"name": "IRA", "account_type": "pretax", "owner": "joint", "balance": balance}]
+PRETAX = lambda balance: [{"name": "IRA", "account_type": "ira", "owner": "joint", "balance": balance}]
 
 
 def base_inputs(**overrides):
@@ -188,15 +188,22 @@ class TestWorkingIncomeNeverAffectsBracketCapacity:
     working income at all."""
 
     def test_identical_bracket_math_with_and_without_a_working_spouse(self):
+        # jason_ret_age=71 (immediate) is held IDENTICAL in both cases --
+        # pension gates to Jason's own actual retirement
+        # (two_age_pension_for_year), so varying HIS ret_age would also
+        # change year0's pension timing, confounding the comparison.
+        # Only Justin's retirement age/salary differ between the two
+        # scenarios, isolating "does a working spouse's salary affect
+        # bracket capacity" from "does pension timing."
         no_wages = base_inputs(retirement_income_today_dollars=50000,
                                 pension_55=150000, pension_60=150000, pension_65=150000)
         with_wages = base_inputs(retirement_income_today_dollars=50000,
                                   pension_55=150000, pension_60=150000, pension_65=150000,
-                                  w2_salary=800000)
+                                  justin_w2_salary=800000)
         r_no = run_roth_conversion_analysis(no_wages, PRETAX(300000) + TAXABLE(500000),
                                              jason_ret_age=71, justin_ret_age=71)
         r_with = run_roth_conversion_analysis(with_wages, PRETAX(300000) + TAXABLE(500000),
-                                               jason_ret_age=73, justin_ret_age=71)
+                                               jason_ret_age=71, justin_ret_age=73)
         assert r_no["schedule"][0]["base_taxable_income"] == r_with["schedule"][0]["base_taxable_income"]
         assert r_no["schedule"][0]["room_in_22_bracket"] == r_with["schedule"][0]["room_in_22_bracket"]
         assert r_no["schedule"][0]["optimal_conversion"] == r_with["schedule"][0]["optimal_conversion"]
@@ -204,15 +211,21 @@ class TestWorkingIncomeNeverAffectsBracketCapacity:
         # nonzero room (211400-117800=93600) -- a meaningful comparison,
         # not a trivially-zero one.
         assert r_no["schedule"][0]["room_in_22_bracket"] == 93600
+        # And a real, substantial gap income actually is present in the
+        # with_wages case (proving the comparison isn't accidentally
+        # comparing two scenarios with zero gap income either) --
+        # 800000*0.65 = 520000.
+        assert r_with["still_working_spouse_income_first_year"] == 520000
 
     def test_pension_alone_can_exhaust_the_bracket_regardless_of_wages(self):
         """A large enough pension leaves ZERO room -- and a huge working
-        salary alongside it doesn't create any either."""
+        salary alongside it doesn't create any either. jason_ret_age=71
+        (immediate) again, so pension is active in year0."""
         inputs = base_inputs(retirement_income_today_dollars=50000,
                               pension_55=300000, pension_60=300000, pension_65=300000,
-                              w2_salary=900000)
+                              justin_w2_salary=900000)
         r = run_roth_conversion_analysis(inputs, PRETAX(300000) + TAXABLE(500000),
-                                          jason_ret_age=73, justin_ret_age=71)
+                                          jason_ret_age=71, justin_ret_age=73)
         assert r["schedule"][0]["room_in_22_bracket"] == 0
         assert r["schedule"][0]["optimal_conversion"] == 0
         assert r["total_conversions"] == 0

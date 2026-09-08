@@ -2074,16 +2074,264 @@ def run_stress_tests(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_t
         "second_earner_net_of_tax_factor": SECOND_EARNER_NET_OF_TAX_FACTOR,
     }
 
+
+def _run_roth_conversion_analysis_two_age(inputs: Dict, accounts: List[Dict], jason_ret_age: int, justin_ret_age: int,
+                                           ss_timing: str, life_events: List[Dict],
+                                           surplus_allocations: List[Dict]) -> Dict:
+    """Two-age Roth Conversion -- explicit, independent retirement ages
+    for both spouses instead of run_roth_conversion_analysis's single
+    ret_age (CALCULATION_CONTRACT.md section 30, written and committed
+    before any of this existed). Reuses the exact shared timeline/
+    income/spending/withdrawal helpers section 25-29's SWR work already
+    established -- two_age_pension_for_year, two_age_spending_need_fn,
+    two_age_still_working_income_inputs, justin_gap_income_for_year,
+    build_two_person_timeline, run_two_dimensional_retirement_projection
+    for starting balances -- no second, independent set of formulas.
+
+    Per section 30's contract: gross wages/bonus/RSU income (either
+    spouse) is folded ONLY into the spending-need offset
+    (still_working_income_this_year), never into base_taxable/
+    room_in_22, in either direction -- exactly the existing single-axis
+    behavior. The conversion window runs from phase2_start_age (the
+    earlier retiree's own retirement, same anchor every other two-age
+    withdrawal-phase consumer uses) through RMD_START_AGE (still
+    Jason-anchored -- RMDs and the pretax account being converted are
+    Jason-anchored throughout this entire app, unchanged). Per-year
+    order (income offsets need, simulate_withdrawal_year runs the
+    waterfall with growth applied last, simulate_conversion layers on
+    the already-grown closing state) is identical to single-axis,
+    unmodified."""
+    inflation    = inputs["inflation_rate"]
+    post_ret     = inputs["expected_return_post_retirement"]
+    income_today = inputs["retirement_income_today_dollars"]
+    jason_age    = inputs["jason_age"]
+    justin_age   = inputs["justin_age"]
+    _salary_growth_pct = inputs.get("_salary_growth_pct", 0.0)
+    state_tax_rate = inputs.get("state_income_tax_rate", 0) or 0
+
+    pension_annual = pension_for_age(inputs, jason_ret_age)
+    jason_ss_early   = inputs.get("jason_social_security", JASON_SS_EARLY)
+    jason_ss_delayed = inputs.get("jason_ss_delayed", JASON_SS_DELAYED)
+    jason_ss_annual  = jason_ss_early if ss_timing == "early" else jason_ss_delayed
+    jason_ss_age     = 62 if ss_timing == "early" else 67
+    justin_ss_annual = inputs.get("justin_social_security", JUSTIN_SPOUSAL_ANNUAL)
+    justin_ss_age    = inputs.get("justin_ss_age", JUSTIN_SPOUSAL_AGE)
+
+    from retirement_tools_engine import ORDINARY_BRACKETS_MFJ_2026, STD_DEDUCTION_MFJ_2026
+    BRACKET_TOP_22  = next(cap for rate, cap in ORDINARY_BRACKETS_MFJ_2026 if rate == 0.22)
+    STD_DEDUCTION   = STD_DEDUCTION_MFJ_2026
+    TAX_BRACKET_22  = 0.22
+    TAX_BRACKET_24  = 0.24
+    RMD_START_AGE   = rmd_start_age(jason_age)
+
+    from projection_engine import run_two_dimensional_retirement_projection
+    _proj = run_two_dimensional_retirement_projection(inputs, accounts, jason_ret_age=jason_ret_age,
+                                                        justin_ret_age=justin_ret_age, ss_timing=ss_timing,
+                                                        life_events=life_events,
+                                                        surplus_allocations=surplus_allocations)
+    pretax_at_start  = _proj["pretax_at_phase2_start"]
+    roth_at_start    = _proj["roth_at_phase2_start"]
+    taxable_at_start = _proj["taxable_at_phase2_start"]
+
+    # No retirement_end_age passed here -- build_two_person_timeline's
+    # own end_age is floored at `phase2_start_age + 1` (every OTHER
+    # two-age consumer needs at least one withdrawal-loop year, since
+    # "already retired" never means "zero years of retirement"), which
+    # would silently force this window to at least 1 year even for a
+    # household already AT or PAST RMD age, where zero is the correct
+    # answer. conversion_years is computed directly instead, using only
+    # phase2_start_years (unaffected by end_age/retire_yrs) -- the same
+    # `age()`/`justin_age_at()`/`jason_effective_start_age` helpers below
+    # don't depend on end_age either, so this is still the one shared
+    # timeline object, just not relying on its retire_yrs field for a
+    # horizon it was never designed to express.
+    timeline = build_two_person_timeline(jason_age, justin_age, jason_ret_age, justin_ret_age)
+    phase2_start_age = jason_age + timeline.phase2_start_years
+    phase3_start_age = jason_age + timeline.phase3_start_years
+    jason_effective_start_age = timeline.jason_effective_start_age
+    conversion_years = max(0, RMD_START_AGE - phase2_start_age)
+
+    retirement_year_for_events = timeline.retirement_year
+    _, post_events = _split_life_events(life_events, retirement_year_for_events)
+    post_events = post_events + _post_retirement_asset_sale_events(inputs, jason_age, phase2_start_age)
+
+    need_for_year = two_age_spending_need_fn(inputs, income_today, inflation, timeline)
+    phase2_duration_years, still_working_income_at_start = two_age_still_working_income_inputs(
+        inputs, timeline, _salary_growth_pct)
+
+    schedule = []
+    pretax, roth, taxable = pretax_at_start, roth_at_start, taxable_at_start
+    for yr in range(conversion_years):
+        age = timeline.age(yr)
+        justin_age_this_year = timeline.justin_age_at(age)
+
+        year_need, _healthcare_inflated, _bridge_income = need_for_year(age, yr)
+        year_pen = two_age_pension_for_year(pension_annual, age, jason_effective_start_age)
+        year_jss = jason_ss_annual * ((1 + inflation) ** max(0, age - jason_ss_age)) if age >= jason_ss_age else 0.0
+        year_uss = (justin_ss_annual * ((1 + inflation) ** max(0, justin_age_this_year - justin_ss_age))
+                    if justin_age_this_year >= justin_ss_age else 0.0)
+        guaranteed = year_pen + year_jss + year_uss
+
+        life_event_cash, life_event_monthly = _post_retirement_year_effects(post_events, retirement_year_for_events + yr)
+        still_working_income_this_year = justin_gap_income_for_year(
+            yr, phase2_duration_years, still_working_income_at_start, _salary_growth_pct)
+
+        pretax_tax_rate = _pretax_marginal_tax_rate(year_pen, year_jss, year_uss, 0.0, state_tax_rate)
+        base_result = simulate_withdrawal_year(
+            opening=AccountState(pretax=pretax, roth=roth, taxable=taxable, hsa=0.0),
+            spending_need=year_need - life_event_monthly - still_working_income_this_year,
+            guaranteed_income=guaranteed,
+            life_event_cash=life_event_cash,
+            rmd_amount=0.0,
+            tax_model=marginal_bracket_tax_model(pretax_rate=pretax_tax_rate, taxable_rate=0.0),
+            growth_rate=post_ret,
+            order=("taxable", "pretax", "roth"),
+        )
+        pretax_draw = base_result.draws.get("pretax", 0.0)
+
+        # base_taxable/room_in_22: section 30.1/30.2's contract --
+        # working income never appears here, in either direction.
+        ss_taxable   = (year_jss + year_uss) * 0.85
+        base_taxable = year_pen + ss_taxable + pretax_draw - STD_DEDUCTION
+        room_in_22   = max(0, BRACKET_TOP_22 - base_taxable)
+
+        max_conversion_affordable = (base_result.closing.taxable / TAX_BRACKET_22) if TAX_BRACKET_22 > 0 else float("inf")
+        optimal_conversion = min(room_in_22, base_result.closing.pretax, max_conversion_affordable)
+
+        conv_result = simulate_conversion(
+            base_result, optimal_conversion,
+            tax_model=marginal_bracket_tax_model(pretax_rate=TAX_BRACKET_22, taxable_rate=0.0),
+            tax_funding_order=("taxable",),
+        )
+        tax_cost = conv_result.taxes_paid.get("conversion", 0.0) + conv_result.taxes_paid.get("conversion_shortfall", 0.0)
+
+        pretax_after  = conv_result.closing.pretax
+        roth_after    = conv_result.closing.roth
+        taxable_after = conv_result.closing.taxable
+
+        # simulate_conversion is layered on the already-grown closing
+        # state (section 30.4) -- one fewer year of compounding than the
+        # naive age difference, same as single-axis.
+        yrs_to_rmd  = max(0, RMD_START_AGE - age - 1)
+        roth_fv_73  = optimal_conversion * ((1 + post_ret) ** yrs_to_rmd)
+        tax_avoided = roth_fv_73 * TAX_BRACKET_24
+        net_benefit = tax_avoided - tax_cost
+
+        schedule.append({
+            "age":                 age,
+            "justin_age":          justin_age_this_year,
+            "year":                retirement_year_for_events + yr,
+            "pretax_balance":      round(pretax),
+            "roth_balance":        round(roth),
+            "taxable_balance":     round(taxable),
+            "base_taxable_income": round(base_taxable),
+            "room_in_22_bracket":  round(room_in_22),
+            "optimal_conversion":  round(optimal_conversion),
+            "tax_cost":            round(tax_cost),
+            "roth_fv_at_73":       round(roth_fv_73),
+            "tax_avoided_at_73":   round(tax_avoided),
+            "net_benefit":         round(net_benefit),
+            "pretax_after":        round(pretax_after),
+            "roth_after":          round(roth_after),
+            "taxable_after":       round(taxable_after),
+            "unmet_need":          round(base_result.unmet_need),
+            "still_working_spouse_income": round(still_working_income_this_year),
+        })
+
+        pretax, roth, taxable = pretax_after, roth_after, taxable_after
+
+    total_conversions = sum(s["optimal_conversion"] for s in schedule)
+    total_tax_cost    = sum(s["tax_cost"] for s in schedule)
+
+    # "Without conversions" baseline -- re-runs the IDENTICAL spending
+    # pattern (same income/guaranteed income/gap income/life events),
+    # conversions forced to zero, so only the conversion policy differs
+    # between the two paths (same methodology as single-axis).
+    no_conv_pretax  = pretax_at_start
+    no_conv_taxable = taxable_at_start
+    no_conv_roth    = roth_at_start
+    for yr in range(conversion_years):
+        age = timeline.age(yr)
+        justin_age_this_year = timeline.justin_age_at(age)
+        year_need, _hc, _bridge = need_for_year(age, yr)
+        year_pen = two_age_pension_for_year(pension_annual, age, jason_effective_start_age)
+        year_jss = jason_ss_annual * ((1 + inflation) ** max(0, age - jason_ss_age)) if age >= jason_ss_age else 0.0
+        year_uss = (justin_ss_annual * ((1 + inflation) ** max(0, justin_age_this_year - justin_ss_age))
+                    if justin_age_this_year >= justin_ss_age else 0.0)
+        guaranteed = year_pen + year_jss + year_uss
+        life_event_cash, life_event_monthly = _post_retirement_year_effects(post_events, retirement_year_for_events + yr)
+        still_working_income_this_year = justin_gap_income_for_year(
+            yr, phase2_duration_years, still_working_income_at_start, _salary_growth_pct)
+        no_conv_pretax_rate = _pretax_marginal_tax_rate(year_pen, year_jss, year_uss, 0.0, state_tax_rate)
+        no_conv_result = simulate_withdrawal_year(
+            opening=AccountState(pretax=no_conv_pretax, roth=no_conv_roth, taxable=no_conv_taxable, hsa=0.0),
+            spending_need=year_need - life_event_monthly - still_working_income_this_year,
+            guaranteed_income=guaranteed,
+            life_event_cash=life_event_cash,
+            rmd_amount=0.0,
+            tax_model=marginal_bracket_tax_model(pretax_rate=no_conv_pretax_rate, taxable_rate=0.0),
+            growth_rate=post_ret,
+            order=("taxable", "pretax", "roth"),
+        )
+        no_conv_pretax  = no_conv_result.closing.pretax
+        no_conv_taxable = no_conv_result.closing.taxable
+        no_conv_roth    = no_conv_result.closing.roth
+    estimated_rmd_base = _rmd(no_conv_pretax, RMD_START_AGE, RMD_START_AGE)
+
+    total_tax_avoided    = sum(s["tax_avoided_at_73"] for s in schedule)
+    net_lifetime_benefit = total_tax_avoided - total_tax_cost
+
+    return {
+        "schedule":               schedule,
+        "total_conversions":      round(total_conversions),
+        "total_tax_cost":         round(total_tax_cost),
+        "total_tax_avoided":      round(total_tax_avoided),
+        "net_lifetime_benefit":   round(net_lifetime_benefit),
+        "estimated_rmd_without_conversions": round(estimated_rmd_base),
+        "estimated_rmd_with_conversions":    round(_rmd(pretax, RMD_START_AGE, RMD_START_AGE)),
+        "pretax_at_rmd_age_no_conversion":   round(no_conv_pretax),
+        "pretax_at_rmd_age_with_conversion": round(pretax),
+        "roth_at_rmd_age_with_conversion":   round(roth),
+        "conversion_years":       conversion_years,
+        "rmd_start_age":          RMD_START_AGE,
+        "total_unmet_need":       round(sum(s["unmet_need"] for s in schedule)),
+        "any_unmet_need":         any(s["unmet_need"] > 0 for s in schedule),
+        "second_earner_net_of_tax_factor": SECOND_EARNER_NET_OF_TAX_FACTOR,
+        "mode": "two_age",
+        "jason_ret_age": jason_ret_age,
+        "justin_ret_age": justin_ret_age,
+        "phase2_start_age": phase2_start_age,
+        "phase3_start_age": phase3_start_age,
+        "later_retiree": timeline.later_retiree,
+        "ss_timing": ss_timing,
+        "still_working_spouse_income_first_year": round(still_working_income_at_start),
+        "account_ownership_limitation": _proj["account_ownership_limitation"],
+    }
+
+
 def run_roth_conversion_analysis(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_timing: str = "early",
                                   life_events: List[Dict] = None,
-                                  surplus_allocations: List[Dict] = None) -> Dict:
+                                  surplus_allocations: List[Dict] = None,
+                                  jason_ret_age: int = None, justin_ret_age: int = None) -> Dict:
     """
     Find optimal annual Roth conversion amount between retirement and RMD age.
     Goal: fill the 22% bracket each year to minimize lifetime taxes.
 
     life_events/surplus_allocations: threaded through to
     run_retirement_projection below for the starting pretax/roth balances
-    only; both default to None/no-op."""
+    only; both default to None/no-op.
+
+    jason_ret_age/justin_ret_age (2026-09-08, CALCULATION_CONTRACT.md
+    section 30, Milestone 2 of 4): explicit, independent retirement ages
+    for both spouses instead of the single ret_age above -- BOTH
+    required together (a ValueError if only one is given), delegating
+    entirely to _run_roth_conversion_analysis_two_age. ret_age/ss_timing's
+    own single-axis behavior below is completely unaffected when these
+    are left at their None default."""
+    if _require_both_two_age_or_neither(jason_ret_age, justin_ret_age):
+        return _run_roth_conversion_analysis_two_age(inputs, accounts, jason_ret_age, justin_ret_age, ss_timing,
+                                                       life_events, surplus_allocations)
+
     inflation    = inputs["inflation_rate"]
     post_ret     = inputs["expected_return_post_retirement"]
     income_today = inputs["retirement_income_today_dollars"]
