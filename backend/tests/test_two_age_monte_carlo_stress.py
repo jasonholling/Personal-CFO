@@ -134,7 +134,7 @@ class TestDeterministicMonteCarloParity:
     def test_bridge_and_kids_phase(self, monkeypatch):
         inputs = base_inputs(jason_age=55, justin_age=55, retirement_end_age=61,
                               bridge_income_55=30000, bridge_years_55=5)
-        proj, mc = assert_deterministic_mc_matches_projection(monkeypatch, inputs, TAXABLE(500000), 55, 55)
+        proj, mc = assert_deterministic_mc_matches_projection(monkeypatch, inputs, TAXABLE(200000), 55, 55)
         assert proj["yearly_detail"][0]["portfolio_balance"] == 150000
 
     def test_income_surplus(self, monkeypatch):
@@ -176,8 +176,8 @@ class TestDeterministicStressTestsParity:
     def test_bridge_and_kids_phase(self):
         inputs = base_inputs(jason_age=55, justin_age=55, retirement_end_age=61,
                               bridge_income_55=30000, bridge_years_55=5)
-        proj = run_two_dimensional_retirement_projection(inputs, TAXABLE(500000), jason_ret_age=55, justin_ret_age=55)
-        st = run_stress_tests(inputs, TAXABLE(500000), jason_ret_age=55, justin_ret_age=55)
+        proj = run_two_dimensional_retirement_projection(inputs, TAXABLE(200000), jason_ret_age=55, justin_ret_age=55)
+        st = run_stress_tests(inputs, TAXABLE(200000), jason_ret_age=55, justin_ret_age=55)
         assert st["scenarios"]["base"]["chart"][0]["balance"] == proj["yearly_detail"][0]["portfolio_balance"] == 150000
 
     def test_depletion_and_unmet_need(self):
@@ -223,7 +223,7 @@ class TestAdverseReturnsMiddlePhaseAndBoundary:
         from timeline_engine import build_two_person_timeline
         timeline = build_two_person_timeline(60, 60, 61, 64, 65)
         survived, balances, *_ = _run_single_two_age(
-            10000, 0, 0, 0, timeline, inputs,
+            0, 0, 10000, 0, timeline, inputs,
             pension_annual=0, jason_ss_annual=0, jason_ss_age=62,
             income_today=50000, inflation=0.0, post_ret=0.0,
             annual_returns=[-0.30, 0.0, 0.0, 0.0],
@@ -255,7 +255,7 @@ class TestAdverseReturnsMiddlePhaseAndBoundary:
         from timeline_engine import build_two_person_timeline
         timeline = build_two_person_timeline(60, 60, 63, 61, 64)
         survived, balances, *_ = _run_single_two_age(
-            200000, 0, 0, 0, timeline, inputs,
+            0, 0, 200000, 0, timeline, inputs,
             pension_annual=30000, jason_ss_annual=0, jason_ss_age=62,
             income_today=80000, inflation=0.0, post_ret=0.0,
             annual_returns=[0.0, 0.0, -0.80],
@@ -277,11 +277,17 @@ class TestSuccessRateCountsAnyUnfundedYearAsFailure:
         0), yr2's $500,000 pension swamps the $80,000 need and sweeps a
         $420,000 surplus. Every trial is identical under the zero-
         variance monkeypatch, so success_rate must be exactly 0%, not
-        some nonzero rate driven by the positive ending balance."""
+        some nonzero rate driven by the positive ending balance.
+
+        Jason must be the LATER retiree here (justin_ret_age=61,
+        jason_ret_age=63) so his own pension stays gated off during
+        phase2 (it starts only at HIS OWN retirement, section 20) --
+        his own salary (not Justin's) funds the insufficient phase2 gap
+        income."""
         monkeypatch.setattr(random_module, "gauss", lambda mu, sigma: 0.0)
-        inputs = base_inputs(retirement_end_age=64, justin_w2_salary=50000,
+        inputs = base_inputs(retirement_end_age=64, w2_salary=50000,
                               pension_55=500000, pension_60=500000, pension_65=500000)
-        mc = run_monte_carlo(inputs, TAXABLE(0), jason_ret_age=61, justin_ret_age=63)
+        mc = run_monte_carlo(inputs, TAXABLE(0), jason_ret_age=63, justin_ret_age=61)
         assert mc["median_final_balance"] == 420000
         assert mc["success_rate"] == 0.0
 
@@ -289,9 +295,9 @@ class TestSuccessRateCountsAnyUnfundedYearAsFailure:
         """Same construction, checked via Stress Tests' 'base' scenario
         (fully deterministic already, no monkeypatch needed) -- survived
         must be False even though final_balance is positive."""
-        inputs = base_inputs(retirement_end_age=64, justin_w2_salary=50000,
+        inputs = base_inputs(retirement_end_age=64, w2_salary=50000,
                               pension_55=500000, pension_60=500000, pension_65=500000)
-        st = run_stress_tests(inputs, TAXABLE(0), jason_ret_age=61, justin_ret_age=63)
+        st = run_stress_tests(inputs, TAXABLE(0), jason_ret_age=63, justin_ret_age=61)
         assert st["scenarios"]["base"]["final_balance"] == 420000
         assert st["scenarios"]["base"]["survived"] is False
 

@@ -15,10 +15,11 @@ from projection_engine import (
     _split_life_events, _post_retirement_year_effects, _post_retirement_asset_sale_events,
     justin_years_to_retire_for, justin_gap_income_inputs, justin_gap_income_for_year,
     SECOND_EARNER_NET_OF_TAX_FACTOR,
+    two_age_spending_need_fn, two_age_pension_for_year, two_age_still_working_income_inputs,
 )
 from annual_engine import (AccountState, DEFAULT_ORDER, ROTH_FIRST_ORDER, marginal_bracket_tax_model, no_tax_model,
                            simulate_conversion, simulate_withdrawal_year)
-from timeline_engine import build_cumulative_inflation, build_timeline, healthcare_for_age
+from timeline_engine import build_cumulative_inflation, build_timeline, build_two_person_timeline, healthcare_for_age
 from annual_inputs import build_annual_income_inputs
 # Module-level, not lazy/per-call — _pretax_marginal_tax_rate below is
 # called once per simulated year per trial (up to ~40 years x 1000 trials
@@ -424,6 +425,121 @@ def _run_single(
     return survived, balances, pretax_bals, roth_bals, taxable_bals
 
 
+def _run_single_two_age(
+    pretax_start, roth_start, taxable_start, hsa_start,
+    timeline, inputs,
+    pension_annual, jason_ss_annual, jason_ss_age,
+    income_today, inflation, post_ret,
+    annual_returns: List[float],
+    post_life_events: List[Dict] = None,
+    justin_ss_annual: float = JUSTIN_SPOUSAL_ANNUAL,
+    justin_ss_age: float = JUSTIN_SPOUSAL_AGE,
+    state_tax_rate: float = 0.0,
+    salary_growth_pct: float = 0.0,
+) -> Tuple[bool, List[float], List[float], List[float], List[float]]:
+    """Two-age analog of _run_single -- one simulated trial (Monte
+    Carlo) or one deterministic scenario (Stress Tests) across a
+    TwoPersonTimeline's phase2 (one retired, one still working)/phase3
+    (both retired) span, instead of _run_single's single-phase
+    withdrawal_start_age loop.
+
+    Explicit instruction (CALCULATION_CONTRACT.md section 22): reuse
+    shared calculation helpers, avoid copying another independent set
+    of income/pension/bridge/contribution formulas. This function calls
+    the SAME three module-level helpers
+    run_two_dimensional_retirement_projection itself uses --
+    two_age_spending_need_fn (income/healthcare/bridge/kids),
+    two_age_pension_for_year, two_age_still_working_income_inputs (with
+    justin_gap_income_for_year for the per-year lookup) -- rather than
+    re-deriving any of that math here. Contribution/RSU/asset-sale/
+    life-event/surplus-allocation accumulation-phase formulas aren't
+    reused OR duplicated at all: the caller (run_monte_carlo/
+    run_stress_tests) gets the starting bucket balances by calling
+    run_two_dimensional_retirement_projection once and reading its
+    pretax_at_phase2_start/roth_at_phase2_start/etc. fields, the exact
+    same pattern the existing single-axis _run_single's own callers
+    already use against run_retirement_projection.
+
+    `timeline` is built ONCE by the caller (build_two_person_timeline)
+    and passed in, rather than rebuilt inside this function on every
+    one of N=1000 trials -- _run_single's own single-axis Timeline IS
+    rebuilt on every call; passing a pre-built TwoPersonTimeline here
+    instead is a deliberate efficiency improvement, not required for
+    correctness.
+
+    Deliberately does NOT support inflation_mults (per-year varying
+    inflation, e.g. the stagflation_1970s stress scenario) -- v1 scope
+    matches run_two_dimensional_retirement_projection's own single-rate
+    inflation assumption exactly, so the shared spending-need helper's
+    formulas stay identical between the deterministic reference and
+    this trial loop with no risk of silent divergence. annual_returns
+    (varying RETURNS, the actual point of Monte Carlo/Stress) IS fully
+    supported, including adverse sequences during phase2 or spanning
+    the phase2->phase3 boundary."""
+    retire_yrs = timeline.retire_yrs
+    jason_effective_start_age = timeline.jason_effective_start_age
+
+    pretax, roth, taxable, hsa = pretax_start, roth_start, taxable_start, hsa_start
+    balances, pretax_bals, roth_bals, taxable_bals = [], [], [], []
+    _rmd_start = rmd_start_age(timeline.jason_age)
+    any_unmet_need = False
+
+    need_for_year = two_age_spending_need_fn(inputs, income_today, inflation, timeline)
+    phase2_duration_years, still_working_income_at_start = two_age_still_working_income_inputs(
+        inputs, timeline, salary_growth_pct)
+
+    for yr in range(retire_yrs):
+        age = timeline.age(yr)
+        ret = annual_returns[yr] if yr < len(annual_returns) else random.gauss(post_ret, PORT_STD)
+        justin_age_this_year = timeline.justin_age_at(age)
+        calendar_year = timeline.calendar_year(yr)
+
+        year_need, healthcare_inflated, _bridge_income_this_year = need_for_year(age, yr)
+
+        life_event_cash, life_event_monthly = _post_retirement_year_effects(post_life_events or [], calendar_year)
+        year_need -= life_event_monthly
+
+        still_working_income_this_year = justin_gap_income_for_year(
+            yr, phase2_duration_years, still_working_income_at_start, salary_growth_pct)
+        year_need -= still_working_income_this_year
+
+        year_pen = two_age_pension_for_year(pension_annual, age, jason_effective_start_age)
+        year_jss = jason_ss_annual * ((1 + inflation) ** max(0, age - jason_ss_age)) if age >= jason_ss_age else 0.0
+        year_uss = (justin_ss_annual * ((1 + inflation) ** max(0, justin_age_this_year - justin_ss_age))
+                    if justin_age_this_year >= justin_ss_age else 0.0)
+        fixed = year_pen + year_jss + year_uss
+
+        rmd = _rmd(pretax, age, _rmd_start)
+        pretax_tax_rate = _pretax_marginal_tax_rate(year_pen, year_jss, year_uss, rmd, state_tax_rate)
+
+        year_result = simulate_withdrawal_year(
+            opening=AccountState(pretax=pretax, roth=roth, taxable=taxable, hsa=hsa),
+            spending_need=year_need,
+            guaranteed_income=fixed,
+            life_event_cash=life_event_cash,
+            rmd_amount=rmd,
+            tax_model=marginal_bracket_tax_model(pretax_rate=pretax_tax_rate, taxable_rate=0.0),
+            growth_rate=ret,
+            order=DEFAULT_ORDER,
+        )
+        if year_result.unmet_need > 0:
+            any_unmet_need = True
+
+        pretax  = year_result.closing.pretax
+        roth    = year_result.closing.roth
+        taxable = year_result.closing.taxable
+        hsa     = year_result.closing.hsa
+
+        total = pretax + roth + taxable + hsa
+        balances.append(round(total))
+        pretax_bals.append(round(pretax))
+        roth_bals.append(round(roth))
+        taxable_bals.append(round(taxable))
+
+    survived = (balances[-1] > 0 if balances else False) and not any_unmet_need
+    return survived, balances, pretax_bals, roth_bals, taxable_bals
+
+
 def run_swr_analysis(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_timing: str = "early",
                       target_success: float = 0.95, life_events: List[Dict] = None,
                       surplus_allocations: List[Dict] = None) -> Dict:
@@ -683,8 +799,150 @@ def run_swr_analysis(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_t
     }
 
 
+def _require_both_two_age_or_neither(jason_ret_age, justin_ret_age):
+    """Two-age mode (Monte Carlo/Stress Tests) requires BOTH ages
+    explicit -- no silent single-axis fallback if only one is supplied
+    (explicit instruction: "In two-age mode, require both retirement
+    ages"). Returns True if two-age mode should run, False for the
+    existing single-axis mode (neither supplied)."""
+    if (jason_ret_age is None) != (justin_ret_age is None):
+        raise ValueError("two-age mode requires both jason_ret_age and justin_ret_age, not just one")
+    return jason_ret_age is not None and justin_ret_age is not None
+
+
+def _run_monte_carlo_two_age(inputs: Dict, accounts: List[Dict], jason_ret_age: int, justin_ret_age: int,
+                              ss_timing: str, life_events: List[Dict], surplus_allocations: List[Dict]) -> Dict:
+    """Two-age Monte Carlo -- explicit, independent retirement ages for
+    both spouses instead of run_monte_carlo's single ret_age
+    (CALCULATION_CONTRACT.md section 22). Mirrors run_monte_carlo's own
+    structure (starting balances from the deterministic reference
+    projection, N=1000 trials, percentile chart, depletion age) but
+    against a TwoPersonTimeline's phase2/phase3 span via
+    _run_single_two_age instead of _run_single's single-phase loop.
+
+    Starting bucket balances come from run_two_dimensional_retirement_
+    projection's own pretax_at_phase2_start/roth_at_phase2_start/etc.
+    fields -- the same "call the deterministic reference once, read its
+    bucket breakdown" pattern run_monte_carlo's single-axis mode already
+    uses against run_retirement_projection, not a re-derivation of the
+    accumulation-phase contribution/RSU/asset-sale/life-event/surplus-
+    allocation math."""
+    random.seed(42)  # reproducible, same seed run_monte_carlo's single-axis mode uses
+
+    jason_age  = inputs["jason_age"]
+    justin_age = inputs["justin_age"]
+    inflation  = inputs["inflation_rate"]
+    post_ret   = inputs["expected_return_post_retirement"]
+    income_today = inputs["retirement_income_today_dollars"]
+    _salary_growth_pct = inputs.get("_salary_growth_pct", 0.0)
+
+    pension_annual = pension_for_age(inputs, jason_ret_age)
+    jason_ss_early   = inputs.get("jason_social_security", JASON_SS_EARLY)
+    jason_ss_delayed = inputs.get("jason_ss_delayed", JASON_SS_DELAYED)
+    jason_ss_annual  = jason_ss_early if ss_timing == "early" else jason_ss_delayed
+    jason_ss_age     = 62 if ss_timing == "early" else 67
+    justin_ss_annual = inputs.get("justin_social_security", JUSTIN_SPOUSAL_ANNUAL)
+    justin_ss_age    = inputs.get("justin_ss_age", JUSTIN_SPOUSAL_AGE)
+
+    from projection_engine import run_two_dimensional_retirement_projection
+    _proj = run_two_dimensional_retirement_projection(inputs, accounts, jason_ret_age=jason_ret_age,
+                                                        justin_ret_age=justin_ret_age, ss_timing=ss_timing,
+                                                        life_events=life_events,
+                                                        surplus_allocations=surplus_allocations)
+    pretax_at_start  = _proj["pretax_at_phase2_start"]
+    roth_at_start    = _proj["roth_at_phase2_start"]
+    taxable_at_start = _proj["taxable_at_phase2_start"]
+    hsa_at_start     = _proj["hsa_at_phase2_start"]
+
+    timeline = build_two_person_timeline(jason_age, justin_age, jason_ret_age, justin_ret_age,
+                                          inputs.get("retirement_end_age"))
+    phase2_start_age = jason_age + timeline.phase2_start_years
+    phase3_start_age = jason_age + timeline.phase3_start_years
+    end_age = timeline.end_age
+    retire_yrs = timeline.retire_yrs
+    N = 1000
+
+    retirement_year_for_events = timeline.retirement_year
+    _, post_life_events = _split_life_events(life_events, retirement_year_for_events)
+    post_life_events = post_life_events + _post_retirement_asset_sale_events(
+        inputs, jason_age, phase2_start_age)
+
+    successes = 0
+    all_balances = []
+
+    for _ in range(N):
+        returns = [random.gauss(post_ret, PORT_STD) for _ in range(retire_yrs)]
+        survived, balances, *_ = _run_single_two_age(
+            pretax_at_start, roth_at_start, taxable_at_start, hsa_at_start,
+            timeline, inputs,
+            pension_annual, jason_ss_annual, jason_ss_age,
+            income_today, inflation, post_ret, returns,
+            post_life_events=post_life_events,
+            justin_ss_annual=justin_ss_annual,
+            justin_ss_age=justin_ss_age,
+            state_tax_rate=inputs.get("state_income_tax_rate", 0),
+            salary_growth_pct=_salary_growth_pct,
+        )
+        if survived: successes += 1
+        all_balances.append(balances)
+
+    success_rate = round(successes / N * 100, 1)
+
+    ages = list(range(phase2_start_age, end_age))
+    p10, p25, p50, p75, p90 = [], [], [], [], []
+    for yr in range(retire_yrs):
+        vals = sorted(b[yr] if yr < len(b) else 0 for b in all_balances)
+        p10.append({"age": ages[yr], "balance": vals[int(N*0.10)]})
+        p25.append({"age": ages[yr], "balance": vals[int(N*0.25)]})
+        p50.append({"age": ages[yr], "balance": vals[int(N*0.50)]})
+        p75.append({"age": ages[yr], "balance": vals[int(N*0.75)]})
+        p90.append({"age": ages[yr], "balance": vals[int(N*0.90)]})
+
+    chart = [{"age": ages[yr],
+              "p10": p10[yr]["balance"], "p25": p25[yr]["balance"],
+              "p50": p50[yr]["balance"],
+              "p75": p75[yr]["balance"], "p90": p90[yr]["balance"]}
+             for yr in range(0, retire_yrs, 2)]
+
+    median_run = sorted(all_balances, key=lambda b: b[-1])[N//2]
+    depletion_age = end_age
+    for i, bal in enumerate(median_run):
+        if bal <= 0:
+            depletion_age = phase2_start_age + i
+            break
+
+    _, still_working_income_at_start = two_age_still_working_income_inputs(inputs, timeline, _salary_growth_pct)
+
+    return {
+        "success_rate": success_rate,
+        "mode": "two_age",
+        "jason_ret_age": jason_ret_age,
+        "justin_ret_age": justin_ret_age,
+        "phase2_start_age": phase2_start_age,
+        "phase3_start_age": phase3_start_age,
+        "later_retiree": timeline.later_retiree,
+        "retirement_end_age": end_age,
+        "ss_timing": ss_timing,
+        "portfolio_at_retirement": round(pretax_at_start + roth_at_start + taxable_at_start + hsa_at_start),
+        "median_final_balance": round(sorted(b[-1] for b in all_balances)[N//2]),
+        "median_depletion_age": depletion_age,
+        "simulations": N,
+        "chart": chart,
+        # Working-spouse income and the flat net-of-tax assumption --
+        # same disclosure convention every other consumer's second-earner
+        # gap income already surfaces (backlog P1, CALCULATION_CONTRACT.md
+        # section 16), deterministic (doesn't vary by trial) so it's a
+        # single first-year/duration summary like Monte Carlo's existing
+        # single-axis justin_gap_income_first_year field.
+        "still_working_spouse_income_first_year": round(still_working_income_at_start),
+        "second_earner_net_of_tax_factor": SECOND_EARNER_NET_OF_TAX_FACTOR,
+        "account_ownership_limitation": _proj["account_ownership_limitation"],
+    }
+
+
 def run_monte_carlo(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_timing: str = "early",
-                     life_events: List[Dict] = None, surplus_allocations: List[Dict] = None) -> Dict:
+                     life_events: List[Dict] = None, surplus_allocations: List[Dict] = None,
+                     jason_ret_age: int = None, justin_ret_age: int = None) -> Dict:
     """Run 1000 Monte Carlo simulations.
 
     life_events: optional list of life_events rows (already filtered to
@@ -697,7 +955,20 @@ def run_monte_carlo(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_ti
     the two retirement-relevant goals matter — see projection_engine.py).
     Affects only the starting bucket balances via run_retirement_projection
     below — this feature has no withdrawal-phase half, so _run_single is
-    untouched. Defaults to None/no-op."""
+    untouched. Defaults to None/no-op.
+
+    jason_ret_age/justin_ret_age (2026-09-08, CALCULATION_CONTRACT.md
+    section 22): explicit, independent retirement ages for both spouses
+    instead of the single ret_age above -- BOTH required together (a
+    ValueError if only one is given), delegating entirely to
+    _run_monte_carlo_two_age. ret_age/ss_timing's own single-axis
+    behavior below is completely unaffected when these are left at
+    their None default -- this is new, additive behavior, not a
+    modification of the existing mode."""
+    if _require_both_two_age_or_neither(jason_ret_age, justin_ret_age):
+        return _run_monte_carlo_two_age(inputs, accounts, jason_ret_age, justin_ret_age, ss_timing,
+                                         life_events, surplus_allocations)
+
     random.seed(42)  # reproducible
 
     jason_age  = inputs["jason_age"]
@@ -856,15 +1127,156 @@ def run_monte_carlo(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_ti
     }
 
 
+def _run_stress_tests_two_age(inputs: Dict, accounts: List[Dict], jason_ret_age: int, justin_ret_age: int,
+                               ss_timing: str, life_events: List[Dict], surplus_allocations: List[Dict]) -> Dict:
+    """Two-age Stress Tests -- explicit, independent retirement ages for
+    both spouses instead of run_stress_tests's single ret_age
+    (CALCULATION_CONTRACT.md section 22). The 'base' scenario (post_ret
+    every year) must reproduce run_two_dimensional_retirement_
+    projection's own yearly balances exactly -- verified in
+    test_two_age_monte_carlo_stress.py.
+
+    Runs the pure return-sequence-override scenarios from the shared
+    SCENARIOS dict (crash_2008, lost_decade, early_sequence -- all
+    inflation_mult=1.0, matching this function's own flat-inflation v1
+    scope exactly, so no special-casing is needed to reuse them here).
+    stagflation_1970s (variable inflation), bridge_job_loss (needs a
+    two-age-aware bridge re-projection), and ss_reduction (a scenario-
+    level SS multiplier not yet wired into the two-age per-year SS
+    formula) are deliberately NOT run in two-age mode -- each needs
+    feature support explicitly out of scope for this v1, not silently
+    misapplied."""
+    jason_age  = inputs["jason_age"]
+    justin_age = inputs["justin_age"]
+    inflation  = inputs["inflation_rate"]
+    post_ret   = inputs["expected_return_post_retirement"]
+    income_today = inputs["retirement_income_today_dollars"]
+    _salary_growth_pct = inputs.get("_salary_growth_pct", 0.0)
+
+    pension_annual = pension_for_age(inputs, jason_ret_age)
+    jason_ss_early   = inputs.get("jason_social_security", JASON_SS_EARLY)
+    jason_ss_delayed = inputs.get("jason_ss_delayed", JASON_SS_DELAYED)
+    jason_ss_annual  = jason_ss_early if ss_timing == "early" else jason_ss_delayed
+    jason_ss_age     = 62 if ss_timing == "early" else 67
+    justin_ss_annual = inputs.get("justin_social_security", JUSTIN_SPOUSAL_ANNUAL)
+    justin_ss_age    = inputs.get("justin_ss_age", JUSTIN_SPOUSAL_AGE)
+
+    from projection_engine import run_two_dimensional_retirement_projection
+    _proj = run_two_dimensional_retirement_projection(inputs, accounts, jason_ret_age=jason_ret_age,
+                                                        justin_ret_age=justin_ret_age, ss_timing=ss_timing,
+                                                        life_events=life_events,
+                                                        surplus_allocations=surplus_allocations)
+    pretax_at_start  = _proj["pretax_at_phase2_start"]
+    roth_at_start    = _proj["roth_at_phase2_start"]
+    taxable_at_start = _proj["taxable_at_phase2_start"]
+    hsa_at_start     = _proj["hsa_at_phase2_start"]
+
+    timeline = build_two_person_timeline(jason_age, justin_age, jason_ret_age, justin_ret_age,
+                                          inputs.get("retirement_end_age"))
+    phase2_start_age = jason_age + timeline.phase2_start_years
+    phase3_start_age = jason_age + timeline.phase3_start_years
+    end_age = timeline.end_age
+    retire_yrs = timeline.retire_yrs
+
+    retirement_year_for_events = timeline.retirement_year
+    _, post_life_events = _split_life_events(life_events, retirement_year_for_events)
+    post_life_events = post_life_events + _post_retirement_asset_sale_events(
+        inputs, jason_age, phase2_start_age)
+
+    base_returns = [post_ret] * retire_yrs
+    base_survived, base_bals, *_ = _run_single_two_age(
+        pretax_at_start, roth_at_start, taxable_at_start, hsa_at_start,
+        timeline, inputs,
+        pension_annual, jason_ss_annual, jason_ss_age,
+        income_today, inflation, post_ret, base_returns,
+        post_life_events=post_life_events,
+        justin_ss_annual=justin_ss_annual,
+        justin_ss_age=justin_ss_age,
+        state_tax_rate=inputs.get("state_income_tax_rate", 0),
+        salary_growth_pct=_salary_growth_pct,
+    )
+
+    results = {"base": {
+        "label": f"Base Case ({post_ret * 100:g}% every year)",
+        "survived": base_survived,
+        "final_balance": base_bals[-1],
+        "chart": [{"age": phase2_start_age+i, "balance": b} for i, b in enumerate(base_bals) if i % 2 == 0],
+    }}
+
+    for key, scenario in SCENARIOS.items():
+        if key in ("stagflation_1970s", "bridge_job_loss", "ss_reduction"):
+            continue  # each needs feature support out of scope for two-age v1 -- see docstring
+        overrides = scenario["overrides"]
+        returns = [overrides.get(yr, post_ret) for yr in range(retire_yrs)]
+        if key == "early_sequence":
+            # Lazy branch, not dict.get's eager default arg -- a short
+            # two-age horizon (retire_yrs <= len(overrides)) means every
+            # yr is already covered by `overrides` and normal_returns is
+            # never actually indexed, but dict.get() would still
+            # evaluate an out-of-range index as its (unused) default
+            # argument every iteration and crash regardless.
+            normal_returns = [random.gauss(post_ret, PORT_STD) for _ in range(max(0, retire_yrs - len(overrides)))]
+            normal_returns.sort()
+            returns = [overrides[yr] if yr in overrides else normal_returns[max(0, yr-len(overrides))]
+                       for yr in range(retire_yrs)]
+
+        survived, bals, *_ = _run_single_two_age(
+            pretax_at_start, roth_at_start, taxable_at_start, hsa_at_start,
+            timeline, inputs,
+            pension_annual, jason_ss_annual, jason_ss_age,
+            income_today, inflation, post_ret, returns,
+            post_life_events=post_life_events,
+            justin_ss_annual=justin_ss_annual,
+            justin_ss_age=justin_ss_age,
+            state_tax_rate=inputs.get("state_income_tax_rate", 0),
+            salary_growth_pct=_salary_growth_pct,
+        )
+        results[key] = {
+            "label": scenario["label"],
+            "description": scenario["description"],
+            "survived": survived,
+            "final_balance": bals[-1],
+            "chart": [{"age": phase2_start_age+i, "balance": b} for i, b in enumerate(bals) if i % 2 == 0],
+        }
+
+    _, still_working_income_at_start = two_age_still_working_income_inputs(inputs, timeline, _salary_growth_pct)
+
+    return {
+        "scenarios": results,
+        "mode": "two_age",
+        "jason_ret_age": jason_ret_age,
+        "justin_ret_age": justin_ret_age,
+        "phase2_start_age": phase2_start_age,
+        "phase3_start_age": phase3_start_age,
+        "later_retiree": timeline.later_retiree,
+        "retirement_end_age": end_age,
+        "ss_timing": ss_timing,
+        "portfolio_at_retirement": round(pretax_at_start + roth_at_start + taxable_at_start + hsa_at_start),
+        "still_working_spouse_income_first_year": round(still_working_income_at_start),
+        "second_earner_net_of_tax_factor": SECOND_EARNER_NET_OF_TAX_FACTOR,
+        "account_ownership_limitation": _proj["account_ownership_limitation"],
+    }
+
+
 def run_stress_tests(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_timing: str = "early",
-                      life_events: List[Dict] = None, surplus_allocations: List[Dict] = None) -> Dict:
+                      life_events: List[Dict] = None, surplus_allocations: List[Dict] = None,
+                      jason_ret_age: int = None, justin_ret_age: int = None) -> Dict:
     """Run deterministic stress test scenarios.
 
     life_events: see run_monte_carlo — same optional, defaults-to-no-op
     wiring.
 
     surplus_allocations: see run_monte_carlo — same optional,
-    starting-balance-only wiring."""
+    starting-balance-only wiring.
+
+    jason_ret_age/justin_ret_age: see run_monte_carlo's identical
+    params -- both required together, delegates to
+    _run_stress_tests_two_age, completely unaffected when left at their
+    None default (2026-09-08, CALCULATION_CONTRACT.md section 22)."""
+    if _require_both_two_age_or_neither(jason_ret_age, justin_ret_age):
+        return _run_stress_tests_two_age(inputs, accounts, jason_ret_age, justin_ret_age, ss_timing,
+                                          life_events, surplus_allocations)
+
     jason_age  = inputs["jason_age"]
     justin_age = inputs["justin_age"]
     inflation  = inputs["inflation_rate"]
