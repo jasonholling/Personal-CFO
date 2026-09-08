@@ -158,6 +158,23 @@ class TwoPersonTimeline:
         retirement, zero-length phase 2)."""
         return jason_age_this_year < self.jason_age + self.phase3_start_years
 
+    @property
+    def jason_effective_start_age(self) -> int:
+        """Jason's own real retirement start age -- max(jason_ret_age,
+        jason_age), the same "already past" clamp every per-person field
+        on this dataclass already applies, expressed as an absolute age
+        (jason_years_to_retire is already clamped to 0 for an
+        already-past selection, so this differs from jason_ret_age only
+        in that case). Single source of truth for two independent uses
+        in projection_engine.py's two-age withdrawal loop and its
+        Monte Carlo/Stress Tests counterparts (CALCULATION_CONTRACT.md
+        sections 20-22): Jason's own pension start, and the age-55
+        bridge/kids spending phases' own year-zero anchor -- both must
+        count elapsed years from HERE, not from the raw selected
+        jason_ret_age, which can be years stale for a household already
+        past it today."""
+        return self.jason_age + self.jason_years_to_retire
+
 
 def build_two_person_timeline(jason_age: int, justin_age: int, jason_ret_age: int, justin_ret_age: int,
                                retirement_end_age: Optional[float] = None) -> TwoPersonTimeline:
