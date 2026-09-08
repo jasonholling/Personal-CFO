@@ -1297,6 +1297,24 @@ class TestSurvivorScenarioEndpoint:
         r = client.get("/api/simulation/survivor-scenario")
         assert r.status_code == 200
 
+    def test_survivor_scenario_two_age_mode(self, client, sample_inputs, sample_accounts):
+        _seed_planning_inputs(client, sample_inputs)
+        _seed_accounts(client, sample_accounts)
+        r = client.get("/api/simulation/survivor-scenario",
+                        params={"deceased": "jason", "death_age": 65,
+                                "jason_ret_age": 61, "justin_ret_age": 63})
+        assert r.status_code == 200
+        data = r.json()
+        assert data["mode"] == "two_age"
+        assert data["jason_ret_age"] == 61
+        assert data["justin_ret_age"] == 63
+
+    def test_survivor_scenario_two_age_mode_requires_both_ages(self, client, sample_inputs, sample_accounts):
+        _seed_planning_inputs(client, sample_inputs)
+        _seed_accounts(client, sample_accounts)
+        r = client.get("/api/simulation/survivor-scenario", params={"jason_ret_age": 61})
+        assert r.status_code == 400
+
 
 class TestRentalAnalysisEndpoint:
     def test_no_rental_key_configured(self, client, sample_inputs):

@@ -3575,3 +3575,114 @@ rather than inferred defaults. 37.5's pension-commencement question is
 now decided (Option A). **Still no application code changed on this
 branch — implementation begins once Jason confirms the design overall
 (not just the one pension question) is ready to build.**
+
+## 38. Milestone 4 — Survivor Scenario + account ownership: implementation report (2026-09-08, on `codex/two-age-survivor-design`)
+
+Milestone 4 of 4 (final milestone). Design in sections 36-37, approved
+by Jason 2026-09-08 (including the 37.5 pension-commencement decision,
+Option A) before any of this existed. This section is the required
+accuracy/performance report for the completed implementation.
+
+**What was built, in dependency order:**
+
+1. `owner_split_starting_balances_two_age` (projection_engine.py) —
+   the pooled accumulation-phase formulas `run_two_dimensional_
+   retirement_projection` already uses, partitioned into `jason`/
+   `justin`/`joint`/`trust` buckets by reading each account's own
+   `owner` field (no invented ownership). Verified to sum EXACTLY to
+   the pooled function's own `*_at_phase2_start` figures across
+   multiple households, ages, and retirement orders.
+2. `run_owner_split_two_dimensional_projection` (projection_engine.py)
+   — carries those buckets through the ENTIRE per-year walk (section
+   37.4's "not just at initialization" requirement), reusing the exact
+   same `simulate_withdrawal_year` call the pooled function's own loop
+   makes each year, then allocating the single pooled result's per-type
+   balance change across owner buckets via a stated withdrawal-order
+   policy (`joint`, `jason`, `justin`, `trust`) rather than recomputing
+   the tax/RMD/draw math independently. Reconciliation is by
+   construction, verified exactly (to the dollar) across long horizons,
+   RMD years, both retirement orders, past selections, large age gaps,
+   depletion, and a trust-only household.
+3. `_run_survivor_scenario_two_age` (simulation_engine.py) — the actual
+   two-age Survivor calculation, built on (2)'s reconciled pre-death
+   walk. Implements all of section 37's explicit-assumption inputs
+   (`trust_available_to_survivor`, `joint_accounts_survivorship`,
+   `spousal_rollover_election`), real post-death RMDs on the survivor's
+   own age against a merged pretax sub-balance tracked separately
+   through a two-bucket withdrawal walk, Option A pension continuation,
+   and gap income generalized from single-axis's Justin-only gate to
+   `deceased != later_retiree`.
+
+**A real bug was found and fixed during development** (not a review
+finding, caught by the reconciliation tests written before the fix):
+`WITHDRAWAL_OWNER_ORDER` originally excluded `trust`, conflating
+section 37.1's "trust never auto-included" rule (about the SURVIVOR's
+post-death access) with ordinary PRE-death spending, where the existing
+pooled engine already spends trust-owned balances as part of its one
+pooled total. Excluding trust from the pre-death draw order let trust
+money grow unchecked while the pooled reference correctly drew it
+down — diverging by over $1.2M by year 24 of a test projection before
+the fix. Caught immediately by the reconciliation test (which failed
+loudly, exactly as intended), fixed by including trust last in the
+pre-death order, re-verified exact to the dollar afterward.
+
+**Accuracy — test-first, per instruction:** 31 new tests total across
+three files (15 for the owner-split projection layer, 16 for Survivor
+itself), all written before or alongside implementation and verified
+either by exact reconciliation against the already-reviewed pooled
+engine (sections 19-24) or by hand-computed arithmetic (the ownership-
+transfer math is simple sums/halves of already-reconciled figures).
+One hand-calculation error was caught and fixed during test-writing
+(not a code bug): an initial docstring miscounted how many pre-death
+years elapse by a given death age, producing a wrong expected number —
+caught by comparing against the actual function's output (which had
+already passed the independent reconciliation tests), corrected by
+redoing the year-by-year trace rather than adjusting the implementation
+to match the wrong number.
+
+Covers: ownership transfer at death (all three explicit-assumption
+flags, both directions), pension commencement before Jason's own
+retirement (both the Option A case and the unaffected-survivor case),
+real post-death RMDs on the survivor's own age (both before and after
+the survivor's own `rmd_start_age`), gap income generalized to
+whichever spouse is `later_retiree` (both directions — the still-
+working spouse dying vs. surviving), the both-ages-required gate, and
+single-axis-mode-unaffected.
+
+**Performance:** this milestone adds two NEW per-household-year
+computations (the owner-split walk, then the post-death survivor walk)
+on top of what single-axis Survivor already does — a single
+deterministic pass each, not a randomized-trial loop like SWR/Monte
+Carlo, so the added cost is small and linear in years, not
+multiplicative. Not separately benchmarked against single-axis Survivor
+given the structural difference (a genuinely new capability — owner
+attribution — not a faster/slower path to the same single-axis
+answer); the existing single-axis `run_survivor_scenario` is completely
+unmodified and unaffected.
+
+**Frontend:** no page changes this milestone. Survivor Scenario already
+has a real UI presence inside `StressTestWhatIf.jsx`'s "Survivor
+Scenario" tab (single-axis only, using the page's own `retAge`) —
+wiring two-age support into that tab (the same toggle pattern
+established for Monte Carlo/Historical Stress) is deferred to a
+follow-up pass, since it wasn't part of the approved design's own
+scope (sections 36-37 covered the calculation-engine and ownership
+model only) and this session's remaining budget was directed at
+getting the calculation layer correct and reviewed first.
+
+**Explicitly deferred, matching section 37's own scope (not silently
+dropped):** per-spouse RMDs during NORMAL (non-Survivor, both-alive)
+two-age operation — every other two-age consumer still uses one
+household RMD keyed to Jason's age; inherited-IRA-specific RMD timing
+rules beyond the single named spousal-rollover election; trust
+succession terms beyond the binary available/not-available assumption;
+the MFJ→Single tax-bracket jump (already an explicitly documented,
+unaddressed limitation in single-axis Survivor, unchanged).
+
+**Verified:** full backend suite 1270 passed, 97.52% coverage.
+Frontend suite unaffected, still 39 passed (no frontend changes this
+milestone). Sensitive-data check passed.
+
+Branch: `codex/two-age-survivor-design`, pushed, **not merged** — per
+Jason's explicit instruction (auditor unavailable; get all four
+milestones built, review everything together once it's back).

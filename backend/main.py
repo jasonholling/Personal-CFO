@@ -1702,7 +1702,19 @@ def get_contribution_sensitivity(ret_age: int = 60, body: dict = None):
 
 @app.get("/api/simulation/survivor-scenario")
 def get_survivor_scenario(ret_age: int = 60, deceased: str = "jason", death_age: int = None,
-                           survivor_need_factor: float = 0.75):
+                           survivor_need_factor: float = 0.75,
+                           jason_ret_age: int = None, justin_ret_age: int = None,
+                           ss_timing: str = "early",
+                           trust_available_to_survivor: bool = False,
+                           joint_accounts_survivorship: bool = True,
+                           spousal_rollover_election: bool = True):
+    """jason_ret_age/justin_ret_age (2026-09-08, CALCULATION_CONTRACT.md
+    sections 36-37, Milestone 4 of 4): two-age mode with an owner-
+    attributed account ledger, both ages required together. The three
+    trailing booleans are two-age-only explicit scenario assumptions
+    (section 37.1-37.3) with no single-axis equivalent -- ignored
+    entirely when jason_ret_age/justin_ret_age are left at their None
+    default."""
     conn = get_db()
     inputs_row = conn.execute("SELECT * FROM planning_inputs WHERE id=1").fetchone()
     accounts   = [dict(r) for r in conn.execute("SELECT * FROM accounts").fetchall()]
@@ -1712,7 +1724,15 @@ def get_survivor_scenario(ret_age: int = 60, deceased: str = "jason", death_age:
     if not inputs_row:
         raise HTTPException(status_code=400, detail="Planning inputs not set yet")
     from simulation_engine import run_survivor_scenario
-    return run_survivor_scenario(dict(inputs_row), accounts, ret_age, deceased, death_age, survivor_need_factor, life_events=life_events, surplus_allocations=surplus_allocations)
+    try:
+        return run_survivor_scenario(dict(inputs_row), accounts, ret_age, deceased, death_age, survivor_need_factor,
+                                      life_events=life_events, surplus_allocations=surplus_allocations,
+                                      jason_ret_age=jason_ret_age, justin_ret_age=justin_ret_age, ss_timing=ss_timing,
+                                      trust_available_to_survivor=trust_available_to_survivor,
+                                      joint_accounts_survivorship=joint_accounts_survivorship,
+                                      spousal_rollover_election=spousal_rollover_election)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 @app.get("/api/simulation/sequence-risk")
 def get_sequence_risk(ret_age: int = 55, ss_timing: str = "early"):

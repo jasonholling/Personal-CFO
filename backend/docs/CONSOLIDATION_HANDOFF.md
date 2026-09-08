@@ -66,20 +66,28 @@ Milestone 3, two-age Tax Efficiency (section 34 design notes + 35
 implementation report), is built on `codex/two-age-tax-efficiency` —
 branched from the Roth Conversion branch (not `main`), since it needs
 that branch's reviewed working-income tax treatment and `main` doesn't
-have it yet — pushed, **not yet merged**.
+have it yet — pushed, **not yet merged**. Milestone 4, Survivor
+Scenario + account ownership (section 36 initial design, section 37
+revised design approved by Jason including the pension-commencement
+decision, section 38 implementation report), is built on
+`codex/two-age-survivor-design` — branched from the Tax Efficiency
+branch — pushed, **not yet merged**. All four milestones are now
+implemented.
 
 **Sequencing note, superseding the "review before merging, don't start
-the next milestone" instruction above for right now:** Jason's own
-auditor is temporarily unavailable, so per his explicit instruction
-(2026-09-08) work is continuing through the remaining milestones
-without waiting for Milestones 2-3's review to land — "let's not merge
-but go on to the next milestone, we'll circle back." Nothing gets
-pushed to `main` in the meantime. Once the auditor is back, the
-expected merge order is Roth Conversion → Tax Efficiency → (after its
-own separate design-gate approval) Survivor Scenario. Milestone 4
-(Survivor Scenario + account ownership) is next, design-only proposal
-first per its own explicit gate. Real payroll tax and a heatmap UI
-stay out of scope per the original instruction.
+the next milestone" instruction above:** Jason's own auditor was
+temporarily unavailable, so per his explicit instruction (2026-09-08)
+work continued through all four milestones without waiting for
+Milestones 2-4's own review to land — "get all the work done and I'll
+have the auditor review." Nothing has been pushed to `main` beyond
+Milestone 1. Once the auditor reviews everything together, the
+expected merge order (each branch stacked on the previous, so each
+must land before the next can cleanly merge to `main`) is Roth
+Conversion → Tax Efficiency → Survivor Scenario. Real payroll tax and
+a heatmap UI stay out of scope per the original instruction. Milestone
+4's own approved design (section 37) deferred two-age frontend wiring
+for Survivor Scenario's existing `StressTestWhatIf.jsx` tab to a
+follow-up pass — not part of the approved design's own scope.
 
 ## Final status against Jason's 9-item follow-on task list
 
