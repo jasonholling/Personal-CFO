@@ -1493,3 +1493,254 @@ build succeeds (same pre-existing large-chunk warning, unrelated).
 Sensitive-data check passed. Branch:
 `codex/second-earner-output-visibility-and-parity` (same branch as
 sections 16-17 — still unmerged, pending review).
+
+## 19. Two-dimensional retirement timing — v1 (Phase 2 only), Retirement Projection reference implementation (2026-09-08, on `codex/two-dimensional-retirement`)
+
+Full design lives in `docs/TWO_DIMENSIONAL_RETIREMENT_DESIGN.md`
+(sections 1-6 written before any code, section 7 the concrete v1
+contract). This section is the calculation-contract-style summary; the
+design doc has the full reasoning and is the canonical reference.
+
+**What this is:** a new, additive function,
+`run_two_dimensional_retirement_projection` (`projection_engine.py`),
+and a new `TwoPersonTimeline`/`build_two_person_timeline`
+(`timeline_engine.py`) — explicit, independent retirement ages for both
+spouses, one scenario at a time (no sweep, no heatmap), for the
+Retirement Projection reference implementation only. **Nothing about
+the existing `run_retirement_projection`, `Timeline`/`build_timeline`,
+or any of the other 5 withdrawal-phase consumers changed** — this is
+new code alongside them, not a modification.
+
+**Key design finding:** the existing second-earner gap-income mechanism
+(section 15, `justin_gap_income_for_year`) already implements most of
+what a two-axis middle phase needs — it just only ever ran in one
+direction (Justin working, Jason's `ret_age` as the sole axis) and only
+ever started at Jason's own retirement. `justin_gap_income_for_year`'s
+signature was already fully generic, and `simulate_withdrawal_year`
+already sweeps income surplus into savings automatically (proven
+correct by this session's own Survivor insurance-calc fixes, section
+18). Reusing both meant v1 needed no new withdrawal-engine machinery —
+only a two-axis timeline and a symmetric version of the existing
+gap-income call site (either spouse can be the "still-working" side,
+not just Justin).
+
+**Model:** a household passes through "phase 2" (one spouse retired,
+one still working — new) then "phase 3" (both retired, identical to
+`run_retirement_projection`'s existing single-phase withdrawal loop).
+`phase2_start_years`/`phase3_start_years` are the earlier/later of the
+two spouses' own years-to-retirement (each independently clamped to 0
+if already past, mirroring `build_timeline`'s existing per-person
+convention). During phase 2, the still-working spouse's income offsets
+spending need at the same flat `SECOND_EARNER_NET_OF_TAX_FACTOR` (0.65)
+every other consumer's gap income already uses — no continued 401k
+contribution is modeled from that income once the withdrawal loop has
+started (a documented simplification: real payroll-tax modeling during
+an active withdrawal loop is out of scope for v1). Withdrawal order,
+tax treatment, and RMDs are unchanged — reuses `simulate_withdrawal_year`
+exactly as the reference implementation does.
+
+**Regression property:** equal ages (or `justin_ret_age` left at the
+existing 0/unset sentinel) produce zero phase-2 years and reduce
+exactly to `run_retirement_projection`'s own single-axis output for
+that age — checked numerically in
+`test_two_dimensional_retirement.py`'s simultaneous-retirement case,
+which calls both functions on the same inputs and asserts identical
+`portfolio_balance` values.
+
+**Test-first:** `test_two_person_timeline.py` (12 cases) and
+`test_two_dimensional_retirement.py` (7 cases) were written and
+committed BEFORE either piece of implementation existed, with every
+expected number hand-calculated against the design doc's contract, not
+derived by running a draft implementation first. Categories covered:
+either spouse retiring first (2 cases, proving the 65% offset applies
+symmetrically), simultaneous retirement (+ the regression cross-check
+above), a 10-year spousal age gap, an already-3-years-past retirement
+age for one spouse, an income surplus swept into savings, and
+insufficient funds reported correctly across the phase2→phase3
+boundary. All 19 cases passed on the first implementation attempt — no
+expected numbers were adjusted to fit the code.
+
+**API:** `GET /api/projections/two-dimensional-retirement` —
+`jason_ret_age`/`justin_ret_age` both required query params, no
+defaults (a 422 if either is omitted, so this endpoint is not reachable
+by accident from a page that only knows the single-axis model).
+
+**Frontend:** a new "Two-Age Scenario" tab in Retirement Projection
+(`TwoAgeScenario.jsx`) — two age inputs, a year-by-year table showing
+the phase split and still-working income, and the account-ownership
+limitation note (below) rendered directly from the API response. Kept
+as its own tab rather than folded into the existing Overview/Side by
+Side/Sensitivity tabs, so the two models stay visibly distinct. Every
+existing `SecondEarnerNote` usage (Monte Carlo, Stress Tests, Roth
+Conversion, Survivor Scenario) now also links back to this tab with a
+one-line "single retirement-age model" cross-reference — documentation
+only, no behavior change — so a user reading one of those pages cannot
+mistake that offset for a genuine second, independently-timed
+retirement age.
+
+**Explicitly deferred (unchanged from the design doc):** Survivor
+Scenario integration, real payroll-tax modeling, an owner-attributed
+account ledger (the aggregated-bucket limitation is now surfaced
+directly in the API response and UI, not just documented), and any
+heatmap/matrix UI. Monte Carlo, Stress Tests, SWR, Tax Efficiency, and
+Roth Conversion are completely unchanged.
+
+**Verified:** all 19 new tests pass; full backend suite re-run (see the
+commit history on this branch for the exact count — 1135 passed
+immediately after the calculation-engine commit, before the API/UI
+commits that followed added their own tests on top); full frontend
+suite 24 passed (was 20); production build succeeds; sensitive-data
+check passed. Branch: `codex/two-dimensional-retirement`, pushed,
+**not merged** — per the explicit instruction this was scoped under,
+for independent review.
+
+## 20. Two-dimensional retirement timing — pension gating, age-55 rules preserved, UI fixes (2026-09-08, follow-up review)
+
+Independent review of section 19's commit found two real calculation
+bugs and two UI issues. All four fixed on the same unmerged branch.
+
+**P1 — Jason's pension started before he actually retired.** During
+phase 2, `year_pen = pension_annual` was added unconditionally from
+`phase2_start`, regardless of whether Jason himself had retired yet.
+Whenever Justin retired first (Jason is `later_retiree`, still working
+during phase 2), his own future pension was paid two years early on top
+of his salary-funded gap income. Reproduction: both spouses 60, Justin
+retires at 61, Jason at 63, $30,000 pension, $100,000 Jason salary,
+$80,000 spend, $200,000 taxable, 0% growth/inflation. Old (buggy) final
+balance: $180,000 (two premature $30,000 payments swept in as
+surplus). Correct: $120,000. **Fixed:** a new
+`jason_pension_start_age = jason_age + timeline.jason_years_to_retire`
+gates `year_pen` to `age >= jason_pension_start_age` — pension only
+pays once Jason has actually reached his own selected retirement age,
+independent of when the withdrawal loop itself started.
+
+**P1 — The age-55 bridge-job/kids-at-home spending phases were
+entirely absent.** `run_retirement_projection`'s own `if ret_age ==
+55:` branch (bridge income covering healthcare net of a bridge job,
+family healthcare while kids are still home, then the normal
+pre-/post-Medicare split) had no analog in the new function at all —
+every household saw the plain default formula regardless of age.
+Reproduction: both spouses at 55 retiring simultaneously (zero phase-2
+years), $80,000 spend, $30,000/yr bridge income for 5 years, $200,000
+taxable. Existing single-axis tool's year-1 balance: $150,000. The new
+function's (buggy) year-1 balance: $120,000 — the bridge offset was
+silently dropped. **Fixed:** the same branch, ported verbatim (same
+formulas, same four sub-phases), gated on `jason_ret_age == 55` and
+anchored to `timeline.jason_years_to_retire` rather than
+`phase2_years` — this spending phase is inherently pegged to *Jason's
+own* retirement date (`bridge_years_55`/`kids_years_at_home_55` are
+"years since Jason retired" concepts), which is not always the same
+year the withdrawal loop itself starts (phase2_start can be earlier,
+when Justin retires first). A direct parity test now calls both
+functions on the same inputs and asserts identical
+`portfolio_balance` for the first three years, not just this
+function's own arithmetic in isolation.
+
+**P2 — "Portfolio Draw" column showed net spending need, not the
+actual withdrawal.** `TwoAgeScenario.jsx` displayed `row.draw` (need
+minus guaranteed income, before withdrawal-order/tax mechanics) in a
+column implying it was the real amount leaving the portfolio. An
+$80,000 need funded from pretax accounts can mean $88,889 actually
+withdrawn once grossed up for tax. **Fixed:** the column now displays
+`row.withdrawal` (the real total from `simulate_withdrawal_year`,
+already computed and returned by the API, just not read by the UI) and
+is relabeled "Withdrawal" instead of "Portfolio Draw."
+
+**P2 — Stale results stayed on screen after editing either age, and a
+failed rerun kept the old result with no indication it no longer
+matched the inputs.** **Fixed:** `result` is cleared immediately when
+either age input changes, and at the start of every run (success or
+failure) rather than only replaced on success — so a displayed result
+can never outlive the inputs that produced it. The summary card now
+also states the exact ages the displayed result corresponds to, read
+from the API response (`result.jason_ret_age`/`justin_ret_age`) rather
+than the current input state, so a result can't be silently mislabeled
+if the inputs changed again while a request was still in flight.
+
+New backend tests: `TestPensionGatedToJasonsOwnRetirement` (2 cases)
+and `TestAge55BridgeAndKidsRulesPreserved` (2 cases, one a direct
+parity check against `run_retirement_projection`) in
+`test_two_dimensional_retirement.py`. New frontend tests: withdrawal-
+vs-draw display, the age-pair label, stale-result clearing on both an
+age edit and a failed rerun — 4 new cases in `TwoAgeScenario.test.jsx`.
+
+**Verified:** full backend suite, 1141 passed, 97.44% coverage (was
+1135 immediately after section 19's calculation-engine commit — the 4
+new backend tests plus the API/UI commits' own tests account for the
+rest of the difference already reflected in that commit's own count).
+Frontend: 28 passed (was 24). Production build succeeds. Sensitive-data
+check passed. Branch: `codex/two-dimensional-retirement` — still
+**not merged**, per the same instruction, for continued review.
+
+## 21. Two-dimensional retirement timing -- effective-start-age fix and RSU flat convention (2026-09-08, third follow-up)
+
+Continued independent review of section 20's fixes found two more real
+calculation bugs. Both fixed on the same unmerged branch.
+
+**P1 -- age-55 bridge/kids timing used the raw selected age instead of
+Jason's effective retirement start.** `jason_yr = age - jason_ret_age`
+is correct only when the household hasn't yet reached the selected age
+(jason_ret_age IS the effective start in that case). For a household
+already past it today, jason_years_to_retire clamps to 0 and the real
+effective start is the household's actual current age -- but the
+bridge/kids branch kept indexing from the fictional past date anyway.
+Reproduction: both spouses currently 60, retirement selected at 55
+(5 years already past), 3% inflation, $80,000 spend, $30,000/yr bridge
+income for 5 years. The withdrawal loop's first year IS the effective
+retirement start (age 60), but the buggy formula treated it as
+jason_yr=5 -- compounding 5 years of inflation immediately ($92,742
+instead of $80,000) AND treating bridge income as already expired
+(5 is not < bridge_years=5, so the bridge branch wasn't even entered).
+**Fixed:** a new `jason_effective_start_age = jason_age +
+timeline.jason_years_to_retire` (the same "already past" clamp
+`build_timeline`/`TwoPersonTimeline` apply everywhere else, expressed
+as an absolute age) replaces `jason_ret_age` as the anchor for both the
+bridge/kids branch's `jason_yr` and its own guard, and for the pension
+gate from section 20 (which had the same class of correctness, though
+not the same bug, since it used `jason_years_to_retire` directly rather
+than the raw selected age -- now both share one variable instead of two
+that happened to agree only in the not-yet-retired case).
+
+**P2 -- Jason's RSU escalated with salary growth; the reference
+implementation keeps it flat.** The new function's shared `_contrib_fv`
+helper (401k/bonus/RSU all routed through one growing-annuity-eligible
+path) applied `salary_growth_pct` to Jason's RSU too. But
+`run_retirement_projection` treats Jason's own RSU as a flat dollar
+amount unconditionally (`_fv_annuity`, never the growing variant) --
+only 401k contributions and bonus (both salary-derived percentages)
+grow with an assumed raise rate; a flat RSU grant has no such
+percentage-of-salary basis to grow from. Reproduction: 3 years to
+simultaneous retirement, $100,000 annual RSU, 10% salary growth, 0%
+investment returns -- flat (correct): $65,000 * 3 = $195,000 at the
+65% factor; growing (buggy): $215,150. **Fixed:** a new
+`_contrib_fv_flat` helper (same dormant-years compounding pattern, but
+always `_fv_annuity`, never `_fv_growing_annuity`) used for Jason's RSU
+only. Justin's own RSU deliberately stays on the growing-eligible path
+-- `run_retirement_projection`'s own `justin_annual_rsu` handling (via
+`_justin_contrib_fv`) already lets Justin's RSU grow with
+`salary_growth_pct`, an existing asymmetry between the two spouses'
+RSU treatment that predates this branch and is preserved here exactly,
+not resolved (a new test asserts Justin's own RSU still matches the
+reference's growing value, so a well-intentioned future "fix" of the
+asymmetry doesn't silently reappear).
+
+**Expanded parity checks**, per the explicit instruction: the original
+simultaneous-retirement parity check (section 19) only covered 0%
+inflation/growth with no RSUs -- exactly the dimensions both bugs above
+lived in. `TestExpandedSimultaneousRetirementParity` adds two more
+direct numeric comparisons against `run_retirement_projection`'s own
+output for the same inputs: a past retirement selection with nonzero
+inflation, and nonzero salary growth with RSUs present (not yet
+retired, contributions still accruing).
+
+New tests: `test_bridge_and_inflation_use_jasons_effective_start_not_
+the_raw_selected_age` (`TestAge55BridgeAndKidsRulesPreserved`),
+`TestJasonRsuStaysFlatUnlikeSalaryDerivedContributions` (2 cases), and
+`TestExpandedSimultaneousRetirementParity` (2 cases) -- 5 new tests
+total in `test_two_dimensional_retirement.py`.
+
+**Verified:** full backend suite, 1146 passed, 97.45% coverage.
+Frontend unchanged this round (no UI code touched) -- 28 passed,
+production build succeeds. Sensitive-data check passed. Branch:
+`codex/two-dimensional-retirement` -- still **not merged**, per the
+same instruction, for continued review.

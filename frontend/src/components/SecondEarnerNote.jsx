@@ -16,6 +16,16 @@ import { isPrivacyMode, MASK_CURRENCY } from '../utils/privacy'
 // income even when nearby figures were masked for screen-sharing). The
 // 65%-of-gross POLICY FACTOR stays visible either way — it's a documented
 // methodology constant, not household-specific financial data.
+//
+// The trailing "single retirement-age model" line (added
+// TWO_DIMENSIONAL_RETIREMENT_DESIGN.md section 7.5, 2026-09-08) is a
+// documentation-only addition, not a behavior change: every page this
+// component appears on still models one household retirement date, with
+// this dollar figure as an income OFFSET during the gap, not a genuine
+// second, independently-timed retirement age. Retirement Projection's
+// "Two-Age Scenario" tab is the only tool in this app that models two
+// truly independent ages — this line exists so a user reading the offset
+// on any other page doesn't mistake it for that.
 export default function SecondEarnerNote({ amount, years, factor, personLabel = 'Justin' }) {
   if (!amount || amount <= 0 || !years) return null
   const pct = Math.round((factor ?? 0.65) * 100)
@@ -24,7 +34,8 @@ export default function SecondEarnerNote({ amount, years, factor, personLabel = 
     <div style={{ fontSize: 11, color: 'var(--text3)', marginTop: 6, lineHeight: 1.5 }}>
       Includes ~{amountText}/yr from {personLabel}'s continued income
       for {years} more year{years === 1 ? '' : 's'} — approximated at {pct}% of gross
-      (not a full payroll-tax calculation).
+      (not a full payroll-tax calculation). Single retirement-age model — see Retirement Projection's
+      Two-Age Scenario tab for two independent ages.
     </div>
   )
 }

@@ -17,7 +17,8 @@ import math
 
 from annual_engine import AccountState, DEFAULT_ORDER, marginal_bracket_tax_model, simulate_withdrawal_year
 from annual_inputs import build_annual_income_inputs
-from timeline_engine import CURRENT_YEAR, Timeline, build_cumulative_inflation, build_timeline, healthcare_for_age
+from timeline_engine import (CURRENT_YEAR, Timeline, build_cumulative_inflation, build_timeline, healthcare_for_age,
+                              build_two_person_timeline)
 
 COLLEGE_COST_INFLATION = 0.04
 COLLEGE_YEARS          = 4
@@ -1113,6 +1114,389 @@ def run_retirement_projection(inputs: Dict, accounts: List[Dict], ret_ages: List
             })
 
     return {"scenarios": scenarios, "generated_at": datetime.datetime.now().isoformat()}
+
+
+ACCOUNT_OWNERSHIP_LIMITATION_NOTE = (
+    "Portfolio buckets (pretax/roth/taxable/hsa) are a single aggregated household total, not attributed to "
+    "either spouse. During the middle phase, the still-working spouse's income surplus is swept into savings "
+    "the same as every other consumer's -- it cannot be traced back to whose paycheck it came from."
+)
+
+
+def run_two_dimensional_retirement_projection(inputs: Dict, accounts: List[Dict], jason_ret_age: int, justin_ret_age: int,
+                                                ss_timing: str = "early", salary_growth_pct: float = None,
+                                                life_events: List[Dict] = None,
+                                                surplus_allocations: List[Dict] = None) -> Dict:
+    """Two independent, explicit retirement ages instead of
+    run_retirement_projection's single ret_age -- a new, additive
+    function per docs/TWO_DIMENSIONAL_RETIREMENT_DESIGN.md section 7.4,
+    not a mode flag on the existing reference implementation. v1 scope
+    (section 7, 2026-09-08): explicit ages for both spouses, one
+    scenario at a time (no 13-age sweep, no heatmap); Survivor Scenario,
+    real payroll-tax modeling, and an owner-attributed ledger are all
+    explicitly out of scope here (see ACCOUNT_OWNERSHIP_LIMITATION_NOTE
+    above).
+
+    Reuses run_retirement_projection's own accumulation-phase helpers
+    (_fv/_fv_annuity/_fv_growing_annuity, _split_life_events,
+    _post_retirement_asset_sale_events, _pre_retirement_taxable_add,
+    _surplus_allocations_at_retirement, _post_retirement_year_effects,
+    pension_for_age) and the shared withdrawal-phase step
+    (simulate_withdrawal_year) exactly as-is -- this function does not
+    reimplement withdrawal-order, tax, or RMD policy, only the
+    two-dimensional timing around it.
+
+    A household passes through up to two loop phases here (accumulation
+    before either retirement isn't modeled by this function, same as
+    run_retirement_projection): "phase2" (one spouse retired, one still
+    working -- new) and "phase3" (both retired, identical to
+    run_retirement_projection's existing single-phase withdrawal loop).
+    The still-working spouse's income during phase2 is modeled as a
+    flat SECOND_EARNER_NET_OF_TAX_FACTOR (0.65) offset to spending need
+    -- the SAME approximation and constant every other consumer's
+    second-earner gap income already uses, applied symmetrically to
+    whichever spouse is later_retiree (not hardcoded to Justin). No
+    401k contribution is modeled from that income once the withdrawal
+    loop has started (section 7.3) -- a documented simplification, not
+    an oversight; real payroll-tax modeling during a withdrawal-phase
+    loop is out of scope for v1.
+
+    Regression property: when justin_ret_age == jason_ret_age (or falls
+    back to it via the existing 0/unset sentinel), phase2 has zero
+    years and this reduces exactly to run_retirement_projection's own
+    single-axis output for that age -- verified numerically in
+    test_two_dimensional_retirement.py's simultaneous-retirement case."""
+    salary_growth_pct = inputs.get("_salary_growth_pct", 0.0) if salary_growth_pct is None else salary_growth_pct
+    jason_age  = inputs["jason_age"]
+    justin_age = inputs["justin_age"]
+    inflation  = inputs["inflation_rate"]
+    pre_ret    = inputs["expected_return_pre_retirement"]
+    post_ret   = inputs["expected_return_post_retirement"]
+    income_today = inputs["retirement_income_today_dollars"]
+    annual_hsa   = inputs.get("annual_hsa_contribution", 0)
+    annual_rsu   = inputs.get("annual_rsu_value", 0)
+
+    jason_ss_early   = inputs.get("jason_social_security", JASON_SS_EARLY_DEFAULT)
+    jason_ss_delayed = inputs.get("jason_ss_delayed", jason_ss_early * JASON_SS_DELAYED_RATIO)
+    jason_ss_annual, jason_ss_age = (jason_ss_early, 62) if ss_timing != "delayed" else (jason_ss_delayed, 67)
+    justin_ss_annual = inputs.get("justin_social_security", JUSTIN_SPOUSAL_ANNUAL)
+    justin_ss_age    = inputs.get("justin_ss_age", JUSTIN_SPOUSAL_AGE)
+
+    # ── Starting balances by bucket -- identical to run_retirement_projection ──
+    total_401k = sum(a["balance"] for a in accounts if a["account_type"] == "401k")
+    pretax_pct = inputs.get("pretax_401k_pct", 0.75)
+    roth_pct   = 1.0 - pretax_pct
+    pretax_401k = total_401k * pretax_pct if total_401k > 0 else PRETAX_401K_BALANCE_DEFAULT
+    roth_401k   = total_401k * roth_pct   if total_401k > 0 else ROTH_401K_BALANCE_DEFAULT
+
+    salary      = inputs.get("w2_salary", 0)
+    emp_pct     = inputs.get("employee_401k_pct", 0.06)
+    er_pct      = inputs.get("employer_401k_pct", 0.09)
+    annual_401k_roth   = inputs.get("annual_401k_roth_employee",  salary * emp_pct)
+    annual_401k_pretax = inputs.get("annual_401k_pretax_employer", salary * er_pct)
+    annual_bonus = salary * inputs.get("annual_bonus_pct", 0)
+
+    justin_salary  = inputs.get("justin_w2_salary", 0)
+    justin_emp_pct = inputs.get("justin_employee_401k_pct", 0.06)
+    justin_er_pct  = inputs.get("justin_employer_401k_pct", 0.03)
+    justin_annual_401k_roth   = justin_salary * justin_emp_pct
+    justin_annual_401k_pretax = justin_salary * justin_er_pct
+    justin_annual_bonus = justin_salary * inputs.get("justin_annual_bonus_pct", 0)
+    justin_annual_rsu   = inputs.get("justin_annual_rsu_value", 0)
+
+    pretax_start = pretax_401k + sum(
+        a["balance"] for a in accounts if a["account_type"] == "ira" and a["owner"] not in ("abby", "cooper"))
+    roth_start = roth_401k + sum(
+        a["balance"] for a in accounts if a["account_type"] == "roth_ira" and a["owner"] not in ("abby", "cooper"))
+    taxable_start = sum(
+        a["balance"] for a in accounts if a["account_type"] == "taxable" and a["owner"] not in ("abby", "cooper"))
+    hsa_start = sum(a["balance"] for a in accounts if a["account_type"] == "hsa")
+
+    timeline = build_two_person_timeline(jason_age, justin_age, jason_ret_age, justin_ret_age,
+                                          inputs.get("retirement_end_age"))
+    phase2_years = timeline.phase2_start_years
+    phase2_start_age = jason_age + phase2_years
+    phase3_start_age = jason_age + timeline.phase3_start_years
+    phase2_duration_years = timeline.phase3_start_years - phase2_years
+
+    # ── Accumulation to phase2_start (whichever spouse retires FIRST) ──
+    # Each spouse's own contributions run for their own years-to-retire,
+    # capped at phase2_years -- whoever retires LATER only gets
+    # contribution credit through phase2_start here; the rest of their
+    # working years (phase2 itself) are modeled as income below, not
+    # further contributions (section 7.3).
+    jason_contrib_years  = min(timeline.jason_years_to_retire, phase2_years)
+    jason_dormant_years  = max(0, phase2_years - jason_contrib_years)
+    justin_contrib_years = min(timeline.justin_years_to_retire, phase2_years)
+    justin_dormant_years = max(0, phase2_years - justin_contrib_years)
+
+    def _contrib_fv(annual_amount, contrib_years, dormant_years):
+        if annual_amount <= 0:
+            return 0.0
+        fv_at_stop = (
+            _fv_growing_annuity(annual_amount, pre_ret, salary_growth_pct, contrib_years)
+            if salary_growth_pct else _fv_annuity(annual_amount, pre_ret, contrib_years)
+        )
+        return _fv(fv_at_stop, pre_ret, dormant_years)
+
+    def _contrib_fv_flat(annual_amount, contrib_years, dormant_years):
+        """Same dormant-years compounding pattern as _contrib_fv, but
+        NEVER escalates with salary_growth_pct -- Jason's own RSU grant
+        is a flat dollar amount in run_retirement_projection (line
+        ~731: `_fv_annuity(annual_rsu * ..., pre_ret, years_to_retire)`,
+        unconditionally, unlike 401k contributions/bonus which ARE
+        salary-derived percentages and DO grow). Independent review,
+        2026-09-08, second follow-up: this function's shared _contrib_fv
+        helper incorrectly applied salary growth to Jason's RSU too,
+        reproduced ($195,000 correct vs. $215,150 with growth wrongly
+        applied over 3 years at 10% salary growth). Justin's own RSU
+        deliberately stays on the growing-eligible _contrib_fv above --
+        run_retirement_projection's own justin_annual_rsu handling
+        (via _justin_contrib_fv) already lets it grow with
+        salary_growth_pct, an existing asymmetry between the two
+        spouses' RSU treatment that predates this branch and is
+        preserved here exactly, not resolved."""
+        if annual_amount <= 0:
+            return 0.0
+        fv_at_stop = _fv_annuity(annual_amount, pre_ret, contrib_years)
+        return _fv(fv_at_stop, pre_ret, dormant_years)
+
+    pension_annual = pension_for_age(inputs, jason_ret_age)
+
+    retirement_year_for_events = timeline.retirement_year
+    pre_life_events, post_life_events = _split_life_events(life_events, retirement_year_for_events)
+    post_life_events = post_life_events + _post_retirement_asset_sale_events(inputs, jason_age, phase2_start_age)
+    life_events_taxable_add = _pre_retirement_taxable_add(pre_life_events, pre_ret, retirement_year_for_events)
+    surplus_at_ret = _surplus_allocations_at_retirement(surplus_allocations, pre_ret, phase2_years)
+
+    pretax_contrib_fv = (_contrib_fv(annual_401k_pretax, jason_contrib_years, jason_dormant_years)
+                          + _contrib_fv(justin_annual_401k_pretax, justin_contrib_years, justin_dormant_years))
+    roth_contrib_fv = (_contrib_fv(annual_401k_roth, jason_contrib_years, jason_dormant_years)
+                        + _contrib_fv(justin_annual_401k_roth, justin_contrib_years, justin_dormant_years))
+    pretax_at_start = _fv(pretax_start, pre_ret, phase2_years) + pretax_contrib_fv
+    roth_at_start   = _fv(roth_start, pre_ret, phase2_years) + roth_contrib_fv
+    taxable_at_start = _fv(taxable_start, pre_ret, phase2_years)
+    hsa_at_start = _fv(hsa_start, pre_ret, phase2_years) + _fv_annuity(annual_hsa, pre_ret, phase2_years)
+
+    taxable_at_start += _contrib_fv_flat(annual_rsu * SECOND_EARNER_NET_OF_TAX_FACTOR, jason_contrib_years, jason_dormant_years)
+    taxable_at_start += _contrib_fv(justin_annual_rsu * SECOND_EARNER_NET_OF_TAX_FACTOR, justin_contrib_years, justin_dormant_years)
+    taxable_at_start += _contrib_fv(annual_bonus * SECOND_EARNER_NET_OF_TAX_FACTOR, jason_contrib_years, jason_dormant_years)
+    taxable_at_start += _contrib_fv(justin_annual_bonus * SECOND_EARNER_NET_OF_TAX_FACTOR, justin_contrib_years, justin_dormant_years)
+
+    asset1_sale_age = inputs.get("asset1_sale_age", 0)
+    asset1_sale_net = inputs.get("asset1_sale_net", 0)
+    asset1_app      = inputs.get("asset1_appreciation", 0.03)
+    if asset1_sale_age and asset1_sale_age <= phase2_start_age:
+        yrs_asset1 = max(0, asset1_sale_age - jason_age)
+        yrs_to_grow = phase2_years - yrs_asset1
+        asset1_proceeds = asset1_sale_net * ((1 + asset1_app) ** yrs_asset1)
+        taxable_at_start += asset1_proceeds * ((1 + pre_ret) ** yrs_to_grow)
+    asset2_sale_age = inputs.get("asset2_sale_age", 0)
+    asset2_sale_net = inputs.get("asset2_sale_net", 0)
+    if asset2_sale_age and asset2_sale_age <= phase2_start_age:
+        yrs_asset2 = max(0, asset2_sale_age - jason_age)
+        yrs_to_grow = phase2_years - yrs_asset2
+        taxable_at_start += asset2_sale_net * ((1 + pre_ret) ** yrs_to_grow)
+
+    taxable_at_start += life_events_taxable_add
+    if surplus_at_ret["retirement_contrib"]:
+        pretax_at_start += surplus_at_ret["retirement_contrib"] * pretax_pct
+        roth_at_start   += surplus_at_ret["retirement_contrib"] * roth_pct
+    if surplus_at_ret["taxable_investing"]:
+        taxable_at_start += surplus_at_ret["taxable_investing"]
+
+    portfolio_at_start = pretax_at_start + roth_at_start + taxable_at_start + hsa_at_start
+
+    income_at_start = income_today * ((1 + inflation) ** phase2_years)
+    mort_age = timeline.end_age
+    retire_years = timeline.retire_yrs
+    cum_inflation = build_cumulative_inflation(inflation, retire_years)
+
+    healthcare_pre  = inputs.get("healthcare_pre_medicare", 0)
+    healthcare_post = inputs.get("healthcare_post_medicare", 0)
+    healthcare_pre_at_start  = healthcare_pre  * ((1 + inflation) ** phase2_years)
+    healthcare_post_at_start = healthcare_post * ((1 + inflation) ** phase2_years)
+
+    # Age-55 bridge-job/kids-at-home spending phases -- the SAME rules
+    # run_retirement_projection applies (gated on `ret_age == 55` there),
+    # preserved here rather than silently dropped (independent review,
+    # 2026-09-08, P1: the first cut of this function had no analog of
+    # this branch at all). Anchored to Jason's OWN retirement timeline
+    # (jason_years_to_retire), since bridge_years_55/kids_years_at_home_55
+    # are inherently "years since Jason's own retirement at 55" concepts,
+    # not phase2-relative -- phase2_years can be earlier than this
+    # whenever Justin retires first, so `yr` (phase2-relative) is the
+    # wrong index for this branch's own math.
+    healthcare_kids      = inputs.get("healthcare_kids", 0)
+    kids_annual_cost     = inputs.get("kids_annual_cost", 0)
+    bridge_income        = inputs.get("bridge_income_55", 0)
+    bridge_years         = inputs.get("bridge_years_55", 0)
+    kids_years           = inputs.get("kids_years_at_home_55", 0)
+    income_at_jason_ret          = income_today   * ((1 + inflation) ** timeline.jason_years_to_retire)
+    healthcare_pre_at_jason_ret  = healthcare_pre  * ((1 + inflation) ** timeline.jason_years_to_retire)
+    healthcare_post_at_jason_ret = healthcare_post * ((1 + inflation) ** timeline.jason_years_to_retire)
+    healthcare_kids_at_jason_ret = healthcare_kids * ((1 + inflation) ** timeline.jason_years_to_retire)
+    kids_annual_cost_at_jason_ret = kids_annual_cost * ((1 + inflation) ** timeline.jason_years_to_retire)
+    bridge_income_at_jason_ret    = bridge_income    * ((1 + inflation) ** timeline.jason_years_to_retire)
+
+    # Jason's own EFFECTIVE retirement start age -- max(jason_ret_age,
+    # jason_age), the same "already past" clamp build_timeline/
+    # TwoPersonTimeline apply everywhere else, expressed as an absolute
+    # age here since jason_years_to_retire is already clamped to 0 for
+    # an already-past selection. Two independent uses below:
+    # 1. Jason's own pension starts only once JASON has actually
+    #    retired -- not from phase2_start unconditionally (independent
+    #    review, 2026-09-08, P1: when Justin retires first, phase2's
+    #    still-working spouse is Jason, so pension payments landing
+    #    before his own retirement were two years too early in the
+    #    reproduction that found this).
+    # 2. The age-55 bridge/kids block below must count elapsed years
+    #    from THIS age, not the raw selected jason_ret_age (independent
+    #    review, 2026-09-08, third follow-up: for a household already
+    #    past age 55 today, `age - jason_ret_age` counted years that had
+    #    already elapsed before the household's real current age as if
+    #    they were still ahead of it -- reproduced: both spouses
+    #    currently 60, retirement selected at 55, 3% inflation -- the
+    #    first loop year (age 60, which IS Jason's effective retirement
+    #    start) incorrectly compounded 5 years of inflation it already
+    #    had a `jason_years_to_retire`-based reference for, giving
+    #    $92,742 instead of $80,000, and expired bridge/kids timing 5
+    #    years early for the same reason).
+    jason_effective_start_age = jason_age + timeline.jason_years_to_retire
+
+    # Still-working spouse's phase2 income baseline -- symmetric reuse of
+    # the same 0.65 net-of-tax approximation and per-year lookup every
+    # other consumer's second-earner gap income already uses (section
+    # 7.1/7.3). still_working_salary is 0 (and phase2_duration_years is
+    # 0) whenever later_retiree is None -- the simultaneous-retirement
+    # degenerate case, where justin_gap_income_for_year always returns
+    # 0.0 regardless.
+    if timeline.later_retiree == "justin":
+        still_working_salary = justin_salary
+    elif timeline.later_retiree == "jason":
+        still_working_salary = salary
+    else:
+        still_working_salary = 0.0
+    still_working_income_at_start = (
+        still_working_salary * SECOND_EARNER_NET_OF_TAX_FACTOR * ((1 + salary_growth_pct) ** phase2_years)
+        if phase2_duration_years > 0 else 0.0
+    )
+
+    pretax, roth, taxable, hsa = pretax_at_start, roth_at_start, taxable_at_start, hsa_at_start
+    jason_rmd_start_age = rmd_start_age(jason_age)
+    from retirement_tools_engine import marginal_rate as _marginal_rate, STD_DEDUCTION_MFJ_2026 as _STD_DED
+
+    yearly = []
+    for yr in range(retire_years):
+        age = timeline.age(yr)
+        calendar_year = timeline.calendar_year(yr)
+        justin_age_this_year = timeline.justin_age_at(age)
+        phase = "phase2" if timeline.in_phase2(age) else "phase3"
+
+        if jason_ret_age == 55 and age >= jason_effective_start_age:
+            jason_yr = age - jason_effective_start_age
+            kids_still_home = jason_yr < kids_years
+            bridge_active   = jason_yr < bridge_years
+            if bridge_active:
+                healthcare_this_year = 0
+                kids_cost = kids_annual_cost_at_jason_ret * ((1 + inflation) ** jason_yr)
+                bridge    = bridge_income_at_jason_ret    * ((1 + inflation) ** jason_yr)
+                year_need = max(0, income_at_jason_ret * ((1 + inflation) ** jason_yr) + kids_cost - bridge)
+            elif kids_still_home and age < 65:
+                healthcare_this_year = healthcare_kids_at_jason_ret
+                kids_cost = kids_annual_cost_at_jason_ret * ((1 + inflation) ** jason_yr)
+                year_need = income_at_jason_ret * ((1 + inflation) ** jason_yr) + kids_cost + healthcare_kids_at_jason_ret * ((1 + inflation) ** jason_yr)
+            elif age < 65:
+                healthcare_this_year = healthcare_pre_at_jason_ret
+                year_need = income_at_jason_ret * ((1 + inflation) ** jason_yr) + healthcare_pre_at_jason_ret * ((1 + inflation) ** jason_yr)
+            else:
+                healthcare_this_year = healthcare_post_at_jason_ret
+                year_need = income_at_jason_ret * ((1 + inflation) ** jason_yr) + healthcare_post_at_jason_ret * ((1 + inflation) ** jason_yr)
+            healthcare_inflated = healthcare_this_year * ((1 + inflation) ** jason_yr)
+        else:
+            healthcare_inflated = healthcare_for_age(age, healthcare_pre_at_start, healthcare_post_at_start) * ((1 + inflation) ** yr)
+            year_need = income_at_start * ((1 + inflation) ** yr) + healthcare_inflated
+
+        life_event_cash_this_year, life_event_monthly_this_year = _post_retirement_year_effects(post_life_events, calendar_year)
+        year_need -= life_event_monthly_this_year
+
+        still_working_income_this_year = justin_gap_income_for_year(
+            yr, phase2_duration_years, still_working_income_at_start, salary_growth_pct)
+        year_need -= still_working_income_this_year
+
+        # Pension is frozen (no COLA), Social Security COLA'd from each
+        # spouse's own claim age -- same formulas run_retirement_projection
+        # uses via the shared annual_inputs builder, computed directly
+        # here instead since that builder is coupled to Timeline's
+        # single-axis fields (effective_start_age/claim_year_index), not
+        # TwoPersonTimeline's.
+        year_pen = pension_annual if age >= jason_effective_start_age else 0.0
+        year_jss = jason_ss_annual * ((1 + inflation) ** max(0, age - jason_ss_age)) if age >= jason_ss_age else 0.0
+        year_uss = (justin_ss_annual * ((1 + inflation) ** max(0, justin_age_this_year - justin_ss_age))
+                    if justin_age_this_year >= justin_ss_age else 0.0)
+        fixed_income = year_pen + year_jss + year_uss
+
+        rmd = _rmd(pretax, age, jason_rmd_start_age)
+        taxable_income_est = max(0, year_pen + (year_jss + year_uss) * 0.85 + rmd - _STD_DED)
+        pretax_tax_rate = min(0.90, _marginal_rate(taxable_income_est) + max(0, float(inputs.get("state_income_tax_rate") or 0)))
+
+        year_result = simulate_withdrawal_year(
+            opening=AccountState(pretax=pretax, roth=roth, taxable=taxable, hsa=hsa),
+            spending_need=year_need,
+            guaranteed_income=fixed_income,
+            life_event_cash=life_event_cash_this_year,
+            rmd_amount=rmd,
+            tax_model=marginal_bracket_tax_model(pretax_rate=pretax_tax_rate, taxable_rate=0.0),
+            growth_rate=post_ret,
+            order=DEFAULT_ORDER,
+        )
+
+        withdrawal_taxable = year_result.draws.get("taxable", 0.0)
+        withdrawal_pretax  = year_result.draws.get("pretax", 0.0)
+        withdrawal_hsa     = year_result.draws.get("hsa", 0.0)
+        withdrawal_roth    = year_result.draws.get("roth", 0.0)
+        total_withdrawal = withdrawal_taxable + withdrawal_pretax + withdrawal_roth + withdrawal_hsa
+        unmet_need = year_result.unmet_need
+
+        pretax, roth, taxable, hsa = year_result.closing.pretax, year_result.closing.roth, year_result.closing.taxable, year_result.closing.hsa
+        total_portfolio = pretax + roth + taxable + hsa
+
+        yearly.append({
+            "jason_age":  age,
+            "justin_age": justin_age_this_year,
+            "year":       calendar_year,
+            "phase":      phase,
+            "income_need": round(year_need + still_working_income_this_year),  # need BEFORE the still-working offset, matching run_retirement_projection's own field meaning
+            "still_working_spouse_income": round(still_working_income_this_year),
+            "bridge_income": round(bridge_income_at_jason_ret * ((1 + inflation) ** (age - jason_effective_start_age))) if jason_ret_age == 55 and age >= jason_effective_start_age and (age - jason_effective_start_age) < bridge_years else 0,
+            "healthcare_cost": round(healthcare_inflated),
+            "pension":         round(year_pen),
+            "social_security": round(year_jss + year_uss),
+            "rmd":             round(rmd),
+            "estimated_tax":   round(year_result.taxes_paid.get("rmd", 0.0) + year_result.taxes_paid.get("pretax", 0.0)),
+            "withdrawal":      round(total_withdrawal),
+            "draw":            round(max(0.0, year_need - fixed_income)),
+            "unmet_need":      round(unmet_need),
+            "portfolio_balance": round(total_portfolio),
+        })
+
+    underfunded = any(y["unmet_need"] > 0 for y in yearly)
+
+    return {
+        "has_data": True,
+        "jason_ret_age":  jason_ret_age,
+        "justin_ret_age": justin_ret_age,
+        "phase2_start_age": phase2_start_age,
+        "phase3_start_age": phase3_start_age,
+        "later_retiree":    timeline.later_retiree,
+        "portfolio_at_phase2_start": round(portfolio_at_start),
+        "retirement_end_age": mort_age,
+        "any_year_underfunded": underfunded,
+        "on_track": not underfunded,
+        "yearly_detail": yearly,
+        "second_earner_net_of_tax_factor": SECOND_EARNER_NET_OF_TAX_FACTOR,
+        "account_ownership_limitation": ACCOUNT_OWNERSHIP_LIMITATION_NOTE,
+    }
 
 
 def _project_529_saving_phase(starting_balance, monthly_contribution, years_to_college,
