@@ -12,6 +12,8 @@ import StressTestWhatIf from './StressTestWhatIf'
 // default was never reachable through the normal UI flow. These tests
 // verify the ACTUAL request payload, not just the displayed number.
 
+import { setPrivacyMode } from '../utils/privacy'
+
 vi.mock('axios', () => ({ default: { get: vi.fn(), post: vi.fn() } }))
 vi.mock('../hooks/usePersonNames', () => ({
   usePersonNames: () => ({ person1Name: 'Alex', person2Name: 'Sam' }),
@@ -40,6 +42,7 @@ function mockPlanningInputs(jasonAge, justinAge) {
 beforeEach(() => {
   vi.clearAllMocks()
   localStorage.clear()
+  setPrivacyMode(false)
   container = document.createElement('div')
   document.body.appendChild(container)
   root = createRoot(container)
@@ -118,12 +121,21 @@ describe('Survivor Scenario default death age', () => {
   })
 })
 
-describe('Survivor Scenario second-earner gap-income disclosure (backend/docs/CALCULATION_CONTRACT.md section 17, P2)', () => {
+describe('Survivor Scenario second-earner gap-income disclosure (backend/docs/CALCULATION_CONTRACT.md sections 17-18, P2)', () => {
   // A backend-output closeout isn't the same as a user-visible one --
   // independent review, 2026-09-08: justin_gap_income/
   // second_earner_net_of_tax_factor were added to the API response but
   // nothing in the frontend read them. This asserts against the actual
   // RENDERED text, not just that the fields exist on the mocked response.
+  //
+  // `schedule` here deliberately mimics the backend's real [::2]
+  // sampling (only alternating ages 62/64/66 shown, even though the real
+  // gap spans ages 62-65) -- `justin_gap_income_years_remaining` is the
+  // backend's own explicit count over the FULL unsampled schedule
+  // (section 18 fix), independent of how many rows happen to be sampled
+  // into the displayed array. A frontend that derived "years" by
+  // filtering the sampled `schedule` itself would undercount this case
+  // at "2 more years" instead of the true 4.
   const gapSurvivorResult = {
     has_data: true, deceased: 'jason', death_age: 61, survivor_end_age: 90,
     portfolio_at_death: 800000, life_insurance_payout: 0,
@@ -136,6 +148,7 @@ describe('Survivor Scenario second-earner gap-income disclosure (backend/docs/CA
       { age: 64, starting_balance: 790000, draw: 10000, ending_balance: 785000, justin_gap_income: 65000 },
       { age: 66, starting_balance: 780000, draw: 75000, ending_balance: 710000, justin_gap_income: 0 },
     ],
+    justin_gap_income_years_remaining: 4,
     second_earner_net_of_tax_factor: 0.65,
   }
 
@@ -152,10 +165,36 @@ describe('Survivor Scenario second-earner gap-income disclosure (backend/docs/CA
     await flush()
     await click('Run Scenario')
     await flush()
-    // The note counts entries with justin_gap_income > 0 (2 of the 3
-    // mocked schedule rows) and reads the first one's dollar amount.
+    // Reads the FIRST schedule row's dollar amount, and the backend's
+    // own explicit remaining-years count -- not a count derived from the
+    // (sampled) schedule array itself.
     expect(container.textContent).toContain('$65,000')
-    expect(container.textContent).toContain('2 more years')
+    expect(container.textContent).toContain('4 more years')
+    expect(container.textContent).toContain('65%')
+  })
+
+  it('masks the gap-income dollar amount in privacy mode but keeps the policy factor visible', async () => {
+    // Backlog P2 (CALCULATION_CONTRACT.md section 18): SecondEarnerNote
+    // used to format the amount directly, bypassing the app's existing
+    // isPrivacyMode()/MASK_CURRENCY convention. The 65% factor is a
+    // documented methodology constant, not household financial data, so
+    // it stays visible even while the dollar amount is masked.
+    setPrivacyMode(true)
+    localStorage.setItem('cfo_scenario_ret_age', '60')
+    axios.get.mockImplementation(url => Promise.resolve({
+      data: url === '/api/planning-inputs' ? mockPlanningInputs(60, 60)
+          : url === '/api/simulation/survivor-scenario' ? gapSurvivorResult
+          : projections,
+    }))
+    await act(async () => root.render(<StressTestWhatIf />))
+    await flush()
+    await click('Survivor Scenario')
+    await flush()
+    await click('Run Scenario')
+    await flush()
+    expect(container.textContent).not.toContain('$65,000')
+    expect(container.textContent).toContain('$•••,•••')
+    expect(container.textContent).toContain('4 more years')
     expect(container.textContent).toContain('65%')
   })
 

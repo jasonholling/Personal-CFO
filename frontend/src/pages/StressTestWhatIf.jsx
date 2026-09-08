@@ -116,7 +116,7 @@ function SurvivorScenarioSection({ retAge }) {
             </div>
             {deceased !== 'justin' && (
               <SecondEarnerNote amount={result.schedule?.[0]?.justin_gap_income}
-                                 years={result.schedule?.filter(r => r.justin_gap_income > 0).length}
+                                 years={result.justin_gap_income_years_remaining}
                                  factor={result.second_earner_net_of_tax_factor} personLabel={person2Name} />
             )}
             <div className="grid-3">

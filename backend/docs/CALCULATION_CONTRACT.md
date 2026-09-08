@@ -1363,3 +1363,133 @@ before merging (see the commit this section was added in for the exact
 count). Branch: `codex/second-earner-output-visibility-and-parity`
 (same branch as section 16 — these are fixes to that same unmerged
 work, not a new branch).
+
+## 18. Survivor insurance minimum-funding fix (timing + signed surplus); explicit gap-duration field; note privacy masking (2026-09-08, sixth pass)
+
+Continued independent review of the section-17 insurance fix found two
+further real bugs in the same `additional_insurance_needed` calculation,
+plus two frontend P2 findings. All four fixed on the same unmerged
+branch (`codex/second-earner-output-visibility-and-parity`).
+
+**P1 — First survivor year discounted by one extra year it shouldn't
+be.** Section 17's fix computed
+`cap_need = sum(row["draw"] / (1 + post_ret) ** (i + 1) for i, row in
+enumerate(schedule))`. The shared annual engine
+(`simulate_withdrawal_year`) spends BEFORE applying that year's growth
+— so the payout is available at the start of the survivor schedule and
+the first year's need must be funded immediately, undiscounted.
+Discounting it by one year understated the payout whenever
+`post_ret > 0`. Reproduction (both spouses 60, Jason dies at 60,
+horizon 62 exclusive — one survivor year — $100K spend/75% factor, zero
+assets, 10% post-retirement return): the only year needs $75,000
+immediately; the old formula asked for $68,182 (`75000 / 1.10`), which
+still left `survives=False` when actually injected as the payout.
+
+**P1 — Flooring `draw` at zero discarded real wage surpluses.** The
+same sum used `row["draw"]`, which `max(0, need - guaranteed)` floors
+at zero. The simulator itself preserves income above spending as
+savings (section 15's shared-engine migration), but the flooring made
+that surplus invisible to the capitalization, overstating funding
+needed for later years. Reproduction (both spouses 60, ret/death 60,
+horizon 64 exclusive — 3 years — $100K spend/75% factor, zero returns/
+inflation/assets, Justin $200K salary through his own retirement at
+62): death-year baseline already saves $30,000
+(`starting_balance_after_payout`); survivor year 61 saves another
+$55,000 ($130,000 net wages at the 65% factor − $75,000 spend); years
+62-63 each need $75,000 once wages stop. Correct extra funding needed:
+$65,000. The old (floored-`draw`) formula reported $120,000, silently
+dropping the $55,000 surplus.
+
+**Both fixed together**, per the review's explicit instruction, by
+replaying the exact ordered, signed cash flows rather than any flat
+sum. A new `_minimum_survivor_funding(net_needs, post_ret)` helper
+(module-level, own docstring) performs backward substitution over
+`net_needs` — a new list of the UNFLOORED `need - guaranteed` value per
+year, collected alongside `schedule` in the same loop:
+
+```python
+required = 0.0
+for net_need in reversed(net_needs):
+    required = max(0.0, net_need + required / (1 + post_ret))
+```
+
+The `max(0.0, ...)` at each step is what makes this correct where a
+naive full-horizon signed sum would not be: it stops an early surplus
+from being spent forward into a later shortfall (money that hasn't
+been earned yet can't fund an earlier year), and stops a later
+requirement from clawing back an earlier year's already-covered
+surplus. Verified by hand against both reproductions above (exactly
+$75,000 and $65,000) before writing any test, then by the two new
+tests below, then by `test_additional_insurance_needed_reflects_gap_
+income` (section 17's own $315,000 case, still passing unchanged since
+that scenario has no surplus years).
+
+New tests: `test_additional_insurance_needed_does_not_discount_first_
+year` and `test_additional_insurance_needed_credits_wage_surplus_
+without_borrowing_from_the_future` (`TestRunSurvivorScenario`). Per the
+review's explicit instruction — "add a regression that injects the
+recommended payout and verifies spending is actually funded in each
+year; handle rounding explicitly" — both tests also re-run the
+scenario with `additional_insurance_needed` injected as life insurance
+and assert `survives is True`, `depleted_age is None`, and every
+schedule row's `ending_balance >= 0`. The rounding note is real: a
+minimum-funding recommendation by definition drives the final year's
+ending balance to exactly $0, and this function's own depleted-
+portfolio check (`bal_after <= 0`) treats an exact zero as "did not
+survive" — the same as it would for a truly negative balance. Both
+tests inject `additional_insurance_needed + 1` rather than the bare
+recommendation, since `round()` can itself underfund by up to $0.50.
+This is an inherent property of "minimum funding," not a residual bug
+— a household using this number in practice should treat it as a
+floor, not round down.
+
+**P2 — Survivor's gap-duration note undercounted years via sampled
+schedule rows.** `StressTestWhatIf.jsx` derived `years` for
+`SecondEarnerNote` as
+`result.schedule.filter(r => r.justin_gap_income > 0).length`, but
+Survivor is the only consumer in this codebase whose returned
+`schedule` is sampled (`schedule[::2]`, for chart-rendering size, not
+changed here). Reproduction: wages continuing at ages 61-64 sample down
+to just ages 61 and 63, so the note said "2 more years" instead of the
+true 4. Checked every other schedule-based consumer for the same class
+of bug (`grep -n '\[::' simulation_engine.py projection_engine.py`) —
+Survivor's is the ONLY sampled schedule anywhere in the backend;
+Roth Conversion's `schedule`, Retirement Projection's `yearly_detail`,
+and every top-level `justin_gap_income_first_year`/`justin_gap_years`
+field used by Monte Carlo/SWR/Stress Tests are all full, unsampled
+data, so no other consumer needed this fix.
+
+**Fixed:** a new backend field, `justin_gap_income_years_remaining`,
+counted from the FULL (pre-sampling) `schedule` list in the same
+return statement that samples `schedule` itself —
+`sum(1 for row in schedule if row["justin_gap_income"] > 0)`. The
+frontend now reads this field directly instead of re-deriving a count
+from the (sampled) array it also receives.
+
+**P2 — `SecondEarnerNote` bypassed privacy mode.** The component
+formatted the dollar amount directly
+(`` `$${Math.round(amount).toLocaleString()}` ``), never consulting the
+app's existing `isPrivacyMode()`/`MASK_CURRENCY` convention used
+throughout the rest of the app — exposing the working spouse's income
+even on pages where nearby monetary values are masked for
+screen-sharing. Fixed: the amount now renders through
+`isPrivacyMode() ? MASK_CURRENCY : ...`, matching the convention used
+elsewhere (e.g. `Accounts.jsx`, `Allocation.jsx`). Per the review's
+explicit instruction, the 65%-of-gross policy factor stays visible in
+both modes — it's a documented methodology constant, not
+household-specific financial data.
+
+New/updated frontend tests in `SurvivorScenario.test.jsx`: the existing
+gap-income disclosure test now asserts `justin_gap_income_years_remaining:
+4` renders as "4 more years" (previously asserted the old, undercounted
+"2 more years," which matched the bug rather than the correct value); a
+new test enables privacy mode and asserts the rendered text contains
+`$•••,•••` and not `$65,000`, while `65%` remains visible.
+
+**Verified:** full backend suite, 1,116 passed, 97.64% coverage (was
+not rerun by the previous reviewer pass; rerun here per their note).
+Frontend: 20 passed (was 19 — one new privacy-mode test), production
+build succeeds (same pre-existing large-chunk warning, unrelated).
+Sensitive-data check passed. Branch:
+`codex/second-earner-output-visibility-and-parity` (same branch as
+sections 16-17 — still unmerged, pending review).

@@ -1027,6 +1027,115 @@ class TestRunSurvivorScenario:
         assert result["additional_insurance_needed"] < old_buggy_value
         assert old_buggy_value - result["additional_insurance_needed"] == pytest.approx(259663, abs=1)
 
+    def test_additional_insurance_needed_does_not_discount_first_year(self):
+        """Backlog P1 (CALCULATION_CONTRACT.md section 18), independent
+        review, 2026-09-08, sixth pass: the section-17 fix's
+        `cap_need = sum(row["draw"] / (1+post_ret)**(i+1) ...)` discounted
+        the FIRST survivor year by one extra year it shouldn't have --
+        the shared annual engine (simulate_withdrawal_year) spends BEFORE
+        applying that year's growth, so the first year's need must be
+        funded immediately, undiscounted.
+
+        Exact reproduction, hand-calculated by the reviewer: both spouses
+        60, Jason dies at 60 (schedule starts at 61), horizon 62
+        (exclusive) -- one survivor year only. $100K spend, 75% survivor
+        factor, 0% everything except a 10% post-retirement return, zero
+        assets. The only year requires $75,000 immediately -- the old
+        (buggy) discounted formula asked for only $68,182
+        ($75,000 / 1.10), which still leaves the plan depleted if actually
+        injected as the payout."""
+        inputs = {
+            "jason_age": 60, "justin_age": 60,
+            "retirement_income_today_dollars": 100000, "inflation_rate": 0.0,
+            "expected_return_pre_retirement": 0.0, "expected_return_post_retirement": 0.10,
+            "jason_social_security": 0, "jason_ss_delayed": 0, "justin_social_security": 0,
+            "jason_ss_age": 62, "justin_ss_age": 67,
+            "annual_401k_contribution": 0, "annual_roth_contribution": 0, "annual_hsa_contribution": 0,
+            "annual_rsu_value": 0, "annual_bonus_pct": 0, "mortgage_balance": 0,
+            "retirement_end_age": 62,
+        }
+        accounts = [{"name": "Brokerage", "account_type": "taxable", "owner": "joint", "balance": 0}]
+        result = run_survivor_scenario(inputs, accounts, ret_age=60, deceased="jason", death_age=60,
+                                        survivor_need_factor=0.75)
+        assert result["survives"] is False
+        assert result["starting_balance_after_payout"] == 0
+        assert result["additional_insurance_needed"] == 75000
+        old_buggy_value = round(75000 / 1.10)
+        assert old_buggy_value == 68182  # matches the independent review's own reported old value
+        assert result["additional_insurance_needed"] > old_buggy_value
+
+        # Inject the recommendation and replay: verifies it actually funds
+        # the year, not just that the formula changed. round() can
+        # underfund by up to $0.50, so a $1 buffer is added -- the exact
+        # rounded recommendation alone lands exactly on a $0 ending
+        # balance, which this codebase's own depleted-portfolio check
+        # (bal_after <= 0) treats as "did not survive," same as it would
+        # for any minimum-funding recommendation that (by definition)
+        # spends the portfolio down to exactly zero in its final year.
+        funded_inputs = {**inputs, "jason_life_basic": result["additional_insurance_needed"] + 1}
+        funded = run_survivor_scenario(funded_inputs, accounts, ret_age=60, deceased="jason", death_age=60,
+                                        survivor_need_factor=0.75)
+        assert funded["survives"] is True
+        assert funded["depleted_age"] is None
+        assert all(row["ending_balance"] >= 0 for row in funded["schedule"])
+
+    def test_additional_insurance_needed_credits_wage_surplus_without_borrowing_from_the_future(self):
+        """Backlog P1 (CALCULATION_CONTRACT.md section 18), independent
+        review, 2026-09-08, sixth pass: the section-17 fix summed
+        `row["draw"]`, which is floored at zero, discarding real wage
+        surpluses the simulator itself preserves as savings -- and a
+        naive signed full-horizon sum would have the opposite defect,
+        letting a LATER surplus retroactively fund an EARLIER shortfall
+        that the year-by-year simulation would never actually allow.
+
+        Exact reproduction, hand-calculated by the reviewer: both
+        spouses 60, selected retirement/death age 60 (schedule starts at
+        61), horizon 64 (exclusive) -- 3 survivor years (61, 62, 63).
+        $100K household spend, 75% survivor factor, zero starting
+        assets/returns/inflation/pension/SS, Justin salary $200,000 until
+        his own retirement at 62 (net wages at the 65% factor =
+        $130,000/yr while working). Death-year baseline saves $30,000
+        (that's starting_balance_after_payout, from the pre-death
+        projection). Survivor year 61 saves another $55,000 ($130,000
+        wages - $75,000 spend); years 62-63 each need $75,000 once wages
+        stop = $150,000. Required extra funding: $150,000 - $55,000
+        surplus - $30,000 already on hand = $65,000. The old (buggy)
+        floored-draw sum instead reported $120,000, silently dropping the
+        $55,000 wage surplus entirely."""
+        inputs = {
+            "jason_age": 60, "justin_age": 60,
+            "retirement_income_today_dollars": 100000, "inflation_rate": 0.0,
+            "expected_return_pre_retirement": 0.0, "expected_return_post_retirement": 0.0,
+            "jason_social_security": 0, "jason_ss_delayed": 0, "justin_social_security": 0,
+            "jason_ss_age": 62, "justin_ss_age": 67,
+            "annual_401k_contribution": 0, "annual_roth_contribution": 0, "annual_hsa_contribution": 0,
+            "annual_rsu_value": 0, "annual_bonus_pct": 0, "mortgage_balance": 0,
+            "retirement_end_age": 64,
+            "justin_w2_salary": 200000, "justin_ret_age": 62,
+        }
+        accounts = [{"name": "Brokerage", "account_type": "taxable", "owner": "joint", "balance": 0}]
+        result = run_survivor_scenario(inputs, accounts, ret_age=60, deceased="jason", death_age=60,
+                                        survivor_need_factor=0.75)
+        assert result["survives"] is False
+        assert result["starting_balance_after_payout"] == 30000
+        assert result["additional_insurance_needed"] == 65000
+        old_buggy_value = 120000  # matches the independent review's own reported old value
+        assert result["additional_insurance_needed"] < old_buggy_value
+        assert old_buggy_value - result["additional_insurance_needed"] == 55000
+
+        # Inject the recommendation (plus a $1 rounding buffer, same
+        # reasoning as the sibling test above) and replay year-by-year:
+        # every year's ending balance must be non-negative, proving the
+        # early wage surplus was correctly credited without letting the
+        # later, wage-free years borrow against income that hadn't
+        # existed yet at that point in the timeline.
+        funded_inputs = {**inputs, "jason_life_basic": result["additional_insurance_needed"] + 1}
+        funded = run_survivor_scenario(funded_inputs, accounts, ret_age=60, deceased="jason", death_age=60,
+                                        survivor_need_factor=0.75)
+        assert funded["survives"] is True
+        assert funded["depleted_age"] is None
+        assert all(row["ending_balance"] >= 0 for row in funded["schedule"])
+
     def test_returns_has_data_true_for_valid_scenario(self, sample_inputs, sample_accounts):
         result = run_survivor_scenario(sample_inputs, sample_accounts, ret_age=60, deceased="jason", death_age=70)
         assert result["has_data"] is True

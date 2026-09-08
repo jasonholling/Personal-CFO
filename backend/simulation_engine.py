@@ -2000,6 +2000,43 @@ def run_contribution_sensitivity(inputs: Dict, accounts: List[Dict], ret_age: in
     }
 
 
+def _minimum_survivor_funding(net_needs: List[float], post_ret: float) -> float:
+    """Minimum non-negative starting capital that funds every year of a
+    dated, signed cash-flow sequence, replaying the same spend-then-grow
+    order the shared annual engine uses (independent review,
+    2026-09-08, sixth pass -- CALCULATION_CONTRACT.md section 18).
+
+    `net_needs[i]` is that year's UNFLOORED (need - guaranteed) figure --
+    positive means a real shortfall to fund, negative means a real
+    surplus (e.g. Justin's gap wages exceeding spending) that reduces
+    what must be funded *for that year*, but a surplus in a later year
+    can never retroactively cover an earlier year's shortfall, because
+    the money simply isn't available yet at that point in the timeline.
+
+    Solved by backward substitution: walk the years in reverse, and at
+    each step compute the capital that must exist at the START of that
+    year to (a) cover its own net need immediately -- funds are spent
+    before that year's growth is applied, matching
+    simulate_withdrawal_year's own order, so the first year in the
+    sequence must be entirely undiscounted -- and (b) still leave enough,
+    after one year of growth, to cover everything required from the
+    years after it:
+
+        required = max(0, net_need + required_from_later_years / (1 + post_ret))
+
+    The max(0, ...) at each step is what prevents an early surplus from
+    "spending forward" into a later shortfall: once a year's own need is
+    covered, any leftover from later requirements is dropped, not carried
+    backward past that point either -- each year is only ever asked to
+    hold what the years at-or-after it still need, discounted to its own
+    start.
+    """
+    required = 0.0
+    for net_need in reversed(net_needs):
+        required = max(0.0, net_need + required / (1 + post_ret))
+    return required
+
+
 def run_survivor_scenario(inputs: Dict, accounts: List[Dict], ret_age: int = 60,
                            deceased: str = "jason", death_age: int = None,
                            survivor_need_factor: float = 0.75,
@@ -2154,6 +2191,14 @@ def run_survivor_scenario(inputs: Dict, accounts: List[Dict], ret_age: int = 60,
     income_need_at_death = income_today * ((1 + inflation) ** years_since_today) * survivor_need_factor
 
     schedule = []
+    # Signed, UNFLOORED net need per year (need - guaranteed, before the
+    # max(0, ...) that produces the displayed `draw`) — a negative value
+    # is a real savings surplus that year. Collected alongside `schedule`
+    # so additional_insurance_needed below can compute minimum funding
+    # from the exact same ordered cash flows, without the flooring that
+    # silently discarded wage surpluses (backlog P1, CALCULATION_CONTRACT.md
+    # section 18).
+    net_needs = []
     bal = starting_balance
     depleted_age = None
     # The baseline's death_row["portfolio_balance"] is an END-OF-YEAR
@@ -2191,6 +2236,7 @@ def run_survivor_scenario(inputs: Dict, accounts: List[Dict], ret_age: int = 60,
         )
         need -= gap_income_this_year
         draw       = max(0, need - guaranteed)
+        net_needs.append(need - guaranteed)  # unfloored -- see net_needs' own comment above
         # Catch the edge case where the portfolio is already at (or below)
         # zero going into this year and there's still a real gap to cover —
         # without this check, a starting_balance of 0 never triggers the
@@ -2258,19 +2304,34 @@ def run_survivor_scenario(inputs: Dict, accounts: List[Dict], ret_age: int = 60,
         # (independent review, 2026-09-08 — reproduced: $100K spend/
         # 75% survivor factor/$100K Justin salary through 65/$135K
         # taxable/0% everything gave $574,663 either way; the correct,
-        # dated-cash-flow answer is $315,000 -- see
-        # test_additional_insurance_needed_reflects_gap_income below).
-        # `schedule` here is still the FULL per-year list (the [::2]
-        # display sampling only happens at the return statement below),
-        # so every year is captured, not just the alternating ones shown
-        # in the API response. Nominal cash flows discounted at the
-        # nominal post_ret rate (not a real/inflation-adjusted rate) --
-        # correct now that flows are dated explicitly rather than
-        # represented as a single constant real figure.
-        cap_need = sum(
-            row["draw"] / ((1 + post_ret) ** (i + 1))
-            for i, row in enumerate(schedule)
-        )
+        # dated-cash-flow answer is $315,000).
+        #
+        # Two further findings from the same review, both fixed here
+        # (CALCULATION_CONTRACT.md section 18):
+        #
+        # 1. The engine spends BEFORE applying that year's growth
+        #    (simulate_withdrawal_year's own convention, matched above) —
+        #    the first survivor year's need must be funded immediately,
+        #    not discounted by one extra year as a naive
+        #    sum(draw[i]/(1+post_ret)**(i+1)) does. Reproduced: a single
+        #    survivor year, $75,000 need, 10% return -- the discounted
+        #    formula asked for only $68,182, which still leaves
+        #    survives=False when actually injected as the payout.
+        # 2. Using the FLOORED `draw` (not the signed, unfloored net
+        #    need) discarded real wage surpluses the simulator itself
+        #    preserves as savings -- overstating the funding required for
+        #    later years. Reproduced: Justin's wages exceed spending in
+        #    the first survivor year by $55,000; the correct answer
+        #    ($65,000) is $55,000 less than what flooring produced
+        #    ($120,000).
+        #
+        # _minimum_survivor_funding solves both by replaying the exact
+        # ordered, signed cash flows via backward substitution (see its
+        # own docstring) rather than a flat sum in either direction —
+        # this also correctly refuses to let a LATER surplus retroactively
+        # fund an EARLIER shortfall, which a full-horizon signed sum alone
+        # would get wrong.
+        cap_need = _minimum_survivor_funding(net_needs, post_ret)
         additional_insurance_needed = max(0, round(cap_need - starting_balance))
 
     if survives:
@@ -2311,4 +2372,14 @@ def run_survivor_scenario(inputs: Dict, accounts: List[Dict], ret_age: int = 60,
         # everywhere it's used; surfaced once here for the UI/docs,
         # matching every other consumer's own new field of this name.
         "second_earner_net_of_tax_factor": SECOND_EARNER_NET_OF_TAX_FACTOR,
+        # Explicit remaining-gap-income duration (backlog P2,
+        # CALCULATION_CONTRACT.md section 18): counted from the FULL
+        # per-year `schedule` list above (not the [::2] sampling applied
+        # just above for `schedule` itself) — a frontend deriving "years
+        # remaining" by filtering the SAMPLED schedule for
+        # justin_gap_income > 0 undercounts by roughly half whenever the
+        # gap spans more than one displayed row (independent review,
+        # 2026-09-08 — reproduced: wages continuing at ages 61-64 sampled
+        # down to just 61 and 63, reporting "2 more years" instead of 4).
+        "justin_gap_income_years_remaining": sum(1 for row in schedule if row["justin_gap_income"] > 0),
     }
