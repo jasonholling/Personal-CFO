@@ -19,13 +19,26 @@ export default function TwoAgeScenario() {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
 
+  // Independent review, 2026-09-08 (P2): editing either age left the
+  // PREVIOUS result on screen with no indication it no longer matched
+  // the ages in the inputs, and a failed rerun kept the stale result
+  // too. Clearing on every age edit and at the start of every run (not
+  // just on success) means only a result that actually matches the
+  // current request is ever shown -- and the summary below renders the
+  // ages FROM THE RESPONSE (result.jason_ret_age/justin_ret_age), not
+  // from the current input state, so a result can't silently be
+  // mislabeled if the inputs changed again while a request was in flight.
+  const updateJasonAge = v => { setJasonRetAge(v); setResult(null) }
+  const updateJustinAge = v => { setJustinRetAge(v); setResult(null) }
+
   const run = () => {
     setLoading(true)
     setError(null)
+    setResult(null)
     axios.get('/api/projections/two-dimensional-retirement', {
       params: { jason_ret_age: jasonRetAge, justin_ret_age: justinRetAge },
     }).then(r => setResult(r.data))
-      .catch(() => setError('Could not run this scenario. Check both ages and try again.'))
+      .catch(() => { setResult(null); setError('Could not run this scenario. Check both ages and try again.') })
       .finally(() => setLoading(false))
   }
 
@@ -45,11 +58,11 @@ export default function TwoAgeScenario() {
         <div className="grid-3" style={{ marginBottom:12 }}>
           <div>
             <div className="label" style={{ marginBottom:8 }}>{person1Name}'s Retirement Age</div>
-            <input type="number" value={jasonRetAge} onChange={e => setJasonRetAge(parseInt(e.target.value) || 0)} />
+            <input type="number" value={jasonRetAge} onChange={e => updateJasonAge(parseInt(e.target.value) || 0)} />
           </div>
           <div>
             <div className="label" style={{ marginBottom:8 }}>{person2Name}'s Retirement Age</div>
-            <input type="number" value={justinRetAge} onChange={e => setJustinRetAge(parseInt(e.target.value) || 0)} />
+            <input type="number" value={justinRetAge} onChange={e => updateJustinAge(parseInt(e.target.value) || 0)} />
           </div>
         </div>
         <button className="btn-primary" onClick={run} disabled={loading}>{loading ? 'Calculating…' : 'Run Scenario'}</button>
@@ -59,7 +72,10 @@ export default function TwoAgeScenario() {
       {result?.has_data && (
         <>
           <div className="card" style={{ marginBottom:24, borderTop:`3px solid ${result.on_track ? '#34d399' : '#f87171'}` }}>
-            <div className="label" style={{ marginBottom:16 }}>Summary</div>
+            <div className="label" style={{ marginBottom:4 }}>Summary</div>
+            <div style={{ fontSize:12, color:'var(--text3)', marginBottom:16 }}>
+              Results for {person1Name} retiring at {result.jason_ret_age} and {person2Name} retiring at {result.justin_ret_age}
+            </div>
             <div className="grid-3">
               <div>
                 <div className="label">Portfolio When The First of You Retires</div>
@@ -94,7 +110,7 @@ export default function TwoAgeScenario() {
                     <th style={{ padding:'6px 8px' }}>Phase</th>
                     <th style={{ padding:'6px 8px' }}>Spending Need</th>
                     <th style={{ padding:'6px 8px' }}>Still-Working Income</th>
-                    <th style={{ padding:'6px 8px' }}>Portfolio Draw</th>
+                    <th style={{ padding:'6px 8px' }}>Withdrawal</th>
                     <th style={{ padding:'6px 8px' }}>Ending Balance</th>
                   </tr>
                 </thead>
@@ -106,7 +122,16 @@ export default function TwoAgeScenario() {
                       <td style={{ padding:'6px 8px' }}>{row.phase === 'phase2' ? 'One retired' : 'Both retired'}</td>
                       <td style={{ padding:'6px 8px' }}>{fmt(row.income_need)}</td>
                       <td style={{ padding:'6px 8px' }}>{row.still_working_spouse_income > 0 ? fmt(row.still_working_spouse_income) : '—'}</td>
-                      <td style={{ padding:'6px 8px' }}>{fmt(row.draw)}</td>
+                      {/* Independent review, 2026-09-08 (P2): this used
+                          to show row.draw -- net spending need before
+                          withdrawal-order/tax mechanics -- labeled as if
+                          it were the actual amount leaving the portfolio.
+                          row.withdrawal is the real grossed-up total
+                          simulate_withdrawal_year actually drew (e.g. an
+                          $80,000 need funded from pretax can mean $88,889
+                          actually leaves the accounts once the
+                          withdrawal is grossed up for tax). */}
+                      <td style={{ padding:'6px 8px' }}>{fmt(row.withdrawal)}</td>
                       <td style={{ padding:'6px 8px', color: row.unmet_need > 0 ? '#f87171' : 'inherit' }}>
                         {row.unmet_need > 0 ? `${fmt(row.portfolio_balance)} (short ${fmt(row.unmet_need)})` : fmt(row.portfolio_balance)}
                       </td>

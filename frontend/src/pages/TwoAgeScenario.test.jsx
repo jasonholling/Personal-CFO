@@ -29,9 +29,15 @@ const mockResult = {
   account_ownership_limitation: 'Portfolio buckets are a single aggregated household total, not attributed to either spouse.',
   second_earner_net_of_tax_factor: 0.65,
   yearly_detail: [
-    { year: 2087, jason_age: 61, justin_age: 61, phase: 'phase2', income_need: 80000, still_working_spouse_income: 65000, draw: 15000, unmet_need: 0, portfolio_balance: 185000 },
-    { year: 2088, jason_age: 62, justin_age: 62, phase: 'phase2', income_need: 80000, still_working_spouse_income: 65000, draw: 15000, unmet_need: 0, portfolio_balance: 170000 },
-    { year: 2089, jason_age: 63, justin_age: 63, phase: 'phase3', income_need: 80000, still_working_spouse_income: 0, draw: 80000, unmet_need: 0, portfolio_balance: 90000 },
+    // draw (net need) and withdrawal (actual grossed-up amount that
+    // left the portfolio) are deliberately DIFFERENT in this last row --
+    // independent review, 2026-09-08 (P2): the UI used to display draw
+    // labeled as the withdrawal amount, which is wrong whenever pretax
+    // tax gross-up applies (an $80,000 need can mean $88,889 actually
+    // leaves the accounts).
+    { year: 2087, jason_age: 61, justin_age: 61, phase: 'phase2', income_need: 80000, still_working_spouse_income: 65000, draw: 15000, withdrawal: 15000, unmet_need: 0, portfolio_balance: 185000 },
+    { year: 2088, jason_age: 62, justin_age: 62, phase: 'phase2', income_need: 80000, still_working_spouse_income: 65000, draw: 15000, withdrawal: 15000, unmet_need: 0, portfolio_balance: 170000 },
+    { year: 2089, jason_age: 63, justin_age: 63, phase: 'phase3', income_need: 80000, still_working_spouse_income: 0, draw: 80000, withdrawal: 88889, unmet_need: 0, portfolio_balance: 90000 },
   ],
 }
 
@@ -92,5 +98,44 @@ describe('TwoAgeScenario', () => {
     await clickRun()
     expect(container.textContent).not.toContain('$185,000')
     expect(container.textContent).toContain('$•••,•••')
+  })
+
+  it('displays the actual withdrawal amount, not the pre-tax net need', async () => {
+    await act(async () => root.render(<TwoAgeScenario />))
+    await clickRun()
+    // The last row's real withdrawal ($88,889) differs from its net need
+    // ($80,000, already asserted present via the Spending Need column in
+    // the other rendering test) -- the Withdrawal column must show the
+    // former.
+    expect(container.textContent).toContain('$88,889')
+  })
+
+  it('shows the age pair the displayed result actually corresponds to', async () => {
+    await act(async () => root.render(<TwoAgeScenario />))
+    await clickRun()
+    expect(container.textContent).toContain('retiring at 61')
+    expect(container.textContent).toContain('retiring at 63')
+  })
+
+  it('clears the stale result as soon as either age input changes', async () => {
+    await act(async () => root.render(<TwoAgeScenario />))
+    await clickRun()
+    expect(container.textContent).toContain('$185,000')
+    const inputs = container.querySelectorAll('input[type=number]')
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(inputs[0], '62')
+      inputs[0].dispatchEvent(new Event('input', { bubbles: true }))
+    })
+    expect(container.textContent).not.toContain('$185,000')
+  })
+
+  it('clears the stale result on a failed rerun instead of leaving the old one displayed', async () => {
+    await act(async () => root.render(<TwoAgeScenario />))
+    await clickRun()
+    expect(container.textContent).toContain('$185,000')
+    axios.get.mockRejectedValueOnce(new Error('network error'))
+    await clickRun()
+    expect(container.textContent).not.toContain('$185,000')
+    expect(container.textContent).toContain('Could not run this scenario')
   })
 })
