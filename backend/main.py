@@ -1724,10 +1724,17 @@ def get_sequence_risk(ret_age: int = 55, ss_timing: str = "early"):
 
 @app.post("/api/simulation/roth-conversion")
 @app.get("/api/simulation/roth-conversion")
-def get_roth_conversion(ret_age: int = 60, ss_timing: str = "early", body: dict = None):
+def get_roth_conversion(ret_age: int = 60, ss_timing: str = "early", body: dict = None,
+                         jason_ret_age: int = None, justin_ret_age: int = None):
+    """jason_ret_age/justin_ret_age (2026-09-08, CALCULATION_CONTRACT.md
+    section 30/32, Milestone 2 of 4): two-age mode, both required
+    together -- read from the query string (GET) or, same as
+    ret_age/ss_timing above, from the POST body if present."""
     if body is not None:
         ret_age = body.get("ret_age", ret_age)
         ss_timing = body.get("ss_timing", ss_timing)
+        jason_ret_age = body.get("jason_ret_age", jason_ret_age)
+        justin_ret_age = body.get("justin_ret_age", justin_ret_age)
     conn = get_db()
     inputs_row = conn.execute("SELECT * FROM planning_inputs ORDER BY id DESC LIMIT 1").fetchone()
     accounts   = [dict(r) for r in conn.execute("SELECT * FROM accounts").fetchall()]
@@ -1736,7 +1743,13 @@ def get_roth_conversion(ret_age: int = 60, ss_timing: str = "early", body: dict 
     conn.close()
     if not inputs_row: return {"error": "No planning inputs found"}
     from simulation_engine import run_roth_conversion_analysis
-    return run_roth_conversion_analysis(_apply_whatif_overrides(dict(inputs_row), body or {}), accounts, ret_age, ss_timing, life_events=life_events, surplus_allocations=surplus_allocations)
+    inputs = _apply_whatif_overrides(dict(inputs_row), body or {})
+    try:
+        return run_roth_conversion_analysis(inputs, accounts, ret_age, ss_timing, life_events=life_events,
+                                             surplus_allocations=surplus_allocations,
+                                             jason_ret_age=jason_ret_age, justin_ret_age=justin_ret_age)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 @app.post("/api/simulation/swr")
 @app.get("/api/simulation/swr")
