@@ -3029,3 +3029,86 @@ frontend change this round).
 
 Branch: `codex/two-age-roth-conversion`, pushed, **still not merged** —
 third review round, awaiting approval before Milestone 3 begins.
+
+## 34. Two-age Tax Efficiency — design notes, written before implementation (2026-09-08, on `codex/two-age-tax-efficiency`)
+
+Milestone 3 of 4. Branched from `codex/two-age-roth-conversion` (not
+`main`) since this milestone's own instruction requires reusing that
+branch's reviewed working-income tax treatment, which isn't on `main`
+yet (Milestone 2 is pushed but not merged — Jason's explicit
+instruction: keep going without waiting for that review to land,
+circle back to merge both once the auditor is available again).
+
+**Scope confirmed before writing any code:** `run_tax_efficiency_
+simulation` is exposed at `GET /api/simulation/tax-efficiency`
+(`main.py`) but **nothing in the frontend calls that endpoint at
+all** — grepped the entire `frontend/src/` tree for any reference to
+`tax-efficiency`/`TaxEfficiency`/`tax_efficiency`; there are none. This
+tool has no existing UI surface. Per the milestone's own instruction
+("Confirm where this tool is actually exposed. Do not create an
+unrelated new page without approval"), this branch adds two-age
+support to the calculation engine and its API endpoint only — no new
+frontend page. Building one would be new, unapproved UI surface, not
+"extending existing two-age support."
+
+**How "reuse the reviewed working-income tax treatment from the Roth
+milestone" applies here:** read directly from the existing single-axis
+`run_tax_efficiency_simulation` — this tool has never had bracket-
+aware or marginal-rate-aware taxation at all. Every pretax withdrawal
+(RMD or ordered draw) is taxed at a single **flat** `TAX_PRETAX = 0.22`
+constant, taxable draws at a flat `TAX_TAXABLE = 0.15` (LTCG
+approximation), Roth at 0% — regardless of the household's actual
+income level, guaranteed income, or (for two-age) a working spouse's
+salary. There is no `base_taxable`/`room_in_22` concept here, and
+consequently no place where Roth Conversion's actual bug (gross wages
+omitted from a bracket-capacity/marginal-rate calculation) could
+recur — the flat rate doesn't depend on total income in either the
+single-axis or two-age version. The relevant part of the Roth
+milestone's reviewed treatment that DOES apply: the still-working
+spouse's income is modeled via the SAME net-of-tax
+(`SECOND_EARNER_NET_OF_TAX_FACTOR`) figure, folded ONLY into the
+spending-need offset (`justin_gap_income_for_year`, added to the
+existing `life_event_monthly` channel via `_cash_available_offsets_
+need`, exactly matching single-axis's own established pattern) — never
+into any tax-rate calculation, because none exists here to feed. This
+is not a gap being silently carried forward; it's confirmed, by
+reading the code, that there is nothing analogous to fix.
+
+**Shared engine reuse (no second, independent formula set):**
+`build_two_person_timeline`, `two_age_spending_need_fn` (bridge/kids/
+healthcare-aware — richer than single-axis's own healthcare-only
+formula here too, same intentional, documented difference Roth
+Conversion's section 30.6 already established), `two_age_pension_for_
+year`, per-spouse SS claim-date formulas (the same inline pattern six
+other call sites in this file already use), `two_age_still_working_
+income_inputs` + `justin_gap_income_for_year`,
+`run_two_dimensional_retirement_projection` for starting balances
+(unrounded buckets). The three draw-order strategies themselves reuse
+`_ordered_draw`/`_optimal_draw` completely unmodified — both already
+take `tax_pretax_rate`/`tax_taxable_rate` as plain parameters, so
+two-age needs no changes to either. `_cash_available_offsets_need` is
+reused directly (already a module-level, shared, tested function — not
+duplicated a second time for two-age, unlike the single-axis version's
+own older inline copy this function was originally extracted from).
+
+**Preserving the milestone's explicit requirements:** all three
+strategies run against ONE shared `all_returns` array (built once,
+same reproducible-seed pattern every other consumer uses) and
+identical timeline/income/spending/life-events/starting-balances per
+trial — "only the intended strategy should differ" holds by
+construction, matching single-axis's own existing structure exactly.
+Signed cash flows are preserved via `_cash_available_offsets_need`'s
+existing surplus/shortfall handling (unchanged). Unfunded spending is
+reported via `any_unmet_need`/`success_rate`'s existing "funded AND
+positive ending balance" definition (unchanged from single-axis; not
+in scope to revisit here, matching the same boundary SWR's own
+`survived` field kept in section 23).
+
+**Performance:** this loop runs N=1000 trials × `retire_yrs` years ×
+3 strategies per call — the same order of magnitude as Monte Carlo's
+own loop. Will be benchmarked against single-axis after implementation
+(same methodology every prior milestone's report used) and reported
+plainly.
+
+Both retirement ages required together via the existing
+`_require_both_two_age_or_neither` gate, unchanged pattern.
