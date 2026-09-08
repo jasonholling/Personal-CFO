@@ -2688,3 +2688,101 @@ new one.
 
 Heatmaps, a full payroll-tax engine, and unrelated cleanup remain out
 of scope, per the overall instruction.
+
+## 31. Two-age Roth Conversion — implementation report (2026-09-08, on `codex/two-age-roth-conversion`)
+
+Milestone 2 of 4 (SWR done, merged to main). Full working-income tax
+contract in section 30, written and committed before any code. This
+section is the required accuracy/performance report for the completed
+implementation.
+
+**What was built:** `jason_ret_age`/`justin_ret_age` on
+`run_roth_conversion_analysis`, both required together, delegating to
+`_run_roth_conversion_analysis_two_age`. Reuses the exact shared
+helpers section 25-30 already established: `two_age_pension_for_year`,
+`two_age_spending_need_fn`, `two_age_still_working_income_inputs`,
+`justin_gap_income_for_year`, `build_two_person_timeline`,
+`run_two_dimensional_retirement_projection` for starting balances. The
+per-year tax math itself (`base_taxable`/`room_in_22`,
+`simulate_withdrawal_year` then `simulate_conversion` layered on the
+already-grown closing state) is the identical shape single-axis
+already uses -- no second, independent formula set, only fed two-age
+inputs.
+
+**Accuracy — test-first, per instruction:** 12 tests, all hand-computed
+by replaying the shared, already-reviewed primitives' own documented
+contracts (not inferred from the code under test), written and
+committed RED before any implementation code (confirmed failing with
+`TypeError` against the not-yet-existing params). Two bugs were found
+against this RED suite during implementation, both fixed before the
+first green commit:
+
+1. `build_two_person_timeline`'s own `end_age` is floored at
+   `phase2_start_age + 1` (every OTHER two-age consumer needs at least
+   one withdrawal-loop year -- "already retired" never means "zero
+   years of retirement" for SWR/Monte Carlo/Stress/Projection).
+   Reusing it via `retirement_end_age=RMD_START_AGE` for
+   `conversion_years` silently forced at least 1 conversion year even
+   for a household already at or past RMD age, where 0 is the correct
+   answer. Fixed by building the timeline with no `retirement_end_age`
+   override at all (`age()`/`justin_age_at()`/`jason_effective_start_age`
+   don't depend on it) and computing `conversion_years =
+   max(0, RMD_START_AGE - phase2_start_age)` directly.
+2. Two of the new tests were internally inconsistent: they varied
+   `jason_ret_age` between a "with working spouse" and "without" case
+   to introduce gap income, which also moved Jason's own pension
+   timing (gated to his actual retirement) -- confounding the
+   comparison the tests claimed to make. Fixed by holding
+   `jason_ret_age` constant and using Justin as the later-retiring,
+   working spouse in both cases instead.
+
+All 12 tests passed after both fixes, no adjustment to any
+hand-computed expected number. Covers: a full 2-year schedule with
+every per-year field hand-verified (bracket room, conversion amount,
+tax cost, Roth future value, tax avoided, net benefit, ending
+balances); both retirement orders (proving symmetry -- identical
+bracket math and conversion amounts regardless of which spouse's
+salary funds the gap income); working income's zero effect on bracket
+capacity in either direction (a direct comparison plus a pension-alone-
+exhausts-the-bracket case, the milestone's explicit "no room in the
+bracket" requirement); a past retirement selection (conversion window
+starts at the real current age, zero years once already at RMD age);
+unequal ages (each spouse's own SS claim age); nonzero inflation/growth
+(the one-fewer-year-of-compounding relationship holds under real
+growth, not just 0%); a full shortfall case; and the both-ages-required
+gate.
+
+**Performance:** unlike SWR/Monte Carlo, this tool has never used
+randomized trials -- it's a single deterministic pass per call, same
+methodology single-axis already uses. Benchmarked (20-run average,
+matched household/inputs): single-axis ~0.97ms, two-age ~0.45ms per
+call. Both effectively instant; no performance exception needed or
+expected, and none was.
+
+**Frontend:** Roth Conversion has its own standalone page
+(`RothConversion.jsx`, not part of Simulation.jsx's Monte Carlo/Stress
+tabs) -- confirmed by reading the nav/page list before touching
+anything, not assumed. Added the same "Use Two Independent Retirement
+Ages" toggle/two-input pattern `StressTestWhatIf.jsx` already
+established for Monte Carlo/Historical Stress, POSTing both ages
+instead of GETting the single `ret_age` when on. The summary header
+shows both ages in two-age mode; `SecondEarnerNote` (mode-aware
+amount/years/personLabel, the same convention `Simulation.jsx`'s own
+`secondEarnerNoteProps` uses) discloses the working spouse's gap
+income. SS timing stays visible and editable in both modes, matching
+the SWR/Monte Carlo precedent (independent review, section 23).
+
+**Verified:** full backend suite 1223 passed, 97.66% coverage. Full
+frontend suite 38 passed (was 35), production build succeeds.
+Sensitive-data check passed.
+
+**Explicitly out of scope for this milestone**, unchanged from the
+overall plan: full payroll-tax modeling, the conversion itself pushing
+into a higher bracket, ongoing 401k contributions during phase2,
+capital-gains tax, owner-specific treatment (Milestone 4), Tax
+Efficiency (Milestone 3), Survivor Scenario (Milestone 4).
+
+Branch: `codex/two-age-roth-conversion`, pushed, **not merged** — per
+the explicit instruction ("Do not merge or start the next milestone
+until the current one is reviewed and approved"), for independent
+review.

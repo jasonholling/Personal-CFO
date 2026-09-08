@@ -56,14 +56,17 @@ than copying them — **has since merged to `main`** (commit `32b7f65`).
 **2026-09-08, further addendum — extending two-age support to the
 remaining 4 consumers, run as 4 separate reviewed milestones (not one
 large branch), each starting from current `main` after the preceding
-milestone merges:** Milestone 1, two-age SWR (section 25 design + 26
-implementation report), is built on `codex/two-age-swr` — pushed, **not
-yet merged**, per the explicit instruction it was scoped under (review
-before merging, and do not start Milestone 2 until this one is
-approved). Milestones 2-4 (Roth Conversion, Tax Efficiency, then a
-design-only gate for Survivor Scenario + account ownership) remain
-entirely unstarted. Real payroll tax and a heatmap UI stay out of scope
-per the same instruction.
+milestone merges:** Milestone 1, two-age SWR (sections 25-29 — design,
+implementation, and three independent-review fix rounds), **has since
+merged to `main`** (commit `5ed38b0`), branch deleted. Milestone 2,
+two-age Roth Conversion (section 30 working-income tax contract + 31
+implementation report), is built on `codex/two-age-roth-conversion` —
+pushed, **not yet merged**, per the explicit instruction it was scoped
+under (review before merging, and do not start Milestone 3 until this
+one is approved). Milestones 3-4 (Tax Efficiency, then a design-only
+gate for Survivor Scenario + account ownership) remain entirely
+unstarted. Real payroll tax and a heatmap UI stay out of scope per the
+same instruction.
 
 ## Final status against Jason's 9-item follow-on task list
 
