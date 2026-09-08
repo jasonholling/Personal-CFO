@@ -1671,3 +1671,76 @@ rest of the difference already reflected in that commit's own count).
 Frontend: 28 passed (was 24). Production build succeeds. Sensitive-data
 check passed. Branch: `codex/two-dimensional-retirement` — still
 **not merged**, per the same instruction, for continued review.
+
+## 21. Two-dimensional retirement timing -- effective-start-age fix and RSU flat convention (2026-09-08, third follow-up)
+
+Continued independent review of section 20's fixes found two more real
+calculation bugs. Both fixed on the same unmerged branch.
+
+**P1 -- age-55 bridge/kids timing used the raw selected age instead of
+Jason's effective retirement start.** `jason_yr = age - jason_ret_age`
+is correct only when the household hasn't yet reached the selected age
+(jason_ret_age IS the effective start in that case). For a household
+already past it today, jason_years_to_retire clamps to 0 and the real
+effective start is the household's actual current age -- but the
+bridge/kids branch kept indexing from the fictional past date anyway.
+Reproduction: both spouses currently 60, retirement selected at 55
+(5 years already past), 3% inflation, $80,000 spend, $30,000/yr bridge
+income for 5 years. The withdrawal loop's first year IS the effective
+retirement start (age 60), but the buggy formula treated it as
+jason_yr=5 -- compounding 5 years of inflation immediately ($92,742
+instead of $80,000) AND treating bridge income as already expired
+(5 is not < bridge_years=5, so the bridge branch wasn't even entered).
+**Fixed:** a new `jason_effective_start_age = jason_age +
+timeline.jason_years_to_retire` (the same "already past" clamp
+`build_timeline`/`TwoPersonTimeline` apply everywhere else, expressed
+as an absolute age) replaces `jason_ret_age` as the anchor for both the
+bridge/kids branch's `jason_yr` and its own guard, and for the pension
+gate from section 20 (which had the same class of correctness, though
+not the same bug, since it used `jason_years_to_retire` directly rather
+than the raw selected age -- now both share one variable instead of two
+that happened to agree only in the not-yet-retired case).
+
+**P2 -- Jason's RSU escalated with salary growth; the reference
+implementation keeps it flat.** The new function's shared `_contrib_fv`
+helper (401k/bonus/RSU all routed through one growing-annuity-eligible
+path) applied `salary_growth_pct` to Jason's RSU too. But
+`run_retirement_projection` treats Jason's own RSU as a flat dollar
+amount unconditionally (`_fv_annuity`, never the growing variant) --
+only 401k contributions and bonus (both salary-derived percentages)
+grow with an assumed raise rate; a flat RSU grant has no such
+percentage-of-salary basis to grow from. Reproduction: 3 years to
+simultaneous retirement, $100,000 annual RSU, 10% salary growth, 0%
+investment returns -- flat (correct): $65,000 * 3 = $195,000 at the
+65% factor; growing (buggy): $215,150. **Fixed:** a new
+`_contrib_fv_flat` helper (same dormant-years compounding pattern, but
+always `_fv_annuity`, never `_fv_growing_annuity`) used for Jason's RSU
+only. Justin's own RSU deliberately stays on the growing-eligible path
+-- `run_retirement_projection`'s own `justin_annual_rsu` handling (via
+`_justin_contrib_fv`) already lets Justin's RSU grow with
+`salary_growth_pct`, an existing asymmetry between the two spouses'
+RSU treatment that predates this branch and is preserved here exactly,
+not resolved (a new test asserts Justin's own RSU still matches the
+reference's growing value, so a well-intentioned future "fix" of the
+asymmetry doesn't silently reappear).
+
+**Expanded parity checks**, per the explicit instruction: the original
+simultaneous-retirement parity check (section 19) only covered 0%
+inflation/growth with no RSUs -- exactly the dimensions both bugs above
+lived in. `TestExpandedSimultaneousRetirementParity` adds two more
+direct numeric comparisons against `run_retirement_projection`'s own
+output for the same inputs: a past retirement selection with nonzero
+inflation, and nonzero salary growth with RSUs present (not yet
+retired, contributions still accruing).
+
+New tests: `test_bridge_and_inflation_use_jasons_effective_start_not_
+the_raw_selected_age` (`TestAge55BridgeAndKidsRulesPreserved`),
+`TestJasonRsuStaysFlatUnlikeSalaryDerivedContributions` (2 cases), and
+`TestExpandedSimultaneousRetirementParity` (2 cases) -- 5 new tests
+total in `test_two_dimensional_retirement.py`.
+
+**Verified:** full backend suite, 1146 passed, 97.45% coverage.
+Frontend unchanged this round (no UI code touched) -- 28 passed,
+production build succeeds. Sensitive-data check passed. Branch:
+`codex/two-dimensional-retirement` -- still **not merged**, per the
+same instruction, for continued review.
