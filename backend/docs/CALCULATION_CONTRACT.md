@@ -1895,3 +1895,105 @@ coverage on top). Full frontend suite: 34 passed (was 28). Production
 build succeeds. Sensitive-data check passed. Branch:
 `codex/two-age-monte-carlo-stress`, pushed, **not merged** -- per the
 explicit instruction this was scoped under, for independent review.
+
+## 23. Two-age Monte Carlo/Stress Tests follow-up review (2026-09-08, on `codex/two-age-monte-carlo-stress`)
+
+Independent review of section 22's commit (`d347e4b`) found five issues.
+All five fixed on the same unmerged branch.
+
+**P1 -- two-age mode silently dropped selected assumptions.** Both
+`MonteCarloSection`/`StressTestSection`'s two-age branches called the
+plain `GET` endpoint with only `jason_ret_age`/`justin_ret_age`,
+omitting `ss_timing` entirely and never applying any What-If Builder
+overrides -- switching into two-age mode reverted to early SS claiming
+and saved Settings regardless of what was already selected. Reproduced
+as a real result difference ($400,000 with early SS vs $340,000 with
+delayed SS on the same household). **Fixed** on both ends: `post_
+monte_carlo`/`post_stress_tests` now read `jason_ret_age`/
+`justin_ret_age` from the request body (same two-age dispatch and
+400-on-`ValueError` handling the `GET` endpoints already have); the
+frontend now `POST`s in two-age mode too, with `ss_timing`/`overrides`
+threaded through the same way the single-age branch already does. The
+SS-claiming-timing selector, previously hidden entirely while two-age
+mode was on (so there was no way to change it), now stays visible and
+editable in both modes.
+
+**Incomplete scope -- three stress scenarios were silently skipped.**
+`stagflation_1970s`, `bridge_job_loss`, and `ss_reduction` were entirely
+absent from two-age Stress Tests' first cut, with the UI simply hiding
+them -- none of the three were an agreed deferral (only Survivor
+integration, real payroll tax, the ownership ledger, and a heatmap UI
+were). **Completed:**
+- `stagflation_1970s` (variable inflation): `two_age_spending_need_fn`
+  and `_run_single_two_age` gain an optional `inflation_mults`
+  parameter, using the same accumulate-don't-retroactively-erase-
+  history cumulative-inflation curve `timeline_engine.
+  build_cumulative_inflation` already provides for every other
+  consumer. Defaults to `None` (flat inflation every year), under
+  which the new formulas reduce to the *exact* originals -- verified
+  algebraically (both the phase2-anchored default branch and the
+  jason-effective-start-anchored bridge/kids branch, which rebases via
+  division onto the same underlying curve) and confirmed by every
+  existing test passing unchanged. Social Security's own COLA is
+  rebased onto the identical curve, relative to each spouse's own claim
+  age rather than phase2_start (also verified to reduce to the exact
+  original flat formula when `inflation_mults` is `None`), so SS and
+  spending need can't silently drift out of sync with each other during
+  a variable-inflation scenario.
+- `bridge_job_loss`: re-projects starting balances with a shortened
+  `bridge_years_55` via `run_two_dimensional_retirement_projection`,
+  the same re-projection pattern the single-axis version's own
+  `bridge_years_override` handling already uses, gated on
+  `jason_ret_age == 55` (bridge/kids timing is always anchored to
+  Jason's own retirement -- section 21) rather than the single-axis
+  `ret_age`.
+- `ss_reduction`: a scenario-level multiplier applied to both spouses'
+  SS annual amount before the trial call -- including Justin's own
+  benefit from the start, the exact gap the single-axis version needed
+  a separate follow-up fix for (external audit 2026-09-06).
+
+All 7 scenarios now run in two-age mode; the frontend's scenario-key
+filtering is kept as a defensive no-op rather than removed outright.
+
+**P2 -- a fully funded plan could report 0% success.** `_run_single_
+two_age`'s `survived` formula required `balances[-1] > 0` on top of
+"every year funded" -- a trial that funds every year in full but ends
+at exactly $0 (the money lasted precisely as long as the plan needed
+it to) is a real success, not a failure. Reproduced exactly: one year,
+$80,000 available, $80,000 spend, 0% return -- the deterministic
+Projection reports `on_track=True` (`unmet_need=0`), but Monte Carlo
+reported 0% success and Stress reported failure for the identical
+scenario. **Fixed:** `survived = not any_unmet_need`, matching `run_
+two_dimensional_retirement_projection`'s own `on_track` definition
+exactly. `_run_single`'s identical single-axis formula has the same
+property -- left unchanged, existing behavior for every other consumer,
+out of scope for this branch (documented in the code, not silently
+carried over).
+
+**P2 -- rounded starting balances broke deterministic parity.**
+`pretax_at_phase2_start`/`roth_at_phase2_start`/`taxable_at_phase2_
+start`/`hsa_at_phase2_start` were rounded before ever being consumed as
+`_run_single_two_age`'s opening balances, so Monte Carlo/Stress started
+from a slightly different number than the deterministic projection's
+own full-precision arithmetic for the identical scenario (reproduced: a
+$2 drift under fixed returns). **Fixed:** these four fields are now
+unrounded floats -- they're consumed as another engine's input, not
+displayed anywhere directly; `round()` belongs at display time only.
+
+**P2 -- two-age results described themselves as single-age.**
+`SecondEarnerNote`'s trailing model-description line still read "Single
+retirement-age model" even on a result whose own `mode` was
+`"two_age"`. **Fixed:** a new optional `twoAge` prop, set from
+`data.mode === 'two_age'` by the shared `secondEarnerNoteProps()`
+helper, switches the note to "Two-age model -- both retirement ages set
+independently."
+
+**Verified:** 9 new backend tests (success-rate contract, unrounded
+bucket fields, all 7 scenarios present, `ss_reduction`/`bridge_job_
+loss`/`stagflation_1970s` each verified with a hand-calculated or
+script-verified-before-asserting reproduction) plus 4 new endpoint
+tests plus 6 updated/new frontend tests, all passing. Full backend
+suite: 1181 passed, 97.56% coverage. Full frontend suite: 34 passed,
+production build succeeds. Sensitive-data check passed. Branch:
+`codex/two-age-monte-carlo-stress` -- still **not merged**, per the
+same instruction, for continued review.
