@@ -712,6 +712,8 @@ def _run_swr_analysis_two_age(inputs: Dict, accounts: List[Dict], jason_ret_age:
     retire_yrs = timeline.retire_yrs
     N = 1000
     state_tax_rate = inputs.get("state_income_tax_rate", 0)
+    income_today = inputs["retirement_income_today_dollars"]
+    still_working_income_at_start = two_age_still_working_income_inputs(inputs, timeline, _salary_growth_pct)[1]
 
     all_returns = [[random.gauss(post_ret, PORT_STD) for _ in range(retire_yrs)] for _ in range(N)]
 
@@ -729,15 +731,32 @@ def _run_swr_analysis_two_age(inputs: Dict, accounts: List[Dict], jason_ret_age:
 
     # Same expanding-then-bisecting search as the single-axis version --
     # see its own comment for why the upper bound isn't a fixed cap.
-    lo, hi = 0, portfolio * 0.15 if portfolio > 0 else 0
-    hit_search_limit = False
-    if portfolio > 0:
-        expansions = 0
-        while success_at_withdrawal(hi) >= target_success and expansions < 12:
-            lo = hi
-            hi *= 2
-            expansions += 1
-        hit_search_limit = expansions >= 12
+    #
+    # The seed bound used to be `portfolio * 0.15`, gated entirely behind
+    # `if portfolio > 0` -- a household with $0 starting portfolio but
+    # substantial still-working income never got the expansion loop at
+    # all, so the search was pinned to lo=hi=0 and reported $0 safe
+    # withdrawal even when a trial's surplus wages fully funded real
+    # spending after the still-working spouse retired (independent
+    # review, 2026-09-08, P2 -- reproduced: $0 starting portfolio,
+    # $130,000 net working income in year one then full retirement in
+    # year two, $65,000/yr spending -- Projection confirms it's fully
+    # funded from the swept-in wage surplus; this search returned $0).
+    # Seed from whichever of portfolio, still-working income, or the
+    # household's own spending scale is largest, with a small fixed
+    # floor, so a $0-portfolio household still gets a real bracket to
+    # expand from -- the expansion loop itself (unchanged) still
+    # verifies the seed actually succeeds before trusting it, and still
+    # converges to exactly $0 when nothing (no portfolio, no income) can
+    # fund any withdrawal at all.
+    hi_seed = max(portfolio, still_working_income_at_start, income_today, 1000.0) * 0.15
+    lo, hi = 0, hi_seed
+    expansions = 0
+    while success_at_withdrawal(hi) >= target_success and expansions < 12:
+        lo = hi
+        hi *= 2
+        expansions += 1
+    hit_search_limit = expansions >= 12
     for _ in range(20):
         mid = (lo + hi) / 2
         rate = success_at_withdrawal(mid)
@@ -751,40 +770,69 @@ def _run_swr_analysis_two_age(inputs: Dict, accounts: List[Dict], jason_ret_age:
 
     # Guaranteed-income summary -- pension gates to Jason's own
     # retirement (jason_effective_start_age), not phase2_start_age,
-    # same as the withdrawal loop itself. SS steady-state uses each
-    # spouse's own claim age exactly as the single-axis version does.
+    # same as the withdrawal loop itself. SS uses each spouse's OWN
+    # claim age for its own inflation compounding, not a shared exponent
+    # (independent review, 2026-09-08, P2 -- reproduced: $30,000 claimed
+    # at 62, retiring at 67, 3% inflation -- Projection correctly compounds
+    # 5 years of COLA to $34,778; this summary reported a flat $30,000,
+    # since guaranteed_day_one never compounded SS at all and
+    # guaranteed_first_year compounded BOTH spouses' benefits from a
+    # single shared years_to_steadystate instead of each one's own years-
+    # since-claiming). Fixed by computing each spouse's own elapsed years
+    # since their own claim age at the age in question, matching exactly
+    # the per-year loop's own year_jss/year_uss formulas above.
     jason_effective_start_age = timeline.jason_effective_start_age
     age_gap = timeline.age_gap
     justin_age_at_phase2_start = phase2_start_age - age_gap
     years_until_jason_claims  = max(0, jason_ss_age  - phase2_start_age)
     years_until_justin_claims = max(0, justin_ss_age - justin_age_at_phase2_start)
     years_to_ss = max(years_until_jason_claims, years_until_justin_claims)
-    years_to_pension = max(0, jason_effective_start_age - phase2_start_age)
-    years_to_steadystate = max(years_to_ss, years_to_pension)
     ss_start_age = phase2_start_age + years_to_ss
+    justin_age_at_ss_start = ss_start_age - age_gap
+    jason_ss_years_since_claim_at_steadystate  = max(0, ss_start_age - jason_ss_age)
+    justin_ss_years_since_claim_at_steadystate = max(0, justin_age_at_ss_start - justin_ss_age)
     guaranteed_first_year = (
         pension_annual +
-        jason_ss_annual * ((1 + inflation) ** years_to_steadystate) +
-        justin_ss_annual * ((1 + inflation) ** years_to_steadystate)
+        jason_ss_annual * ((1 + inflation) ** jason_ss_years_since_claim_at_steadystate) +
+        justin_ss_annual * ((1 + inflation) ** justin_ss_years_since_claim_at_steadystate)
     )
     guaranteed_day_one = pension_annual if phase2_start_age >= jason_effective_start_age else 0.0
     if phase2_start_age >= jason_ss_age:
-        guaranteed_day_one += jason_ss_annual
+        guaranteed_day_one += jason_ss_annual * ((1 + inflation) ** max(0, phase2_start_age - jason_ss_age))
     if justin_age_at_phase2_start >= justin_ss_age:
-        guaranteed_day_one += justin_ss_annual
+        guaranteed_day_one += justin_ss_annual * ((1 + inflation) ** max(0, justin_age_at_phase2_start - justin_ss_age))
 
-    still_working_income_at_start = two_age_still_working_income_inputs(inputs, timeline, _salary_growth_pct)[1]
     total_safe_spend = safe_withdrawal + guaranteed_day_one
 
-    # Same "on track" comparison the single-axis summary reports --
-    # income_target is today's household spending target grown to
-    # phase2_start (the same basis income_at_start/_swr_success_rate
-    # itself never touches, matching section 25's "no bridge/kids/
-    # healthcare in the search loop, only in this summary" contract).
-    income_today   = inputs["retirement_income_today_dollars"]
+    # Household affordability -- reuses run_two_dimensional_retirement_
+    # projection's OWN complete dated cash flows (_proj, already computed
+    # above for starting balances) rather than the flat single-year
+    # income_target vs total_safe_spend comparison this used to run
+    # (independent review, 2026-09-08, P1 -- SWR's withdrawal search
+    # never models bridge/kids costs or per-year healthcare at all (see
+    # section 25's contract; safe_withdrawal_annual itself is
+    # deliberately unchanged, still that same portfolio-only search), so
+    # a flat comparison against a bare income+healthcare_pre figure
+    # necessarily missed both -- reproduced: $220,000 portfolio, 2 years,
+    # $100,000 spending + $30,000 kids/healthcare costs -- this used to
+    # say "on track" while Projection reported a $40,000 shortfall; and
+    # $200,000 portfolio, 2 years, $125,000 spending, 10% inflation, a
+    # frozen $30,000 pension -- "on track" here vs Projection's $2,500
+    # unmet need. _proj already ran the full engine (bridge/kids/
+    # healthcare/guaranteed income/still-working income, all correctly
+    # dated) at this exact household's target spending level -- its own
+    # on_track/yearly_detail are the real answer, not a second
+    # independent formula. income_target below is left as the flat,
+    # first-year figure it always was (still a useful "for scale" number
+    # for display), but on_track and cushion_pct now come from the
+    # complete dated totals instead.
     healthcare_pre = inputs.get("healthcare_pre_medicare", 0)
     income_target  = (income_today + healthcare_pre) * ((1 + inflation) ** timeline.phase2_start_years)
-    cushion_pct    = round((total_safe_spend / income_target - 1) * 100, 1) if income_target > 0 else 0
+    total_income_need = sum(y["income_need"] for y in _proj["yearly_detail"])
+    total_unmet_need  = sum(y["unmet_need"]  for y in _proj["yearly_detail"])
+    total_funded_need = total_income_need - total_unmet_need
+    cushion_pct = round((total_funded_need / total_income_need - 1) * 100, 1) if total_income_need > 0 else 0
+    on_track = _proj["on_track"]
 
     return {
         "portfolio_at_retirement":   round(portfolio),
@@ -794,7 +842,8 @@ def _run_swr_analysis_two_age(inputs: Dict, accounts: List[Dict], jason_ret_age:
         "guaranteed_income_steadystate": round(guaranteed_first_year),
         "income_target":             round(income_target),
         "cushion_pct":               cushion_pct,
-        "on_track":                  total_safe_spend >= income_target,
+        "on_track":                  on_track,
+        "total_unmet_need":          round(total_unmet_need),
         "pension_annual":            round(pension_annual),
         "jason_ss_annual":           round(jason_ss_annual),
         "justin_ss_annual":          round(justin_ss_annual),

@@ -2292,3 +2292,85 @@ payroll-tax modeling, the owner-attributed ledger, heatmaps.
 Branch: `codex/two-age-swr`, pushed, **not merged** — per the explicit
 instruction ("Do not merge or start the next milestone until the
 current one is reviewed and approved"), for independent review.
+
+## 27. Two-age SWR — independent review fixes (2026-09-08, on `codex/two-age-swr`)
+
+First independent review of `codex/two-age-swr` (commit `7b4245d`) found
+three issues in `_run_swr_analysis_two_age`, all now fixed and covered
+by new hand/script-verified tests (`test_two_age_swr.py`). None touch
+`_swr_success_rate_two_age`'s own withdrawal search loop or
+`safe_withdrawal_annual`/`safe_withdrawal_rate` — the portfolio-only
+search meaning from section 25 is unchanged.
+
+**P1 — household affordability compared against a flat target that
+missed the search's own known blind spots.** `on_track`/`cushion_pct`
+used to compare `total_safe_spend` (searched withdrawal + day-one
+guaranteed income) against a flat `income_target` figure computed from
+just `retirement_income_today_dollars` + `healthcare_pre_medicare` at
+one point in time — missing bridge/kids costs, the healthcare
+pre/post-Medicare split over time, and per-year timing entirely, since
+those were never part of the search loop to begin with (section 25's
+own documented limitation). Reproduced: $220,000 portfolio, both retire
+now, 2-year horizon, $100,000 income + $30,000 healthcare/kids cost,
+0% inflation/growth — reported on_track even though the household's
+real 2-year need ($260,000) exceeds the $220,000 portfolio by $40,000;
+and $200,000 portfolio, $125,000 income, 10% inflation, a frozen
+$30,000 pension — reported on_track despite a real $2,500 unmet need in
+year 2. Fixed by reusing `run_two_dimensional_retirement_projection`'s
+own `on_track`/`yearly_detail` — already computed above for starting
+balances, already running the complete dated cash flow (bridge/kids/
+healthcare/guaranteed income/still-working income, all correctly
+timed) — instead of a second, cruder comparison. `total_unmet_need`
+(summed from `yearly_detail`) is now also returned. `cushion_pct` is
+now `(total_need − total_unmet) / total_need − 1`, in percent, over the
+complete horizon — negative exactly when the household has a real
+shortfall. `income_target` itself is left as the same flat, first-year
+figure it always was (still a reasonable "for scale" number for
+display); only `on_track`/`cushion_pct` changed basis.
+
+**P2 — a $0 starting portfolio forced a $0 search result regardless of
+future income.** The search's upper bound seed (`portfolio * 0.15`) and
+its entire expansion loop were gated behind `if portfolio > 0` — a
+household with no starting assets but real future income (e.g. a
+still-working spouse) got `lo = hi = 0` unconditionally, well before the
+search ever got a chance to test a real number. Reproduced: $0 taxable,
+Jason retires now, Justin works one more year at a $200,000 salary
+($130,000 net via the existing 65% factor) then retires, $65,000/yr
+spending — fully fundable from the swept-in year-one wage surplus
+(confirmed independently via `run_two_dimensional_retirement_projection`
+and by hand via `_swr_year_step`), but the old code returned $0. Fixed
+by seeding the search bound from whichever of portfolio, the
+still-working spouse's income, or the household's own spending scale is
+largest (with a small fixed floor), and always running the expansion
+loop — which still verifies the seed actually succeeds before trusting
+it, and still converges to exactly $0 when nothing can fund any
+withdrawal at all (the existing depleted-account test is unaffected).
+
+**P2 — guaranteed-income summary fields used inconsistent Social
+Security inflation.** `guaranteed_income_annual` (day-one) never
+compounded either spouse's SS benefit by any elapsed years at all — it
+just added the raw annual figure once eligible — while the withdrawal
+loop's own per-year `year_jss`/`year_uss` formulas always correctly
+compound from each spouse's own claim age. `guaranteed_income_steadystate`
+had a related but different bug: it compounded BOTH spouses' benefits
+by one shared `years_to_steadystate` value instead of each spouse's own
+elapsed years since their own claim date. Reproduced: $30,000 claimed at
+62, retiring (and measuring day-one income) at 67, 3% inflation — the
+correct COLA'd figure is $34,778 (5 years' compounding), reported as a
+flat $30,000. A second case (unequal ages, Jason already claiming his
+own SS well before Justin claims his spousal benefit) showed the
+steady-state bug independently: correct is $41,878 (each spouse
+compounded from their own claim date), the old shared-exponent formula
+produced $44,337. Both fields now use the exact same per-spouse
+claim-date formula the withdrawal loop itself already uses.
+
+**Verified:** full backend suite 1204 passed (was 1198; 6 new tests),
+97.58% coverage. Full frontend suite still 35 passed, production build
+succeeds, sensitive-data check passed. `safe_withdrawal_annual` is
+unchanged by any of these three fixes — verified directly by the P1
+test cases, which assert the underlying search still converges to the
+same portfolio-only figure section 25 defines while the now-separate
+affordability fields correctly flag the shortfall.
+
+Branch: `codex/two-age-swr`, pushed, **still not merged** — second
+review round, awaiting approval before Milestone 2 begins.

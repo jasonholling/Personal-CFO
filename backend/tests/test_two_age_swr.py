@@ -194,6 +194,123 @@ class TestSummaryFieldsGatedToJasonsOwnRetirement:
         assert "on_track" in r
 
 
+class TestHouseholdAffordabilityUsesCompleteDatedCashFlows:
+    """Independent review, 2026-09-08, P1: SWR's own withdrawal search
+    never models bridge/kids costs or per-year healthcare (preserved
+    exactly per section 25's contract -- safe_withdrawal_annual itself
+    is untouched by these tests), but on_track/cushion_pct used to
+    compare that portfolio-only search result against a flat, one-year
+    income_target -- silently missing exactly the costs the search
+    itself never modeled. Fixed by reusing run_two_dimensional_
+    retirement_projection's own complete dated cash flows (already
+    computed for starting balances) instead of a second, cruder
+    comparison. Both cases below were reproduced against this exact bug
+    during review and hand/script-verified against
+    run_two_dimensional_retirement_projection directly."""
+
+    def test_kids_and_healthcare_costs_produce_a_real_shortfall(self):
+        """$220,000 taxable, both retire now at 61, 2-year horizon,
+        $100,000 income + $30,000 healthcare/kids cost (via
+        healthcare_pre_medicare, the default branch's own healthcare
+        term), 0% inflation/growth. Household need is $130,000/yr x 2 =
+        $260,000 against a $220,000 portfolio -- a real $40,000
+        shortfall, hand-verified via simulate_withdrawal_year's own
+        waterfall (year0: 220000-130000=90000 remaining; year1:
+        90000-130000 = -40000 unmet)."""
+        inputs = base_inputs(jason_age=61, justin_age=61, retirement_end_age=63,
+                              retirement_income_today_dollars=100000, healthcare_pre_medicare=30000)
+        r = run_swr_analysis(inputs, TAXABLE(220000), jason_ret_age=61, justin_ret_age=61, target_success=0.5)
+        assert r["total_unmet_need"] == 40000
+        assert r["on_track"] is False
+        assert r["cushion_pct"] == -15.4
+
+    def test_inflation_and_a_frozen_pension_produce_a_real_shortfall(self):
+        """$200,000 taxable, both retire now at 61, 2-year horizon,
+        $125,000 income, 10% inflation, a frozen (no-COLA) $30,000
+        pension. Year0: need 125000, pension 30000, draw 95000 ->
+        200000-95000=105000. Year1: need 137500 (10% inflation), pension
+        still 30000 (frozen), draw 107500 -> 105000-107500 = -2500 unmet
+        -- hand-verified the same way as the case above."""
+        inputs = base_inputs(jason_age=61, justin_age=61, retirement_end_age=63,
+                              retirement_income_today_dollars=125000, inflation_rate=0.10,
+                              pension_55=30000, pension_60=30000, pension_65=30000)
+        r = run_swr_analysis(inputs, TAXABLE(200000), jason_ret_age=61, justin_ret_age=61, target_success=0.5)
+        assert r["total_unmet_need"] == 2500
+        assert r["on_track"] is False
+        assert r["cushion_pct"] == -1.0
+
+    def test_fully_funded_household_still_reports_on_track(self):
+        """Sanity check the fix isn't one-directional: a household with
+        ample portfolio for its real (kids/healthcare-inclusive) need
+        must still report on_track=True, total_unmet_need=0."""
+        inputs = base_inputs(jason_age=61, justin_age=61, retirement_end_age=63,
+                              retirement_income_today_dollars=100000, healthcare_pre_medicare=30000)
+        r = run_swr_analysis(inputs, TAXABLE(1000000), jason_ret_age=61, justin_ret_age=61, target_success=0.5)
+        assert r["total_unmet_need"] == 0
+        assert r["on_track"] is True
+
+
+class TestZeroPortfolioSearchBoundIsIndependentOfPortfolioSize:
+    """Independent review, 2026-09-08, P2: with a $0 starting portfolio,
+    both search bounds used to collapse to $0 regardless of future
+    working income, since the expansion loop was gated entirely behind
+    `if portfolio > 0`. Reproduced: $0 taxable, Jason retires now (60),
+    Justin works one more year at a $200,000 salary (-> $130,000
+    net-of-tax via the existing 65% factor) then retires too, $65,000/yr
+    spending. Hand-verified via _swr_year_step directly: year0 (Justin
+    still working) -- remaining=max(0,65000-130000)=0, surplus
+    130000-65000=65000 swept into taxable; year1 (both retired) --
+    taxable=65000 exactly covers the 65000 draw, remaining=0. A dollar
+    above (65001) leaves $1 unmet in year1. Old code returned $0
+    regardless of this fully-funded plan."""
+
+    def test_zero_portfolio_with_working_spouse_income_still_searches_a_real_boundary(self, monkeypatch):
+        monkeypatch.setattr(random_module, "gauss", lambda mu, sigma: 0.0)
+        inputs = base_inputs(jason_age=60, justin_age=60, retirement_end_age=62, justin_w2_salary=200000)
+        r = run_swr_analysis(inputs, TAXABLE(0), jason_ret_age=60, justin_ret_age=61, target_success=1.0)
+        assert r["safe_withdrawal_annual"] == 65000
+        assert r["later_retiree"] == "justin"
+
+
+class TestGuaranteedIncomeSummaryUsesEachSpousesOwnClaimDate:
+    """Independent review, 2026-09-08, P2: guaranteed_income_annual
+    (day-one) never compounded Social Security by any elapsed years at
+    all, and guaranteed_income_steadystate compounded BOTH spouses'
+    benefits from one shared years_to_steadystate instead of each one's
+    own years since claiming -- inconsistent with the per-year search
+    loop's own year_jss/year_uss formulas, which already do this
+    correctly per spouse."""
+
+    def test_day_one_ss_compounds_from_its_own_claim_age(self):
+        """$30,000 claimed at 62 (ss_timing='early'), retiring (and thus
+        measuring day-one guaranteed income) at 67, 3% inflation --
+        5 years of COLA: 30000 * 1.03**5 = 34778.22 -> 34778."""
+        inputs = base_inputs(jason_age=67, justin_age=67, retirement_end_age=70,
+                              inflation_rate=0.03, jason_social_security=30000)
+        r = run_swr_analysis(inputs, TAXABLE(500000), jason_ret_age=67, justin_ret_age=67,
+                              ss_timing="early", target_success=0.5)
+        assert r["guaranteed_income_annual"] == 34778
+
+    def test_steadystate_compounds_each_spouse_from_their_own_claim_date_not_a_shared_exponent(self):
+        """Jason (5yrs older, gap=5) already claimed early SS at 62 by
+        the time he retires at 64 -- his own benefit. Justin, retiring at
+        the same calendar time (age 59), doesn't claim his spousal
+        benefit until his own age 67 (the JUSTIN_SPOUSAL_AGE default) --
+        8 years after phase2 starts. At that steady-state point (Jason's
+        age 72), Jason's OWN elapsed-since-claim is 10 years (72-62), not
+        Justin's 8; Justin's own elapsed-since-claim is exactly 0
+        (67-67), not 8. Correct: 20000*1.03**10 + 15000*1.03**0 =
+        41878.33 -> 41878. The old shared-exponent formula compounded
+        both benefits by the same 8 years instead: (20000+15000)*
+        1.03**8 = 44337 -- a different, wrong number."""
+        inputs = base_inputs(jason_age=64, justin_age=59, retirement_end_age=90,
+                              inflation_rate=0.03, jason_social_security=20000,
+                              justin_social_security=15000)
+        r = run_swr_analysis(inputs, TAXABLE(500000), jason_ret_age=64, justin_ret_age=64,
+                              ss_timing="early", target_success=0.5)
+        assert r["guaranteed_income_steadystate"] == 41878
+
+
 class TestTwoAgeSwrModeRequiresBothAges:
     def test_only_jason_ret_age_raises(self):
         inputs = base_inputs(retirement_end_age=64)
