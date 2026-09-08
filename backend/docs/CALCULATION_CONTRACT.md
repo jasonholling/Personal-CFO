@@ -1197,3 +1197,99 @@ section was added in for the exact count). This work was done on an
 isolated branch (`codex/second-earner-gap-income-all-consumers`),
 pushed but **not merged to `main`**, per the explicit instruction it was
 built under — review before merging.
+
+## 16. Second-earner gap income — output visibility, public-output parity, Survivor timing contract (2026-09-08, fourth pass)
+
+A fourth review of section 15's propagation work found the mechanism was
+correct but under-surfaced, and asked for a stronger cross-consumer
+regression than the internal-helper parity tests already had. Both
+addressed on an isolated branch (per instruction) before merging.
+
+**P1 — gap income now visible in every consumer's public output, not
+just applied silently inside the withdrawal math:**
+- `run_retirement_projection`: already had `justin_gap_income` per
+  `yearly_detail` row (section 15); now also reports
+  `second_earner_net_of_tax_factor` per scenario, for transparency (see
+  the P2 item below).
+- `run_roth_conversion_analysis`: `justin_gap_income` added to each
+  `schedule` row (it already computed `income` via the shared builder —
+  this was simply never read out into the row), plus
+  `second_earner_net_of_tax_factor` at the top level.
+- `run_swr_analysis`, `run_monte_carlo`, `run_stress_tests`,
+  `run_tax_efficiency_simulation`: none of these have a per-year
+  schedule for ANY income source (not even the pre-existing
+  `pension_annual`/SS figures get one, except SWR's own steady-state
+  summary), so each gets `justin_gap_income_first_year` (the
+  today's-dollars-grown-to-withdrawal-start figure) and
+  `justin_gap_years` (how many years it lasts) as top-level summary
+  fields — plus `second_earner_net_of_tax_factor`, same as the
+  per-year-schedule consumers.
+- `run_survivor_scenario`: `justin_gap_income` added to each `schedule`
+  row (0 whenever `deceased == "justin"`, per section 15's own gating —
+  reported as an explicit 0, not omitted), plus
+  `second_earner_net_of_tax_factor` at the top level.
+
+**P1 — a genuine public-output-level parity test, not just internal-
+helper parity.** `TestSecondEarnerGapIncomePublicOutputParityAcrossAllConsumers`
+(2 tests) exercises all 6 consumers against one fixed, deterministic
+household:
+1. `test_displayed_gap_income_figure_is_identical_across_all_consumers`
+   — the exact same $65,000 figure (`100000 * SECOND_EARNER_NET_OF_TAX_FACTOR`,
+   flat since `years_to_retire=0` and `salary_growth_pct` defaults to 0
+   in this household) must appear, byte-for-byte, in every one of the 6
+   consumers' own displayed income field.
+2. `test_headline_metric_moves_in_expected_direction_across_all_consumers`
+   — each consumer's own headline metric (`projected_surplus`,
+   `median_final_balance` ×2, `safe_withdrawal_annual`, each
+   strategy's `median_final_balance`, `net_lifetime_benefit`, a
+   survivor-schedule `draw`) improves with gap income present vs.
+   absent, for the same household. Needed a household sized so neither
+   the with- nor without-gap run floors at a fully-depleted $0 balance
+   (an earlier draft using `sample_accounts`' own ~$870K under a 30-year
+   0%-return horizon did exactly that — both runs hit $0 regardless of
+   gap income, which would have silently proven nothing; fixed by using
+   a shorter horizon and lower spending in this test's own household,
+   not by changing any production code).
+
+**P2 — Survivor's gap-income timing is now an explicit, documented
+contract**, not just correct-by-construction: `run_survivor_scenario`'s
+own docstring states precisely which years get gap income (based on the
+ORIGINAL household withdrawal timeline, `years_to_ret = max(0, ret_age -
+jason_age)` — death doesn't shift or reset this window) and which don't
+(every year once `deceased == "justin"`, full stop). Four hand-calculated
+tests pin this exactly: death before Justin's own retirement (gap
+active), death during Justin's working years but landing exactly on his
+retirement age (gap ends that very year — the survivor schedule starts
+the day after death, so this is the one boundary case worth naming
+explicitly), death well after Justin's retirement (gap 0 for the entire
+schedule), and a past-selected-`ret_age` scenario (proving the window
+anchors to `timeline.effective_start_age`, the household's real current
+age, not the stale selection).
+
+**P2 — the net-of-tax approximation's sensitivity is now surfaced, not
+just centralized.** `SECOND_EARNER_NET_OF_TAX_FACTOR` (0.65) is used
+identically for gap wages, RSU, and bonus despite those having
+genuinely different real-world tax/payroll treatment (ordinary income
+withholding vs. supplemental-wage withholding vs. capital gains) — this
+was already true before this pass and remains a deliberate, simple
+approximation, not a new gap. What's new: every consumer's public output
+now includes `second_earner_net_of_tax_factor` explicitly, so a caller
+(the frontend, or a future audit) can see the exact assumption a
+displayed number rests on instead of having to read this source file.
+Frontend display of this field is not part of this pass — no UI
+currently renders `justin_gap_income`/`justin_gap_income_first_year` at
+all yet; that's a separate follow-up once/if these figures are surfaced
+in Settings or the relevant planning pages.
+
+**P2 — the two-dimensional retirement-timing limitation is unchanged
+and was not started in this pass, per instruction.** Justin's continued
+income is fully handled for every scenario where Jason retires first
+(sections 15-16); the reverse — modeling Justin retiring first while
+Jason keeps working, swept independently in the scenario UI — still
+requires the `jason_ret_age × justin_ret_age` redesign described in
+section 14, item 2. Restated here because it remains, by a wide margin,
+the largest real limitation in this feature area.
+
+Verified: full backend/frontend suite re-run on the isolated branch
+before merging (see the commit this section was added in for the exact
+count). Branch: `codex/second-earner-output-visibility-and-parity`.

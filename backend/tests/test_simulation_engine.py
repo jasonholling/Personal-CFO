@@ -994,6 +994,56 @@ class TestRunSurvivorScenario:
         # gap income present.
         assert with_gap["schedule"][0]["draw"] < without_gap["schedule"][0]["draw"]
 
+    def test_gap_income_timing_contract_death_before_justins_retirement(self, sample_inputs, sample_accounts):
+        """Hand-calculated (backlog P2, CALCULATION_CONTRACT.md section
+        16): jason_age=justin_age=60, ret_age=60 (years_to_retire=0),
+        justin_w2_salary=100000, justin_ret_age=65 -> justin_gap_years=5,
+        gap_income_at_start=100000*0.65*(1+0)**0=65000 flat (default
+        salary_growth_pct=0). Death at 61 -> survivor schedule starts at
+        62; 62-60=2 < 5, still well within Justin's own working window."""
+        inputs = {**sample_inputs, "jason_age": 60, "justin_age": 60,
+                  "justin_w2_salary": 100000, "justin_ret_age": 65}
+        result = run_survivor_scenario(inputs, sample_accounts, ret_age=60, deceased="jason", death_age=61)
+        row = next(r for r in result["schedule"] if r["age"] == 62)
+        assert row["justin_gap_income"] == 65000
+
+    def test_gap_income_timing_contract_death_during_ends_exactly_at_retirement(self, sample_inputs, sample_accounts):
+        """Same household, death at 64 -> schedule starts at 65;
+        65-60=5, NOT < 5 -- gap income must be exactly 0 starting this
+        very year, even though death happened WHILE Justin was still
+        mid-gap (64 < 65)."""
+        inputs = {**sample_inputs, "jason_age": 60, "justin_age": 60,
+                  "justin_w2_salary": 100000, "justin_ret_age": 65}
+        result = run_survivor_scenario(inputs, sample_accounts, ret_age=60, deceased="jason", death_age=64)
+        row = next(r for r in result["schedule"] if r["age"] == 65)
+        assert row["justin_gap_income"] == 0
+
+    def test_gap_income_timing_contract_death_after_justins_retirement(self, sample_inputs, sample_accounts):
+        """Same household, death at 70 -- well after Justin's own
+        retirement at 65. Every year of the survivor schedule must show
+        0, not just the first."""
+        inputs = {**sample_inputs, "jason_age": 60, "justin_age": 60,
+                  "justin_w2_salary": 100000, "justin_ret_age": 65}
+        result = run_survivor_scenario(inputs, sample_accounts, ret_age=60, deceased="jason", death_age=70)
+        assert all(row["justin_gap_income"] == 0 for row in result["schedule"])
+
+    def test_gap_income_timing_contract_past_selected_retirement_age(self, sample_inputs, sample_accounts):
+        """Hand-calculated past-ret_age case: household is actually 65
+        (jason_age=justin_age=65) but selects the already-past ret_age=55
+        -- timeline.effective_start_age must anchor to the REAL current
+        age (65), not the stale selection, same correction every other
+        consumer already applies. justin_ret_age=70 ->
+        justin_years_to_retire=5, years_to_retire=max(0,55-65)=0 ->
+        gap_years=5, gap_income_at_start=100000*0.65=65000 flat. Death at
+        67 -> schedule starts at 68; 68-65=3 < 5, gap income applies --
+        this only comes out right if the window anchored to 65, not 55
+        or some other value."""
+        inputs = {**sample_inputs, "jason_age": 65, "justin_age": 65,
+                  "justin_w2_salary": 100000, "justin_ret_age": 70}
+        result = run_survivor_scenario(inputs, sample_accounts, ret_age=55, deceased="jason", death_age=67)
+        row = next(r for r in result["schedule"] if r["age"] == 68)
+        assert row["justin_gap_income"] == 65000
+
     def test_gap_income_does_not_apply_when_justin_is_deceased(self, sample_inputs, sample_accounts):
         """The other selection path: deceased='justin' means Justin's own
         working income doesn't exist anymore at all -- not tapered off at
@@ -1333,3 +1383,117 @@ class TestSecondEarnerGapIncomeZeroImpactAcrossAllConsumers:
         a = run_survivor_scenario(sample_inputs, sample_accounts, ret_age=60, deceased="jason", death_age=70)
         b = run_survivor_scenario(self._explicit_defaults(sample_inputs), sample_accounts, ret_age=60, deceased="jason", death_age=70)
         assert a["schedule"] == b["schedule"]
+
+
+class TestSecondEarnerGapIncomePublicOutputParityAcrossAllConsumers:
+    """Backlog P1 (CALCULATION_CONTRACT.md section 16): the strongest
+    regression compares COMPLETE public outputs across all 6 withdrawal-
+    phase consumers for the same deterministic household -- not just the
+    unit-level parity tests against each consumer's own internal helper
+    (_swr_year_step, _cash_available_offsets_need). One fixed household,
+    one fixed gap-income configuration, checked at the public-API level:
+    the displayed income field itself must be numerically identical
+    everywhere it's surfaced (same formula, same inputs), and each
+    consumer's own headline balance/unmet-need/success-rate metric must
+    move in the expected direction with gap income present vs. absent."""
+
+    HOUSEHOLD = {
+        "jason_age": 60, "justin_age": 60,
+        # Modest spending + a shorter horizon than sample_accounts' own
+        # ~$870K would otherwise fully deplete under 0% returns -- the
+        # headline-metric-direction test needs both the with- and
+        # without-gap runs to land on a REAL nonzero balance, not both
+        # floored at 0 (which would compare equal regardless of gap
+        # income and prove nothing).
+        "retirement_income_today_dollars": 30000, "inflation_rate": 0.02,
+        "expected_return_pre_retirement": 0.0, "expected_return_post_retirement": 0.0,
+        "jason_social_security": 0, "jason_ss_delayed": 0, "justin_social_security": 0,
+        "jason_ss_age": 62, "justin_ss_age": 67,
+        "healthcare_pre_medicare": 0, "healthcare_post_medicare": 0,
+        "pension_55": 0, "pension_60": 0, "pension_65": 0,
+        "w2_salary": 0, "annual_401k_contribution": 0, "annual_hsa_contribution": 0,
+        "annual_rsu_value": 0, "annual_bonus_pct": 0,
+        "retirement_end_age": 70,
+        "justin_w2_salary": 100000, "justin_ret_age": 65,
+    }
+
+    def test_displayed_gap_income_figure_is_identical_across_all_consumers(self, sample_accounts, monkeypatch):
+        """justin_gap_income_first_year (SWR/Monte Carlo/Stress/Tax
+        Efficiency) and the yr=0 justin_gap_income (Retirement
+        Projection/Roth Conversion, both years_to_retire=0 in this
+        household so their first schedule row IS the first withdrawal
+        year) must all report the exact same number: $65,000
+        (100000 * SECOND_EARNER_NET_OF_TAX_FACTOR, flat since
+        years_to_retire=0 and salary_growth_pct defaults to 0)."""
+        import random as random_module
+        monkeypatch.setattr(random_module, "gauss", lambda mu, sigma: 0.0)
+        inputs = self.HOUSEHOLD
+        expected = 100000 * 0.65
+
+        proj = run_retirement_projection(inputs, sample_accounts, ret_ages=[60])
+        proj_row0 = next(s for s in proj["scenarios"] if s["label"] == "age_60_early")["yearly_detail"][0]
+        assert proj_row0["justin_gap_income"] == pytest.approx(expected)
+
+        swr = run_swr_analysis(inputs, sample_accounts, ret_age=60, ss_timing="early")
+        assert swr["justin_gap_income_first_year"] == pytest.approx(expected)
+
+        mc = run_monte_carlo(inputs, sample_accounts, ret_age=60, ss_timing="early")
+        assert mc["justin_gap_income_first_year"] == pytest.approx(expected)
+
+        st = run_stress_tests(inputs, sample_accounts, ret_age=60, ss_timing="early")
+        assert st["justin_gap_income_first_year"] == pytest.approx(expected)
+
+        te = run_tax_efficiency_simulation(inputs, sample_accounts, ret_age=60, ss_timing="early")
+        assert te["justin_gap_income_first_year"] == pytest.approx(expected)
+
+        roth = run_roth_conversion_analysis(inputs, sample_accounts, ret_age=60, ss_timing="early")
+        assert roth["schedule"][0]["justin_gap_income"] == pytest.approx(expected)
+
+        survivor = run_survivor_scenario(inputs, sample_accounts, ret_age=60, deceased="jason", death_age=61)
+        survivor_row = next(r for r in survivor["schedule"] if r["age"] == 62)
+        assert survivor_row["justin_gap_income"] == pytest.approx(expected)
+
+    def test_headline_metric_moves_in_expected_direction_across_all_consumers(self, sample_accounts, monkeypatch):
+        """Balances up, unmet need down/unchanged, success rate up/
+        unchanged, withdrawal-derived figures improve -- for every one of
+        the 6 consumers, comparing this household against the same
+        household with justin_ret_age == ret_age (no gap)."""
+        import random as random_module
+        monkeypatch.setattr(random_module, "gauss", lambda mu, sigma: 0.0)
+        gap = self.HOUSEHOLD
+        no_gap = {**self.HOUSEHOLD, "justin_ret_age": 60}
+
+        proj_gap = run_retirement_projection(gap, sample_accounts, ret_ages=[60])
+        proj_no_gap = run_retirement_projection(no_gap, sample_accounts, ret_ages=[60])
+        s_gap = next(s for s in proj_gap["scenarios"] if s["label"] == "age_60_early")
+        s_no_gap = next(s for s in proj_no_gap["scenarios"] if s["label"] == "age_60_early")
+        assert s_gap["projected_surplus"] > s_no_gap["projected_surplus"]
+
+        mc_gap = run_monte_carlo(gap, sample_accounts, ret_age=60, ss_timing="early")
+        mc_no_gap = run_monte_carlo(no_gap, sample_accounts, ret_age=60, ss_timing="early")
+        assert mc_gap["median_final_balance"] > mc_no_gap["median_final_balance"]
+
+        st_gap = run_stress_tests(gap, sample_accounts, ret_age=60, ss_timing="early")
+        st_no_gap = run_stress_tests(no_gap, sample_accounts, ret_age=60, ss_timing="early")
+        assert st_gap["scenarios"]["base"]["final_balance"] > st_no_gap["scenarios"]["base"]["final_balance"]
+
+        swr_gap = run_swr_analysis(gap, sample_accounts, ret_age=60, ss_timing="early")
+        swr_no_gap = run_swr_analysis(no_gap, sample_accounts, ret_age=60, ss_timing="early")
+        assert swr_gap["safe_withdrawal_annual"] > swr_no_gap["safe_withdrawal_annual"]
+
+        te_gap = run_tax_efficiency_simulation(gap, sample_accounts, ret_age=60, ss_timing="early")
+        te_no_gap = run_tax_efficiency_simulation(no_gap, sample_accounts, ret_age=60, ss_timing="early")
+        for strategy in ("taxable_first", "roth_first", "optimal"):
+            assert te_gap["strategies"][strategy]["median_final_balance"] >= te_no_gap["strategies"][strategy]["median_final_balance"]
+
+        roth_gap = run_roth_conversion_analysis(gap, sample_accounts, ret_age=60, ss_timing="early")
+        roth_no_gap = run_roth_conversion_analysis(no_gap, sample_accounts, ret_age=60, ss_timing="early")
+        assert roth_gap["net_lifetime_benefit"] >= roth_no_gap["net_lifetime_benefit"]
+        assert roth_gap["total_unmet_need"] == 0
+        assert roth_no_gap["total_unmet_need"] == 0
+
+        surv_gap = run_survivor_scenario(gap, sample_accounts, ret_age=60, deceased="jason", death_age=61)
+        surv_no_gap = run_survivor_scenario(no_gap, sample_accounts, ret_age=60, deceased="jason", death_age=61)
+        row_gap = next(r for r in surv_gap["schedule"] if r["age"] == 62)
+        row_no_gap = next(r for r in surv_no_gap["schedule"] if r["age"] == 62)
+        assert row_gap["draw"] < row_no_gap["draw"]
