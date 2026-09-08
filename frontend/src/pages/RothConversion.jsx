@@ -5,6 +5,8 @@ import {
 } from 'recharts'
 import { isPrivacyMode, MASK_CURRENCY } from '../utils/privacy'
 import { useScenario } from '../hooks/useScenario'
+import { usePersonNames } from '../hooks/usePersonNames'
+import SecondEarnerNote from '../components/SecondEarnerNote'
 
 const fmt  = (n) => isPrivacyMode() ? MASK_CURRENCY : (n == null ? '—' : new Intl.NumberFormat('en-US',{style:'currency',currency:'USD',maximumFractionDigits:0}).format(n))
 const fmtK = (n) => isPrivacyMode() ? MASK_CURRENCY : (n == null ? '—' : Math.abs(n)>=1000000?`$${(n/1000000).toFixed(2)}M`:`$${(n/1000).toFixed(0)}K`)
@@ -44,18 +46,48 @@ const ChartTip = ({ active, payload, label }) => {
   )
 }
 
+// Two-age mode (backend/docs/CALCULATION_CONTRACT.md section 30/32,
+// Milestone 2 of 4): explicit, independent retirement ages for both
+// spouses, same toggle wording/pattern StressTestWhatIf.jsx already
+// established for Monte Carlo/Historical Stress -- off (the default)
+// keeps this page on its existing single-age ret_age/ssTiming behavior,
+// completely unaffected.
 export default function RothConversion() {
   const { retAge, ssTiming, setRetAge, setSsTiming } = useScenario()
+  const { person1Name, person2Name } = usePersonNames()
   const [data, setData]         = useState(null)
   const [loading, setLoading]   = useState(true)
+  const [twoAgeMode, setTwoAgeMode]   = useState(false)
+  const [jasonRetAge, setJasonRetAge] = useState(65)
+  const [justinRetAge, setJustinRetAge] = useState(65)
 
   useEffect(() => {
     setLoading(true)
-    axios.get(`/api/simulation/roth-conversion?ret_age=${retAge}&ss_timing=${ssTiming}`)
+    const request = twoAgeMode
+      ? axios.post('/api/simulation/roth-conversion', {
+          ss_timing: ssTiming, jason_ret_age: jasonRetAge, justin_ret_age: justinRetAge,
+        })
+      : axios.get(`/api/simulation/roth-conversion?ret_age=${retAge}&ss_timing=${ssTiming}`)
+    request
       .then(r => setData(r.data))
       .catch(() => setData(null))
       .finally(() => setLoading(false))
-  }, [retAge, ssTiming])
+  }, [retAge, ssTiming, twoAgeMode, jasonRetAge, justinRetAge])
+
+  // SecondEarnerNote's amount/years/personLabel differ by mode, same
+  // convention Simulation.jsx's own secondEarnerNoteProps already uses
+  // for Monte Carlo/Stress -- two-age results carry
+  // still_working_spouse_income_first_year/phase2_start_age/
+  // phase3_start_age instead of a single-axis justin_gap_income_first_year/
+  // justin_gap_years pair, and the still-working spouse can be EITHER
+  // person (later_retiree).
+  const secondEarnerNoteProps = data && data.mode === 'two_age' ? {
+    amount: data.still_working_spouse_income_first_year,
+    years: data.phase3_start_age - data.phase2_start_age,
+    factor: data.second_earner_net_of_tax_factor,
+    personLabel: data.later_retiree === 'jason' ? person1Name : person2Name,
+    twoAge: true,
+  } : null
 
   return (
     <div>
@@ -74,26 +106,55 @@ export default function RothConversion() {
         </div>
       </div>
 
+      <div style={{ marginBottom:16 }}>
+        <button
+          className={twoAgeMode ? 'btn-primary' : 'btn-secondary'}
+          onClick={() => setTwoAgeMode(m => !m)}
+          style={{ fontSize:12 }}
+        >{twoAgeMode ? '✓ Two-Age Mode' : 'Use Two Independent Retirement Ages'}</button>
+      </div>
+
       {/* Scenario controls */}
       <div className="card" style={{ marginBottom:24 }}>
-        <div className="grid-2">
-          <div>
-            <div className="label" style={{ marginBottom:8 }}>Retirement Age</div>
-            <div style={{ display:'flex', gap:8 }}>
-              {RET_AGES.map(o => (
-                <button key={o.value} className={o.value === retAge ? 'btn-primary' : 'btn-secondary'} onClick={() => setRetAge(o.value)}>{o.label}</button>
-              ))}
+        {!twoAgeMode ? (
+          <div className="grid-2">
+            <div>
+              <div className="label" style={{ marginBottom:8 }}>Retirement Age</div>
+              <div style={{ display:'flex', gap:8 }}>
+                {RET_AGES.map(o => (
+                  <button key={o.value} className={o.value === retAge ? 'btn-primary' : 'btn-secondary'} onClick={() => setRetAge(o.value)}>{o.label}</button>
+                ))}
+              </div>
+            </div>
+            <div>
+              <div className="label" style={{ marginBottom:8 }}>Social Security Timing</div>
+              <div style={{ display:'flex', gap:8 }}>
+                {SS_TIMINGS.map(o => (
+                  <button key={o.value} className={o.value === ssTiming ? 'btn-primary' : 'btn-secondary'} onClick={() => setSsTiming(o.value)}>{o.label}</button>
+                ))}
+              </div>
             </div>
           </div>
-          <div>
-            <div className="label" style={{ marginBottom:8 }}>Social Security Timing</div>
-            <div style={{ display:'flex', gap:8 }}>
-              {SS_TIMINGS.map(o => (
-                <button key={o.value} className={o.value === ssTiming ? 'btn-primary' : 'btn-secondary'} onClick={() => setSsTiming(o.value)}>{o.label}</button>
-              ))}
+        ) : (
+          <div style={{ display:'flex', gap:24, flexWrap:'wrap', alignItems:'flex-end' }}>
+            <div>
+              <div className="label" style={{ marginBottom:8 }}>{person1Name}'s Retirement Age</div>
+              <input type="number" value={jasonRetAge} onChange={e => setJasonRetAge(parseInt(e.target.value) || 0)} />
+            </div>
+            <div>
+              <div className="label" style={{ marginBottom:8 }}>{person2Name}'s Retirement Age</div>
+              <input type="number" value={justinRetAge} onChange={e => setJustinRetAge(parseInt(e.target.value) || 0)} />
+            </div>
+            <div>
+              <div className="label" style={{ marginBottom:8 }}>Social Security Timing</div>
+              <div style={{ display:'flex', gap:8 }}>
+                {SS_TIMINGS.map(o => (
+                  <button key={o.value} className={o.value === ssTiming ? 'btn-primary' : 'btn-secondary'} onClick={() => setSsTiming(o.value)}>{o.label}</button>
+                ))}
+              </div>
             </div>
           </div>
-        </div>
+        )}
       </div>
 
       {loading && <div className="loading">Calculating conversion ladder...</div>}
@@ -108,8 +169,13 @@ export default function RothConversion() {
         <>
           {/* Summary */}
           <div className="card" style={{ marginBottom:24, borderTop:`3px solid ${ACCENT}` }}>
-            <div className="label" style={{ marginBottom:16 }}>Summary — Ages {retAge}–{data.rmd_start_age - 1} ({data.conversion_years} years)</div>
-            <div className="grid-4">
+            <div className="label" style={{ marginBottom:16 }}>
+              {data.mode === 'two_age'
+                ? `Summary — ${person1Name} ${data.jason_ret_age} · ${person2Name} ${data.justin_ret_age} (${data.conversion_years} years to age ${data.rmd_start_age})`
+                : `Summary — Ages ${retAge}–${data.rmd_start_age - 1} (${data.conversion_years} years)`}
+            </div>
+            {secondEarnerNoteProps && <SecondEarnerNote {...secondEarnerNoteProps} />}
+            <div className="grid-4" style={{ marginTop: secondEarnerNoteProps ? 16 : 0 }}>
               <div>
                 <div className="label">Total Converted</div>
                 <div style={{ fontSize:18, fontWeight:600, marginTop:4, color:ACCENT }}>{fmtK(data.total_conversions)}</div>
