@@ -60,13 +60,26 @@ milestone merges:** Milestone 1, two-age SWR (sections 25-29 — design,
 implementation, and three independent-review fix rounds), **has since
 merged to `main`** (commit `5ed38b0`), branch deleted. Milestone 2,
 two-age Roth Conversion (section 30 working-income tax contract + 31
-implementation report), is built on `codex/two-age-roth-conversion` —
-pushed, **not yet merged**, per the explicit instruction it was scoped
-under (review before merging, and do not start Milestone 3 until this
-one is approved). Milestones 3-4 (Tax Efficiency, then a design-only
-gate for Survivor Scenario + account ownership) remain entirely
-unstarted. Real payroll tax and a heatmap UI stay out of scope per the
-same instruction.
+implementation report + 32-33 two independent-review fix rounds), is
+built on `codex/two-age-roth-conversion` — pushed, **not yet merged**.
+Milestone 3, two-age Tax Efficiency (section 34 design notes + 35
+implementation report), is built on `codex/two-age-tax-efficiency` —
+branched from the Roth Conversion branch (not `main`), since it needs
+that branch's reviewed working-income tax treatment and `main` doesn't
+have it yet — pushed, **not yet merged**.
+
+**Sequencing note, superseding the "review before merging, don't start
+the next milestone" instruction above for right now:** Jason's own
+auditor is temporarily unavailable, so per his explicit instruction
+(2026-09-08) work is continuing through the remaining milestones
+without waiting for Milestones 2-3's review to land — "let's not merge
+but go on to the next milestone, we'll circle back." Nothing gets
+pushed to `main` in the meantime. Once the auditor is back, the
+expected merge order is Roth Conversion → Tax Efficiency → (after its
+own separate design-gate approval) Survivor Scenario. Milestone 4
+(Survivor Scenario + account ownership) is next, design-only proposal
+first per its own explicit gate. Real payroll tax and a heatmap UI
+stay out of scope per the original instruction.
 
 ## Final status against Jason's 9-item follow-on task list
 

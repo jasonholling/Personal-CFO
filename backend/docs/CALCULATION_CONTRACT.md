@@ -3112,3 +3112,68 @@ plainly.
 
 Both retirement ages required together via the existing
 `_require_both_two_age_or_neither` gate, unchanged pattern.
+
+## 35. Two-age Tax Efficiency — implementation report (2026-09-08, on `codex/two-age-tax-efficiency`)
+
+Milestone 3 of 4. Design notes in section 34, written before any code.
+This section is the required accuracy/performance report.
+
+**What was built:** `jason_ret_age`/`justin_ret_age` on
+`run_tax_efficiency_simulation`, both required together, delegating to
+`_run_tax_efficiency_simulation_two_age`. Reuses the exact shared
+helpers section 25-34 already established, and the completely
+UNMODIFIED `_ordered_draw`/`_optimal_draw`/`_cash_available_offsets_
+need` — no second, independent formula set, only fed two-age inputs.
+All three strategies (`taxable_first`/`roth_first`/`optimal`) run
+against one shared `all_returns` array and identical per-trial
+timeline/income/starting balances, matching single-axis's own
+structure and the milestone's explicit "only the intended strategy
+should differ" requirement.
+
+**Scope confirmed before writing any code:** this tool has no frontend
+UI at all (section 34) — no page was added, per the milestone's own
+"confirm where this tool is exposed" instruction.
+
+**Accuracy — test-first, per instruction:** 12 tests, all hand-computed
+by replaying `_ordered_draw`/`_optimal_draw`'s own documented gross-up
+contracts, written and committed RED before any implementation code.
+One real error was found and fixed against this RED suite during
+implementation (not a review finding): the initial hand-computed
+expected numbers assumed taxable draws were tax-free, matching Roth
+Conversion's own `simulate_withdrawal_year` convention
+(`taxable_rate=0.0` there) — but Tax Efficiency's `_ordered_draw` is
+called with `tax_taxable_rate=TAX_TAXABLE=0.15` (the LTCG
+approximation this file's own docstring documents), a genuine
+difference between the two tools. All affected numbers were recomputed
+by hand against the correct rate; all 12 tests passed unchanged after
+the fix, no adjustment to any implementation code needed. Covers: a
+full 2-year `taxable_first` schedule and a `roth_first` counterpart on
+the same household (both hand-verified against `_ordered_draw`'s own
+arithmetic); either retirement order (byte-identical results in both
+directions — this tool's flat tax rate has no bracket-capacity concept
+for working income to ever affect, unlike Roth Conversion, so
+"symmetric" here means literally identical, not just proportionally
+so); a past retirement selection and unequal ages; nonzero inflation/
+growth; RMD forced regardless of spending need (added for coverage —
+none of the other cases reached RMD age); a full shortfall case (0%
+success, not a false 100%); a zero-spending sanity check proving all
+three strategies share identical starting conditions; and the
+both-ages-required gate.
+
+**Performance:** benchmarked (5-run average, matched household/
+inputs) at ~0.196s single-axis vs ~0.208s two-age — no material
+difference (~6%), well within call-to-call variance; no performance
+exception needed.
+
+**Verified:** full backend suite 1241 passed (1238 + 3 API tests),
+97.68% coverage. Sensitive-data check passed. No frontend changes
+this milestone (see scope note above).
+
+**Explicitly out of scope for this milestone**, unchanged from the
+overall plan: Survivor Scenario + account ownership (Milestone 4,
+design-gated), real payroll-tax modeling, heatmaps, unrelated cleanup.
+
+Branch: `codex/two-age-tax-efficiency`, pushed, **not merged** — per
+Jason's explicit instruction (auditor unavailable; proceed through
+remaining milestones, circle back to review/merge SWR-forward once
+it's back), for independent review whenever that resumes.
