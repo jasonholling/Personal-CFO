@@ -184,6 +184,7 @@ function SurvivorScenarioSection({ retAge }) {
 }
 
 export default function StressTestWhatIf({ onNavigate }) {
+  const { person1Name, person2Name } = usePersonNames()
   const { retAge, ssTiming, setRetAge, setSsTiming } = useScenario()
   const [tab, setTab] = useState('whatif')
   // The What-If Builder reports its current slider state up here as it
@@ -192,6 +193,17 @@ export default function StressTestWhatIf({ onNavigate }) {
   // discarding them in favor of saved Settings (external audit
   // 2026-09-06). null until the What-If tab has computed at least once.
   const [whatIfAssumptions, setWhatIfAssumptions] = useState(null)
+
+  // Two-age mode (backend/docs/CALCULATION_CONTRACT.md section 22):
+  // explicit, independent retirement ages for both spouses, shared by
+  // Monte Carlo and Historical Stress since both read the same toggle
+  // here rather than tracking it twice. jasonRetAge/justinRetAge are
+  // only ever passed down to MonteCarloSection/StressTestSection when
+  // twoAgeMode is on -- off (the default) keeps both sections on their
+  // existing single-age ret_age/ssTiming behavior, completely unaffected.
+  const [twoAgeMode, setTwoAgeMode] = useState(false)
+  const [jasonRetAge, setJasonRetAge] = useState(65)
+  const [justinRetAge, setJustinRetAge] = useState(65)
 
   return (
     <div>
@@ -226,7 +238,25 @@ export default function StressTestWhatIf({ onNavigate }) {
           Survivor Scenario has its own controls, so the coarse retAge/
           ssTiming selector below is only shown for Monte Carlo/Historical
           Stress, which need it directly. */}
-      {tab !== 'whatif' && tab !== 'survivor' && (
+      {(tab === 'monte_carlo' || tab === 'stress') && (
+        <div style={{ marginBottom:16 }}>
+          <button
+            className={twoAgeMode ? 'btn-primary' : 'btn-secondary'}
+            onClick={() => setTwoAgeMode(m => !m)}
+            style={{ fontSize:12 }}
+          >{twoAgeMode ? '✓ Two-Age Mode' : 'Use Two Independent Retirement Ages'}</button>
+        </div>
+      )}
+
+      {/* What-If Builder has its own full 55-67 retirement-age slider, and
+          Survivor Scenario has its own controls, so the coarse retAge/
+          ssTiming selector below is only shown for Monte Carlo/Historical
+          Stress, which need it directly. Two-age mode replaces it with
+          two explicit age inputs instead (backend/docs/
+          CALCULATION_CONTRACT.md section 22) -- What-If overrides and SS
+          claiming-age timing don't apply in two-age mode v1 (out of
+          scope), so that selector is hidden while it's on. */}
+      {tab !== 'whatif' && tab !== 'survivor' && !twoAgeMode && (
         <div style={{ display:'flex', gap:24, marginBottom:28, flexWrap:'wrap', alignItems:'flex-end' }}>
           <div>
             <div className="label" style={{ marginBottom:8 }}>Retirement Age</div>
@@ -252,12 +282,28 @@ export default function StressTestWhatIf({ onNavigate }) {
           </div>
         </div>
       )}
+      {tab !== 'whatif' && tab !== 'survivor' && twoAgeMode && (
+        <div style={{ display:'flex', gap:24, marginBottom:28, flexWrap:'wrap', alignItems:'flex-end' }}>
+          <div>
+            <div className="label" style={{ marginBottom:8 }}>{person1Name}'s Retirement Age</div>
+            <input type="number" value={jasonRetAge} onChange={e => setJasonRetAge(parseInt(e.target.value) || 0)} />
+          </div>
+          <div>
+            <div className="label" style={{ marginBottom:8 }}>{person2Name}'s Retirement Age</div>
+            <input type="number" value={justinRetAge} onChange={e => setJustinRetAge(parseInt(e.target.value) || 0)} />
+          </div>
+        </div>
+      )}
 
       <div hidden={tab !== 'whatif'}>
         <WhatIf onNavigate={onNavigate} onAssumptionsChange={setWhatIfAssumptions} />
       </div>
-      {tab === 'monte_carlo' && <MonteCarloSection retAge={retAge} ssTiming={ssTiming} overrides={whatIfAssumptions} />}
-      {tab === 'stress'      && <StressTestSection retAge={retAge} ssTiming={ssTiming} overrides={whatIfAssumptions} />}
+      {tab === 'monte_carlo' && <MonteCarloSection retAge={retAge} ssTiming={ssTiming} overrides={whatIfAssumptions}
+                                                     jasonRetAge={twoAgeMode ? jasonRetAge : null}
+                                                     justinRetAge={twoAgeMode ? justinRetAge : null} />}
+      {tab === 'stress'      && <StressTestSection retAge={retAge} ssTiming={ssTiming} overrides={whatIfAssumptions}
+                                                     jasonRetAge={twoAgeMode ? jasonRetAge : null}
+                                                     justinRetAge={twoAgeMode ? justinRetAge : null} />}
       {tab === 'survivor'    && <SurvivorScenarioSection retAge={retAge} />}
     </div>
   )

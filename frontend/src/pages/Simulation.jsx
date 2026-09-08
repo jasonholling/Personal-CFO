@@ -23,6 +23,28 @@ const NAVY   = '#5C7CE0' // was #1B3A6B — nearly the same luminance as the dar
 const ACCENT = '#4f9cf9'
 const ORANGE = '#f97316'
 
+// SecondEarnerNote's amount/years/personLabel differ by mode: single-axis
+// results carry justin_gap_income_first_year/justin_gap_years (always
+// Justin); two-age results (mode === 'two_age') carry
+// still_working_spouse_income_first_year plus phase2/phase3_start_age,
+// and the still-working spouse can be EITHER person (later_retiree).
+// Shared by MonteCarloSection/StressTestSection below so both modes
+// render the note the same way instead of two independent branches.
+function secondEarnerNoteProps(data, person1Name, person2Name) {
+  if (data.mode === 'two_age') {
+    return {
+      amount: data.still_working_spouse_income_first_year,
+      years: data.phase3_start_age - data.phase2_start_age,
+      factor: data.second_earner_net_of_tax_factor,
+      personLabel: data.later_retiree === 'jason' ? person1Name : person2Name,
+    }
+  }
+  return {
+    amount: data.justin_gap_income_first_year, years: data.justin_gap_years,
+    factor: data.second_earner_net_of_tax_factor, personLabel: person2Name,
+  }
+}
+
 export const RET_AGES = [55,56,57,58,59,60,61,62,63,64,65,66,67]
 export const SS_OPTS  = [
   { value:'early',   label:'SS at 62' },
@@ -52,13 +74,20 @@ const CustomTooltip = ({ active, payload, label, person1Name }) => {
 // previously switching to this tab always discarded whatever the What-If
 // Builder had just been changed to (external audit 2026-09-06). The
 // Companion results receive the same overrides, age, and claiming timing.
-export function MonteCarloSection({ retAge, ssTiming, overrides }) {
+export function MonteCarloSection({ retAge, ssTiming, overrides, jasonRetAge, justinRetAge }) {
   const { person1Name, person2Name } = usePersonNames()
   const [data, setData]         = useState(null)
   const [swr, setSwr]           = useState(null)
   const [incSrc, setIncSrc]     = useState(null)
   const [loading, setLoading]   = useState(false)
   const [error, setError]       = useState(null)
+  // Two-age mode (both jasonRetAge/justinRetAge set, backend/docs/
+  // CALCULATION_CONTRACT.md section 22) uses the explicit two-age
+  // endpoint directly instead of the single-axis GET/POST -- What-If
+  // overrides don't carry into two-age mode in this v1 (out of scope),
+  // and SWR/income-sources (single-axis-only companions) aren't fetched
+  // alongside it.
+  const twoAge = jasonRetAge != null && justinRetAge != null
   // Bumped on every run() and every input change. A response is only
   // applied if this counter still matches the value captured when the
   // request was fired — otherwise the user has since changed age/timing/
@@ -72,13 +101,26 @@ export function MonteCarloSection({ retAge, ssTiming, overrides }) {
   useEffect(() => {
     genRef.current++
     setData(null); setSwr(null); setIncSrc(null); setError(null); setLoading(false)
-  }, [retAge, ssTiming, overrides])
+  }, [retAge, ssTiming, overrides, jasonRetAge, justinRetAge])
 
   const run = () => {
     const gen = ++genRef.current
     setLoading(true)
     setError(null)
     setData(null); setSwr(null); setIncSrc(null)
+    if (twoAge) {
+      axios.get('/api/simulation/monte-carlo', { params: { jason_ret_age: jasonRetAge, justin_ret_age: justinRetAge } })
+        .then(mc => {
+          if (gen !== genRef.current) return
+          setData(mc.data)
+          setLoading(false)
+        }).catch(() => {
+          if (gen !== genRef.current) return
+          setLoading(false)
+          setError('Simulation failed to run. Check both ages and try again.')
+        })
+      return
+    }
     const mcCall = overrides
       ? axios.post('/api/simulation/monte-carlo', { ...overrides, ret_age: retAge, ss_timing: ssTiming })
       : axios.get(`/api/simulation/monte-carlo?ret_age=${retAge}&ss_timing=${ssTiming}`)
@@ -121,6 +163,11 @@ export function MonteCarloSection({ retAge, ssTiming, overrides }) {
 
   return (
     <div>
+      {data.mode === 'two_age' && (
+        <div style={{ fontSize:12, color:'var(--text3)', marginBottom:16 }}>
+          Ages used: {person1Name} {data.jason_ret_age} · {person2Name} {data.justin_ret_age}
+        </div>
+      )}
       {/* Success rate hero */}
       <div className="grid-4" style={{ marginBottom:24 }}>
         <div className="card" style={{ gridColumn:'span 1' }}>
@@ -140,8 +187,7 @@ export function MonteCarloSection({ retAge, ssTiming, overrides }) {
         <div className="card">
           <div className="label">Portfolio at Retirement</div>
           <div className="number-lg" style={{ color:ACCENT, marginTop:8 }}>{fmtK(data.portfolio_at_retirement)}</div>
-          <SecondEarnerNote amount={data.justin_gap_income_first_year} years={data.justin_gap_years}
-                             factor={data.second_earner_net_of_tax_factor} personLabel={person2Name} />
+          <SecondEarnerNote {...secondEarnerNoteProps(data, person1Name, person2Name)} />
         </div>
         <div className="card">
           <div className="label">Safe Spending Power</div>
@@ -297,13 +343,15 @@ export function MonteCarloSection({ retAge, ssTiming, overrides }) {
 // ── Stress tests section ──────────────────────────────────────────────────────
 // `overrides`: see MonteCarloSection's comment above — same What-If
 // Builder wiring, including Roth and contribution comparisons.
-export function StressTestSection({ retAge, ssTiming, overrides }) {
+export function StressTestSection({ retAge, ssTiming, overrides, jasonRetAge, justinRetAge }) {
   const { person1Name, person2Name } = usePersonNames()
   const [data, setData]       = useState(null)
   const [roth, setRoth]       = useState(null)
   const [contrib, setContrib] = useState(null)
   const [loading, setLoading] = useState(false)
   const [error, setError]     = useState(null)
+  // See MonteCarloSection's identical comment/flag above.
+  const twoAge = jasonRetAge != null && justinRetAge != null
   // See MonteCarloSection's genRef comment above — same stale-response
   // guard and error surfacing (external audit 2026-09-07, finding #13).
   const genRef = useRef(0)
@@ -311,7 +359,7 @@ export function StressTestSection({ retAge, ssTiming, overrides }) {
   useEffect(() => {
     genRef.current++
     setData(null); setRoth(null); setContrib(null); setError(null); setLoading(false)
-  }, [retAge, ssTiming, overrides])
+  }, [retAge, ssTiming, overrides, jasonRetAge, justinRetAge])
   const [active, setActive]   = useState('crash_2008')
 
   const run = () => {
@@ -319,6 +367,19 @@ export function StressTestSection({ retAge, ssTiming, overrides }) {
     setLoading(true)
     setError(null)
     setData(null); setRoth(null); setContrib(null)
+    if (twoAge) {
+      axios.get('/api/simulation/stress-tests', { params: { jason_ret_age: jasonRetAge, justin_ret_age: justinRetAge } })
+        .then(st => {
+          if (gen !== genRef.current) return
+          setData(st.data)
+          setLoading(false)
+        }).catch(() => {
+          if (gen !== genRef.current) return
+          setLoading(false)
+          setError('Stress test failed to run. Check both ages and try again.')
+        })
+      return
+    }
     const stCall = overrides
       ? axios.post('/api/simulation/stress-tests', { ...overrides, ret_age: retAge, ss_timing: ssTiming })
       : axios.get(`/api/simulation/stress-tests?ret_age=${retAge}&ss_timing=${ssTiming}`)
@@ -358,14 +419,22 @@ export function StressTestSection({ retAge, ssTiming, overrides }) {
 
   const scenarios = data.scenarios
   const base = scenarios.base
-  const stressKeys = ['crash_2008', 'stagflation_1970s', 'lost_decade']
-  const newStressKeys = ['early_sequence', 'bridge_job_loss', 'ss_reduction']
-  const current = scenarios[active]
+  // stagflation_1970s/bridge_job_loss/ss_reduction aren't run in two-age
+  // mode (each needs feature support out of scope for this v1 --
+  // simulation_engine.py's own comment on _run_stress_tests_two_age) --
+  // filtered here so these cards don't try to render an absent scenario.
+  const stressKeys = ['crash_2008', 'stagflation_1970s', 'lost_decade'].filter(k => scenarios[k])
+  const newStressKeys = ['early_sequence', 'bridge_job_loss', 'ss_reduction'].filter(k => scenarios[k])
+  const current = scenarios[active] || scenarios[stressKeys[0]]
 
   return (
     <div>
-      <SecondEarnerNote amount={data.justin_gap_income_first_year} years={data.justin_gap_years}
-                         factor={data.second_earner_net_of_tax_factor} personLabel={person2Name} />
+      {data.mode === 'two_age' && (
+        <div style={{ fontSize:12, color:'var(--text3)', marginBottom:16 }}>
+          Ages used: {person1Name} {data.jason_ret_age} · {person2Name} {data.justin_ret_age}
+        </div>
+      )}
+      <SecondEarnerNote {...secondEarnerNoteProps(data, person1Name, person2Name)} />
       {/* Summary cards */}
       <div className="grid-3" style={{ marginBottom:24 }}>
         {stressKeys.map(key => {
