@@ -1608,6 +1608,406 @@ def run_two_dimensional_retirement_projection(inputs: Dict, accounts: List[Dict]
     }
 
 
+# Milestone 4 (CALCULATION_CONTRACT.md sections 36-37): the four owner
+# buckets every account-ownership-aware calculation in this file uses.
+# NOT invented -- accounts.owner is already a required, populated
+# column (jason/justin/joint/abby/cooper/trust, confirmed by reading
+# db.py's schema and Accounts.jsx's own fixed domain); kids' accounts
+# (abby/cooper) are excluded upstream by every caller, exactly as the
+# existing pooled functions already do, before any of these four
+# buckets come into play.
+OWNER_BUCKETS = ("jason", "justin", "joint", "trust")
+
+
+def _owner_bucket_for_account(account: Dict) -> str:
+    """Maps an account's raw `owner` field to one of OWNER_BUCKETS.
+    Defensive fallback to "joint" for any value outside the known
+    domain (should not occur given Accounts.jsx's fixed dropdown, but
+    this file has no way to enforce that at the data layer) -- "joint"
+    is the conservative choice for an unrecognized owner, since it's
+    the one bucket every existing pooled consumer already includes in
+    the household total without a per-spouse claim on it."""
+    owner = account.get("owner")
+    return owner if owner in OWNER_BUCKETS else "joint"
+
+
+def owner_split_starting_balances_two_age(inputs: Dict, accounts: List[Dict], jason_ret_age: int, justin_ret_age: int,
+                                            salary_growth_pct: float = None,
+                                            life_events: List[Dict] = None,
+                                            surplus_allocations: List[Dict] = None) -> Dict:
+    """Owner-attributed starting balances at phase2_start -- the SAME
+    accumulation-phase dollar formulas run_two_dimensional_retirement_
+    projection already uses (CALCULATION_CONTRACT.md section 37.4:
+    "no invented ownership, read from the existing owner field"), just
+    partitioned into OWNER_BUCKETS instead of summed into one pooled
+    total. This is new, ADDITIVE scope for Survivor Scenario
+    specifically -- SWR/Monte Carlo/Roth Conversion/Tax Efficiency/the
+    existing pooled Projection all keep reading the unmodified pooled
+    function exactly as before; nothing here changes their behavior.
+
+    Attribution rules (section 37.4):
+    - Each account's own `owner` field determines its bucket (via
+      _owner_bucket_for_account) -- no guessing.
+    - 401k accounts are split pretax/roth using the SAME household-
+      level pretax_401k_pct assumption the pooled function uses (no
+      per-spouse pretax/roth election exists in this app's inputs),
+      applied per owner-group's own 401k balance.
+    - Ongoing CONTRIBUTIONS (401k employee/employer, RSU, bonus) are
+      inherently individual -- a paycheck can't fund a "joint" 401k --
+      so Jason's own contribution formulas land in the jason bucket,
+      Justin's own in the justin bucket, exactly matching which half
+      of the pooled function's own `+` they already were.
+    - Household-level pre-retirement cash inflows with no natural
+      individual owner in this app's inputs (asset sales, life events,
+      surplus allocations, the single household HSA contribution
+      figure) are attributed to the JOINT bucket -- an explicit,
+      documented v1 approximation (see `account_ownership_limitation`
+      in the return value), not a claim that they're literally jointly
+      titled.
+
+    Core correctness property (verified by
+    TestOwnerSplitReconcilesAgainstPooledTotals): summing all four
+    buckets for any account type reproduces run_two_dimensional_
+    retirement_projection's own pooled `*_at_phase2_start` figure
+    EXACTLY, for identical inputs -- the split re-partitions the same
+    dollar amounts, it does not recompute them differently."""
+    salary_growth_pct = inputs.get("_salary_growth_pct", 0.0) if salary_growth_pct is None else salary_growth_pct
+    jason_age  = inputs["jason_age"]
+    justin_age = inputs["justin_age"]
+    pre_ret    = inputs["expected_return_pre_retirement"]
+    annual_hsa = inputs.get("annual_hsa_contribution", 0)
+    annual_rsu = inputs.get("annual_rsu_value", 0)
+
+    pretax_401k_pct = inputs.get("pretax_401k_pct", 0.75)
+    roth_401k_pct   = 1.0 - pretax_401k_pct
+
+    salary      = inputs.get("w2_salary", 0)
+    emp_pct     = inputs.get("employee_401k_pct", 0.06)
+    er_pct      = inputs.get("employer_401k_pct", 0.09)
+    annual_401k_roth   = inputs.get("annual_401k_roth_employee",  salary * emp_pct)
+    annual_401k_pretax = inputs.get("annual_401k_pretax_employer", salary * er_pct)
+    annual_bonus = salary * inputs.get("annual_bonus_pct", 0)
+
+    justin_salary  = inputs.get("justin_w2_salary", 0)
+    justin_emp_pct = inputs.get("justin_employee_401k_pct", 0.06)
+    justin_er_pct  = inputs.get("justin_employer_401k_pct", 0.03)
+    justin_annual_401k_roth   = justin_salary * justin_emp_pct
+    justin_annual_401k_pretax = justin_salary * justin_er_pct
+    justin_annual_bonus = justin_salary * inputs.get("justin_annual_bonus_pct", 0)
+    justin_annual_rsu   = inputs.get("justin_annual_rsu_value", 0)
+
+    timeline = build_two_person_timeline(jason_age, justin_age, jason_ret_age, justin_ret_age,
+                                          inputs.get("retirement_end_age"))
+    phase2_years = timeline.phase2_start_years
+    phase2_start_age = jason_age + phase2_years
+
+    jason_contrib_years  = min(timeline.jason_years_to_retire, phase2_years)
+    jason_dormant_years  = max(0, phase2_years - jason_contrib_years)
+    justin_contrib_years = min(timeline.justin_years_to_retire, phase2_years)
+    justin_dormant_years = max(0, phase2_years - justin_contrib_years)
+
+    def _contrib_fv(annual_amount, contrib_years, dormant_years):
+        if annual_amount <= 0:
+            return 0.0
+        fv_at_stop = (
+            _fv_growing_annuity(annual_amount, pre_ret, salary_growth_pct, contrib_years)
+            if salary_growth_pct else _fv_annuity(annual_amount, pre_ret, contrib_years)
+        )
+        return _fv(fv_at_stop, pre_ret, dormant_years)
+
+    def _contrib_fv_flat(annual_amount, contrib_years, dormant_years):
+        # Matches run_two_dimensional_retirement_projection's own
+        # _contrib_fv_flat exactly -- Jason's RSU grant never escalates
+        # with salary_growth_pct, Justin's does (an existing asymmetry
+        # predating this branch, preserved here unchanged).
+        if annual_amount <= 0:
+            return 0.0
+        fv_at_stop = _fv_annuity(annual_amount, pre_ret, contrib_years)
+        return _fv(fv_at_stop, pre_ret, dormant_years)
+
+    retirement_year_for_events = timeline.retirement_year
+    pre_life_events, _post_life_events = _split_life_events(life_events, retirement_year_for_events)
+    life_events_taxable_add = _pre_retirement_taxable_add(pre_life_events, pre_ret, retirement_year_for_events)
+    surplus_at_ret = _surplus_allocations_at_retirement(surplus_allocations, pre_ret, phase2_years)
+
+    asset1_sale_age = inputs.get("asset1_sale_age", 0)
+    asset1_sale_net = inputs.get("asset1_sale_net", 0)
+    asset1_app      = inputs.get("asset1_appreciation", 0.03)
+    asset1_proceeds_grown = 0.0
+    if asset1_sale_age and asset1_sale_age <= phase2_start_age:
+        yrs_asset1 = max(0, asset1_sale_age - jason_age)
+        yrs_to_grow = phase2_years - yrs_asset1
+        asset1_proceeds = asset1_sale_net * ((1 + asset1_app) ** yrs_asset1)
+        asset1_proceeds_grown = asset1_proceeds * ((1 + pre_ret) ** yrs_to_grow)
+    asset2_sale_age = inputs.get("asset2_sale_age", 0)
+    asset2_sale_net = inputs.get("asset2_sale_net", 0)
+    asset2_proceeds_grown = 0.0
+    if asset2_sale_age and asset2_sale_age <= phase2_start_age:
+        yrs_asset2 = max(0, asset2_sale_age - jason_age)
+        yrs_to_grow = phase2_years - yrs_asset2
+        asset2_proceeds_grown = asset2_sale_net * ((1 + pre_ret) ** yrs_to_grow)
+
+    buckets = {owner: {"pretax": 0.0, "roth": 0.0, "taxable": 0.0, "hsa": 0.0} for owner in OWNER_BUCKETS}
+
+    for owner in OWNER_BUCKETS:
+        owned = [a for a in accounts if _owner_bucket_for_account(a) == owner and a.get("owner") not in ("abby", "cooper")]
+        total_401k_owner = sum(a["balance"] for a in owned if a["account_type"] == "401k")
+        pretax_401k_owner = total_401k_owner * pretax_401k_pct
+        roth_401k_owner   = total_401k_owner * roth_401k_pct
+        ira_owner       = sum(a["balance"] for a in owned if a["account_type"] == "ira")
+        roth_ira_owner  = sum(a["balance"] for a in owned if a["account_type"] == "roth_ira")
+        taxable_owner   = sum(a["balance"] for a in owned if a["account_type"] == "taxable")
+        # hsa_start's own pooled formula never filters by owner at all
+        # (not even abby/cooper) -- matched here via the SAME [a for a
+        # in accounts ...] scan per owner bucket, not the `owned`
+        # abby/cooper-excluded list above, to reconcile exactly.
+        hsa_owner = sum(a["balance"] for a in accounts if a["account_type"] == "hsa"
+                         and _owner_bucket_for_account(a) == owner)
+
+        pretax_start_owner  = pretax_401k_owner + ira_owner
+        roth_start_owner    = roth_401k_owner + roth_ira_owner
+
+        pretax_contrib_fv = 0.0
+        roth_contrib_fv   = 0.0
+        taxable_extra     = 0.0
+        if owner == "jason":
+            pretax_contrib_fv = _contrib_fv(annual_401k_pretax, jason_contrib_years, jason_dormant_years)
+            roth_contrib_fv   = _contrib_fv(annual_401k_roth, jason_contrib_years, jason_dormant_years)
+            taxable_extra += _contrib_fv_flat(annual_rsu * SECOND_EARNER_NET_OF_TAX_FACTOR, jason_contrib_years, jason_dormant_years)
+            taxable_extra += _contrib_fv(annual_bonus * SECOND_EARNER_NET_OF_TAX_FACTOR, jason_contrib_years, jason_dormant_years)
+        elif owner == "justin":
+            pretax_contrib_fv = _contrib_fv(justin_annual_401k_pretax, justin_contrib_years, justin_dormant_years)
+            roth_contrib_fv   = _contrib_fv(justin_annual_401k_roth, justin_contrib_years, justin_dormant_years)
+            taxable_extra += _contrib_fv(justin_annual_rsu * SECOND_EARNER_NET_OF_TAX_FACTOR, justin_contrib_years, justin_dormant_years)
+            taxable_extra += _contrib_fv(justin_annual_bonus * SECOND_EARNER_NET_OF_TAX_FACTOR, justin_contrib_years, justin_dormant_years)
+
+        pretax_final  = _fv(pretax_start_owner, pre_ret, phase2_years) + pretax_contrib_fv
+        roth_final    = _fv(roth_start_owner, pre_ret, phase2_years) + roth_contrib_fv
+        taxable_final = _fv(taxable_owner, pre_ret, phase2_years) + taxable_extra
+        hsa_final     = _fv(hsa_owner, pre_ret, phase2_years)
+
+        if owner == "jason":
+            hsa_final += _fv_annuity(annual_hsa, pre_ret, phase2_years)
+        if owner == "joint":
+            # Household-level cash inflows with no individual owner in
+            # this app's inputs -- attributed to joint, an explicit
+            # documented approximation (see account_ownership_limitation
+            # below), not a claim they're literally jointly titled.
+            taxable_final += asset1_proceeds_grown + asset2_proceeds_grown + life_events_taxable_add
+            if surplus_at_ret["retirement_contrib"]:
+                pretax_final += surplus_at_ret["retirement_contrib"] * pretax_401k_pct
+                roth_final   += surplus_at_ret["retirement_contrib"] * roth_401k_pct
+            if surplus_at_ret["taxable_investing"]:
+                taxable_final += surplus_at_ret["taxable_investing"]
+
+        buckets[owner]["pretax"]  = pretax_final
+        buckets[owner]["roth"]    = roth_final
+        buckets[owner]["taxable"] = taxable_final
+        buckets[owner]["hsa"]     = hsa_final
+
+    buckets["phase2_start_age"] = phase2_start_age
+    buckets["account_ownership_limitation"] = (
+        "Owner attribution reads each account's own `owner` field directly -- nothing is guessed. "
+        "Household-level pre-retirement cash inflows with no individual owner in this app's inputs "
+        "(asset sales, life events, surplus allocations, the single household HSA contribution figure) "
+        "are attributed to the joint bucket as an explicit approximation, not a claim they're jointly titled."
+    )
+    return buckets
+
+
+# Withdrawal owner-order policy (CALCULATION_CONTRACT.md section 37.4):
+# joint funds a shortfall before either spouse's own individually-titled
+# accounts are touched -- a stated policy choice, not an emergent
+# property of anything else in this file. Trust is LAST, not excluded:
+# this order governs the PRE-death walk, which must reconcile exactly
+# against the existing pooled run_two_dimensional_retirement_projection
+# -- that function has always spent trust-owned account balances as
+# part of its single pooled total (it only excludes abby/cooper),
+# so excluding trust here would silently protect trust money the
+# pooled reference function itself already draws down, breaking
+# reconciliation. (Section 37.1's "trust never auto-included" rule is
+# about the DEATH-TRANSITION question -- does trust merge into what
+# the SURVIVOR can spend post-death -- a separate decision applied
+# later, at the transition itself, not here.)
+WITHDRAWAL_OWNER_ORDER = ("joint", "jason", "justin", "trust")
+
+
+def _allocate_type_delta_across_owners(owner_balances_this_type: Dict[str, float], delta: float) -> Dict[str, float]:
+    """Splits a pooled per-type balance CHANGE (`delta`, already net of
+    growth -- see run_owner_split_two_dimensional_projection's own
+    reconciliation argument) across owner sub-balances of that same
+    type, using WITHDRAWAL_OWNER_ORDER for a reduction (delta < 0, a
+    real withdrawal happened) and crediting a positive delta (a surplus/
+    RMD-reinvestment inflow -- only ever possible for the taxable type,
+    per simulate_withdrawal_year's own contract) entirely to `joint`
+    (section 37.4: household-level inflows with no single natural owner
+    default to joint, the same convention owner_split_starting_
+    balances_two_age already established for pre-retirement inflows).
+    Returns {"jason": delta_j, "justin": delta_u, "joint": delta_o,
+    "trust": delta_t} -- see WITHDRAWAL_OWNER_ORDER's own comment for
+    why trust IS included in a pre-death reduction, unlike the separate
+    post-death survivor-availability question."""
+    result = {"jason": 0.0, "justin": 0.0, "joint": 0.0, "trust": 0.0}
+    if delta > 0:
+        result["joint"] = delta
+        return result
+    remaining_reduction = -delta
+    for owner in WITHDRAWAL_OWNER_ORDER:
+        if remaining_reduction <= 0:
+            break
+        available = max(0.0, owner_balances_this_type.get(owner, 0.0))
+        take = min(available, remaining_reduction)
+        result[owner] = -take
+        remaining_reduction -= take
+    # Any leftover (shouldn't happen if the pooled total already covered
+    # the draw, but floating-point edge cases get the residual dumped on
+    # "joint" rather than silently discarded)
+    if remaining_reduction > 1e-6:
+        result["joint"] -= remaining_reduction
+    return result
+
+
+def run_owner_split_two_dimensional_projection(inputs: Dict, accounts: List[Dict], jason_ret_age: int, justin_ret_age: int,
+                                                 ss_timing: str = "early", salary_growth_pct: float = None,
+                                                 life_events: List[Dict] = None,
+                                                 surplus_allocations: List[Dict] = None) -> Dict:
+    """Owner-attributed year-by-year walk (CALCULATION_CONTRACT.md
+    section 37.4) -- carries jason/justin/joint/trust buckets through
+    EVERY year from phase2_start onward, not just a one-time split at
+    initialization (section 36's own insufficient version). New,
+    ADDITIVE scope for Survivor Scenario specifically -- the pooled
+    run_two_dimensional_retirement_projection is completely unmodified
+    and remains what SWR/Monte Carlo/Roth Conversion/Tax Efficiency/the
+    existing pooled Projection all read; nothing here changes their
+    behavior.
+
+    Reconciliation is BY CONSTRUCTION, not by coincidence: every year,
+    this function runs the EXACT SAME simulate_withdrawal_year call the
+    pooled function's own per-year loop makes (same need/guaranteed/
+    RMD/tax-rate/order -- RMD stays aggregate, Jason-anchored, matching
+    every other two-age consumer; per-spouse RMDs during normal
+    both-alive operation are explicitly out of scope per section 37.4)
+    against the POOLED total (summed across this function's own owner
+    buckets each year) -- then allocates that single pooled result's
+    per-type balance CHANGE across the owner buckets via
+    WITHDRAWAL_OWNER_ORDER (a real withdrawal) or to `joint` (a surplus/
+    RMD-reinvestment inflow), never recomputing the underlying tax/RMD/
+    draw math a second, independent way. Growth is applied per owner
+    AFTER allocation, at the identical rate the pooled call already
+    used -- linear, so summing the four owners' post-growth balances
+    reproduces the pooled post-growth balance exactly.
+
+    Returns the same shape as run_two_dimensional_retirement_projection
+    plus an owner-split `yearly_detail` (each year holding a
+    `{owner: {"pretax":..,"roth":..,"taxable":..,"hsa":..}}` closing
+    snapshot) and the final `ending_buckets`."""
+    salary_growth_pct = inputs.get("_salary_growth_pct", 0.0) if salary_growth_pct is None else salary_growth_pct
+    jason_age  = inputs["jason_age"]
+    justin_age = inputs["justin_age"]
+    inflation  = inputs["inflation_rate"]
+    post_ret   = inputs["expected_return_post_retirement"]
+    income_today = inputs["retirement_income_today_dollars"]
+
+    jason_ss_early   = inputs.get("jason_social_security", JASON_SS_EARLY_DEFAULT)
+    jason_ss_delayed = inputs.get("jason_ss_delayed", jason_ss_early * JASON_SS_DELAYED_RATIO)
+    jason_ss_annual, jason_ss_age = (jason_ss_early, 62) if ss_timing != "delayed" else (jason_ss_delayed, 67)
+    justin_ss_annual = inputs.get("justin_social_security", JUSTIN_SPOUSAL_ANNUAL)
+    justin_ss_age    = inputs.get("justin_ss_age", JUSTIN_SPOUSAL_AGE)
+    pension_annual = pension_for_age(inputs, jason_ret_age)
+
+    timeline = build_two_person_timeline(jason_age, justin_age, jason_ret_age, justin_ret_age,
+                                          inputs.get("retirement_end_age"))
+    phase2_start_age = jason_age + timeline.phase2_start_years
+    phase3_start_age = jason_age + timeline.phase3_start_years
+    jason_effective_start_age = timeline.jason_effective_start_age
+    retire_years = timeline.retire_yrs
+    jason_rmd_start_age = rmd_start_age(jason_age)
+
+    retirement_year_for_events = timeline.retirement_year
+    _, post_life_events = _split_life_events(life_events, retirement_year_for_events)
+    post_life_events = post_life_events + _post_retirement_asset_sale_events(inputs, jason_age, phase2_start_age)
+
+    need_for_year = two_age_spending_need_fn(inputs, income_today, inflation, timeline)
+    phase2_duration_years, still_working_income_at_start = two_age_still_working_income_inputs(
+        inputs, timeline, salary_growth_pct)
+
+    starting = owner_split_starting_balances_two_age(inputs, accounts, jason_ret_age, justin_ret_age,
+                                                       salary_growth_pct, life_events, surplus_allocations)
+    buckets = {owner: dict(starting[owner]) for owner in OWNER_BUCKETS}
+
+    from retirement_tools_engine import marginal_rate as _marginal_rate, STD_DEDUCTION_MFJ_2026 as _STD_DED
+
+    yearly = []
+    for yr in range(retire_years):
+        age = timeline.age(yr)
+        calendar_year = timeline.calendar_year(yr)
+        justin_age_this_year = timeline.justin_age_at(age)
+
+        year_need, _healthcare_inflated, _bridge_income = need_for_year(age, yr)
+        life_event_cash_this_year, life_event_monthly_this_year = _post_retirement_year_effects(post_life_events, calendar_year)
+        year_need -= life_event_monthly_this_year
+        still_working_income_this_year = justin_gap_income_for_year(
+            yr, phase2_duration_years, still_working_income_at_start, salary_growth_pct)
+        year_need -= still_working_income_this_year
+
+        year_pen = two_age_pension_for_year(pension_annual, age, jason_effective_start_age)
+        year_jss = jason_ss_annual * ((1 + inflation) ** max(0, age - jason_ss_age)) if age >= jason_ss_age else 0.0
+        year_uss = (justin_ss_annual * ((1 + inflation) ** max(0, justin_age_this_year - justin_ss_age))
+                    if justin_age_this_year >= justin_ss_age else 0.0)
+        fixed_income = year_pen + year_jss + year_uss
+
+        pooled_pretax = sum(buckets[o]["pretax"] for o in OWNER_BUCKETS)
+        rmd = _rmd(pooled_pretax, age, jason_rmd_start_age)
+        taxable_income_est = max(0, year_pen + (year_jss + year_uss) * 0.85 + rmd - _STD_DED)
+        pretax_tax_rate = min(0.90, _marginal_rate(taxable_income_est) + max(0, float(inputs.get("state_income_tax_rate") or 0)))
+
+        pooled_opening = {t: sum(buckets[o][t] for o in OWNER_BUCKETS) for t in ("pretax", "roth", "taxable", "hsa")}
+        year_result = simulate_withdrawal_year(
+            opening=AccountState(**pooled_opening),
+            spending_need=year_need,
+            guaranteed_income=fixed_income,
+            life_event_cash=life_event_cash_this_year,
+            rmd_amount=rmd,
+            tax_model=marginal_bracket_tax_model(pretax_rate=pretax_tax_rate, taxable_rate=0.0),
+            growth_rate=post_ret,
+            order=DEFAULT_ORDER,
+        )
+        pooled_closing_pregrowth = {
+            t: getattr(year_result.closing, t) / (1 + post_ret) if (1 + post_ret) != 0 else getattr(year_result.closing, t)
+            for t in ("pretax", "roth", "taxable", "hsa")
+        }
+
+        year_owner_closing = {}
+        for t in ("pretax", "roth", "taxable", "hsa"):
+            delta = pooled_closing_pregrowth[t] - pooled_opening[t]
+            owner_balances_this_type = {o: buckets[o][t] for o in OWNER_BUCKETS}
+            allocation = _allocate_type_delta_across_owners(owner_balances_this_type, delta)
+            for o in OWNER_BUCKETS:
+                pregrowth = buckets[o][t] + allocation.get(o, 0.0)
+                buckets[o][t] = max(0.0, pregrowth) * (1 + post_ret)
+            year_owner_closing[t] = {o: buckets[o][t] for o in OWNER_BUCKETS}
+
+        yearly.append({
+            "jason_age": age, "justin_age": justin_age_this_year, "year": calendar_year,
+            "phase": "phase2" if timeline.in_phase2(age) else "phase3",
+            "pension": round(year_pen), "social_security": round(year_jss + year_uss),
+            "rmd": round(rmd), "unmet_need": round(year_result.unmet_need),
+            "portfolio_balance": round(sum(buckets[o][t] for o in OWNER_BUCKETS for t in ("pretax", "roth", "taxable", "hsa"))),
+            "owner_balances": {o: {t: round(buckets[o][t]) for t in ("pretax", "roth", "taxable", "hsa")} for o in OWNER_BUCKETS},
+        })
+
+    return {
+        "starting_buckets": starting,
+        "ending_buckets": buckets,
+        "yearly_detail": yearly,
+        "phase2_start_age": phase2_start_age,
+        "phase3_start_age": phase3_start_age,
+        "retirement_end_age": timeline.end_age,
+        "later_retiree": timeline.later_retiree,
+        "account_ownership_limitation": starting["account_ownership_limitation"],
+    }
+
+
 def _project_529_saving_phase(starting_balance, monthly_contribution, years_to_college,
                                years_until_parent_retires, edu_return=0.07,
                                extra_years_of_contributions=0):
