@@ -175,3 +175,172 @@ implementation scoped the way this session's rounds were:
 - The heatmap UI (Phase 5 above)
 - Any change to accumulation-phase (pre-retirement) logic — 2D timing
   only affects what happens once the first spouse retires
+
+## 7. Phase 2 contract (v1 scope, on `codex/two-dimensional-retirement`)
+
+Written before any code changes on this branch, answering section 3's
+open questions for a first pass:
+
+**Scope decision (answers section 3, question 1):** explicit ages for
+both spouses, one scenario at a time — not a 13-age sweep, not a
+heatmap. The UI is two number inputs (Jason's retirement age, Justin's
+retirement age) and a "Run" action, producing one result. This is
+option (a)/(b) from section 3, the cheapest UI-wise, deferred to a
+later ask if a real matrix/heatmap (option c) is wanted.
+
+**Scope decision (question 2):** the existing flat
+`SECOND_EARNER_NET_OF_TAX_FACTOR` (0.65) stays exactly as-is, applied
+symmetrically to *whichever* spouse is still working during the middle
+phase — not just Justin. Real payroll-tax modeling stays deferred.
+
+**Scope decision (question 3):** Survivor Scenario is explicitly OUT of
+scope for v1. It keeps its existing single-`ret_age`-anchored gap-income
+contract (`CALCULATION_CONTRACT.md` section 16) unchanged.
+
+**Scope decision (question 4):** the existing aggregated, unattributed
+account-bucket model (pretax/roth/taxable/hsa, no per-owner ledger) is
+unchanged. A phase-2 wage surplus swept into savings can't be traced
+back to whose paycheck it came from, same limitation every other
+consumer already has — documented, not fixed, here.
+
+### 7.1 A key simplification found while designing this
+
+The existing second-earner gap-income mechanism (`justin_gap_years`,
+`justin_gap_income_at_start`, `justin_gap_income_for_year` in
+`projection_engine.py`) already implements *most* of what a phase-2
+middle period needs — it just only ever runs in one direction (Justin
+still working, Jason's `ret_age` fixed as the household's sole
+withdrawal-start axis) and only ever starts at Jason's own retirement.
+
+Two observations simplify v1 considerably:
+
+1. `simulate_withdrawal_year` (`annual_engine.py`) already sweeps any
+   income surplus (guaranteed income exceeding spending need) into the
+   taxable bucket automatically — this is the exact mechanism verified
+   repeatedly during this session's Survivor insurance-calculation fixes
+   (`CALCULATION_CONTRACT.md` section 18). It requires no new code:
+   modeling the still-working spouse's phase-2 income as
+   `guaranteed_income` (net-of-tax at the 65% factor, same as today's
+   gap income) gets surplus-sweeping for free.
+2. `justin_gap_income_for_year(yr, gap_years, income_at_start,
+   salary_growth_pct)` is already fully generic — nothing about its
+   signature is Justin-specific. It can be reused verbatim for either
+   direction (Jason still working while Justin has retired, or vice
+   versa) just by feeding it whichever spouse's salary applies.
+
+Given this, v1 does **not** need new withdrawal-engine machinery. It
+needs: (a) a timeline that knows about *two* independent retirement
+ages instead of one, and (b) a generalization of the existing
+Jason-anchored gap-income call site so either spouse can be the
+"still-working" side. This is why Phase 2 is scoped smaller here than
+section 5's original estimate suggested — the hard part (the shared
+withdrawal engine's surplus/shortfall handling) was already built and
+proven correct by the gap-income backlog work.
+
+### 7.2 Timeline shape
+
+A new dataclass, `TwoPersonTimeline` (`timeline_engine.py`), additive —
+the existing `Timeline`/`build_timeline` used by all 6 current
+consumers is untouched, so nothing about their behavior changes:
+
+- `jason_years_to_retire = max(0, jason_ret_age - jason_age)`,
+  `justin_years_to_retire = max(0, justin_ret_age - justin_age)` — each
+  spouse's own clamp for an already-past retirement age, same
+  `max(ret_age, age)`-style convention `build_timeline` already uses,
+  applied per-person instead of only to Jason.
+- `phase2_start_years = min(...)` of the two — years from today until
+  the FIRST spouse retires. This is where the withdrawal loop begins
+  (a real change from today: the loop can now start at Justin's
+  retirement, not just Jason's).
+- `phase3_start_years = max(...)` of the two — years from today until
+  BOTH have retired. This is where gap/still-working income stops and
+  full withdrawal (identical to today's existing single-axis model)
+  begins.
+- `later_retiree`: `"jason"` | `"justin"` | `None` (equal ages —
+  simultaneous retirement, zero-length phase 2). This determines whose
+  salary funds the phase-2 income offset.
+- `end_age`/`retire_yrs`: same mortality-cap formula as `build_timeline`
+  (`max(phase2_start_age + 1, min(110, retirement_end_age or 99))`),
+  anchored to `phase2_start_age` instead of the single
+  `effective_start_age`.
+
+**Regression property, by construction:** when `jason_ret_age ==
+justin_ret_age` (or `justin_ret_age` is left at its existing 0/unset
+sentinel and falls back to Jason's date), `phase2_start_years ==
+phase3_start_years` — zero phase-2 years — and the model reduces
+exactly to today's single-axis withdrawal loop starting at that age.
+This is the primary regression check (see the hand-calculated
+"simultaneous retirement" test case, cross-checked numerically against
+`run_retirement_projection`'s own existing output for the same inputs).
+
+### 7.3 Spending / wages / contributions / withdrawals during phase 2
+
+- **Accumulation phase (today → phase2_start):** unchanged in kind —
+  each spouse's own 401k/RSU/bonus contributions run for their own
+  years-to-retirement, using the exact same `_fv_annuity`/
+  `_fv_growing_annuity` + "contribute until you stop, then compound
+  dormant" pattern `_justin_contrib_fv` already implements — just
+  capped at `phase2_start_years` (the earlier retirement) instead of
+  always at Jason's date, so whichever spouse retires LATER only gets
+  contribution credit for the accumulation-phase portion; the rest of
+  their working years (phase 2 itself) are handled as income, next
+  bullet.
+- **Phase 2 (one retired, one working):** the still-working spouse's
+  income is modeled as `guaranteed_income` in the shared withdrawal
+  step — `salary * SECOND_EARNER_NET_OF_TAX_FACTOR`, grown at
+  `salary_growth_pct` from the phase-2-start baseline, via
+  `justin_gap_income_for_year` reused symmetrically. **No further 401k
+  contribution is modeled from this income during phase 2** — once the
+  loop starts, the still-working spouse's paycheck is treated as plain
+  after-tax cash (spendable or, if it exceeds need, automatically swept
+  into taxable savings). This is a deliberate simplification, consistent
+  with real payroll-tax modeling being out of scope: modeling continued
+  payroll-deducted 401k contributions *during* a withdrawal-phase loop
+  would require extending the shared engine itself, which section 6
+  explicitly defers.
+- **Phase 2 spending need:** identical formula to today's household
+  spending target (inflation-adjusted `retirement_income_today_dollars`
+  plus healthcare/life-events/etc.), unchanged — only the income side
+  gains the still-working spouse's offset.
+- **Phase 3 (both retired):** identical to today's existing model —
+  no working income, full withdrawal, same bucket order/tax treatment.
+- **Withdrawal order, tax treatment, RMDs, healthcare phasing:**
+  unchanged from the reference implementation — this function reuses
+  `simulate_withdrawal_year`, `_rmd`, `rmd_start_age`, the marginal-rate
+  helper, and `healthcare_for_age` exactly as `run_retirement_projection`
+  does today, not a new withdrawal policy.
+- **Insufficient funds:** no new logic — `simulate_withdrawal_year`'s
+  existing `unmet_need` reporting is used as-is in both phases.
+- **Income surplus:** no new logic — the existing surplus-sweep-to-
+  taxable behavior (section 7.1) is used as-is in both phases.
+
+### 7.4 Where this lives in code (decision, not yet built)
+
+A **new, additive function** —
+`run_two_dimensional_retirement_projection(inputs, accounts,
+jason_ret_age, justin_ret_age, ...)` in `projection_engine.py` — rather
+than adding a branch inside the existing (already dense)
+`run_retirement_projection`. Reasons: (1) zero risk to the existing
+reference implementation's behavior or its own test suite while this is
+built and reviewed; (2) matches how `run_survivor_scenario` already
+exists as its own function reusing shared helpers rather than a mode
+flag on another consumer; (3) keeps this branch's diff reviewable in
+small, isolated commits per the instruction this was scoped under. It
+reuses (does not reimplement) `simulate_withdrawal_year`,
+`_fv`/`_fv_annuity`/`_fv_growing_annuity`, `_rmd`/`rmd_start_age`,
+`_split_life_events`/`_post_retirement_asset_sale_events`/
+`_pre_retirement_taxable_add`/`_surplus_allocations_at_retirement`/
+`_post_retirement_year_effects`, `pension_for_age`,
+`healthcare_for_age`, and `justin_gap_income_for_year`.
+
+### 7.5 Other consumers — explicit limitation, not silently equivalent
+
+Monte Carlo, Stress Tests, SWR, Tax Efficiency, Roth Conversion, and
+Survivor Scenario are **unchanged** by this work and keep their existing
+single-axis-plus-income-offset behavior (`justin_gap_income`, section
+15). None of them become "two-dimensional" by this branch. Their
+existing `SecondEarnerNote` disclosure and API docstrings get an
+explicit cross-reference added (not a behavior change) so a user reading
+one of those pages cannot mistake the existing gap-income offset for
+genuine two-axis retirement timing — that distinction only exists in
+the new Retirement Projection two-age tool built here.
