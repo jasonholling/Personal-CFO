@@ -3553,10 +3553,17 @@ occurring within the death year:**
      often absent or reduced) provision this app doesn't model, and
      assuming full continuation could overstate the survivor's real
      resources.
-   - Proposed default for v1, pending your confirmation: **Option B**
-     (conservative) — flagged explicitly in the result payload either
-     way (which option was used), so the number is never presented
-     without its own caveat, matching 37.1/37.2's pattern.
+   - **Decided (Jason, 2026-09-08): Option A.** The survivor pension
+     pays the full 100% Joint & Survivor benefit even when Jason dies
+     before his own actual retirement — a pre-retirement death is
+     treated exactly like a post-retirement one for this purpose,
+     extending the existing J&S simplification rather than introducing
+     a new, harsher rule for this one timing case. Still surfaced
+     explicitly in the result payload (which case applied — pre- or
+     post-retirement death — and that the same 100% J&S figure was
+     used either way), matching 37.1/37.2's pattern of never presenting
+     a number without its own caveat, even though the number itself is
+     now settled rather than pending.
 
 ### 37.6 Status
 
@@ -3564,7 +3571,7 @@ Sections 37.1-37.5 replace the corresponding parts of section 36.
 Section 36.4's v1-required/deferred RMD scope and 36.2's "no invented
 ownership, read from the existing `owner` field" foundation both still
 stand, now with 37.1-37.3's explicit-assumption inputs layered on top
-rather than inferred defaults. **Still no application code changed on
-this branch — awaiting approval of this revised design, including an
-explicit choice on 37.5's pension-commencement question, before any
-implementation begins.**
+rather than inferred defaults. 37.5's pension-commencement question is
+now decided (Option A). **Still no application code changed on this
+branch — implementation begins once Jason confirms the design overall
+(not just the one pension question) is ready to build.**
