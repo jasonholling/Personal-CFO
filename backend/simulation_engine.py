@@ -436,6 +436,7 @@ def _run_single_two_age(
     justin_ss_age: float = JUSTIN_SPOUSAL_AGE,
     state_tax_rate: float = 0.0,
     salary_growth_pct: float = 0.0,
+    inflation_mults: List[float] = None,
 ) -> Tuple[bool, List[float], List[float], List[float], List[float]]:
     """Two-age analog of _run_single -- one simulated trial (Monte
     Carlo) or one deterministic scenario (Stress Tests) across a
@@ -467,15 +468,20 @@ def _run_single_two_age(
     instead is a deliberate efficiency improvement, not required for
     correctness.
 
-    Deliberately does NOT support inflation_mults (per-year varying
-    inflation, e.g. the stagflation_1970s stress scenario) -- v1 scope
-    matches run_two_dimensional_retirement_projection's own single-rate
-    inflation assumption exactly, so the shared spending-need helper's
-    formulas stay identical between the deterministic reference and
-    this trial loop with no risk of silent divergence. annual_returns
-    (varying RETURNS, the actual point of Monte Carlo/Stress) IS fully
-    supported, including adverse sequences during phase2 or spanning
-    the phase2->phase3 boundary."""
+    inflation_mults (independent review, 2026-09-08, "Incomplete scope"
+    finding, CALCULATION_CONTRACT.md section 23): per-loop-year
+    inflation multiplier list, same convention every other consumer's
+    stress-scenario inflation handling already uses -- passed straight
+    through to two_age_spending_need_fn, and used here for Social
+    Security's own COLA so both stay consistent with each other during
+    a variable-inflation scenario like stagflation_1970s. Defaults to
+    None (flat `inflation` every year), under which this reduces to the
+    exact same formulas as before -- run_two_dimensional_retirement_
+    projection's own behavior and this function's non-stagflation
+    callers are unaffected. annual_returns (varying RETURNS, the actual
+    point of Monte Carlo/Stress) is independently supported regardless,
+    including adverse sequences during phase2 or spanning the
+    phase2->phase3 boundary."""
     retire_yrs = timeline.retire_yrs
     jason_effective_start_age = timeline.jason_effective_start_age
 
@@ -484,9 +490,34 @@ def _run_single_two_age(
     _rmd_start = rmd_start_age(timeline.jason_age)
     any_unmet_need = False
 
-    need_for_year = two_age_spending_need_fn(inputs, income_today, inflation, timeline)
+    need_for_year = two_age_spending_need_fn(inputs, income_today, inflation, timeline, inflation_mults)
     phase2_duration_years, still_working_income_at_start = two_age_still_working_income_inputs(
         inputs, timeline, salary_growth_pct)
+    # Same cum_inflation[yr] accumulation two_age_spending_need_fn builds
+    # internally (phase2-anchored) -- Social Security's own COLA uses it
+    # too so both stay consistent with each other during a variable-rate
+    # scenario, rather than SS silently keeping the flat pre-stagflation
+    # formula while spending need doesn't. SS COLA is relative to each
+    # spouse's own CLAIM age, not phase2_start, so it needs rebasing the
+    # same way two_age_spending_need_fn's bridge branch rebases to
+    # jason_effective_start_age: `offset` is the loop-relative yr-index
+    # at which that spouse's claim age falls (negative/zero if already
+    # claiming before the loop starts, in which case the already-elapsed
+    # gap compounds at the flat `inflation` rate -- consistent with
+    # Timeline.pre_start_cola's identical convention for the single-axis
+    # case -- and the variable curve only applies from yr=0 onward).
+    phase2_start_age = timeline.age(0)
+    cum_inflation = build_cumulative_inflation(inflation, retire_yrs, inflation_mults)
+
+    def _cola(annual_amount, offset, yr):
+        if annual_amount <= 0:
+            return 0.0
+        if offset <= 0:
+            return annual_amount * ((1 + inflation) ** (-offset)) * cum_inflation[yr]
+        return annual_amount * cum_inflation[yr] / cum_inflation[offset]
+
+    jason_ss_offset  = jason_ss_age  - phase2_start_age
+    justin_ss_offset = justin_ss_age - phase2_start_age + timeline.age_gap
 
     for yr in range(retire_yrs):
         age = timeline.age(yr)
@@ -504,9 +535,8 @@ def _run_single_two_age(
         year_need -= still_working_income_this_year
 
         year_pen = two_age_pension_for_year(pension_annual, age, jason_effective_start_age)
-        year_jss = jason_ss_annual * ((1 + inflation) ** max(0, age - jason_ss_age)) if age >= jason_ss_age else 0.0
-        year_uss = (justin_ss_annual * ((1 + inflation) ** max(0, justin_age_this_year - justin_ss_age))
-                    if justin_age_this_year >= justin_ss_age else 0.0)
+        year_jss = _cola(jason_ss_annual, jason_ss_offset, yr) if age >= jason_ss_age else 0.0
+        year_uss = _cola(justin_ss_annual, justin_ss_offset, yr) if justin_age_this_year >= justin_ss_age else 0.0
         fixed = year_pen + year_jss + year_uss
 
         rmd = _rmd(pretax, age, _rmd_start)
@@ -536,7 +566,23 @@ def _run_single_two_age(
         roth_bals.append(round(roth))
         taxable_bals.append(round(taxable))
 
-    survived = (balances[-1] > 0 if balances else False) and not any_unmet_need
+    # Matches run_two_dimensional_retirement_projection's own on_track
+    # definition exactly: not any(unmet_need > 0). A trial that funds
+    # every single year in full but ends at exactly $0 -- the money
+    # lasted precisely as long as the plan needed it to -- is a real
+    # success, not a failure; requiring balances[-1] > 0 on top of
+    # "every year funded" double-counted the same condition and reported
+    # 0% success for a plan the deterministic Projection itself calls
+    # on_track (independent review, 2026-09-08, P2 -- reproduced: $80,000
+    # available, $80,000 spend, one year, 0% return -- Projection
+    # on_track=True, unmet_need=0 every year, but this formula's stray
+    # `balances[-1] > 0` failed the trial anyway on the exact-zero ending
+    # balance). _run_single's own single-axis formula has the identical
+    # property (same `> 0` check) -- left unchanged here since that's
+    # existing behavior for every other consumer, out of scope for this
+    # two-age branch; see CALCULATION_CONTRACT.md section 23 for the note
+    # to revisit it separately.
+    survived = not any_unmet_need
     return survived, balances, pretax_bals, roth_bals, taxable_bals
 
 
@@ -1136,16 +1182,30 @@ def _run_stress_tests_two_age(inputs: Dict, accounts: List[Dict], jason_ret_age:
     projection's own yearly balances exactly -- verified in
     test_two_age_monte_carlo_stress.py.
 
-    Runs the pure return-sequence-override scenarios from the shared
-    SCENARIOS dict (crash_2008, lost_decade, early_sequence -- all
-    inflation_mult=1.0, matching this function's own flat-inflation v1
-    scope exactly, so no special-casing is needed to reuse them here).
-    stagflation_1970s (variable inflation), bridge_job_loss (needs a
-    two-age-aware bridge re-projection), and ss_reduction (a scenario-
-    level SS multiplier not yet wired into the two-age per-year SS
-    formula) are deliberately NOT run in two-age mode -- each needs
-    feature support explicitly out of scope for this v1, not silently
-    misapplied."""
+    Runs every scenario in the shared SCENARIOS dict, mirroring the
+    single-axis run_stress_tests loop's own handling of each
+    (independent review, 2026-09-08, "Incomplete scope" finding --
+    stagflation_1970s/bridge_job_loss/ss_reduction were skipped in the
+    first cut of this function; all three are implemented here now,
+    not just the pure return-override scenarios):
+    - stagflation_1970s: variable inflation, via inflation_mults threaded
+      through to _run_single_two_age/two_age_spending_need_fn's shared
+      cum_inflation curve (CALCULATION_CONTRACT.md section 23) --
+      Social Security's own COLA uses the identical curve so the two
+      stay consistent with each other during the scenario.
+    - bridge_job_loss: re-projects starting balances with a shortened
+      bridge_years_55, same as the single-axis version's own
+      `if bridge_override is not None and ret_age == 55` re-projection,
+      generalized to `jason_ret_age == 55` (bridge/kids timing is always
+      anchored to Jason's own retirement, section 21).
+    - ss_reduction: a scenario-level multiplier applied to both spouses'
+      SS annual amount before calling _run_single_two_age, the same
+      "compute a reduced scenario_ss, pass it as this call's own
+      jason_ss_annual/justin_ss_annual" pattern the single-axis version
+      already uses (and the same P1 fix that version needed for
+      Justin's own benefit -- CALCULATION_CONTRACT.md external audit
+      2026-09-06 -- applied here from the start, not as a separate
+      follow-up)."""
     jason_age  = inputs["jason_age"]
     justin_age = inputs["justin_age"]
     inflation  = inputs["inflation_rate"]
@@ -1204,10 +1264,46 @@ def _run_stress_tests_two_age(inputs: Dict, accounts: List[Dict], jason_ret_age:
     }}
 
     for key, scenario in SCENARIOS.items():
-        if key in ("stagflation_1970s", "bridge_job_loss", "ss_reduction"):
-            continue  # each needs feature support out of scope for two-age v1 -- see docstring
-        overrides = scenario["overrides"]
-        returns = [overrides.get(yr, post_ret) for yr in range(retire_yrs)]
+        overrides  = scenario["overrides"]
+        inf_mult   = scenario.get("inflation_mult", 1.0)
+        ss_mult    = 1.0 - scenario.get("ss_reduction", 0.0)
+        bridge_override = scenario.get("bridge_years_override", None)
+
+        # Bridge job loss -- modify inputs copy, same as the single-axis
+        # version's own sim_inputs pattern.
+        sim_inputs = dict(inputs)
+        if bridge_override is not None:
+            sim_inputs["bridge_years_55"] = bridge_override
+
+        scenario_jason_ss  = jason_ss_annual * ss_mult
+        scenario_justin_ss = justin_ss_annual * ss_mult
+
+        returns = []
+        inf_mults = []
+        for yr in range(retire_yrs):
+            if yr in overrides:
+                returns.append(overrides[yr])
+                inf_mults.append(inf_mult if yr < 10 else 1.0)
+            else:
+                returns.append(post_ret)
+                inf_mults.append(1.0)
+
+        # Re-project starting balances if bridge years changed -- bridge/
+        # kids timing is anchored to Jason's own retirement (section 21),
+        # so the single-axis version's `ret_age == 55` gate becomes
+        # `jason_ret_age == 55` here.
+        if bridge_override is not None and jason_ret_age == 55:
+            _proj2 = run_two_dimensional_retirement_projection(sim_inputs, accounts, jason_ret_age=jason_ret_age,
+                                                                 justin_ret_age=justin_ret_age, ss_timing=ss_timing,
+                                                                 life_events=life_events,
+                                                                 surplus_allocations=surplus_allocations)
+            sim_pretax  = _proj2["pretax_at_phase2_start"]
+            sim_roth    = _proj2["roth_at_phase2_start"]
+            sim_taxable = _proj2["taxable_at_phase2_start"]
+            sim_hsa     = _proj2["hsa_at_phase2_start"]
+        else:
+            sim_pretax, sim_roth, sim_taxable, sim_hsa = pretax_at_start, roth_at_start, taxable_at_start, hsa_at_start
+
         if key == "early_sequence":
             # Lazy branch, not dict.get's eager default arg -- a short
             # two-age horizon (retire_yrs <= len(overrides)) means every
@@ -1220,16 +1316,23 @@ def _run_stress_tests_two_age(inputs: Dict, accounts: List[Dict], jason_ret_age:
             returns = [overrides[yr] if yr in overrides else normal_returns[max(0, yr-len(overrides))]
                        for yr in range(retire_yrs)]
 
+        # Same "only actually reduced for the ss_reduction scenario"
+        # gating the single-axis version uses -- every other scenario
+        # keeps the real jason_ss_annual/justin_ss_annual unchanged.
+        run_jason_ss  = scenario_jason_ss  if scenario.get("ss_reduction") else jason_ss_annual
+        run_justin_ss = scenario_justin_ss if scenario.get("ss_reduction") else justin_ss_annual
+
         survived, bals, *_ = _run_single_two_age(
-            pretax_at_start, roth_at_start, taxable_at_start, hsa_at_start,
-            timeline, inputs,
-            pension_annual, jason_ss_annual, jason_ss_age,
+            sim_pretax, sim_roth, sim_taxable, sim_hsa,
+            timeline, sim_inputs,
+            pension_annual, run_jason_ss, jason_ss_age,
             income_today, inflation, post_ret, returns,
             post_life_events=post_life_events,
-            justin_ss_annual=justin_ss_annual,
+            justin_ss_annual=run_justin_ss,
             justin_ss_age=justin_ss_age,
             state_tax_rate=inputs.get("state_income_tax_rate", 0),
             salary_growth_pct=_salary_growth_pct,
+            inflation_mults=inf_mults,
         )
         dep_age = end_age
         for i, b in enumerate(bals):

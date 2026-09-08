@@ -1123,7 +1123,8 @@ ACCOUNT_OWNERSHIP_LIMITATION_NOTE = (
 )
 
 
-def two_age_spending_need_fn(inputs: Dict, income_today: float, inflation: float, timeline):
+def two_age_spending_need_fn(inputs: Dict, income_today: float, inflation: float, timeline,
+                              inflation_mults: List[float] = None):
     """Factory returning a per-year spending-need function shared between
     run_two_dimensional_retirement_projection and simulation_engine.py's
     two-age Monte Carlo/Stress Tests trial loop (`_run_single_two_age`)
@@ -1144,6 +1145,19 @@ def two_age_spending_need_fn(inputs: Dict, income_today: float, inflation: float
     run_retirement_projection/_run_single already use for their own
     once-per-scenario reference figures, so this factory itself is
     meant to be called once per scenario/trial-batch, not once per year.
+
+    inflation_mults (independent review, 2026-09-08, "Incomplete scope"
+    finding, CALCULATION_CONTRACT.md section 23): optional per-loop-year
+    inflation multiplier list, same convention timeline_engine.
+    build_cumulative_inflation already uses for stress scenarios like
+    stagflation_1970s that deliberately run inflation hot for part of
+    the horizon. Defaults to None (flat `inflation` every year), which
+    reduces the cumulative-inflation curve below to the exact original
+    (1+inflation)**yr formula for every index -- run_two_dimensional_
+    retirement_projection's own calls never pass this, so its behavior
+    (and every existing test asserting against it) is completely
+    unaffected. Only simulation_engine.py's two-age Stress Tests passes
+    a real (non-None) sequence.
 
     Returns need_for_year(age, yr) -> (year_need, healthcare_inflated,
     bridge_income_this_year), where `age` is Jason's absolute age this
@@ -1172,34 +1186,51 @@ def two_age_spending_need_fn(inputs: Dict, income_today: float, inflation: float
     kids_annual_cost_at_jason_ret = kids_annual_cost * ((1 + inflation) ** timeline.jason_years_to_retire)
     bridge_income_at_jason_ret    = bridge_income    * ((1 + inflation) ** timeline.jason_years_to_retire)
 
+    # cum_inflation[yr] is the accumulated price-growth factor from
+    # phase2_start through the start of loop year yr -- the SAME
+    # accumulate-don't-retroactively-erase-history technique
+    # build_cumulative_inflation's own docstring explains, needed so a
+    # stress scenario's inflation_mults can vary year to year without
+    # silently un-compounding whatever came before. The bridge/kids
+    # branch anchors to jason_effective_start_age instead, which can be
+    # a different (always later-or-equal) starting point than
+    # phase2_start whenever Justin retires first -- rebased via division
+    # (cum_inflation[yr] / cum_inflation[jason_offset]) rather than a
+    # second cumulative-inflation array, since both curves share the
+    # same underlying per-year rate sequence.
+    cum_inflation = build_cumulative_inflation(inflation, timeline.retire_yrs, inflation_mults)
+    jason_offset = jason_effective_start_age - (timeline.jason_age + phase2_years)
+
     def need_for_year(age, yr):
+        cum_from_phase2 = cum_inflation[yr]
         if jason_ret_age == 55 and age >= jason_effective_start_age:
             jason_yr = age - jason_effective_start_age
+            cum_from_jason = cum_inflation[yr] / cum_inflation[jason_offset]
             kids_still_home = jason_yr < kids_years
             bridge_active   = jason_yr < bridge_years
             if bridge_active:
                 healthcare_this_year = 0
-                kids_cost = kids_annual_cost_at_jason_ret * ((1 + inflation) ** jason_yr)
-                bridge    = bridge_income_at_jason_ret    * ((1 + inflation) ** jason_yr)
-                year_need = max(0, income_at_jason_ret * ((1 + inflation) ** jason_yr) + kids_cost - bridge)
+                kids_cost = kids_annual_cost_at_jason_ret * cum_from_jason
+                bridge    = bridge_income_at_jason_ret    * cum_from_jason
+                year_need = max(0, income_at_jason_ret * cum_from_jason + kids_cost - bridge)
                 bridge_income_this_year = bridge
             elif kids_still_home and age < 65:
                 healthcare_this_year = healthcare_kids_at_jason_ret
-                kids_cost = kids_annual_cost_at_jason_ret * ((1 + inflation) ** jason_yr)
-                year_need = income_at_jason_ret * ((1 + inflation) ** jason_yr) + kids_cost + healthcare_kids_at_jason_ret * ((1 + inflation) ** jason_yr)
+                kids_cost = kids_annual_cost_at_jason_ret * cum_from_jason
+                year_need = income_at_jason_ret * cum_from_jason + kids_cost + healthcare_kids_at_jason_ret * cum_from_jason
                 bridge_income_this_year = 0.0
             elif age < 65:
                 healthcare_this_year = healthcare_pre_at_jason_ret
-                year_need = income_at_jason_ret * ((1 + inflation) ** jason_yr) + healthcare_pre_at_jason_ret * ((1 + inflation) ** jason_yr)
+                year_need = income_at_jason_ret * cum_from_jason + healthcare_pre_at_jason_ret * cum_from_jason
                 bridge_income_this_year = 0.0
             else:
                 healthcare_this_year = healthcare_post_at_jason_ret
-                year_need = income_at_jason_ret * ((1 + inflation) ** jason_yr) + healthcare_post_at_jason_ret * ((1 + inflation) ** jason_yr)
+                year_need = income_at_jason_ret * cum_from_jason + healthcare_post_at_jason_ret * cum_from_jason
                 bridge_income_this_year = 0.0
-            healthcare_inflated = healthcare_this_year * ((1 + inflation) ** jason_yr)
+            healthcare_inflated = healthcare_this_year * cum_from_jason
         else:
-            healthcare_inflated = healthcare_for_age(age, healthcare_pre_at_start, healthcare_post_at_start) * ((1 + inflation) ** yr)
-            year_need = income_at_start * ((1 + inflation) ** yr) + healthcare_inflated
+            healthcare_inflated = healthcare_for_age(age, healthcare_pre_at_start, healthcare_post_at_start) * cum_from_phase2
+            year_need = income_at_start * cum_from_phase2 + healthcare_inflated
             bridge_income_this_year = 0.0
         return year_need, healthcare_inflated, bridge_income_this_year
 
@@ -1536,10 +1567,22 @@ def run_two_dimensional_retirement_projection(inputs: Dict, accounts: List[Dict]
         # contribution/RSU/bonus/asset-sale/life-event/surplus-
         # allocation math a second time (CALCULATION_CONTRACT.md
         # section 22).
-        "pretax_at_phase2_start":  round(pretax_at_start),
-        "roth_at_phase2_start":    round(roth_at_start),
-        "taxable_at_phase2_start": round(taxable_at_start),
-        "hsa_at_phase2_start":     round(hsa_at_start),
+        #
+        # Deliberately UNROUNDED (independent review, 2026-09-08, P2):
+        # these four are consumed directly as _run_single_two_age's
+        # opening balances, not displayed anywhere -- rounding them here
+        # meant the deterministic Monte Carlo/Stress trial started from a
+        # slightly different number than run_two_dimensional_retirement_
+        # projection's own full-precision arithmetic used for the SAME
+        # scenario, reproduced as a $2 drift ($424,713 vs $424,711) under
+        # otherwise identical fixed returns -- small, but real and
+        # unnecessary. round() belongs at display time (the frontend's
+        # own Intl.NumberFormat), not baked into a value another engine
+        # consumes as an input.
+        "pretax_at_phase2_start":  pretax_at_start,
+        "roth_at_phase2_start":    roth_at_start,
+        "taxable_at_phase2_start": taxable_at_start,
+        "hsa_at_phase2_start":     hsa_at_start,
         "retirement_end_age": mort_age,
         "any_year_underfunded": underfunded,
         "on_track": not underfunded,

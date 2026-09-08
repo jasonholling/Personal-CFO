@@ -187,6 +187,71 @@ class TestDeterministicStressTestsParity:
         assert st["scenarios"]["base"]["final_balance"] == 0
 
 
+class TestPreviouslySkippedScenariosNowRunInTwoAgeMode:
+    """Independent review, 2026-09-08 -- "Incomplete scope" finding:
+    stagflation_1970s/bridge_job_loss/ss_reduction were entirely skipped
+    in the first cut of two-age Stress Tests, and the UI simply hid
+    them. All three now run. Every scenario is present in the response
+    (not just the pure return-override ones)."""
+
+    def test_all_seven_scenarios_present(self):
+        inputs = base_inputs(retirement_end_age=64, w2_salary=100000,
+                              pension_55=30000, pension_60=30000, pension_65=30000)
+        st = run_stress_tests(inputs, TAXABLE(200000), jason_ret_age=63, justin_ret_age=61)
+        assert set(st["scenarios"].keys()) == {
+            "base", "crash_2008", "stagflation_1970s", "lost_decade",
+            "early_sequence", "bridge_job_loss", "ss_reduction",
+        }
+
+    def test_ss_reduction_actually_reduces_both_spouses_benefits(self):
+        """Hand-calculated: both spouses 61, retiring together at 62 (1yr
+        horizon), $20,000 Jason SS + $10,000 Justin SS (justin_ss_age
+        overridden to 62 so it's active immediately too), zero spending
+        target/healthcare/pension/starting balance, 0% growth/inflation.
+        With no spending need, the full $30,000 guaranteed income is a
+        pure surplus swept into taxable -- base ends at $30,000; the 25%
+        cut scenario reduces BOTH benefits to 75%, ending at $22,500 (not
+        $30,000 with only one spouse's benefit cut, the exact bug the
+        single-axis version's own external-audit fix addressed)."""
+        inputs = base_inputs(jason_age=61, justin_age=61, retirement_income_today_dollars=0,
+                              retirement_end_age=63, jason_social_security=20000,
+                              justin_social_security=10000, justin_ss_age=62)
+        st = run_stress_tests(inputs, TAXABLE(0), jason_ret_age=62, justin_ret_age=62)
+        assert st["scenarios"]["base"]["final_balance"] == 30000
+        assert st["scenarios"]["ss_reduction"]["final_balance"] == 22500
+
+    def test_bridge_job_loss_reprojects_with_a_shortened_bridge(self):
+        """Both spouses 55, retiring together at 55, $30,000/yr bridge
+        income normally lasting 5 years, $5,000,000 taxable, 0% growth/
+        inflation, 5-year horizon. bridge_job_loss shortens the bridge to
+        2 years (matching the single-axis scenario's own description),
+        losing 3 years of $30,000 bridge income relative to the base
+        case -- final balance is lower, not identical to base (which
+        would mean the override silently had no effect)."""
+        inputs = base_inputs(jason_age=55, justin_age=55, retirement_end_age=60,
+                              bridge_income_55=30000, bridge_years_55=5)
+        st = run_stress_tests(inputs, TAXABLE(5000000), jason_ret_age=55, justin_ret_age=55)
+        assert st["scenarios"]["base"]["final_balance"] == 4750000
+        assert st["scenarios"]["bridge_job_loss"]["final_balance"] == 4660000
+
+    def test_stagflation_applies_variable_inflation_to_spending_need(self):
+        """Both spouses 60, retiring together at 62 (2yrs away, so phase2
+        starts 2 years of today's-dollar inflation ahead already), 3-year
+        horizon (ages 62-64), $10,000 today's-dollars spend, 2% base
+        inflation -> stagflation's own 4x multiplier makes the effective
+        withdrawal-phase rate 8% for all 3 years (well within its first
+        10). Verified against simulate_withdrawal_year's own arithmetic
+        directly (script, not by hand) before writing this assertion:
+        the scenario's own 2%/yr return override applies throughout."""
+        inputs = base_inputs(retirement_income_today_dollars=10000, inflation_rate=0.02, retirement_end_age=65)
+        st = run_stress_tests(inputs, TAXABLE(100000), jason_ret_age=62, justin_ret_age=62)
+        assert st["scenarios"]["stagflation_1970s"]["final_balance"] == 71012
+        # 8% effective inflation drives materially higher spending need
+        # than the 6% (2% base * 3.0 -- not this scenario) or a flat 2%
+        # base would, so it must differ from the neutral base case.
+        assert st["scenarios"]["stagflation_1970s"]["final_balance"] != st["scenarios"]["base"]["final_balance"]
+
+
 class TestAdverseReturnsMiddlePhaseAndBoundary:
     """Not deterministic-parity checks (the two-age reference projection
     has no concept of a varying return sequence) -- hand-calculated
@@ -325,3 +390,45 @@ class TestSingleAgeModeUnaffected:
         st = run_stress_tests(sample_inputs, sample_accounts, ret_age=60, ss_timing="early")
         assert "mode" not in st
         assert "jason_ret_age" not in st
+
+
+class TestFullyFundedPlanIsASuccess:
+    def test_exact_zero_ending_balance_with_no_unmet_need_counts_as_survived(self, monkeypatch):
+        """Independent review, 2026-09-08, P2 -- reproduced: one year,
+        $80,000 available, $80,000 spend, 0% return. The deterministic
+        projection reports on_track=True (unmet_need=0 the only year) --
+        the money lasted exactly as long as the plan needed it to, which
+        is success by definition, not failure. The old
+        `balances[-1] > 0` check on top of "every year funded" failed
+        this exact-zero-ending trial anyway, reporting 0% success/
+        survived=False for a plan the Projection itself calls on_track."""
+        monkeypatch.setattr(random_module, "gauss", lambda mu, sigma: 0.0)
+        inputs = base_inputs(retirement_end_age=61)
+        proj = run_two_dimensional_retirement_projection(inputs, TAXABLE(80000), jason_ret_age=60, justin_ret_age=60)
+        assert proj["on_track"] is True
+        assert proj["yearly_detail"][-1]["portfolio_balance"] == 0
+
+        mc = run_monte_carlo(inputs, TAXABLE(80000), jason_ret_age=60, justin_ret_age=60)
+        assert mc["success_rate"] == 100.0
+
+        st = run_stress_tests(inputs, TAXABLE(80000), jason_ret_age=60, justin_ret_age=60)
+        assert st["scenarios"]["base"]["survived"] is True
+
+
+class TestStartingBalancesRetainFullPrecision:
+    def test_bucket_fields_are_not_rounded(self):
+        """Independent review, 2026-09-08, P2 -- pretax_at_phase2_start/
+        roth_at_phase2_start/taxable_at_phase2_start/hsa_at_phase2_start
+        are consumed directly as _run_single_two_age's opening balances,
+        not displayed anywhere; rounding them before simulation_engine.py
+        ever sees them meant Monte Carlo/Stress started from a slightly
+        different number than the deterministic projection's own
+        full-precision arithmetic for the identical scenario (reproduced:
+        a $2 drift on a real household under fixed returns). A 401k
+        balance split at a percentage that doesn't land on a whole dollar
+        proves the fix directly: the returned starting balance must keep
+        its fractional cents, not round to a whole number."""
+        inputs = base_inputs(retirement_end_age=64, pretax_401k_pct=0.75)
+        accounts = [{"name": "401k", "account_type": "401k", "owner": "joint", "balance": 100001}]
+        proj = run_two_dimensional_retirement_projection(inputs, accounts, jason_ret_age=61, justin_ret_age=61)
+        assert proj["pretax_at_phase2_start"] == 75000.75
