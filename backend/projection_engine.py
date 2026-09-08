@@ -369,7 +369,17 @@ def pension_for_age(inputs: Dict, age: int) -> float:
     those anchor points for any other retirement age (e.g. a sensitivity sweep
     or Monte Carlo run at an in-between age). Shared by every module that needs
     a pension figure for an arbitrary retirement age — do not reimplement this
-    interpolation inline elsewhere."""
+    interpolation inline elsewhere.
+
+    Intentionally a single household-level figure, not split per spouse:
+    Settings labels this "Pension (100% Joint & Survivor)" — one employer
+    pension (Jason's, in the default data) with a joint-and-survivor
+    election that continues paying Justin after Jason's death, not two
+    independent pensions. `age` is always Jason's age at every call site
+    (his own selected/swept ret_age) — there is no separate justin_ret_age
+    version of this lookup, and none is planned unless a household with a
+    genuinely independent second pension asks for one. See
+    docs/CALCULATION_CONTRACT.md section 13, backlog item 4."""
     p55 = inputs.get("pension_55", PENSION_100J_S_DEFAULT[55])
     p60 = inputs.get("pension_60", PENSION_100J_S_DEFAULT[60])
     p65 = inputs.get("pension_65", PENSION_100J_S_DEFAULT[65])
@@ -549,6 +559,21 @@ def run_retirement_projection(inputs: Dict, accounts: List[Dict], ret_ages: List
         # already uses for the 529 saving phase.
         justin_contrib_years = min(justin_years_to_retire, years_to_retire)
         justin_dormant_years = max(0, years_to_retire - justin_years_to_retire)
+
+        # Second-earner gap income (2026-09-08, closes backlog item 1 in
+        # docs/CALCULATION_CONTRACT.md section 13): the flip side of the
+        # cap above. If justin_ret_age is set LATER than this scenario's
+        # own withdrawal start (justin_years_to_retire > years_to_retire),
+        # Justin is still earning during the first justin_gap_years of the
+        # household's withdrawal phase. That income should offset
+        # withdrawal need directly, the same mechanism bridge_income_55
+        # already uses for a fixed-duration income offset — generalized
+        # here to any ret_age (not just 55) and keyed to Justin's own
+        # actual retirement date instead of a flat manually-entered bridge
+        # figure. Net-of-tax at the same flat 0.65 approximation this
+        # function already uses for RSU/bonus (not a real payroll-tax
+        # model — see backlog item 3, same section).
+        justin_gap_years = max(0, justin_years_to_retire - years_to_retire)
 
         def _justin_contrib_fv(annual_amount):
             if annual_amount <= 0:
@@ -744,6 +769,10 @@ def run_retirement_projection(inputs: Dict, accounts: List[Dict], ret_ages: List
             healthcare_kids_at_ret  = healthcare_kids  * ((1 + inflation) ** years_to_retire)
             kids_annual_cost_at_ret = kids_annual_cost * ((1 + inflation) ** years_to_retire)
             bridge_income_at_ret    = bridge_income    * ((1 + inflation) ** years_to_retire)
+            justin_gap_income_at_ret = (
+                justin_salary * 0.65 * ((1 + inflation) ** years_to_retire)
+                if justin_gap_years > 0 else 0
+            )
 
             # ── Year-by-year with buckets and RMDs ───────────────────────────
             pretax  = pretax_at_ret
@@ -817,6 +846,14 @@ def run_retirement_projection(inputs: Dict, accounts: List[Dict], ret_ages: List
                 # need, same as rmd_reinvested's treatment. Computed above
                 # via the shared builder for both branches.
                 year_need -= life_event_monthly_this_year
+
+                # Second-earner gap income — see justin_gap_years above.
+                # Active only for the first justin_gap_years of the
+                # withdrawal phase; Justin's contribution/salary timeline
+                # is otherwise entirely a pre-retirement concept, so this
+                # is the one place it reaches into the withdrawal loop.
+                if yr < justin_gap_years:
+                    year_need -= justin_gap_income_at_ret * ((1 + inflation) ** yr)
 
                 # Fixed income sources. Pension is frozen/no-COLA — a
                 # deliberate, consumer-specific policy this consolidation

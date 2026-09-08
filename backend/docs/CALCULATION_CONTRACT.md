@@ -923,33 +923,63 @@ after an early stop, checks out. Seven real gaps were found, all
 pre-existing scope limitations rather than bugs in what's actually
 implemented — logged here as backlog, not fixed yet:
 
-1. **Working spouse income is ignored after the first spouse retires.**
-   `justin_w2_salary` only creates pre-retirement contributions/assets. If
-   Jason retires at 60 and Justin works until 65, Justin's wages don't
-   reduce portfolio withdrawals, appear in guaranteed income, or affect
-   taxes during those years — this is exactly the "phased retirement, one
-   spouse still working" gap already flagged in the function's own
-   docstring and the Settings UI warning, restated here for the backlog
-   record. Justin's own contributions are also capped at Jason's
-   withdrawal start (`years_to_retire`), by the same limitation.
-2. **No symmetric case for Jason continuing to work while Justin is
-   retired.** The implementation handles Justin stopping earlier (his sum
-   sits and compounds), but there's no path for the reverse — only
-   Jason's `ret_age` ever starts the household's withdrawal phase. The
-   feature is asymmetric by construction, not by oversight, but that
-   asymmetry isn't stated anywhere as a product decision.
-3. **Second salary never appears in tax or cash-flow outputs.** Justin's
-   salary is split into Roth/pre-tax contribution amounts only — gross
-   pay, payroll taxes, withholding, and disposable income never reach
-   `cash_flow_engine.py` or any tax calculation (confirmed:
-   `justin_w2_salary` appears nowhere outside `projection_engine.py`/
-   `db.py`). The app can show a larger projected portfolio without ever
-   showing the income that funded it.
-4. **No spouse-specific pension/benefit retirement timing.**
-   `justin_ret_age` controls only his own contribution window — pension
-   and other guaranteed-income logic still key off Jason's selected
-   `ret_age` exclusively. May be an intentional product simplification,
-   but it isn't stated as one anywhere in the model contract or UI.
+1. **CLOSED 2026-09-08 — working spouse income during the gap.**
+   `justin_w2_salary` used to only create pre-retirement
+   contributions/assets. Now: when `justin_ret_age` is set LATER than a
+   given scenario's own withdrawal start, Justin's income (net-of-tax at
+   the same flat 0.65 approximation this file already uses for RSU/
+   bonus — see item 3 below, not a real payroll-tax model) offsets that
+   scenario's spending need for exactly the gap years, the same
+   mechanism `bridge_income_55` already used for a fixed-duration income
+   offset during withdrawal — generalized to any `ret_age` and keyed to
+   Justin's own real retirement date. Justin's own contributions still
+   cap at the earlier of his own retirement or the household's
+   withdrawal start (unchanged, correct — see item 9's reasoning).
+   **Reference implementation only (`run_retirement_projection`) — not
+   yet propagated** to Monte Carlo/Stress/SWR/Roth conversion/Tax
+   efficiency/Survivor, each of which either re-simulates the withdrawal
+   phase independently or only reads starting balances
+   (`pretax_at_retirement` etc.) rather than the gap-income-adjusted
+   later-year need. Verified: `TestJustinGapIncomeOffsetsWithdrawalNeed`
+   (4 tests) — zero effect when `justin_ret_age` is unset or ≤ the
+   scenario's own retirement, need reduced only during the gap years and
+   exactly back to baseline afterward, `projected_surplus` improves on a
+   realistic underfunded-without-it fixture.
+2. **NOT a symmetric bug — a different, larger ask.** Re-examined during
+   item 1's close: the household's withdrawal phase (drawdown/spending
+   simulation) only ever starts at Jason's own selected `ret_age` by
+   this app's fundamental architecture — there's no "Jason still working,
+   drawing down the portfolio because Justin already retired" case to
+   fix, because this app doesn't simulate spending *at all* before
+   Jason's own retirement, for either spouse (only contribution
+   accumulation is modeled pre-retirement — see section 2.3). A true
+   symmetric case (either spouse's retirement independently able to
+   start the household's withdrawal phase) would mean a two-dimensional
+   `jason_ret_age × justin_ret_age` scenario sweep replacing the current
+   single-`ret_age` sweep everywhere it appears (every scenario table on
+   Retirement Projection, Stress Test, Roth Conversion, etc.) — a real
+   product/UX redesign, not a bridge-income trick like item 1's. Left
+   open, correctly scoped now instead of conflated with item 1.
+3. **Partially addressed — net-of-tax approximation, gap years only.**
+   Item 1's gap income uses the same flat 0.65 net-of-tax approximation
+   this file already applies to RSU/bonus, so the gap-year figure isn't
+   raw gross pay anymore — but this is still not real payroll-tax
+   modeling (no brackets, no FICA, no withholding), and it only touches
+   the gap years specifically. Pre-retirement, and for the full window a
+   scenario's `justin_gap_years` doesn't cover, gross pay/payroll taxes/
+   disposable income still never reach `cash_flow_engine.py` or any tax
+   calculation. Also clarified: this was never actually Justin-specific
+   — Jason's own income doesn't auto-populate cash-flow either; Monthly
+   Cash Flow is a fully manual page for both people. Left open for real
+   payroll-tax modeling if that becomes a specific ask.
+4. **No spouse-specific pension/benefit retirement timing — confirmed
+   intentional, now documented as such.** `pension_for_age`'s own
+   docstring and the Settings UI (Pension section) now both state
+   explicitly: this is one household pension (Jason's employer plan, in
+   the default data) with a joint-and-survivor election, not two
+   independent pensions — keyed to Jason's `ret_age` by design. If a
+   household has a genuinely separate second pension, there's still no
+   field for it; that's the remaining real gap, no longer silent.
 5. **Aggregated account ownership stays ambiguous.** Justin's
    contributions flow into the same household pretax/Roth totals every
    other consumer already used (consistent with the existing aggregate
@@ -958,21 +988,26 @@ implemented — logged here as backlog, not fixed yet:
    caps survivor/tax/RMD/estate accuracy for a genuine two-earner
    household more than it did for the one-earner case this ledger shape
    was designed around.
-6. **`justin_ret_age = 0` reads as "independent default," isn't one.**
-   Leaving it unset makes Justin's contributions stop with Jason's
-   scenario `ret_age` — useful backward compatibility (see section 12),
-   but it's Jason's retirement date wearing Justin's field, not Justin's
-   actual plan. The UI warns about this today; worth considering whether
-   a second salary entered without an explicit `justin_ret_age` should be
-   *required* to prompt for one rather than silently falling back.
-7. **Second-earner fields aren't declared on the `PlanningInputs`
-   Pydantic model** — they persist purely because `save_planning_inputs`
-   whitelists against the live SQLite columns (see main.py's own comment
-   on `extra: allow`), the same pattern most Settings fields already use
-   (e.g. `w2_salary` itself isn't declared there either). Not a
-   functional bug, but it weakens request validation, any generated API
-   docs, and type clarity specifically for this feature.
+6. **CLOSED 2026-09-08 — explicit confirmation required, not just a
+   passive warning.** `justin_ret_age = 0` still falls back to Jason's
+   scenario `ret_age` (unchanged, correct backward compatibility — see
+   section 12), but Settings' `save()` now blocks with a
+   `window.confirm()` when `justin_w2_salary > 0` and `justin_ret_age`
+   is still 0, spelling out exactly what the fallback means, instead of
+   only a passive warning banner elsewhere on the page. Cancel returns
+   to editing without saving; confirming proceeds with the fallback as a
+   deliberate choice, not a silent default.
+7. **CLOSED 2026-09-08 — declared on `PlanningInputs`.** All 6
+   second-earner fields now have explicit types/defaults on the Pydantic
+   model (matching db.py's own defaults), same mechanism, zero behavior
+   change — `extra: allow` + the DB-column whitelist in
+   `save_planning_inputs` already accepted them; declaring them just adds
+   real request validation and type clarity on top.
 
-**Not scheduled yet** — revisit if/when phased-retirement or true
-per-spouse tax/cash-flow modeling becomes a real ask, per this doc's own
-standing practice of not building ahead of a specific need.
+**Remaining open: items 2, 3 (payroll-tax modeling specifically), and
+5** — items 2 and 5 are real product/architecture redesigns (a
+two-dimensional retirement-age sweep; a per-owner ledger), not scheduled
+per this doc's standing practice of not building ahead of a specific
+need. Item 3's payroll-tax gap is smaller in isolation but only really
+worth closing alongside a genuine per-person income/tax model, which is
+what items 2/3/5 all ultimately point at.

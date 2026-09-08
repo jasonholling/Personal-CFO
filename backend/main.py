@@ -323,6 +323,18 @@ class PlanningInputs(BaseModel):
     annual_rsu_value: float = 0
     annual_bonus_pct: float = 0
     mortgage_balance: float = 0
+    # Second-earner support (2026-09-08) — see run_retirement_projection's
+    # own docstring and docs/CALCULATION_CONTRACT.md section 13 (backlog
+    # item 7): these persisted correctly before via extra:allow + the
+    # save route's DB-column whitelist, same as most Settings fields, but
+    # were never declared here, weakening request validation/API docs for
+    # this specific feature. All default to 0/unset, matching db.py.
+    justin_w2_salary: float = 0
+    justin_employee_401k_pct: float = 0.06
+    justin_employer_401k_pct: float = 0.03
+    justin_annual_bonus_pct: float = 0
+    justin_annual_rsu_value: float = 0
+    justin_ret_age: int = 0
 
 class SnapshotNote(BaseModel):
     note: str

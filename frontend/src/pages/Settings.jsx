@@ -49,6 +49,22 @@ export default function Settings() {
   const set = (key, val) => setForm(f => ({ ...f, [key]: val }))
 
   const save = () => {
+    // Backlog item 6 (CALCULATION_CONTRACT.md section 13): a second salary
+    // with retirement age left at the 0-fallback silently ties that
+    // person's contribution window to Jason's own ret_age scenario,
+    // which reads as "independent" but isn't. Require an explicit
+    // confirmation at the moment of saving that combination, rather than
+    // only a passive warning banner elsewhere on the page.
+    if ((form.justin_w2_salary ?? 0) > 0 && (form.justin_ret_age ?? 0) === 0) {
+      const p2 = form.person2_name || 'Person 2'
+      const ok = window.confirm(
+        `${p2}'s Retirement Age is still 0 (unset) even though ${p2}'s salary is filled in. ` +
+        `That means ${p2}'s contributions will stop whenever the scenario you're viewing has the ` +
+        `other person retiring — not at ${p2}'s own actual retirement date.\n\n` +
+        `Save anyway with this fallback, or Cancel to go set ${p2}'s Retirement Age first?`
+      )
+      if (!ok) return
+    }
     axios.put('/api/planning-inputs', form)
       .then(() => { setSaved(true); setTimeout(() => setSaved(false), 2500) })
   }
@@ -200,6 +216,12 @@ export default function Settings() {
       </Section>
 
       <Section title="Pension (100% Joint &amp; Survivor)">
+        <div style={{ fontSize:11, color:'var(--text3)', marginBottom:12 }}>
+          One household pension (e.g. {p1}'s employer plan) with a joint-and-survivor election —
+          not two independent pensions. Keyed to {p1}'s retirement age; {p2} continues receiving
+          it after {p1}'s death. If {p2} has their own separate pension, there's no field for it
+          yet — this is a known gap, not silently missing.
+        </div>
         <Row label="Pension at Age 55" hint="Monthly × 12"><NumInput value={form.pension_55 ?? 0} onChange={v => set('pension_55', v)} prefix="$" suffix="/yr" /></Row>
         <Row label="Pension at Age 60" hint="Monthly × 12"><NumInput value={form.pension_60 ?? 0} onChange={v => set('pension_60', v)} prefix="$" suffix="/yr" /></Row>
         <Row label="Pension at Age 65" hint="Monthly × 12"><NumInput value={form.pension_65 ?? 0} onChange={v => set('pension_65', v)} prefix="$" suffix="/yr" /></Row>

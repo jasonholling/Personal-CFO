@@ -417,6 +417,70 @@ class TestJustinIndependentIncomeAndRetirementAge:
         assert scenario_late["portfolio_at_retirement"] > scenario_early["portfolio_at_retirement"]
 
 
+class TestJustinGapIncomeOffsetsWithdrawalNeed:
+    """Backlog item 1 (docs/CALCULATION_CONTRACT.md section 13, closed
+    2026-09-08): when justin_ret_age is set LATER than this scenario's
+    own withdrawal start, Justin's continued (net-of-tax-approximated)
+    income now offsets the household's withdrawal-phase spending need for
+    the gap years, instead of being invisible to the withdrawal loop
+    entirely. Reference implementation only — see this test class's own
+    module-level scope note; Monte Carlo/Stress/SWR/Roth/Tax-Efficiency/
+    Survivor do not yet reflect this (each independently re-simulates the
+    withdrawal phase, or pulls only pretax_at_retirement etc. — the gap
+    income adjusts a *later* year's need directly, not the starting
+    balances those consumers read)."""
+
+    def test_default_justin_ret_age_zero_has_no_gap_income(self, sample_inputs, sample_accounts):
+        """justin_ret_age=0 (unset) must reproduce identical output to a
+        household with no justin_w2_salary at all in the withdrawal
+        phase -- this feature only activates when justin_ret_age is
+        explicitly set later than the scenario's own retirement."""
+        with_salary = run_retirement_projection({**sample_inputs, "justin_w2_salary": 100000}, sample_accounts, ret_ages=[60])
+        without_salary_income_need = [
+            y["income_need"] for y in next(s for s in run_retirement_projection(sample_inputs, sample_accounts, ret_ages=[60])["scenarios"] if s["ss_timing"] == "early")["yearly_detail"]
+        ]
+        with_salary_income_need = [
+            y["income_need"] for y in next(s for s in with_salary["scenarios"] if s["ss_timing"] == "early")["yearly_detail"]
+        ]
+        assert with_salary_income_need == without_salary_income_need
+
+    def test_gap_income_reduces_need_only_during_the_gap_years(self, sample_inputs, sample_accounts):
+        inputs_no_gap = {**sample_inputs, "jason_age": 55, "justin_age": 55, "justin_w2_salary": 100000, "justin_ret_age": 60}
+        inputs_gap = {**sample_inputs, "jason_age": 55, "justin_age": 55, "justin_w2_salary": 100000, "justin_ret_age": 65}
+        no_gap = next(s for s in run_retirement_projection(inputs_no_gap, sample_accounts, ret_ages=[60])["scenarios"] if s["ss_timing"] == "early")
+        gap = next(s for s in run_retirement_projection(inputs_gap, sample_accounts, ret_ages=[60])["scenarios"] if s["ss_timing"] == "early")
+        # 5-year gap (justin_ret_age 65 vs. this scenario's ret_age 60):
+        # years 0-4 of the withdrawal phase should show strictly lower
+        # need than the no-gap baseline; year 5 onward (gap over) should
+        # match exactly.
+        for yr in range(5):
+            assert gap["yearly_detail"][yr]["income_need"] < no_gap["yearly_detail"][yr]["income_need"]
+        assert gap["yearly_detail"][5]["income_need"] == no_gap["yearly_detail"][5]["income_need"]
+
+    def test_gap_income_improves_projected_surplus(self, sample_inputs, sample_accounts):
+        """Integration check: a household with the working spouse's
+        continued income during the gap counted should look meaningfully
+        better (bigger projected_surplus) than the same household
+        without it -- this is the whole point of closing backlog item 1,
+        not just an isolated per-year number. Uses projected_surplus
+        rather than percent_funded since the latter caps at 100 and both
+        of this fixture's scenarios are already comfortably funded."""
+        base = {**sample_inputs, "jason_age": 55, "justin_age": 55, "retirement_income_today_dollars": 80000,
+                "jason_social_security": 30000, "justin_social_security": 0, "retirement_end_age": 90}
+        no_gap = next(s for s in run_retirement_projection({**base, "justin_w2_salary": 100000, "justin_ret_age": 60}, sample_accounts, ret_ages=[60])["scenarios"] if s["ss_timing"] == "early")
+        gap = next(s for s in run_retirement_projection({**base, "justin_w2_salary": 100000, "justin_ret_age": 65}, sample_accounts, ret_ages=[60])["scenarios"] if s["ss_timing"] == "early")
+        assert gap["projected_surplus"] > no_gap["projected_surplus"]
+
+    def test_no_gap_when_justin_retires_before_or_with_this_scenario(self, sample_inputs, sample_accounts):
+        """justin_ret_age <= this scenario's own retirement age must not
+        produce gap income -- there's no gap to offset (Justin retires at
+        or before the household's withdrawal phase even starts)."""
+        inputs = {**sample_inputs, "jason_age": 55, "justin_age": 55, "justin_w2_salary": 100000, "justin_ret_age": 58}
+        scenario = next(s for s in run_retirement_projection(inputs, sample_accounts, ret_ages=[60])["scenarios"] if s["ss_timing"] == "early")
+        no_salary = next(s for s in run_retirement_projection({**sample_inputs, "jason_age": 55, "justin_age": 55}, sample_accounts, ret_ages=[60])["scenarios"] if s["ss_timing"] == "early")
+        assert scenario["yearly_detail"][0]["income_need"] == no_salary["yearly_detail"][0]["income_need"]
+
+
 class TestWithdrawalWaterfallReconciliationFixes:
     """Regression tests for the external audit 2026-09-06 findings: RMD-age
     withdrawals silently getting rationed, spousal SS comparing the wrong
