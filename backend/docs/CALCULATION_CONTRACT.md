@@ -3340,3 +3340,231 @@ Awaiting approval of sections 36.1-36.4 before writing any code.
 Branch: `codex/two-age-survivor-design` (branched from
 `codex/two-age-tax-efficiency`, not `main`, matching the same
 sequencing note section 35/`CONSOLIDATION_HANDOFF.md` already record).
+
+## 37. Milestone 4 — Survivor Scenario + account ownership: REVISED DESIGN PROPOSAL (2026-09-08, on `codex/two-age-survivor-design`)
+
+Revises section 36 per explicit review feedback (five points, all
+addressed below). Still design-only — no application code changed on
+this branch. Section 36 is left in place for history rather than
+edited in place; this section supersedes it on every point where they
+disagree.
+
+### 37.1 Trust assets stay a distinct bucket, with an explicit availability assumption
+
+Section 36 folded `trust`-owned accounts into the joint bucket. **Wrong
+— reverted.** A trust is a separate legal entity with its own
+succession terms; whether its assets are actually available to a
+surviving spouse depends on the trust's own provisions (revocable vs.
+irrevocable, the spouse's status as trustee/beneficiary, distribution
+terms this app has no way to know), not on how the household happened
+to label the account.
+
+**Revised model:** `trust` becomes its own bucket (`jason`/`justin`/
+`joint`/`trust`), tracked and reported separately, never auto-included
+in the survivor's spendable resources. A new explicit input,
+`trust_available_to_survivor` (boolean, default `False`), controls
+whether Survivor Scenario's own calculation includes it — the default
+being "not available" is the conservative choice (never overstates
+survivor resources), and choosing `True` is a deliberate, visible
+household assumption, not an inferred one. The trust balance and
+whichever assumption was used are both surfaced in the result payload
+so the number is never presented without its own caveat attached.
+
+### 37.2 "Joint" ownership does not imply automatic survivorship
+
+Section 36 treated `joint`-owned accounts as automatically passing to
+the survivor in full, inferred from the `joint` label. **Wrong** — as
+the review notes, joint ownership isn't a single legal arrangement.
+Joint tenants with right of survivorship (JTWROS, the common case for
+a married couple's shared brokerage/bank accounts) transfers to the
+survivor automatically; tenants in common does not — the deceased's
+share passes through their estate instead, which this app has no model
+of at all (no will/probate/beneficiary-designation data).
+
+**Revised model:** a new explicit input, `joint_accounts_survivorship`
+(boolean, default `True` — JTWROS is materially more common for a
+married couple's shared accounts in practice, so this is a reasonable
+default, but it is a STATED default, not an inference from the word
+"joint"). When `True`, the joint bucket passes to the survivor in
+full, as section 36 proposed. When `False`, only half of the joint
+bucket is treated as the survivor's own (the deceased's share is
+modeled as lost to the survivor's household resources — NOT split
+50/50 as a calculation choice invented here, but as the literal legal
+default for tenants-in-common ownership when no other split was
+specified — this is the one place a 50% figure appears in this design,
+and it's a named legal default being modeled, not an ownership-
+attribution guess). Both the assumption used and its effect are
+surfaced in the result payload, same as 37.1.
+
+### 37.3 Survivor RMDs: a named, narrow spousal-rollover election — not applied automatically to every deceased-owned pretax account
+
+Section 36 proposed merging every deceased-owned pretax account into
+the survivor's own bucket and computing RMDs on the survivor's own age
+against the merged total, unconditionally. **Too broad** — a surviving
+spouse has multiple real options for an inherited IRA (treat as their
+own via rollover; keep as a separately-titled inherited IRA with its
+own RMD schedule; for an inherited 401(k) specifically, options differ
+again), and automatically assuming rollover for every account
+overstates what this app can actually claim to model.
+
+**Revised model, v1 scope:** model exactly ONE named election —
+**"spouse treats the inherited pretax account(s) as their own"** (the
+IRS-permitted spousal rollover / treat-as-own treatment) — and label
+it as exactly that in the UI/API output, not as a generic "inheritance"
+behavior. This is opt-in per scenario via a new explicit input,
+`spousal_rollover_election` (boolean, default `True` for v1, since
+it's the single most common real choice and the only one this
+narrow v1 supports) — when `False`, v1 does NOT attempt to model the
+alternative (a separately-scheduled inherited IRA with its own RMD
+timeline); it flags the result as "not modeled, assumes rollover was
+declined" rather than silently defaulting to rollover behavior anyway.
+This keeps the claim narrow and honest: v1 supports one clearly-named
+path, not "inheritance in general."
+
+### 37.4 Ownership is tracked through the whole projection, year by year — not just at initialization
+
+Section 36 proposed only splitting the STARTING balance by owner (at
+`phase2_start`) and verifying the household TOTAL matched the existing
+pooled figure. **Insufficient**, per the review: a household total
+match at time zero says nothing about whether contributions, growth,
+withdrawals, conversions, and transfers are attributed to the correct
+owner in EVERY subsequent year — two owner-split ledgers could
+disagree in every single interior year and still coincidentally sum to
+the same total at the end.
+
+**Revised model:** three parallel bucket sets (`jason`, `justin`,
+`joint` — each with its own pretax/roth/taxable/hsa sub-buckets) are
+carried through the ENTIRE per-year loop, not just derived once at the
+start:
+
+- **Contributions** (pre-retirement accumulation phase only, matching
+  every existing consumer's boundary — no withdrawal-phase consumer in
+  this app models ongoing contributions, unchanged): each spouse's own
+  401k/RSU/bonus contributions land in THEIR OWN bucket, using the
+  same per-spouse input fields (`w2_salary` vs `justin_w2_salary`,
+  etc.) `run_two_dimensional_retirement_projection`'s accumulation math
+  already keys off — this part is unchanged from section 36, just
+  explicitly stated as applying every accumulation year, not once.
+- **Growth**: each owner's own sub-bucket compounds independently at
+  the same assumed rate every other consumer already uses — no new
+  rate concept, just applied three times (jason/justin/joint) instead
+  of once.
+- **Withdrawals**: the existing account-TYPE draw order (taxable →
+  pretax → hsa → roth, or whichever strategy a given tool uses)
+  determines WHICH BUCKET TYPE funds a shortfall; a NEW, explicit
+  owner-order policy determines WHICH OWNER's bucket of that type is
+  drawn first. Proposed v1 owner-order: **joint first, then the
+  currently-withdrawing "reference" spouse's own bucket (Jason's, by
+  this app's existing single-pension/RMD-anchoring convention), then
+  the other spouse's own bucket** — i.e., joint funds shared spending
+  before either spouse's individually-titled accounts are touched, a
+  reasonable default a real household's own draw preference could
+  override, but stated explicitly as a policy choice here, not
+  incidental. Each draw event only reduces the SPECIFIC owner-bucket it
+  was drawn from.
+- **Conversions** (Roth Conversion specifically): a conversion moves
+  money from a specific owner's PRETAX bucket to that SAME owner's ROTH
+  bucket — never across owners (a spouse cannot convert their own
+  pretax IRA into the OTHER spouse's Roth IRA; that's not how
+  conversions work). Two-age Roth Conversion's own `jason_ret_age`/
+  `justin_ret_age`/`later_retiree` already identify whose pretax
+  account the conversion window's own math is modeling — v1 continues
+  converting the household's POOLED pretax figure (matching the
+  existing, reviewed Milestone 2 behavior, section 30-33) for that
+  tool; the owner-split ledger this milestone adds is a NEW, parallel
+  view for Survivor Scenario specifically, not a retrofit of Roth
+  Conversion's own already-reviewed math. (Reconciling Roth
+  Conversion's pooled figure against a hypothetical owner-split version
+  is explicitly out of scope for this milestone — flagged, not
+  silently skipped.)
+- **Transfers/surplus sweeps**: land in the SAME owner-bucket the
+  income source they came from belongs to (e.g., Jason's own pension
+  surplus sweeps into Jason's own taxable bucket, not joint) — pension
+  is Jason-attributed (section 13, unchanged), so its surplus is too.
+  Guaranteed income with no single natural owner (a joint life-event
+  windfall, for instance) sweeps into the joint bucket.
+
+**Reconciliation, per the review's own instruction:** verified per
+account TYPE (pretax/roth/taxable/hsa) and per YEAR, not just a single
+starting-total check — `jason[type][year] + justin[type][year] +
+joint[type][year] == the existing pooled consumer's own [type][year]
+balance`, for every year of the projection, both pre- and post-death.
+This is the actual test surface or Milestone 4's implementation phase,
+replacing section 36's weaker "totals match at time zero" property.
+
+### 37.5 Death-year cash-flow ordering, stated explicitly
+
+Section 36 didn't state the death year's own internal ordering.
+**Revised, explicit sequence, in the order these events are modeled as
+occurring within the death year:**
+
+1. **The death year itself runs as a normal, both-alive year** in the
+   underlying deterministic Projection baseline this whole family of
+   tools already uses for its starting figures — i.e., the deceased's
+   own wages (if still working pre-retirement) are earned in FULL for
+   that year, guaranteed income (pension/SS) accrues normally, and any
+   RMD obligation the deceased already had that year (age at or past
+   their own `rmd_start_age`) is taken and taxed exactly as it would be
+   in a normal year — **the death-year RMD is therefore already
+   satisfied by construction**, inherited from the baseline
+   projection's own per-year math, not a separately-modeled "final
+   RMD" event. This is the existing single-axis convention
+   (`portfolio_at_death` already reflects a full year of normal
+   activity) — stated explicitly here rather than left implicit, per
+   the review.
+2. **Wages stop** for the deceased spouse effective the END of the
+   death year (i.e., the FOLLOWING year is the first year with no
+   contribution/income from them) — no sub-year proration, matching
+   this app's existing annual-only granularity everywhere else.
+3. **The insurance payout arrives** and **ownership transfers**
+   (deceased's own buckets merging into the survivor's, per 37.1-37.3's
+   now-explicit assumptions) both take effect **at the START of the
+   first post-death year** — i.e., `starting_balance` for the survivor
+   schedule (already `portfolio_at_death + payout` in the existing
+   code) is the point where the payout and the ownership transfer both
+   land, together, not gradually or mid-year.
+4. **Survivor income begins** (reduced-need spending pattern, survivor
+   SS benefit switch, gap income gating) in that SAME first post-death
+   year — matching the existing single-axis behavior (the survivor's
+   own distinct spending pattern starts the year AFTER death, never the
+   death year itself, to avoid double-counting that year's spending —
+   unchanged from the existing, reviewed fix in section 18).
+5. **Pension commencement when Jason dies BEFORE his own retirement**
+   (a genuinely NEW case two-age introduces — single-axis could never
+   reach it, since its own `ret_age` anchor always assumed Jason had
+   already retired by the time Survivor Scenario runs; two-age's
+   `phase2_start` can fall before Jason's own retirement when Justin
+   retires first). This app's existing pension model already assumes
+   100% Joint & Survivor continuation for a death occurring AFTER
+   retirement — whether that SAME continuation applies to a
+   pre-retirement death depends on the real plan's own pre-retirement
+   death-benefit terms, which are typically DIFFERENT from (often less
+   generous than) the post-retirement J&S election, and this app has
+   no data to distinguish them. **This needs your decision, not an
+   assumption made on your behalf:**
+   - **Option A (simpler, more optimistic):** treat a pre-retirement
+     death exactly like a post-retirement one — the survivor still
+     receives the same 100% J&S pension figure, as if Jason had
+     retired at the moment of death. Extends the existing
+     simplification rather than introducing a new one.
+     - **Option B (conservative):** the pension pays $0 if Jason dies
+     before his own actual retirement, on the reasoning that
+     pre-retirement death benefits are a materially different (and
+     often absent or reduced) provision this app doesn't model, and
+     assuming full continuation could overstate the survivor's real
+     resources.
+   - Proposed default for v1, pending your confirmation: **Option B**
+     (conservative) — flagged explicitly in the result payload either
+     way (which option was used), so the number is never presented
+     without its own caveat, matching 37.1/37.2's pattern.
+
+### 37.6 Status
+
+Sections 37.1-37.5 replace the corresponding parts of section 36.
+Section 36.4's v1-required/deferred RMD scope and 36.2's "no invented
+ownership, read from the existing `owner` field" foundation both still
+stand, now with 37.1-37.3's explicit-assumption inputs layered on top
+rather than inferred defaults. **Still no application code changed on
+this branch — awaiting approval of this revised design, including an
+explicit choice on 37.5's pension-commencement question, before any
+implementation begins.**
