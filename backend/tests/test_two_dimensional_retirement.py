@@ -226,3 +226,96 @@ class TestInsufficientFunds:
         assert [y["unmet_need"] for y in yearly] == [27500, 47500, 80000]
         assert [y["portfolio_balance"] for y in yearly] == [0, 0, 0]
         assert result["any_year_underfunded"] is True
+
+
+class TestPensionGatedToJasonsOwnRetirement:
+    def test_pension_does_not_start_until_jason_actually_retires(self):
+        """Independent review, 2026-09-08 (P1) -- reproduction: both
+        spouses 60, Justin retires at 61 (1yr), Jason at 63 (3yr) --
+        Jason is later_retiree, so his own salary funds the phase2
+        offset while his PENSION must not start until he actually
+        retires at 63. Jason salary $100,000 -> gap income $65,000/yr.
+        Pension $30,000/yr. Household need $80,000/yr. taxable starts
+        at $200,000, 0% growth/inflation.
+
+        yr0 (age61, phase2): pension=0 (not yet retired), draw=80000-65000=15000, bal 200000->185000
+        yr1 (age62, phase2): pension=0, draw=15000, bal 185000->170000
+        yr2 (age63, phase3): pension=30000 (now retired), draw=80000-30000=50000, bal 170000->120000
+
+        The bug (pension added unconditionally from phase2_start) would
+        instead treat pension as a $30,000/yr surplus on top of the
+        $65,000 gap income during the two premature years, giving a
+        final balance of $180,000 -- two premature $30,000 payments
+        above the correct $120,000."""
+        inputs = base_inputs(retirement_end_age=64, w2_salary=100000,
+                              pension_55=30000, pension_60=30000, pension_65=30000)
+        result = run_two_dimensional_retirement_projection(inputs, TAXABLE(200000), jason_ret_age=63, justin_ret_age=61)
+        yearly = result["yearly_detail"]
+        assert [y["jason_age"] for y in yearly] == [61, 62, 63]
+        assert [y["phase"] for y in yearly] == ["phase2", "phase2", "phase3"]
+        assert [y["pension"] for y in yearly] == [0, 0, 30000]
+        assert [y["draw"] for y in yearly] == [15000, 15000, 50000]
+        assert [y["portfolio_balance"] for y in yearly] == [185000, 170000, 120000]
+        old_buggy_final_balance = 180000  # matches the independent review's own reported old value
+        assert result["yearly_detail"][-1]["portfolio_balance"] != old_buggy_final_balance
+
+    def test_pension_starts_immediately_when_jason_retires_first(self):
+        """The mirror case -- Jason retires FIRST (61), Justin later
+        (63). Jason's pension should start right at phase2_start (61),
+        not be delayed to phase3 -- he's already retired by then."""
+        inputs = base_inputs(retirement_end_age=64, justin_w2_salary=100000,
+                              pension_55=30000, pension_60=30000, pension_65=30000)
+        result = run_two_dimensional_retirement_projection(inputs, TAXABLE(200000), jason_ret_age=61, justin_ret_age=63)
+        yearly = result["yearly_detail"]
+        assert [y["pension"] for y in yearly] == [30000, 30000, 30000]
+
+
+class TestAge55BridgeAndKidsRulesPreserved:
+    def test_bridge_income_phase_matches_single_axis_reference_exactly(self):
+        """Independent review, 2026-09-08 (P1) -- the age-55 bridge-job/
+        kids-at-home spending phases (run_retirement_projection's own
+        `if ret_age == 55:` branch) were entirely absent from the first
+        cut of this function. Reproduction: both spouses AT 55 today,
+        both retiring at 55 (simultaneous -- zero phase2 years, every
+        loop year is phase3), $80,000 household spend, $30,000/yr
+        bridge income for 5 years, zero starting balance offsets.
+        taxable starts at $200,000.
+
+        Bridge-active year: year_need = max(0, 80000 - 30000) = 50000,
+        not the plain 80000 a household outside the age-55 bridge would
+        see -- draw 50000/yr for 5 years, matching
+        run_retirement_projection's own ret_age=55 output exactly for
+        the same inputs (direct parity check below), not just this
+        function's own arithmetic."""
+        inputs = base_inputs(jason_age=55, justin_age=55, retirement_end_age=61,
+                              bridge_income_55=30000, bridge_years_55=5)
+        result = run_two_dimensional_retirement_projection(inputs, TAXABLE(200000), jason_ret_age=55, justin_ret_age=55)
+        yearly = result["yearly_detail"]
+        assert [y["jason_age"] for y in yearly] == [55, 56, 57, 58, 59, 60]
+        assert [y["draw"] for y in yearly] == [50000, 50000, 50000, 50000, 50000, 80000]
+        assert [y["bridge_income"] for y in yearly] == [30000, 30000, 30000, 30000, 30000, 0]
+        assert [y["portfolio_balance"] for y in yearly] == [150000, 100000, 50000, 0, 0, 0]
+
+        from projection_engine import run_retirement_projection
+        single_axis_inputs = dict(inputs)
+        single_axis_inputs["justin_ret_age"] = 55
+        reference = run_retirement_projection(single_axis_inputs, TAXABLE(200000), ret_ages=[55])
+        ref_scenario = next(s for s in reference["scenarios"] if s["label"] == "age_55_early")
+        ref_balances = [y["portfolio_balance"] for y in ref_scenario["yearly_detail"][:3]]
+        assert ref_balances == [150000, 100000, 50000]
+        assert [y["portfolio_balance"] for y in yearly[:3]] == ref_balances
+
+    def test_kids_still_home_phase_uses_family_healthcare(self):
+        """Bridge phase ends, kids still home (kids_years_at_home_55 >
+        bridge_years_55) -- the family-healthcare-cost phase, distinct
+        from the pre-Medicare default. Same household as above, but
+        bridge only 2 years, kids home for 4."""
+        inputs = base_inputs(jason_age=55, justin_age=55, retirement_end_age=58,
+                              bridge_income_55=30000, bridge_years_55=2, kids_years_at_home_55=4,
+                              healthcare_kids=10000)
+        result = run_two_dimensional_retirement_projection(inputs, TAXABLE(500000), jason_ret_age=55, justin_ret_age=55)
+        yearly = result["yearly_detail"]
+        # yr0-1: bridge active, healthcare=0, need=max(0,80000-30000)=50000
+        # yr2: bridge over (jason_yr=2, not <2), kids still home (2<4) -> family healthcare $10,000, need=80000+10000=90000
+        assert [y["draw"] for y in yearly] == [50000, 50000, 90000]
+        assert [y["healthcare_cost"] for y in yearly] == [0, 0, 10000]

@@ -1295,6 +1295,37 @@ def run_two_dimensional_retirement_projection(inputs: Dict, accounts: List[Dict]
     healthcare_pre_at_start  = healthcare_pre  * ((1 + inflation) ** phase2_years)
     healthcare_post_at_start = healthcare_post * ((1 + inflation) ** phase2_years)
 
+    # Age-55 bridge-job/kids-at-home spending phases -- the SAME rules
+    # run_retirement_projection applies (gated on `ret_age == 55` there),
+    # preserved here rather than silently dropped (independent review,
+    # 2026-09-08, P1: the first cut of this function had no analog of
+    # this branch at all). Anchored to Jason's OWN retirement timeline
+    # (jason_years_to_retire), since bridge_years_55/kids_years_at_home_55
+    # are inherently "years since Jason's own retirement at 55" concepts,
+    # not phase2-relative -- phase2_years can be earlier than this
+    # whenever Justin retires first, so `yr` (phase2-relative) is the
+    # wrong index for this branch's own math.
+    healthcare_kids      = inputs.get("healthcare_kids", 0)
+    kids_annual_cost     = inputs.get("kids_annual_cost", 0)
+    bridge_income        = inputs.get("bridge_income_55", 0)
+    bridge_years         = inputs.get("bridge_years_55", 0)
+    kids_years           = inputs.get("kids_years_at_home_55", 0)
+    income_at_jason_ret          = income_today   * ((1 + inflation) ** timeline.jason_years_to_retire)
+    healthcare_pre_at_jason_ret  = healthcare_pre  * ((1 + inflation) ** timeline.jason_years_to_retire)
+    healthcare_post_at_jason_ret = healthcare_post * ((1 + inflation) ** timeline.jason_years_to_retire)
+    healthcare_kids_at_jason_ret = healthcare_kids * ((1 + inflation) ** timeline.jason_years_to_retire)
+    kids_annual_cost_at_jason_ret = kids_annual_cost * ((1 + inflation) ** timeline.jason_years_to_retire)
+    bridge_income_at_jason_ret    = bridge_income    * ((1 + inflation) ** timeline.jason_years_to_retire)
+
+    # Jason's own pension starts only once JASON has actually retired --
+    # not from phase2_start unconditionally (independent review,
+    # 2026-09-08, P1: when Justin retires first, phase2's still-working
+    # spouse is Jason, so pension payments landing before his own
+    # retirement were two years too early in the reproduction that found
+    # this). age >= jason_pension_start_age is the same "already past"
+    # semantics build_timeline/TwoPersonTimeline already apply elsewhere.
+    jason_pension_start_age = jason_age + timeline.jason_years_to_retire
+
     # Still-working spouse's phase2 income baseline -- symmetric reuse of
     # the same 0.65 net-of-tax approximation and per-year lookup every
     # other consumer's second-earner gap income already uses (section
@@ -1324,8 +1355,29 @@ def run_two_dimensional_retirement_projection(inputs: Dict, accounts: List[Dict]
         justin_age_this_year = timeline.justin_age_at(age)
         phase = "phase2" if timeline.in_phase2(age) else "phase3"
 
-        healthcare_inflated = healthcare_for_age(age, healthcare_pre_at_start, healthcare_post_at_start) * ((1 + inflation) ** yr)
-        year_need = income_at_start * ((1 + inflation) ** yr) + healthcare_inflated
+        if jason_ret_age == 55 and age >= jason_ret_age:
+            jason_yr = age - jason_ret_age
+            kids_still_home = jason_yr < kids_years
+            bridge_active   = jason_yr < bridge_years
+            if bridge_active:
+                healthcare_this_year = 0
+                kids_cost = kids_annual_cost_at_jason_ret * ((1 + inflation) ** jason_yr)
+                bridge    = bridge_income_at_jason_ret    * ((1 + inflation) ** jason_yr)
+                year_need = max(0, income_at_jason_ret * ((1 + inflation) ** jason_yr) + kids_cost - bridge)
+            elif kids_still_home and age < 65:
+                healthcare_this_year = healthcare_kids_at_jason_ret
+                kids_cost = kids_annual_cost_at_jason_ret * ((1 + inflation) ** jason_yr)
+                year_need = income_at_jason_ret * ((1 + inflation) ** jason_yr) + kids_cost + healthcare_kids_at_jason_ret * ((1 + inflation) ** jason_yr)
+            elif age < 65:
+                healthcare_this_year = healthcare_pre_at_jason_ret
+                year_need = income_at_jason_ret * ((1 + inflation) ** jason_yr) + healthcare_pre_at_jason_ret * ((1 + inflation) ** jason_yr)
+            else:
+                healthcare_this_year = healthcare_post_at_jason_ret
+                year_need = income_at_jason_ret * ((1 + inflation) ** jason_yr) + healthcare_post_at_jason_ret * ((1 + inflation) ** jason_yr)
+            healthcare_inflated = healthcare_this_year * ((1 + inflation) ** jason_yr)
+        else:
+            healthcare_inflated = healthcare_for_age(age, healthcare_pre_at_start, healthcare_post_at_start) * ((1 + inflation) ** yr)
+            year_need = income_at_start * ((1 + inflation) ** yr) + healthcare_inflated
 
         life_event_cash_this_year, life_event_monthly_this_year = _post_retirement_year_effects(post_life_events, calendar_year)
         year_need -= life_event_monthly_this_year
@@ -1340,7 +1392,7 @@ def run_two_dimensional_retirement_projection(inputs: Dict, accounts: List[Dict]
         # here instead since that builder is coupled to Timeline's
         # single-axis fields (effective_start_age/claim_year_index), not
         # TwoPersonTimeline's.
-        year_pen = pension_annual
+        year_pen = pension_annual if age >= jason_pension_start_age else 0.0
         year_jss = jason_ss_annual * ((1 + inflation) ** max(0, age - jason_ss_age)) if age >= jason_ss_age else 0.0
         year_uss = (justin_ss_annual * ((1 + inflation) ** max(0, justin_age_this_year - justin_ss_age))
                     if justin_age_this_year >= justin_ss_age else 0.0)
@@ -1378,6 +1430,7 @@ def run_two_dimensional_retirement_projection(inputs: Dict, accounts: List[Dict]
             "phase":      phase,
             "income_need": round(year_need + still_working_income_this_year),  # need BEFORE the still-working offset, matching run_retirement_projection's own field meaning
             "still_working_spouse_income": round(still_working_income_this_year),
+            "bridge_income": round(bridge_income_at_jason_ret * ((1 + inflation) ** (age - jason_ret_age))) if jason_ret_age == 55 and age >= jason_ret_age and (age - jason_ret_age) < bridge_years else 0,
             "healthcare_cost": round(healthcare_inflated),
             "pension":         round(year_pen),
             "social_security": round(year_jss + year_uss),
