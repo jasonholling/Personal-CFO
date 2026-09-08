@@ -102,6 +102,102 @@ def build_timeline(jason_age: int, justin_age: int, ret_age: int,
     )
 
 
+@dataclass(frozen=True)
+class TwoPersonTimeline:
+    """Two independent retirement ages instead of Timeline's one --
+    additive, doesn't touch Timeline/build_timeline above, so the 6
+    existing withdrawal-phase consumers built on those are completely
+    unaffected (backend/docs/TWO_DIMENSIONAL_RETIREMENT_DESIGN.md
+    section 7.2, v1 scope: explicit ages for both spouses, Retirement
+    Projection reference implementation only).
+
+    A household passes through up to three phases: both working (not
+    modeled here -- this timeline starts where withdrawal starts),
+    ONE retired/one still working ("phase 2"), then both retired
+    ("phase 3"). phase2_start_years is the earlier of the two spouses'
+    own years-to-retirement (each already clamped to 0 if that spouse's
+    selected age is already in the past, same per-person convention
+    Timeline applies to Jason alone); phase3_start_years is the later.
+    When the two ages are equal (or justin_ret_age falls back to
+    Jason's date via the existing 0/unset sentinel), phase2_start_years
+    == phase3_start_years and there is no middle phase at all -- the
+    model reduces exactly to today's single-axis withdrawal loop
+    starting at that age (the regression property the hand-calculated
+    "simultaneous retirement" test checks numerically against
+    run_retirement_projection's own output)."""
+    jason_age: int
+    justin_age: int
+    jason_ret_age: int
+    justin_ret_age: int
+    age_gap: int                    # jason_age - justin_age
+    jason_years_to_retire: int       # max(0, jason_ret_age - jason_age)
+    justin_years_to_retire: int      # max(0, justin_ret_age - justin_age)
+    phase2_start_years: int          # min(...) -- years from today until the FIRST spouse retires
+    phase3_start_years: int          # max(...) -- years from today until BOTH have retired
+    later_retiree: Optional[str]     # "jason" | "justin" | None (simultaneous -- no phase 2)
+    retirement_year: int             # calendar year phase2 starts
+    end_age: int                     # exclusive upper bound (Jason-age terms), already floored/capped
+    retire_yrs: int                  # end_age - phase2_start_age; the withdrawal loop's actual length
+
+    def age(self, yr: int) -> int:
+        """Jason's age in withdrawal-loop-relative year `yr` (0-indexed,
+        yr=0 is phase2_start_age -- NOT phase3_start_age, since the loop
+        must cover the middle phase too)."""
+        return self.jason_age + self.phase2_start_years + yr
+
+    def justin_age_at(self, jason_age_this_year: int) -> int:
+        return jason_age_this_year - self.age_gap
+
+    def calendar_year(self, yr: int) -> int:
+        return self.retirement_year + yr
+
+    def in_phase2(self, jason_age_this_year: int) -> bool:
+        """True for a year strictly before both spouses have retired --
+        the still-working spouse's income should offset need this year.
+        Always False when later_retiree is None (simultaneous
+        retirement, zero-length phase 2)."""
+        return jason_age_this_year < self.jason_age + self.phase3_start_years
+
+
+def build_two_person_timeline(jason_age: int, justin_age: int, jason_ret_age: int, justin_ret_age: int,
+                               retirement_end_age: Optional[float] = None) -> TwoPersonTimeline:
+    """The single source of truth for two-dimensional retirement timing
+    (v1: Retirement Projection reference implementation only -- see
+    docs/TWO_DIMENSIONAL_RETIREMENT_DESIGN.md section 7). Mirrors
+    build_timeline's per-person "already past this age" clamp
+    (max(0, ret_age - age)), applied independently to each spouse rather
+    than only to Jason."""
+    jason_years_to_retire  = max(0, jason_ret_age - jason_age)
+    justin_years_to_retire = max(0, justin_ret_age - justin_age)
+    phase2_start_years = min(jason_years_to_retire, justin_years_to_retire)
+    phase3_start_years = max(jason_years_to_retire, justin_years_to_retire)
+    if jason_years_to_retire == justin_years_to_retire:
+        later_retiree = None
+    elif jason_years_to_retire > justin_years_to_retire:
+        later_retiree = "jason"
+    else:
+        later_retiree = "justin"
+    phase2_start_age = jason_age + phase2_start_years
+    retirement_year = CURRENT_YEAR + phase2_start_years
+    end_age = max(phase2_start_age + 1, min(110, int(retirement_end_age or 99)))
+    retire_yrs = end_age - phase2_start_age
+    return TwoPersonTimeline(
+        jason_age=jason_age,
+        justin_age=justin_age,
+        jason_ret_age=jason_ret_age,
+        justin_ret_age=justin_ret_age,
+        age_gap=jason_age - justin_age,
+        jason_years_to_retire=jason_years_to_retire,
+        justin_years_to_retire=justin_years_to_retire,
+        phase2_start_years=phase2_start_years,
+        phase3_start_years=phase3_start_years,
+        later_retiree=later_retiree,
+        retirement_year=retirement_year,
+        end_age=end_age,
+        retire_yrs=retire_yrs,
+    )
+
+
 def healthcare_for_age(age: int, healthcare_pre: float, healthcare_post: float) -> float:
     """The pre/post-Medicare healthcare split every withdrawal-phase
     consumer applies identically: full cost before 65, the (typically
