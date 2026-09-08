@@ -2071,3 +2071,129 @@ frontend code changed this round), production build succeeds,
 sensitive-data check passed. Branch: `codex/two-age-monte-carlo-stress`
 -- still **not merged**, per the same instruction, for continued
 review.
+
+## 25. Two-age SWR — design contract, written before implementation (2026-09-08, on `codex/two-age-swr`)
+
+Milestone 1 of 4 (SWR, Roth Conversion, Tax Efficiency, Survivor/
+ownership, in that order, each its own reviewed branch). This section
+is the required "define exactly what the search solves for" contract,
+written and committed before any calculation code on this branch.
+
+### 25.1 What the existing single-axis SWR actually solves for
+
+Read directly from `run_swr_analysis`/`_swr_year_step` before writing
+anything new, since the instruction is to preserve this meaning, not
+assume it:
+
+- The search variable is `annual_withdrawal_today` — a single TODAY'S-
+  dollars figure representing the household's **additional
+  portfolio-funded spending, on top of guaranteed income** (pension +
+  Jason's SS + Justin's SS + life-event cash/monthly + second-earner
+  gap income, the last two folded into `_swr_year_step`'s
+  `event_monthly` parameter). It is **not** total household spending —
+  `_swr_year_step`'s own docstring states this explicitly (section 3.5
+  of this document): SWR answers "how much can I safely withdraw from
+  the portfolio alone," not "given my itemized spending need, do I
+  survive" (that second question is Retirement Projection/Monte
+  Carlo/Stress Tests' job).
+- Dollar basis: today's dollars, inflated every loop year via
+  `annual_withdrawal_today * (1+inflation)**yr` -- flat compounding,
+  no per-year stress `inflation_mults` support (SWR never ran the
+  named stress scenarios; that's Stress Tests' own job).
+- Begins: at `withdrawal_start_age` (`Timeline.effective_start_age`),
+  i.e. the household's single withdrawal-phase start -- there is no
+  middle phase in the single-axis version because there's only one
+  retirement age.
+- **SWR's own withdrawal loop does not separately model bridge/kids
+  costs or per-year healthcare at all** -- confirmed by reading the
+  loop: `healthcare_pre`/`healthcare_post` are read from `inputs` but
+  only ever used once, in the final summary's `income_target`
+  comparison (`income_target = (income_today + healthcare_pre) *
+  (1+inflation)**years_to_ret`), never inside `success_at_withdrawal`'s
+  per-year math. There is no `ret_age == 55` bridge/kids branch in
+  this function at all, unlike Retirement Projection/Monte Carlo/
+  Stress Tests. This is a real, pre-existing scope limit of SWR, not
+  an oversight this milestone is asked to fix.
+- Success criterion: across N=1000 pre-generated random return
+  sequences (seeded, reproducible), the fraction of trials that fund
+  every single year in full (no rationing, no depletion -- `remaining
+  <= 0` every year) must be `>= target_success` (default 95%). Found
+  via binary search: an expanding-then-bisecting search on
+  `annual_withdrawal_today`, 20 bisection iterations after the initial
+  bracket is established.
+- Shared, allocation-free primitives already used (not reimplemented
+  inline a second time): `_swr_year_step` (the withdrawal-order/tax
+  step, already parity-tested against `simulate_withdrawal_year`),
+  `_pretax_marginal_tax_rate`, `_rmd`/`rmd_start_age`,
+  `justin_gap_income_for_year`, `_post_retirement_year_effects`. SS/
+  pension COLA is computed inline with the same flat formula every
+  other consumer uses, not via the shared per-year builder
+  (`build_annual_income_inputs`) -- a documented performance exception
+  (this loop runs up to ~32x more often than any other consumer:
+  binary search x 1000 trials x ~40yrs), verified equivalent by
+  `test_annual_inputs.py::TestPerformanceExceptionParity`.
+
+### 25.2 Two-age SWR contract (what changes, what doesn't)
+
+**Preserved exactly, per instruction ("Preserve the existing SWR
+meaning unless an explicit change is approved"):**
+- `annual_withdrawal_today` remains a single today's-dollars,
+  flat-inflation-compounded, portfolio-funded-spending-on-top-of-
+  guaranteed-income search variable, applied uniformly across the
+  *entire* horizon (both phase2 and phase3) -- not phase-dependent.
+  This is the natural generalization, not a new definition: the
+  household still draws the same real amount every year regardless of
+  phase; phase2's extra income just makes it easier to hit
+  `target_success` those years, exactly the same way pension/SS/life-
+  event income already does.
+- No bridge/kids/healthcare modeling is added to the two-age search
+  loop either -- extending that scope is a separate, explicitly-scoped
+  ask, not implied by "two-age SWR." (Flagged prominently here and in
+  the milestone's own final report so this reading can be corrected if
+  wrong.)
+- Success criterion, N=1000 trials, binary search structure, and the
+  20-iteration precision are unchanged.
+- `_swr_year_step`, `_pretax_marginal_tax_rate`, `_rmd`/
+  `rmd_start_age`, `_post_retirement_year_effects` are reused as-is,
+  zero changes -- this milestone only needs different *inputs* to
+  those same functions, not different functions.
+
+**New, additive (the actual "two-age" extension):**
+- Timeline: `build_two_person_timeline` instead of `build_timeline` --
+  the loop now runs from `phase2_start_age` (yr=0) through `end_age`,
+  covering both phase2 (one retired, one still working) and phase3
+  (both retired), instead of a single withdrawal_start_age.
+- Guaranteed income during phase2 gains the still-working spouse's net
+  income, via `two_age_still_working_income_inputs` +
+  `justin_gap_income_for_year` -- folded into `_swr_year_step`'s
+  `event_monthly` exactly the same way the existing gap-income offset
+  already is (same call shape, same parameter, symmetric to whichever
+  spouse is `later_retiree` rather than hardcoded to Justin).
+- Pension gates to `two_age_pension_for_year(pension_annual, age,
+  jason_effective_start_age)` instead of paying unconditionally from
+  day one -- same fix already applied to Monte Carlo/Stress Tests
+  (section 20).
+- Starting portfolio balances come from
+  `run_two_dimensional_retirement_projection`'s own
+  `pretax_at_phase2_start`/etc. fields (unrounded, section 23) --
+  same "call the deterministic reference once" pattern every other
+  two-age consumer already uses, not a re-derivation of the
+  accumulation-phase math.
+- `jason_ret_age`/`justin_ret_age` on `run_swr_analysis`, both
+  required together (`ValueError` if only one given) -- same
+  `_require_both_two_age_or_neither` gate the other two-age consumers
+  already share (reused directly, not re-implemented).
+- Summary fields (`ss_start_age`, `guaranteed_income_steadystate`,
+  `cushion_pct`, etc.) recomputed against `phase2_start_age`/
+  `phase3_start_age` instead of the single-axis `withdrawal_start_age`.
+
+### 25.3 Performance
+
+Reuses the exact same allocation-free primitives the single-axis
+version already relies on for its own documented performance
+exception -- no new performance exception is being introduced here;
+this milestone's own benchmark (section 26, once implemented) will
+confirm the two-age loop's runtime stays in the same range as the
+existing single-axis SWR at matched trial count/horizon/seed, not a
+new claim requiring its own equivalence proof beyond what
+`_swr_year_step` already has.
