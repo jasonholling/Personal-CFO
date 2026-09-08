@@ -1997,3 +1997,77 @@ suite: 1181 passed, 97.56% coverage. Full frontend suite: 34 passed,
 production build succeeds. Sensitive-data check passed. Branch:
 `codex/two-age-monte-carlo-stress` -- still **not merged**, per the
 same instruction, for continued review.
+
+## 24. Two-age Stress Tests second follow-up review (2026-09-08, on `codex/two-age-monte-carlo-stress`)
+
+Independent review of section 23's commit (`d120da7`) found two more
+real bugs, both in the newly-completed stress-scenario support. Both
+fixed on the same unmerged branch.
+
+**P1 -- stagflation's cumulative inflation reset at the phase2/bridge
+boundary.** Section 23's `two_age_spending_need_fn` computed the
+bridge/kids branch's own dollar baselines (`income_at_jason_ret`,
+`healthcare_*_at_jason_ret`, etc.) anchored to `jason_effective_start_
+age` via `timeline.jason_years_to_retire`, then rebased the per-year
+cumulative-inflation multiplier as `cum_inflation[yr] /
+cum_inflation[jason_offset]`. Under FLAT inflation this was provably
+identical to anchoring at `phase2_start` instead -- compounding the
+same total number of years via two different splits is the same
+arithmetic either way, which is why the original section-21 design's
+choice of anchor never mattered. That equivalence breaks under a
+VARIABLE per-year rate: whenever Justin retires first,
+`jason_effective_start_age` can fall strictly after `phase2_start_age`,
+meaning the years between them are already inside the withdrawal loop
+and should be subject to `inflation_mults` like any other loop year --
+anchoring to `jason_effective_start_age` instead treated that whole
+span as flat pre-loop compounding, and the rebasing then reset the
+per-year multiplier to exactly 1.0 right at the boundary, discarding
+every year of already-accumulated elevated inflation outright.
+Reproduced exactly: both spouses currently 53, Justin already retired,
+Jason retiring at 55, $100,000 spend, 8% stressed inflation (2% base *
+the scenario's own 4x) -- year 3 (age 55, the first bridge year)
+reverted to $104,040 (the flat, no-stress figure) instead of the
+correct $116,640; the resulting final balance was overstated
+($736,603 vs the correct $723,751).
+
+**Fixed** by eliminating the second anchor entirely: every dollar
+baseline (`income_at_start`/`healthcare_*_at_start`/`kids_annual_cost_
+at_start`/`bridge_income_at_start`) now anchors to `phase2_start`
+unconditionally, matching the default branch's own convention exactly,
+and both branches share one `cum_inflation[yr]` multiplier with no
+rebasing. `jason_yr` (`age - jason_effective_start_age`) is kept, but
+narrowed to what it should have only ever been -- a duration counter
+compared against `bridge_years`/`kids_years`, not a second inflation
+clock. Verified algebraically that this reduces to the exact same
+formulas as before whenever `jason_offset == 0` (Jason retires first or
+simultaneously, which is every existing bridge/kids test's own
+configuration) and confirmed by the full suite passing unchanged;
+verified against the review's own reproduction directly
+(`two_age_spending_need_fn` called standalone, asserting the exact
+per-year need sequence `[100000, 108000, 116640]`) before checking the
+resulting `final_balance`.
+
+**P2 -- "bridge job loss" could invent income instead of removing it.**
+The scenario unconditionally set `bridge_years_55` to 2 for the
+stressed run, even when the household's own configured value was 0 or
+1 -- turning a scenario meant to model the bridge job ending EARLY into
+one that could instead give a household with no bridge job (or a
+shorter one) MORE bridge income than they actually planned for.
+Reproduced exactly: $30,000/yr bridge income configured with 0 bridge
+years -- the stress scenario ended $60,000 above the neutral base case
+($820,000 vs $760,000) instead of identical to it. **Fixed** by capping
+the override at the household's own existing value
+(`min(bridge_override, inputs.get("bridge_years_55", 0))`) in BOTH the
+two-age copy and the single-axis original it was copied from -- the
+identical bug was already present in the source this branch's own
+`_run_stress_tests_two_age` mirrored, per the explicit instruction to
+fix it in both places rather than only the newer copy.
+
+**Verified:** 2 new backend tests (the exact stagflation phase-boundary
+reproduction via `two_age_spending_need_fn` called directly, and the
+zero-bridge-years `bridge_job_loss` reproduction), full backend suite
+1183 passed / 97.51% coverage, full frontend suite 34 passed (no
+frontend code changed this round), production build succeeds,
+sensitive-data check passed. Branch: `codex/two-age-monte-carlo-stress`
+-- still **not merged**, per the same instruction, for continued
+review.
