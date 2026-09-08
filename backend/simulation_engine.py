@@ -3697,12 +3697,279 @@ def _minimum_survivor_funding(net_needs: List[float], post_ret: float) -> float:
     return required
 
 
+def _run_survivor_scenario_two_age(inputs: Dict, accounts: List[Dict], jason_ret_age: int, justin_ret_age: int,
+                                    ss_timing: str, deceased: str, death_age: int,
+                                    survivor_need_factor: float,
+                                    life_events: List[Dict], surplus_allocations: List[Dict],
+                                    trust_available_to_survivor: bool = False,
+                                    joint_accounts_survivorship: bool = True,
+                                    spousal_rollover_election: bool = True) -> Dict:
+    """Two-age Survivor Scenario -- explicit, independent retirement ages
+    for both spouses, and an owner-attributed account ledger, instead of
+    run_survivor_scenario's single ret_age and single pooled portfolio
+    (CALCULATION_CONTRACT.md sections 36-37, Milestone 4 of 4, design
+    approved before any of this existed).
+
+    trust_available_to_survivor/joint_accounts_survivorship/
+    spousal_rollover_election (section 37.1-37.3): explicit scenario
+    assumptions, never inferred from an account's owner label alone --
+    - trust_available_to_survivor (default False, conservative): trust-
+      owned balances are excluded from the survivor's resources unless
+      explicitly confirmed available (this app has no way to know a
+      trust's own succession terms).
+    - joint_accounts_survivorship (default True, JTWROS being the
+      common case for a married couple, but a STATED default, not an
+      inference from the word "joint"): True passes the joint bucket to
+      the survivor in full; False applies the tenants-in-common legal
+      default (only half is the survivor's own, the other half is
+      modeled as lost to the household).
+    - spousal_rollover_election (default True, the single most common
+      real choice and the only one this narrow v1 supports): True
+      merges the deceased's own pretax balance into the survivor's own
+      for spending AND for computing the survivor's own post-death RMDs
+      against the merged total; False excludes the deceased's own
+      pretax entirely (v1 does not attempt to model a separately-
+      scheduled inherited IRA with its own RMD timeline -- flagged in
+      the result, not silently defaulted to rollover behavior anyway).
+      Roth/taxable/HSA balances are NOT gated by this election -- unlike
+      pretax, they carry no election-dependent RMD mechanics in this
+      app's model, so they always merge into the survivor's own
+      resources regardless.
+
+    Death-year ordering (section 37.5): the pre-death walk
+    (run_owner_split_two_dimensional_projection) runs the death year
+    itself as a normal both-alive year, so that year's own RMD (if any)
+    is already satisfied by construction, not a separate event. Wages
+    stop for the deceased at year-end; the insurance payout, ownership
+    transfer, and the survivor's own distinct (reduced) spending pattern
+    all begin together in the FIRST post-death year -- unchanged from
+    single-axis's own reviewed timing (section 18).
+
+    Post-death RMDs (section 37.4, v1-required) are REAL, not just
+    reported: the survivor's own merged pretax sub-balance is tracked
+    separately from every other bucket type through the post-death
+    walk, and _rmd is computed against it using the SURVIVOR's own age
+    (not Jason's, unlike every other two-age consumer's still-out-of-
+    scope aggregate/Jason-anchored RMD) -- a real, forced draw each year
+    once the survivor reaches their own rmd_start_age. Tax modeling on
+    ongoing withdrawals otherwise stays exactly as unmodeled as
+    single-axis Survivor's own documented limitation (no MFJ->single
+    bracket jump) -- this milestone adds real RMD mechanics on top of
+    that same simplification, it does not remove it.
+
+    Pension commencement before Jason's own retirement (section 37.5,
+    decided by Jason 2026-09-08: Option A) -- if Jason is the deceased
+    and dies before his own actual retirement, the survivor still
+    receives the full 100% Joint & Survivor pension figure, exactly as
+    if Jason had retired at the moment of death."""
+    from projection_engine import (run_owner_split_two_dimensional_projection, OWNER_BUCKETS,
+                                    two_age_still_working_income_inputs)
+
+    jason_age  = inputs["jason_age"]
+    justin_age = inputs["justin_age"]
+    post_ret   = inputs["expected_return_post_retirement"]
+    inflation  = inputs["inflation_rate"]
+    age_gap    = jason_age - justin_age
+    _salary_growth_pct = inputs.get("_salary_growth_pct", 0.0)
+
+    walk = run_owner_split_two_dimensional_projection(inputs, accounts, jason_ret_age, justin_ret_age,
+                                                        ss_timing=ss_timing, salary_growth_pct=_salary_growth_pct,
+                                                        life_events=life_events, surplus_allocations=surplus_allocations)
+    yearly = walk["yearly_detail"]
+    phase2_start_age = walk["phase2_start_age"]
+    later_retiree = walk["later_retiree"]
+
+    if death_age is None:
+        deceased_effective_start_age = (phase2_start_age if deceased == "jason"
+                                         else phase2_start_age - age_gap)
+        death_age = deceased_effective_start_age + 10
+
+    death_jason_age = death_age if deceased == "jason" else death_age + age_gap
+    death_row = next((y for y in yearly if y["jason_age"] >= death_jason_age), None)
+    if not death_row:
+        return {"has_data": False}
+    death_jason_age = death_row["jason_age"]
+
+    end_age = max(death_jason_age + 1, min(110, int(inputs.get("retirement_end_age") or 99)))
+
+    if deceased == "jason":
+        payout = (inputs.get("jason_life_basic", 0) + inputs.get("jason_life_supplemental", 0)
+                  + inputs.get("jason_life_term", 0))
+        survivor_owner, deceased_owner = "justin", "jason"
+    else:
+        payout = (inputs.get("justin_life_ul", 0) + inputs.get("justin_life_whole", 0)
+                  + inputs.get("person2_life_employer", 0) + inputs.get("justin_life_term", 0)
+                  + inputs.get("justin_life_kids", 0))
+        survivor_owner, deceased_owner = "jason", "justin"
+
+    ob = death_row["owner_balances"]
+    # Ownership transfer at death (section 37.1-37.3, explicit scenario
+    # assumptions, never inferred).
+    survivor_pretax_start = ob[survivor_owner]["pretax"] + (ob[deceased_owner]["pretax"] if spousal_rollover_election else 0.0)
+    survivor_other_start = (
+        ob[survivor_owner]["roth"] + ob[survivor_owner]["taxable"] + ob[survivor_owner]["hsa"]
+        + ob[deceased_owner]["roth"] + ob[deceased_owner]["taxable"] + ob[deceased_owner]["hsa"]
+    )
+    joint_total = sum(ob["joint"].values())
+    joint_contribution = joint_total if joint_accounts_survivorship else joint_total * 0.5
+    trust_total = sum(ob["trust"].values())
+    trust_contribution = trust_total if trust_available_to_survivor else 0.0
+
+    portfolio_at_death = sum(ob[o][t] for o in OWNER_BUCKETS for t in ("pretax", "roth", "taxable", "hsa"))
+    starting_pretax = survivor_pretax_start
+    starting_other  = survivor_other_start + joint_contribution + trust_contribution + payout
+    starting_balance = starting_pretax + starting_other
+
+    survivor_ss_annual = max(inputs.get("jason_social_security", 0), inputs.get("justin_social_security", 0))
+    # Pension: section 37.5, Option A (decided) -- if Jason (its owner)
+    # is the deceased, the survivor gets the full pension figure
+    # regardless of whether Jason had actually retired yet, NOT the
+    # death row's own (possibly still-gated-to-$0) `pension` field.
+    # If Justin is the deceased, Jason (the survivor) simply continues
+    # receiving his own pension normally -- also NOT gated by death at
+    # all, since it was always his own benefit.
+    pension_annual = pension_for_age(inputs, jason_ret_age) if deceased == "jason" else death_row["pension"]
+
+    years_since_today = death_row["year"] - CURRENT_YEAR
+    income_today = inputs["retirement_income_today_dollars"]
+    income_need_at_death = income_today * ((1 + inflation) ** years_since_today) * survivor_need_factor
+
+    # Gap income (section 37.3): generalizes single-axis's own
+    # `deceased != "justin"` gate to whichever spouse is actually
+    # later_retiree -- the still-working spouse's income doesn't exist
+    # if THEY are the one who died, regardless of which spouse that is.
+    # timeline is rebuilt here (not threaded out of `walk`, which
+    # returns plain dicts, not the TwoPersonTimeline object itself) --
+    # same inputs, so it's the identical timeline the walk already used.
+    timeline = build_two_person_timeline(jason_age, justin_age, jason_ret_age, justin_ret_age,
+                                          inputs.get("retirement_end_age"))
+    phase2_duration_years, still_working_income_at_start = two_age_still_working_income_inputs(
+        inputs, timeline, _salary_growth_pct)
+    gap_income_still_applies = deceased != later_retiree
+
+    survivor_rmd_start_age = rmd_start_age(inputs["justin_age"] if survivor_owner == "justin" else inputs["jason_age"])
+
+    schedule = []
+    net_needs = []
+    pretax_bal = max(0.0, starting_pretax)
+    other_bal  = max(0.0, starting_other)
+    depleted_age = None
+    for i, age in enumerate(range(death_jason_age + 1, end_age)):
+        need = income_need_at_death * ((1 + inflation) ** (i + 1))
+        guaranteed = pension_annual + survivor_ss_annual * ((1 + inflation) ** (i + 1))
+
+        # yr (relative to phase2_start, TwoPersonTimeline's own anchor,
+        # not single-axis Timeline's effective_start_age) -- age is
+        # always in Jason-age terms in this loop.
+        gap_income_this_year = (
+            justin_gap_income_for_year(age - phase2_start_age, phase2_duration_years,
+                                        still_working_income_at_start, _salary_growth_pct)
+            if gap_income_still_applies else 0.0
+        )
+        need -= gap_income_this_year
+
+        survivor_age_this_year = age if survivor_owner == "jason" else age - age_gap
+        rmd = _rmd(pretax_bal, survivor_age_this_year, survivor_rmd_start_age)
+
+        draw = max(0, need - guaranteed)
+        net_needs.append(need - guaranteed)
+        total_bal = pretax_bal + other_bal
+        if depleted_age is None and total_bal <= 0 and draw > 0:
+            depleted_age = age
+
+        result = simulate_withdrawal_year(
+            opening=AccountState(pretax=pretax_bal, taxable=other_bal),
+            spending_need=need,
+            guaranteed_income=guaranteed,
+            life_event_cash=0.0,
+            rmd_amount=rmd,
+            tax_model=no_tax_model(),
+            growth_rate=post_ret,
+            order=("taxable", "pretax"),
+        )
+        pretax_bal, other_bal = result.closing.pretax, result.closing.taxable
+        bal_after = pretax_bal + other_bal
+
+        schedule.append({"age": age, "starting_balance": round(total_bal), "draw": round(draw),
+                          "required_minimum_distribution": round(rmd),
+                          "ending_balance": round(bal_after)})
+        if bal_after <= 0 and depleted_age is None and total_bal > 0:
+            depleted_age = age
+
+    survives = depleted_age is None
+    additional_insurance_needed = 0
+    if not survives:
+        cap_need = _minimum_survivor_funding(net_needs, post_ret)
+        additional_insurance_needed = max(0, round(cap_need - starting_balance))
+
+    if survives:
+        recommendation = (
+            f"If {deceased} dies at {death_age}, the ${payout:,.0f} life insurance payout plus the portfolio "
+            f"(${portfolio_at_death:,.0f} at that point) covers the survivor's needs through age {end_age}, assuming "
+            f"living costs drop to {survivor_need_factor*100:.0f}% of the couple's target and Social Security "
+            f"switches to the higher of the two benefits. This doesn't account for the tax-bracket jump from "
+            f"filing jointly to filing single, which would add real drag on top of this."
+        )
+    else:
+        recommendation = (
+            f"If {deceased} dies at {death_age}, the plan runs out around age {depleted_age} for the survivor — "
+            f"about ${additional_insurance_needed:,.0f} more life insurance on {deceased} would close that gap "
+            f"(today's dollars, before accounting for the MFJ-to-single tax-bracket jump, which would push the "
+            f"real number higher)."
+        )
+
+    return {
+        "has_data": True,
+        "mode": "two_age",
+        "jason_ret_age": jason_ret_age,
+        "justin_ret_age": justin_ret_age,
+        "deceased": deceased,
+        "death_age": death_age,
+        "survivor_end_age": end_age,
+        "portfolio_at_death": round(portfolio_at_death),
+        "life_insurance_payout": round(payout),
+        "starting_balance_after_payout": round(starting_balance),
+        "survivor_ss_annual": round(survivor_ss_annual),
+        "pension_annual": round(pension_annual),
+        "income_need_at_death": round(income_need_at_death),
+        "survivor_need_factor": survivor_need_factor,
+        "survives": survives,
+        "depleted_age": depleted_age,
+        "additional_insurance_needed": additional_insurance_needed,
+        "recommendation": recommendation,
+        "schedule": schedule[::2],
+        "trust_available_to_survivor": trust_available_to_survivor,
+        "joint_accounts_survivorship": joint_accounts_survivorship,
+        "spousal_rollover_election": spousal_rollover_election,
+        "trust_balance_at_death": round(trust_total),
+        "joint_balance_at_death": round(joint_total),
+        "second_earner_net_of_tax_factor": SECOND_EARNER_NET_OF_TAX_FACTOR,
+        "account_ownership_limitation": walk["account_ownership_limitation"],
+    }
+
+
 def run_survivor_scenario(inputs: Dict, accounts: List[Dict], ret_age: int = 60,
                            deceased: str = "jason", death_age: int = None,
                            survivor_need_factor: float = 0.75,
                            life_events: List[Dict] = None,
-                           surplus_allocations: List[Dict] = None) -> Dict:
-    """Stress-tests the plan assuming one spouse dies during retirement:
+                           surplus_allocations: List[Dict] = None,
+                           jason_ret_age: int = None, justin_ret_age: int = None,
+                           ss_timing: str = "early",
+                           trust_available_to_survivor: bool = False,
+                           joint_accounts_survivorship: bool = True,
+                           spousal_rollover_election: bool = True) -> Dict:
+    """jason_ret_age/justin_ret_age (2026-09-08, CALCULATION_CONTRACT.md
+    sections 36-37, Milestone 4 of 4): two-age mode with an owner-
+    attributed account ledger, both ages required together, delegating
+    entirely to _run_survivor_scenario_two_age. ret_age's own single-axis
+    behavior below is completely unaffected when these are left at their
+    None default. trust_available_to_survivor/joint_accounts_
+    survivorship/spousal_rollover_election are two-age-only explicit
+    scenario assumptions (section 37.1-37.3) with no single-axis
+    equivalent (single-axis has never distinguished account ownership at
+    all).
+
+    Stress-tests the plan assuming one spouse dies during retirement:
     the deceased's life insurance payout is added to the portfolio, Social
     Security switches to the survivor benefit (the higher of the two, not
     both — that's how SS survivor benefits actually work), pension is
@@ -3752,6 +4019,13 @@ def run_survivor_scenario(inputs: Dict, accounts: List[Dict], ret_age: int = 60,
     cases covering Justin dying before/during/after his own gap window,
     and a past-selected-ret_age scenario.
     """
+    if _require_both_two_age_or_neither(jason_ret_age, justin_ret_age):
+        return _run_survivor_scenario_two_age(inputs, accounts, jason_ret_age, justin_ret_age, ss_timing,
+                                               deceased, death_age, survivor_need_factor,
+                                               life_events, surplus_allocations,
+                                               trust_available_to_survivor, joint_accounts_survivorship,
+                                               spousal_rollover_election)
+
     from projection_engine import run_retirement_projection
 
     jason_age  = inputs["jason_age"]
