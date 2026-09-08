@@ -23,6 +23,7 @@ from projection_engine import (
     COLLEGE_YEARS,
     justin_years_to_retire_for,
     justin_gap_income_inputs,
+    justin_gap_income_for_year,
     SECOND_EARNER_NET_OF_TAX_FACTOR,
 )
 
@@ -529,6 +530,87 @@ class TestJustinGapIncomeInputsHelper:
     def test_justin_years_to_retire_for_fallback_and_explicit(self):
         assert justin_years_to_retire_for({"justin_ret_age": 0}, justin_age=50, years_to_retire=10) == 10
         assert justin_years_to_retire_for({"justin_ret_age": 55}, justin_age=50, years_to_retire=10) == 5
+
+    @pytest.mark.parametrize("justin_ret_age,expected_gap_years", [
+        (58, 0),   # Justin retires BEFORE this scenario's own retirement (60) -- no gap
+        (60, 0),   # Justin retires exactly AT this scenario's retirement -- no gap
+        (65, 5),   # Justin retires AFTER -- a real 5-year gap
+    ])
+    def test_justin_retires_before_at_and_after_jasons_scenario_retirement(self, justin_ret_age, expected_gap_years):
+        """The three cases a household actually faces when picking a
+        justin_ret_age relative to whichever Jason ret_age scenario is
+        being viewed (jason_age=55, ret_age=60 -> years_to_retire=5)."""
+        justin_age = 55
+        years_to_retire = 5
+        justin_years_to_retire = justin_years_to_retire_for(
+            {"justin_ret_age": justin_ret_age}, justin_age, years_to_retire)
+        gap_years, at_start = justin_gap_income_inputs(
+            {"justin_w2_salary": 100000, "justin_ret_age": justin_ret_age},
+            justin_years_to_retire, years_to_retire, salary_growth_pct=0.0)
+        assert gap_years == expected_gap_years
+        assert (at_start > 0) == (expected_gap_years > 0)
+
+    def test_current_age_already_exceeds_selected_retirement_age(self):
+        """years_to_retire clamps to 0 (already past that age) -- the
+        same past-ret_age case every other withdrawal-phase consumer
+        handles via timeline_engine.build_timeline. justin_ret_age set
+        to a real future age for Justin still produces a real gap,
+        entirely from years_to_retire being 0."""
+        jason_age, ret_age = 65, 55  # already 10 years past this scenario's ret_age
+        years_to_retire = max(0, ret_age - jason_age)
+        assert years_to_retire == 0
+        justin_age, justin_ret_age = 63, 68  # Justin has 5 years left
+        justin_years_to_retire = justin_years_to_retire_for(
+            {"justin_ret_age": justin_ret_age}, justin_age, years_to_retire)
+        assert justin_years_to_retire == 5
+        gap_years, at_start = justin_gap_income_inputs(
+            {"justin_w2_salary": 100000, "justin_ret_age": justin_ret_age},
+            justin_years_to_retire, years_to_retire, salary_growth_pct=0.0)
+        assert gap_years == 5
+        # years_to_retire=0 -> no pre-retirement-start growth to apply,
+        # so at_start is exactly the net-of-tax salary.
+        assert at_start == pytest.approx(100000 * SECOND_EARNER_NET_OF_TAX_FACTOR)
+
+    def test_unequal_spouse_ages(self):
+        """justin_years_to_retire_for must convert using JUSTIN's own
+        age, not Jason's -- an age gap must not silently corrupt the
+        computation."""
+        # Jason 60, Justin 50 (10-year gap). Justin retires at 62 -> 12
+        # years from now, regardless of Jason's own age/ret_age.
+        assert justin_years_to_retire_for({"justin_ret_age": 62}, justin_age=50, years_to_retire=999) == 12
+        # Same Justin age/ret_age, unset justin_ret_age falls back to
+        # whatever years_to_retire the caller passes (Jason's own),
+        # confirming the age gap plays no role in the fallback path.
+        assert justin_years_to_retire_for({"justin_ret_age": 0}, justin_age=50, years_to_retire=7) == 7
+
+    def test_gap_income_ends_exactly_at_justins_retirement_year(self):
+        """The boundary the reviewer specifically asked for: yr ==
+        justin_gap_years must already be 0, not one year late or early."""
+        gap_years, at_start = justin_gap_income_inputs(
+            {"justin_w2_salary": 100000}, justin_years_to_retire=15, years_to_retire=10, salary_growth_pct=0.0)
+        assert gap_years == 5
+        assert justin_gap_income_for_year(4, gap_years, at_start, 0.0) > 0   # last working year
+        assert justin_gap_income_for_year(5, gap_years, at_start, 0.0) == 0.0  # retired exactly this year
+        assert justin_gap_income_for_year(6, gap_years, at_start, 0.0) == 0.0  # stays 0 after
+
+    def test_no_change_when_salary_is_zero(self):
+        gap_years, at_start = justin_gap_income_inputs(
+            {"justin_w2_salary": 0, "justin_ret_age": 65}, justin_years_to_retire=15, years_to_retire=5,
+            salary_growth_pct=0.03)
+        assert gap_years == 10  # a real gap exists in terms of years...
+        assert at_start == 0.0  # ...but $0 salary means $0 income regardless
+        assert justin_gap_income_for_year(0, gap_years, at_start, 0.03) == 0.0
+
+    def test_no_change_when_retirement_age_is_unset(self):
+        """justin_ret_age=0 (or absent) must fall back to years_to_retire
+        exactly, producing gap_years=0 (no gap vs. the scenario's own
+        retirement) regardless of salary."""
+        justin_years_to_retire = justin_years_to_retire_for({}, justin_age=55, years_to_retire=8)
+        assert justin_years_to_retire == 8
+        gap_years, at_start = justin_gap_income_inputs(
+            {"justin_w2_salary": 150000}, justin_years_to_retire, years_to_retire=8, salary_growth_pct=0.03)
+        assert gap_years == 0
+        assert at_start == 0.0
 
 
 class TestWithdrawalWaterfallReconciliationFixes:

@@ -13,7 +13,7 @@ from projection_engine import (
     JUSTIN_SPOUSAL_ANNUAL, JUSTIN_SPOUSAL_AGE, CURRENT_YEAR,
     _fv, _fv_annuity, _fv_annuity_monthly, _rmd, pension_for_age, rmd_start_age,
     _split_life_events, _post_retirement_year_effects, _post_retirement_asset_sale_events,
-    justin_years_to_retire_for, justin_gap_income_inputs,
+    justin_years_to_retire_for, justin_gap_income_inputs, justin_gap_income_for_year,
 )
 from annual_engine import (AccountState, DEFAULT_ORDER, ROTH_FIRST_ORDER, marginal_bracket_tax_model, no_tax_model,
                            simulate_conversion, simulate_withdrawal_year)
@@ -447,6 +447,17 @@ def run_swr_analysis(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_t
     healthcare_post = inputs.get("healthcare_post_medicare", 0)
 
     years_to_ret = max(0, ret_age - jason_age)
+    # Second-earner gap income (2026-09-08 second follow-up,
+    # CALCULATION_CONTRACT.md section 14 → 15): computed once here, same
+    # precedent as pension_annual, and looked up per-year inside
+    # success_at_withdrawal's inner loop via the allocation-free
+    # justin_gap_income_for_year (not the dataclass-returning shared
+    # builder — this loop runs N=1000 trials x retire_yrs x the binary
+    # search's iteration count).
+    _salary_growth_pct = inputs.get("_salary_growth_pct", 0.0)
+    _justin_years_to_retire = justin_years_to_retire_for(inputs, justin_age, years_to_ret)
+    justin_gap_years, justin_gap_income_at_start = justin_gap_income_inputs(
+        inputs, _justin_years_to_retire, years_to_ret, _salary_growth_pct)
     pension_annual = pension_for_age(inputs, ret_age)
     jason_ss_early  = inputs.get("jason_social_security", JASON_SS_EARLY)
     jason_ss_delayed = inputs.get("jason_ss_delayed", JASON_SS_DELAYED)
@@ -531,10 +542,22 @@ def run_swr_analysis(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_t
                 # RMD
                 rmd = _rmd(pretax, age, _rmd_start)
                 event_cash, event_monthly = _post_retirement_year_effects(post_events, retirement_year + yr)
+                # Second-earner gap income (backlog item 1, closed for SWR
+                # 2026-09-08 second follow-up): folded into event_monthly
+                # rather than portfolio_draw itself, matching SWR's own
+                # documented convention (CALCULATION_CONTRACT.md 3.5) that
+                # guaranteed/extra income stays separate from "how much can
+                # I safely draw from the portfolio alone" — the same
+                # treatment a recurring life-event income offset already
+                # gets here (_swr_year_step already reduces portfolio_draw
+                # by event_monthly before checking for unmet need).
+                gap_income_this_year = justin_gap_income_for_year(
+                    yr, justin_gap_years, justin_gap_income_at_start, _salary_growth_pct)
                 pretax_tax_rate = _pretax_marginal_tax_rate(year_pen, year_jss, year_uss, rmd,
                                                               inputs.get("state_income_tax_rate", 0))
                 pretax, roth, taxable, hsa, remaining = _swr_year_step(
-                    pretax, roth, taxable, hsa, portfolio_draw, event_cash, event_monthly,
+                    pretax, roth, taxable, hsa, portfolio_draw, event_cash,
+                    event_monthly + gap_income_this_year,
                     rmd, pretax_tax_rate)
 
                 # Fail if the portfolio is fully depleted, OR if spending
@@ -1561,6 +1584,14 @@ def run_tax_efficiency_simulation(inputs: Dict, accounts: List[Dict], ret_age: i
     healthcare_pre_te    = healthcare_pre * ((1 + inflation) ** years_to_ret_te)
     healthcare_post_te   = healthcare_post * ((1 + inflation) ** years_to_ret_te)
 
+    # Second-earner gap income (2026-09-08 second follow-up,
+    # CALCULATION_CONTRACT.md section 14 → 15) — computed once, shared by
+    # all 3 strategies inside run_strategy below.
+    _salary_growth_pct = inputs.get("_salary_growth_pct", 0.0)
+    _justin_years_to_retire_te = justin_years_to_retire_for(inputs, justin_age, years_to_ret_te)
+    justin_gap_years, justin_gap_income_at_start = justin_gap_income_inputs(
+        inputs, _justin_years_to_retire_te, years_to_ret_te, _salary_growth_pct)
+
     pension_annual = pension_for_age(inputs, ret_age)
     jason_ss_early  = inputs.get("jason_social_security", JASON_SS_EARLY)
     jason_ss_delayed = inputs.get("jason_ss_delayed", JASON_SS_DELAYED)
@@ -1677,8 +1708,19 @@ def run_tax_efficiency_simulation(inputs: Dict, accounts: List[Dict], ret_age: i
                 # annual_engine.simulate_withdrawal_year's own convention
                 # exactly (spending_need is never floored there either —
                 # see its cash_available >= spending_need branch).
+                # Second-earner gap income (backlog item 1, closed for
+                # Tax Efficiency 2026-09-08 second follow-up): folded into
+                # the recurring life_event_monthly channel — economically
+                # the same thing (extra income reducing this year's net
+                # need, banked as surplus if it exceeds the need), and
+                # this loop already has a tested function for exactly
+                # that shape. Allocation-free lookup (justin_gap_income_
+                # for_year), same performance reasoning as the SS/
+                # healthcare formulas already kept inline here.
+                gap_income_this_year = justin_gap_income_for_year(
+                    yr, justin_gap_years, justin_gap_income_at_start, _salary_growth_pct)
                 net_need, surplus_credit = _cash_available_offsets_need(
-                    year_need, guaranteed, life_event_cash, life_event_monthly)
+                    year_need, guaranteed, life_event_cash, life_event_monthly + gap_income_this_year)
                 taxable += surplus_credit
 
                 # RMD — must take regardless of strategy
@@ -1947,6 +1989,20 @@ def run_survivor_scenario(inputs: Dict, accounts: List[Dict], ret_age: int = 60,
     inflation  = inputs["inflation_rate"]
     age_gap    = jason_age - justin_age  # positive: jason is older
 
+    # Second-earner gap income (2026-09-08 second follow-up,
+    # CALCULATION_CONTRACT.md section 14 → 15): only meaningful if Justin
+    # is the SURVIVOR, not the deceased -- Justin's own continued working
+    # income obviously stops entirely if Justin is the one who died,
+    # rather than just tapering off at his own retirement age like every
+    # other consumer's version of this offset. Gated at the point of use
+    # below (deceased != "justin"), not here, since justin_gap_years/
+    # justin_gap_income_at_start themselves don't depend on who died.
+    _salary_growth_pct = inputs.get("_salary_growth_pct", 0.0)
+    _years_to_ret_survivor = max(0, ret_age - jason_age)
+    _justin_years_to_retire_survivor = justin_years_to_retire_for(inputs, justin_age, _years_to_ret_survivor)
+    justin_gap_years, justin_gap_income_at_start = justin_gap_income_inputs(
+        inputs, _justin_years_to_retire_survivor, _years_to_ret_survivor, _salary_growth_pct)
+
     # timeline_engine.build_timeline: same shared source every other
     # withdrawal-phase consumer uses. The death_age default below was the
     # second of the two adjacent cases flagged alongside the asset-sale
@@ -2044,6 +2100,22 @@ def run_survivor_scenario(inputs: Dict, accounts: List[Dict], ret_age: int = 60,
         # (supposedly frozen) pension portion right along with SS
         # (external audit 2026-09-07).
         guaranteed = pension_annual + survivor_ss_annual * ((1 + inflation) ** (i + 1))
+        # Second-earner gap income (backlog item 1, closed for Survivor
+        # 2026-09-08 second follow-up): only applies if Justin is the
+        # SURVIVOR (deceased != "justin") -- if Justin is the one who
+        # died, this working income doesn't exist anymore at all, not
+        # just tapered off at his own retirement age. `age` here is in
+        # JASON-age terms (this loop is always keyed that way); convert
+        # to "years since this scenario's own withdrawal start"
+        # (timeline.effective_start_age) to look up the same yr index
+        # every other consumer uses.
+        gap_income_this_year = (
+            justin_gap_income_for_year(
+                age - timeline.effective_start_age, justin_gap_years,
+                justin_gap_income_at_start, _salary_growth_pct)
+            if deceased != "justin" else 0.0
+        )
+        need -= gap_income_this_year
         draw       = max(0, need - guaranteed)
         # Catch the edge case where the portfolio is already at (or below)
         # zero going into this year and there's still a real gap to cover —

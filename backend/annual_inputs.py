@@ -156,10 +156,16 @@ def build_annual_income_inputs(
     else:
         life_event_cash, life_event_monthly = post_retirement_year_effects(post_life_events or [], calendar_year)
 
-    justin_gap_income = (
-        justin_gap_income_at_start * ((1 + salary_growth_pct) ** yr)
-        if yr < justin_gap_years else 0.0
-    )
+    # Lazy import to avoid a circular import (projection_engine.py owns
+    # this helper and already imports build_annual_income_inputs from
+    # this module at load time — same precedent as
+    # post_retirement_year_effects's own injection above, but this one's
+    # a pure utility function so a local import is simpler than adding
+    # another parameter). Cheap after the first call since Python caches
+    # the module.
+    from projection_engine import justin_gap_income_for_year
+    justin_gap_income = justin_gap_income_for_year(
+        yr, justin_gap_years, justin_gap_income_at_start, salary_growth_pct)
 
     return AnnualIncomeInputs(
         age=age,

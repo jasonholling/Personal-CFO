@@ -1098,3 +1098,102 @@ directly on `main` (no branch — this repo has no PR process):
 
 Full backend suite re-verified green after both fixes — see the commit
 this section was added in for the exact count.
+
+## 15. Second-earner gap income — full propagation to all 6 consumers (2026-09-08, third pass)
+
+Section 14 propagated gap income to 4 of 6 withdrawal-phase consumers and
+left `run_swr_analysis`, `run_tax_efficiency_simulation`, and
+`run_survivor_scenario` open. A follow-up request closed all three,
+correcting a count discrepancy along the way: an earlier summary said "2
+of 6" consumers still missed gap income while actually naming 3
+(SWR, Tax Efficiency, Survivor) — the number below is the corrected one.
+
+**A new allocation-free helper, `justin_gap_income_for_year(yr,
+justin_gap_years, justin_gap_income_at_start, salary_growth_pct)`**, in
+`projection_engine.py` alongside `justin_years_to_retire_for`/
+`justin_gap_income_inputs`: pure floats in/out, no object construction,
+cheap enough to call inside SWR's binary-search inner loop and Tax
+Efficiency's per-trial strategies — the two consumers already documented
+as too slow for the shared `annual_engine`/`annual_inputs` machinery
+(sections 4/10). `annual_inputs.py`'s `build_annual_income_inputs` now
+calls this function too (via a lazy import to avoid a circular import,
+same precedent as `post_retirement_year_effects`'s own injection),
+instead of keeping a parallel copy of the same one-line formula — every
+consumer now reads gap income for a given year through exactly one
+function, dataclass-wrapped or not.
+
+**Wired into the remaining 3 consumers, each preserving its own existing
+withdrawal/tax policy — no engine migration, no scenario-model
+changes:**
+- `run_swr_analysis`: gap income is folded into `_swr_year_step`'s
+  existing `event_monthly` parameter (no signature change to that
+  shared, parity-tested helper) — economically identical to a recurring
+  life-event income offset, which this loop already treats that way.
+  Verified exact: `test_gap_income_parity_via_swr_year_step` shows
+  `_swr_year_step`'s returned `remaining` drops by precisely the
+  gap-income amount, all else equal.
+- `run_tax_efficiency_simulation`: folded into the existing
+  `life_event_monthly` argument of `_cash_available_offsets_need` —
+  computed once per year, shared by all 3 strategies
+  (taxable_first/roth_first/optimal) before they branch. Verified exact
+  the same way (`test_gap_income_parity_via_cash_available_offsets_need`).
+- `run_survivor_scenario`: the one genuinely different case — gap income
+  only applies when Justin is the SURVIVOR (`deceased != "justin"`), not
+  tapered at his own retirement age like every other consumer, but gone
+  entirely if Justin is the one who died. `age` in this loop is always
+  in Jason-age terms; converted to the same "years since this scenario's
+  own withdrawal start" index every other consumer uses via
+  `age - timeline.effective_start_age`. Both selection paths tested
+  directly: `test_gap_income_applies_when_justin_survives` (deceased=
+  "jason", gap income reduces the survivor's draw) and
+  `test_gap_income_does_not_apply_when_justin_is_deceased` (deceased=
+  "justin", draws identical to a household with no second-earner fields
+  configured at all — compared via each year's `draw` specifically, not
+  the full schedule, since `starting_balance` legitimately differs
+  between those two input sets for an unrelated reason: `justin_w2_salary`/
+  `justin_ret_age` also changes the pre-death baseline portfolio via
+  `run_retirement_projection`'s own already-closed gap-income offset).
+
+**Item 1 is now fully closed: all 6 of 6 withdrawal-phase consumers see
+second-earner gap income.** Tests added (18 total across this pass):
+`TestJustinGapIncomeInputsHelper` gained 8 new cases (Justin retiring
+before/at/after the scenario's own retirement age; the household's
+current age already past the selected retirement age; unequal spouse
+ages; the exact yr-equals-justin_gap_years boundary; zero salary; unset
+retirement age) plus the pre-existing 4; SWR and Tax Efficiency each got
+a directional improvement test and an exact parity test against their
+own shared helper function; Survivor got both selection-path tests;
+`TestSecondEarnerGapIncomeZeroImpactAcrossAllConsumers` (6 tests) checks
+every one of the 6 consumers produces byte-identical output between
+plain defaults and explicit `justin_w2_salary=0`/`justin_ret_age=0` —
+closing this feature's central promise (opt-in, zero effect otherwise)
+for consumers 5 and 6, not just the 4 already covered in section 14.
+The exact deterministic Monte Carlo/Stress-Tests-vs-Retirement-Projection
+reconciliation tests from section 14 are unchanged and still pass.
+
+**Four larger items remain open, correctly scoped, not silently
+dropped** (owner attribution counted explicitly, per the request that
+prompted this correction):
+1. **The two-dimensional retirement-age redesign** (section 14, item 2)
+   — replacing the single `jason_ret_age` scenario sweep with a genuine
+   `jason_ret_age × justin_ret_age` sweep everywhere it appears in the
+   UI. A real product/UX redesign, not a formula fix.
+2. **Real payroll-tax modeling** — `SECOND_EARNER_NET_OF_TAX_FACTOR`
+   (0.65) remains a flat, explicit approximation everywhere gap income
+   is used, not brackets/FICA/filing-status/state-tax.
+3. **Owner-attributed account ledger** (section 13, item 5) — Justin's
+   contributions still land in the same pooled pretax/Roth totals every
+   consumer already used; no owner-specific RMD/survivor/estate rules.
+4. **Per-year output visibility beyond Retirement Projection** (section
+   14, item 5) — `justin_gap_income` is its own field in
+   `run_retirement_projection`'s `yearly_detail` only. Monte Carlo,
+   Stress Tests, SWR, Tax Efficiency, and Survivor Scenario don't expose
+   per-year income-source detail for ANY offset (including the
+   pre-existing `bridge_income`) — a broader per-year-output-detail gap
+   across this file, not specific to gap income.
+
+Full backend/frontend test suite re-verified green (see the commit this
+section was added in for the exact count). This work was done on an
+isolated branch (`codex/second-earner-gap-income-all-consumers`),
+pushed but **not merged to `main`**, per the explicit instruction it was
+built under — review before merging.
