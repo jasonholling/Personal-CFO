@@ -2515,3 +2515,176 @@ build succeeds, sensitive-data check passed.
 
 Branch: `codex/two-age-swr`, pushed, **still not merged** -- fourth
 review round pending before Milestone 2 begins.
+
+## 30. Two-age Roth Conversion — working-income tax contract, written before implementation (2026-09-08, on `codex/two-age-roth-conversion`)
+
+Milestone 2 of 4 (SWR done and merged, section 25-29). Required by the
+milestone's own instruction: document the working-income tax contract
+BEFORE any implementation code, so bracket-capacity treatment is a
+deliberate decision, not an accident of how the code happened to get
+written. Everything below was read directly from the existing
+single-axis `run_roth_conversion_analysis` (unmodified by this
+milestone) and the shared two-age helpers already built for SWR/Monte
+Carlo/Stress/Projection — not assumed.
+
+### 30.1 What counts toward taxable income (bracket capacity)
+
+`base_taxable` (the figure `room_in_22 = BRACKET_TOP_22 - base_taxable`
+is measured against) is, in the existing single-axis tool:
+
+    base_taxable = pension + 0.85 * (jason_SS + justin_SS) + pretax_draw - STD_DEDUCTION
+
+Confirmed by reading the code: **gross wages, bonus, and RSU income —
+the still-working spouse's or either spouse's own pre-retirement
+earnings — are NEVER added to `base_taxable`, in the existing
+single-axis tool or anywhere else in this app's withdrawal-phase
+engines** (SWR, Monte Carlo, Stress Tests, Projection). Working income
+is modeled EXCLUSIVELY through `SECOND_EARNER_NET_OF_TAX_FACTOR = 0.65`
+— a flat net-of-tax approximation applied once, at the point wages
+enter the model, then folded purely into the year's SPENDING-NEED
+OFFSET (`event_monthly` / `justin_gap_income_for_year`'s return value),
+never into any bracket-capacity or ordinary-income calculation.
+
+Two-age Roth Conversion preserves this exactly: the still-working
+spouse's phase2 income (`two_age_still_working_income_inputs` +
+`justin_gap_income_for_year`, the same two calls every other two-age
+withdrawal-phase consumer already makes) offsets `year_need` the same
+way life-event cash does, and is never added to `base_taxable`.
+
+### 30.2 How each income source affects bracket capacity
+
+| Source | Effect on `base_taxable` |
+|---|---|
+| Pension (`two_age_pension_for_year`, gated to Jason's own retirement) | Added in full — no exclusion. |
+| Social Security (each spouse's own claim-date formula) | 85% included, same flat approximation as every other consumer's `_pretax_marginal_tax_rate` estimate. |
+| Standard deduction | Flat `STD_DEDUCTION_MFJ_2026` subtracted — unchanged constant, no itemization modeled. |
+| Pretax-funded portion of the year's spending draw | Added (`pretax_draw` from `simulate_withdrawal_year`'s own `draws["pretax"]`) — taxable- and Roth-funded spending is NOT added, matching single-axis exactly. |
+| Taxable- or Roth-funded spending | No effect (principal draws aren't ordinary income; this tool doesn't model capital-gains tax on taxable-account growth, an existing, unchanged limitation). |
+| Working income (wages/bonus/RSU, either spouse) | **No effect** — see 30.1. Never added, in either direction. |
+| Pretax (401k) contributions during phase2 (the still-working spouse may still be contributing) | **Not modeled at all.** This app only models contributions during the pre-retirement accumulation phase (`run_retirement_projection`'s own contribution formulas, run once to produce the starting Roth-conversion-window balances via `run_two_dimensional_retirement_projection`). No withdrawal-phase consumer in this app — single-axis or two-age — reduces a still-working spouse's OWN taxable income for ongoing contributions once the OTHER spouse has already started the conversion window; this is a pre-existing, explicit approximation, not new scope for this milestone. |
+| The conversion amount itself | **Not blended into `base_taxable`/`room_in_22` at all.** `base_taxable` determines how much ROOM exists in the selected bracket; the conversion that fills that room is taxed SEPARATELY, via `simulate_conversion`'s own flat-rate tax model at the bracket's own marginal rate (22%, `TAX_BRACKET_22`) — the conversion cannot itself push the household into a higher bracket in this tool's model (a documented, pre-existing simplification carried over unchanged, not something this milestone is asked to fix). |
+
+### 30.3 How the 65% take-home approximation interacts with conversion taxes
+
+It doesn't, directly, and by design that's the point: because working
+income is folded into `event_monthly`/spending-need offset ONLY (never
+into `base_taxable`), it can neither inflate nor shrink the household's
+apparent 22%-bracket room, and this tool never taxes it a second time.
+The 0.65 factor is meant to represent the wage-earner's FULL tax burden
+(federal + state ordinary income tax + payroll tax, an approximation
+this tool has never itemized) already deducted via payroll withholding
+before the money is counted as usable household cash — treating that
+already-net figure as additional GROSS taxable income on top of
+pension/SS/RMDs would double-charge ordinary wage taxes on the same
+dollars twice AND would incorrectly consume 22%-bracket room that a W-2
+earner's actual withholding, not this household-level retirement-
+distribution model, already accounts for. This app has never modeled a
+scenario where a working spouse's wages are BOTH taxed at their own
+marginal W-2 rate (via payroll withholding, invisible to this tool)
+AND folded into the retirement-distribution bracket math this function
+computes — keeping working income out of `base_taxable` entirely is
+the existing app-wide convention this milestone preserves, not a new
+decision.
+
+### 30.4 Order of operations: income, withdrawals, conversion, growth
+
+Per year, unchanged from single-axis and preserved exactly for
+two-age:
+
+1. Compute the year's guaranteed income (pension + each spouse's own
+   SS), the still-working spouse's gap income (if in phase2), life
+   events, and total spending need (`two_age_spending_need_fn` for
+   two-age, bridge/kids/healthcare-aware — see 30.6).
+2. `simulate_withdrawal_year` runs the full waterfall against the
+   YEAR'S OPENING balances: guaranteed income and life-event cash
+   offset need first (surplus swept into taxable if income exceeds
+   need); any shortfall draws `("taxable", "pretax", "roth")` in
+   order, each draw grossed up for tax; **growth is applied LAST**, to
+   every bucket's post-withdrawal (and post-surplus-sweep) balance —
+   `annual_engine.py`'s own documented contract.
+3. `simulate_conversion` is layered ON TOP of that ALREADY-GROWN
+   closing state — no further growth is applied within it. The
+   conversion amount is therefore valued at the END of the current
+   year / START of the next, which is why compounding it forward to
+   RMD age uses `RMD_START_AGE - age - 1` (one fewer year than the
+   naive age difference), the existing single-axis fix this milestone
+   does not touch.
+4. The conversion's own tax is paid from OUTSIDE the IRA (taxable,
+   by default) — capped by what remaining taxable can actually afford,
+   never leaving an unfunded tax bill, exactly as `simulate_conversion`'s
+   own docstring requires.
+
+Income "stopping" (the still-working spouse's own retirement,
+`phase2 -> phase3`) is handled entirely by
+`justin_gap_income_for_year`'s existing `phase2_duration_years` gate —
+the same mechanism SWR/Monte Carlo/Stress two-age already use, not a
+new one.
+
+### 30.5 What stays explicitly deferred
+
+- **Full payroll-tax modeling** (FICA/Medicare on wages, employer
+  matching, etc.) — out of scope per the milestone instruction. Still
+  folded, approximately, into the flat 0.65 net-of-tax factor alongside
+  ordinary income tax, exactly as it already is everywhere else in this
+  app.
+- **The conversion pushing the household into a higher bracket** — this
+  tool has never modeled that (the conversion is taxed flat at the
+  target bracket's own rate, not incrementally against `base_taxable +
+  conversion`); unchanged, pre-existing, not addressed by this
+  milestone.
+- **Ongoing 401k contributions during phase2** — not modeled in any
+  withdrawal-phase consumer, single-axis or two-age; unchanged.
+- **Capital-gains tax on taxable-account growth/draws** — not modeled
+  anywhere in this app; unchanged.
+- **Owner-specific tax treatment** (per-spouse account ownership) —
+  out of scope until Milestone 4's ownership foundation; conversions
+  here, like every other two-age tool, operate on the household's
+  pooled/joint bucket totals (`account_ownership_limitation`).
+
+### 30.6 Two-age-specific additive scope (new for this milestone)
+
+- Both `jason_ret_age`/`justin_ret_age` required together, via the
+  existing `_require_both_two_age_or_neither` gate (unchanged).
+- The conversion window starts at `phase2_start_age` (the earlier
+  retiree's own retirement — the same anchor every other two-age
+  withdrawal-phase consumer uses), not Jason's own
+  `jason_effective_start_age` — a household where Justin retires first
+  can start converting as soon as ANY retirement income exists to
+  spend from, matching the household's actual timeline. It still runs
+  through `RMD_START_AGE` (Jason's own age — RMDs and the pretax
+  account being converted are Jason-anchored throughout this entire
+  app, an existing, unchanged convention; there is no separate
+  justin_ret_age-anchored pretax pool). Built via
+  `build_two_person_timeline(..., retirement_end_age=RMD_START_AGE)` —
+  reusing the exact same timeline object every other two-age consumer
+  builds, just with a different horizon endpoint, rather than a new
+  timeline abstraction.
+- Spending need uses the FULL `two_age_spending_need_fn` (bridge/kids/
+  healthcare-aware, age-55 branch included) instead of single-axis
+  Roth Conversion's own simpler `income + healthcare` formula (which
+  never modeled bridge/kids at all, a pre-existing, documented
+  single-axis limitation). **This is an intentional, documented
+  difference from reuse, not a bug**: two-age's own shared spending
+  helper is strictly more complete, and per the milestone's own
+  instruction ("reuse the shared ... spending ... helpers"), the
+  richer shared formula is used rather than reimplementing single-axis's
+  narrower one a second time for two-age.
+- Guaranteed income and gap income use the exact same helpers section
+  25-29's SWR work already established:
+  `two_age_pension_for_year`, per-spouse SS claim-date formulas (the
+  same inline pattern four other call sites in this file already use),
+  `two_age_still_working_income_inputs` + `justin_gap_income_for_year`.
+- Starting pretax/Roth/taxable balances come from
+  `run_two_dimensional_retirement_projection`'s own UNROUNDED bucket
+  fields (`pretax_at_phase2_start`/`roth_at_phase2_start`/
+  `taxable_at_phase2_start`), the same pattern SWR/Monte Carlo/Stress
+  two-age already use — not a second, independent accumulation-phase
+  calculation.
+- The with-conversion vs. no-conversion comparison remains a single
+  deterministic pass under identical assumptions/return path for both
+  (this tool has never used randomized trials, unlike SWR/Monte Carlo)
+  — unchanged methodology, just run against the two-age timeline and
+  income/spending helpers above.
+
+Heatmaps, a full payroll-tax engine, and unrelated cleanup remain out
+of scope, per the overall instruction.
