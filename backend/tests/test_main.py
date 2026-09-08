@@ -282,6 +282,24 @@ class TestProjectionsRequirePlanningInputs:
         assert r.status_code == 200
         assert "goals" in r.json()
 
+    def test_two_dimensional_retirement_projection_200_with_both_ages(self, client, sample_inputs, sample_accounts):
+        _seed_planning_inputs(client, sample_inputs)
+        _seed_accounts(client, sample_accounts)
+        r = client.get("/api/projections/two-dimensional-retirement", params={"jason_ret_age": 62, "justin_ret_age": 60})
+        assert r.status_code == 200
+        body = r.json()
+        assert body["jason_ret_age"] == 62
+        assert body["justin_ret_age"] == 60
+        assert "yearly_detail" in body
+
+    def test_two_dimensional_retirement_projection_requires_both_ages(self, client, sample_inputs):
+        _seed_planning_inputs(client, sample_inputs)
+        # Neither query param has a default -- omitting either is a 422,
+        # not a silent fallback to the single-axis model (this endpoint
+        # is deliberately not reachable by accident).
+        r = client.get("/api/projections/two-dimensional-retirement", params={"jason_ret_age": 62})
+        assert r.status_code == 422
+
     def test_insurance_analysis_200_with_inputs(self, client, sample_inputs):
         _seed_planning_inputs(client, sample_inputs)
         r = client.get("/api/projections/insurance")
