@@ -2075,6 +2075,98 @@ def run_stress_tests(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_t
     }
 
 
+def _progressive_federal_tax(taxable_income: float, brackets) -> float:
+    """Total federal ordinary-income tax owed on `taxable_income` under a
+    progressive bracket table (a list of (rate, cap) tuples, cumulative
+    caps, same shape as retirement_tools_engine.ORDINARY_BRACKETS_MFJ_2026)
+    -- independent review, 2026-09-08, Roth Conversion follow-up, P1/P2:
+    no consumer in this codebase had a real progressive-tax calculator
+    before this (every existing withdrawal-phase consumer, single-axis
+    and two-age, only ever prices a MARGINAL rate via
+    _pretax_marginal_tax_rate, appropriate for "what rate applies to the
+    NEXT dollar," not "what's owed on this whole amount"). `taxable_income`
+    is assumed already net of any standard deduction, matching this
+    file's own base_taxable convention. Returns 0 for taxable_income<=0
+    (a standard deduction that more than offsets income means no tax, not
+    a negative one)."""
+    if taxable_income <= 0:
+        return 0.0
+    tax = 0.0
+    prev_cap = 0.0
+    for rate, cap in brackets:
+        if taxable_income > cap:
+            tax += (cap - prev_cap) * rate
+            prev_cap = cap
+        else:
+            tax += (taxable_income - prev_cap) * rate
+            break
+    return tax
+
+
+def _incremental_conversion_tax(pre_conversion_taxable: float, conversion_amount: float,
+                                 state_tax_rate: float, brackets) -> float:
+    """The conversion's OWN tax cost -- tax(base + conversion) -
+    tax(base), not a flat rate x amount (independent review, 2026-09-08,
+    Roth Conversion follow-up, P2: reproduced, $0 other taxable income,
+    a $243,600 conversion costs $35,932 under the real progressive table,
+    not the $53,592 a flat 22% charged -- a materially wrong price for
+    every conversion this tool ever recommends, distorting both
+    affordability and the reported benefit). `pre_conversion_taxable` may
+    be negative (unused standard-deduction room from a low-income year,
+    this file's own base_taxable convention) -- floored at 0 on both
+    sides of the subtraction, so a conversion first "fills" any leftover
+    deduction room tax-free before progressive rates apply, exactly the
+    way a real tax return works. State tax is a flat additional rate on
+    the conversion amount itself (the same flat-rate-on-top convention
+    _pretax_marginal_tax_rate already uses elsewhere in this file --
+    no state bracket table exists to make this progressive too)."""
+    pre  = max(0.0, pre_conversion_taxable)
+    post = max(0.0, pre_conversion_taxable + conversion_amount)
+    federal = _progressive_federal_tax(post, brackets) - _progressive_federal_tax(pre, brackets)
+    return federal + conversion_amount * max(0.0, state_tax_rate)
+
+
+def _max_conversion_for_tax_budget(pre_conversion_taxable: float, budget: float,
+                                    state_tax_rate: float, brackets) -> float:
+    """The largest conversion whose OWN incremental tax (see
+    _incremental_conversion_tax) fits within `budget` (available taxable
+    cash) -- replaces the old flat `budget / TAX_BRACKET_22` affordability
+    cap, which priced every dollar at the top bracket's own rate
+    regardless of how much of the conversion actually lands in cheaper,
+    lower brackets. Walks the bracket table from `pre_conversion_taxable`
+    (floored at 0) upward, greedily filling each bracket's remaining room
+    until the budget runs out, mirroring the same greedy-fill logic
+    room_in_22 already expresses as a policy choice, but applied to a
+    dollar budget instead of a bracket-top target."""
+    if budget <= 0:
+        return 0.0
+    pre = max(0.0, pre_conversion_taxable)
+    remaining_budget = budget
+    total_convertible = 0.0
+    prev_cap = 0.0
+    for rate, cap in brackets:
+        if cap <= pre:
+            prev_cap = cap
+            continue
+        bracket_start = max(prev_cap, pre)
+        bracket_room  = cap - bracket_start
+        effective_rate = rate + max(0.0, state_tax_rate)
+        if effective_rate <= 0:
+            total_convertible += bracket_room if bracket_room != float("inf") else 0.0
+            prev_cap = cap
+            continue
+        cost_of_full_bracket = bracket_room * effective_rate if bracket_room != float("inf") else float("inf")
+        if cost_of_full_bracket <= remaining_budget:
+            total_convertible += bracket_room
+            remaining_budget -= cost_of_full_bracket
+            prev_cap = cap
+        else:
+            total_convertible += remaining_budget / effective_rate
+            remaining_budget = 0.0
+            break
+    return total_convertible
+
+
 def _run_roth_conversion_analysis_two_age(inputs: Dict, accounts: List[Dict], jason_ret_age: int, justin_ret_age: int,
                                            ss_timing: str, life_events: List[Dict],
                                            surplus_allocations: List[Dict]) -> Dict:
@@ -2120,7 +2212,14 @@ def _run_roth_conversion_analysis_two_age(inputs: Dict, accounts: List[Dict], ja
     from retirement_tools_engine import ORDINARY_BRACKETS_MFJ_2026, STD_DEDUCTION_MFJ_2026
     BRACKET_TOP_22  = next(cap for rate, cap in ORDINARY_BRACKETS_MFJ_2026 if rate == 0.22)
     STD_DEDUCTION   = STD_DEDUCTION_MFJ_2026
-    TAX_BRACKET_22  = 0.22
+    # TAX_BRACKET_22 (a flat 22% conversion-tax rate) is gone -- the
+    # conversion's own tax is now computed progressively via
+    # _incremental_conversion_tax/_max_conversion_for_tax_budget below
+    # (independent review, 2026-09-08, Roth Conversion follow-up, P2).
+    # TAX_BRACKET_24 remains -- the future-RMD-tax-avoided ESTIMATE is a
+    # deliberately simplified flat-rate figure, unchanged, matching
+    # single-axis's own documented convention (and the frontend's own
+    # "Estimate assumes a 24% marginal rate" disclosure).
     TAX_BRACKET_24  = 0.24
     RMD_START_AGE   = rmd_start_age(jason_age)
 
@@ -2175,6 +2274,35 @@ def _run_roth_conversion_analysis_two_age(inputs: Dict, accounts: List[Dict], ja
         life_event_cash, life_event_monthly = _post_retirement_year_effects(post_events, retirement_year_for_events + yr)
         still_working_income_this_year = justin_gap_income_for_year(
             yr, phase2_duration_years, still_working_income_at_start, _salary_growth_pct)
+        # The GROSS wage figure, for taxable-income/bracket-capacity
+        # purposes only -- independent review, 2026-09-08, Roth
+        # Conversion follow-up, P1: still_working_income_this_year is
+        # already NET-of-tax (the existing 65% SECOND_EARNER_NET_OF_
+        # TAX_FACTOR approximation), and that NET figure keeps funding
+        # the spending-need offset exactly as before -- unchanged.
+        # Reproduced: a $500,000 working salary, no other income, ample
+        # assets -- this used to recommend a $243,600 conversion inside
+        # the 22% bracket, when the repo's own deductions/bracket table
+        # says that salary alone already leaves $0 room. Gross wages are
+        # real ordinary taxable income and must reduce bracket capacity
+        # the same way pension/SS/pretax draws already do; the 65%
+        # factor is a SPENDING approximation (net take-home cash), not a
+        # tax-liability one, and applying it twice (once to reduce net
+        # cash, again by pretending gross income is smaller than it is)
+        # would double-count the same tax the factor already implies was
+        # withheld. still_working_income_this_year is exactly linear in
+        # the underlying salary (justin_gap_income_for_year multiplies a
+        # fixed base by a growth factor, nothing else), so dividing back
+        # out the flat NET_OF_TAX_FACTOR recovers the gross figure
+        # exactly, without needing a second, independent salary lookup
+        # (two_age_still_working_income_inputs already resolved which
+        # spouse's w2_salary/justin_w2_salary applies and at what
+        # growth-adjusted level -- this just un-applies the one factor
+        # that shouldn't touch taxable income).
+        gross_wages_this_year = (
+            still_working_income_this_year / SECOND_EARNER_NET_OF_TAX_FACTOR
+            if still_working_income_this_year else 0.0
+        )
 
         pretax_tax_rate = _pretax_marginal_tax_rate(year_pen, year_jss, year_uss, 0.0, state_tax_rate)
         base_result = simulate_withdrawal_year(
@@ -2189,18 +2317,33 @@ def _run_roth_conversion_analysis_two_age(inputs: Dict, accounts: List[Dict], ja
         )
         pretax_draw = base_result.draws.get("pretax", 0.0)
 
-        # base_taxable/room_in_22: section 30.1/30.2's contract --
-        # working income never appears here, in either direction.
+        # base_taxable/room_in_22: section 32's corrected contract --
+        # gross wages now count in full, same as pension/SS/pretax
+        # draws. room_in_22 itself is still a bracket-EDGE policy target
+        # ("fill up through the 22% bracket"), unaffected in form -- it
+        # just reads a base_taxable that now reflects reality.
         ss_taxable   = (year_jss + year_uss) * 0.85
-        base_taxable = year_pen + ss_taxable + pretax_draw - STD_DEDUCTION
+        base_taxable = year_pen + ss_taxable + pretax_draw + gross_wages_this_year - STD_DEDUCTION
         room_in_22   = max(0, BRACKET_TOP_22 - base_taxable)
 
-        max_conversion_affordable = (base_result.closing.taxable / TAX_BRACKET_22) if TAX_BRACKET_22 > 0 else float("inf")
+        # Conversion tax is now PROGRESSIVE/incremental -- tax(base +
+        # conversion) - tax(base) -- not a flat 22% x amount (independent
+        # review, 2026-09-08, Roth Conversion follow-up, P2: reproduced,
+        # $0 other taxable income, a $243,600 conversion costs $35,932
+        # under the real table, not the $53,592 flat 22% charged). Both
+        # the affordability cap and the tax actually charged use the
+        # same incremental formula, so they agree with each other by
+        # construction.
+        max_conversion_affordable = _max_conversion_for_tax_budget(
+            base_taxable, base_result.closing.taxable, state_tax_rate, ORDINARY_BRACKETS_MFJ_2026)
         optimal_conversion = min(room_in_22, base_result.closing.pretax, max_conversion_affordable)
 
         conv_result = simulate_conversion(
             base_result, optimal_conversion,
-            tax_model=marginal_bracket_tax_model(pretax_rate=TAX_BRACKET_22, taxable_rate=0.0),
+            tax_model=lambda bucket, gross, _base=base_taxable, _state=state_tax_rate: (
+                _incremental_conversion_tax(_base, gross, _state, ORDINARY_BRACKETS_MFJ_2026)
+                if bucket == "pretax" else 0.0
+            ),
             tax_funding_order=("taxable",),
         )
         tax_cost = conv_result.taxes_paid.get("conversion", 0.0) + conv_result.taxes_paid.get("conversion_shortfall", 0.0)

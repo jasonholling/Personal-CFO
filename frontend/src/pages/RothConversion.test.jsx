@@ -99,4 +99,37 @@ describe('Two-Age Roth Conversion', () => {
     expect(container.textContent).toContain('65%')
     expect(container.textContent).toContain('Two-age model')
   })
+
+  it('ignores a stale, out-of-order response from an earlier age selection', async () => {
+    // Independent review, 2026-09-08, Roth Conversion follow-up, P2:
+    // changing ages/timing/mode fired another request with no
+    // cancellation or generation guard -- an OLDER, slower response
+    // landing AFTER a newer one could overwrite the newer result. Here
+    // the FIRST request (retAge=60, the default) resolves AFTER the
+    // SECOND (retAge=55, clicked immediately after) -- the final
+    // rendered state must reflect the second (newer) request's result,
+    // not the first (older, stale) one that happened to resolve last.
+    let resolveFirst, resolveSecond
+    const first  = new Promise(res => { resolveFirst = res })
+    const second = new Promise(res => { resolveSecond = res })
+    axios.get.mockImplementationOnce(() => first).mockImplementationOnce(() => second)
+
+    await act(async () => root.render(<RothConversion />))
+    await flush()
+    await click('Retire 55')
+    await flush()
+
+    // Newer request (retAge=55) resolves first.
+    await act(async () => { resolveSecond({ data: { ...singleAgeResult, total_conversions: 555000 } }) })
+    await flush()
+    expect(container.textContent).toContain('$555K')
+
+    // Older, stale request (the initial retAge=60 fetch) resolves late
+    // -- must be ignored, not overwrite the already-applied newer result.
+    await act(async () => { resolveFirst({ data: { ...singleAgeResult, total_conversions: 100000 } }) })
+    await flush()
+    expect(container.textContent).toContain('$555K')
+    expect(container.textContent).not.toContain('$100K')
+    expect(container.textContent).not.toContain('Calculating conversion ladder')
+  })
 })

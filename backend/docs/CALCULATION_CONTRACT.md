@@ -2518,6 +2518,20 @@ review round pending before Milestone 2 begins.
 
 ## 30. Two-age Roth Conversion — working-income tax contract, written before implementation (2026-09-08, on `codex/two-age-roth-conversion`)
 
+**CORRECTED 2026-09-08 (independent review, Roth Conversion follow-up,
+P1/P2) — sections 30.1-30.3 below originally asserted that gross
+working income never affects bracket capacity "in either direction."
+That rule was wrong and is corrected in place here (not append-only
+for this specific point, since leaving a known-false rule as the
+"authoritative" design contract would actively mislead Milestone 3,
+which is required to reuse it). The corrected rule: gross wages ARE
+ordinary taxable income and DO reduce 22%-bracket room, the same way
+pension/SS/pretax draws already do — only the SEPARATE 65% net-of-tax
+figure continues to fund the spending-need offset, unchanged. Section
+32 has the full reproduction, fix, and reasoning; sections 30.1-30.3
+below now state the corrected rule directly rather than leaving the
+wrong one on the record with a footnote.**
+
 Milestone 2 of 4 (SWR done and merged, section 25-29). Required by the
 milestone's own instruction: document the working-income tax contract
 BEFORE any implementation code, so bracket-capacity treatment is a
@@ -2527,31 +2541,46 @@ single-axis `run_roth_conversion_analysis` (unmodified by this
 milestone) and the shared two-age helpers already built for SWR/Monte
 Carlo/Stress/Projection — not assumed.
 
-### 30.1 What counts toward taxable income (bracket capacity)
+### 30.1 What counts toward taxable income (bracket capacity) — CORRECTED
 
 `base_taxable` (the figure `room_in_22 = BRACKET_TOP_22 - base_taxable`
 is measured against) is, in the existing single-axis tool:
 
     base_taxable = pension + 0.85 * (jason_SS + justin_SS) + pretax_draw - STD_DEDUCTION
 
-Confirmed by reading the code: **gross wages, bonus, and RSU income —
-the still-working spouse's or either spouse's own pre-retirement
-earnings — are NEVER added to `base_taxable`, in the existing
-single-axis tool or anywhere else in this app's withdrawal-phase
-engines** (SWR, Monte Carlo, Stress Tests, Projection). Working income
-is modeled EXCLUSIVELY through `SECOND_EARNER_NET_OF_TAX_FACTOR = 0.65`
-— a flat net-of-tax approximation applied once, at the point wages
-enter the model, then folded purely into the year's SPENDING-NEED
-OFFSET (`event_monthly` / `justin_gap_income_for_year`'s return value),
-never into any bracket-capacity or ordinary-income calculation.
+Confirmed by reading the code: single-axis Roth Conversion (and every
+other withdrawal-phase engine in this app — SWR, Monte Carlo, Stress
+Tests, Projection) never adds a working spouse's gross wages to any
+ordinary-income figure at all — but that's a **pre-existing gap in
+those tools, not a rule to preserve**. It went uncaught there because
+none of those other tools ever has BOTH a still-working spouse's
+income AND a bracket-capacity calculation in the same year the way
+Roth Conversion's own conversion-window can (a household can retire
+one spouse and start converting while the other is still earning a
+real W-2 salary). Two-age Roth Conversion's own `base_taxable` DOES
+include gross wages — see 30.2/30.3. Reproduced during review: a
+$500,000 working salary, no other income, ample assets — this
+originally recommended a $243,600 conversion inside the 22% bracket,
+when the repo's own deductions/bracket table says that salary alone
+(500000-32200=467800 > 211400) already leaves $0 room.
 
-Two-age Roth Conversion preserves this exactly: the still-working
-spouse's phase2 income (`two_age_still_working_income_inputs` +
-`justin_gap_income_for_year`, the same two calls every other two-age
-withdrawal-phase consumer already makes) offsets `year_need` the same
-way life-event cash does, and is never added to `base_taxable`.
+The existing `SECOND_EARNER_NET_OF_TAX_FACTOR = 0.65` net-of-tax
+approximation is UNCHANGED and still funds the year's SPENDING-NEED
+OFFSET exactly as before (`justin_gap_income_for_year`'s return value,
+folded into `event_monthly`/`spending_need` the same way life-event
+cash is) — that half of the picture wasn't wrong. What was missing is
+a SEPARATE gross-wage figure, derived by dividing the net figure back
+out (`still_working_income_this_year / SECOND_EARNER_NET_OF_TAX_FACTOR`
+— exact, since the factor is applied as a flat multiplier with no
+other nonlinearity), that now ALSO enters `base_taxable`. The two
+figures serve genuinely different purposes and are BOTH needed, not a
+contradiction: the net figure answers "how much cash does this
+household actually have to spend," the gross figure answers "how much
+ordinary taxable income does this household actually have" — using
+only one of the two for both questions is what produced the original
+bug.
 
-### 30.2 How each income source affects bracket capacity
+### 30.2 How each income source affects bracket capacity — CORRECTED
 
 | Source | Effect on `base_taxable` |
 |---|---|
@@ -2560,31 +2589,34 @@ way life-event cash does, and is never added to `base_taxable`.
 | Standard deduction | Flat `STD_DEDUCTION_MFJ_2026` subtracted — unchanged constant, no itemization modeled. |
 | Pretax-funded portion of the year's spending draw | Added (`pretax_draw` from `simulate_withdrawal_year`'s own `draws["pretax"]`) — taxable- and Roth-funded spending is NOT added, matching single-axis exactly. |
 | Taxable- or Roth-funded spending | No effect (principal draws aren't ordinary income; this tool doesn't model capital-gains tax on taxable-account growth, an existing, unchanged limitation). |
-| Working income (wages/bonus/RSU, either spouse) | **No effect** — see 30.1. Never added, in either direction. |
+| **Working income (wages/bonus/RSU, either spouse)** | **Added in full, gross** — see 30.1/30.3. The SEPARATE net-of-tax figure still funds spending only; this is not a double-count of the same dollars for the same purpose, since one figure feeds cash flow and the other feeds tax liability. |
 | Pretax (401k) contributions during phase2 (the still-working spouse may still be contributing) | **Not modeled at all.** This app only models contributions during the pre-retirement accumulation phase (`run_retirement_projection`'s own contribution formulas, run once to produce the starting Roth-conversion-window balances via `run_two_dimensional_retirement_projection`). No withdrawal-phase consumer in this app — single-axis or two-age — reduces a still-working spouse's OWN taxable income for ongoing contributions once the OTHER spouse has already started the conversion window; this is a pre-existing, explicit approximation, not new scope for this milestone. |
-| The conversion amount itself | **Not blended into `base_taxable`/`room_in_22` at all.** `base_taxable` determines how much ROOM exists in the selected bracket; the conversion that fills that room is taxed SEPARATELY, via `simulate_conversion`'s own flat-rate tax model at the bracket's own marginal rate (22%, `TAX_BRACKET_22`) — the conversion cannot itself push the household into a higher bracket in this tool's model (a documented, pre-existing simplification carried over unchanged, not something this milestone is asked to fix). |
+| The conversion amount itself | **Not blended into `base_taxable`/`room_in_22` at all.** `base_taxable` determines how much ROOM exists in the selected bracket (a policy target — "fill up through the 22% bracket"); the conversion that fills that room is taxed separately — see section 32 for the progressive/incremental fix to HOW that tax is computed (no longer a flat rate). The conversion still cannot itself push the household into a higher bracket in this tool's `room_in_22` model — that ceiling is a deliberate, unchanged policy choice, not an oversight. |
 
-### 30.3 How the 65% take-home approximation interacts with conversion taxes
+### 30.3 How the 65% take-home approximation interacts with conversion taxes — CORRECTED
 
-It doesn't, directly, and by design that's the point: because working
-income is folded into `event_monthly`/spending-need offset ONLY (never
-into `base_taxable`), it can neither inflate nor shrink the household's
-apparent 22%-bracket room, and this tool never taxes it a second time.
-The 0.65 factor is meant to represent the wage-earner's FULL tax burden
-(federal + state ordinary income tax + payroll tax, an approximation
-this tool has never itemized) already deducted via payroll withholding
-before the money is counted as usable household cash — treating that
-already-net figure as additional GROSS taxable income on top of
-pension/SS/RMDs would double-charge ordinary wage taxes on the same
-dollars twice AND would incorrectly consume 22%-bracket room that a W-2
-earner's actual withholding, not this household-level retirement-
-distribution model, already accounts for. This app has never modeled a
-scenario where a working spouse's wages are BOTH taxed at their own
-marginal W-2 rate (via payroll withholding, invisible to this tool)
-AND folded into the retirement-distribution bracket math this function
-computes — keeping working income out of `base_taxable` entirely is
-the existing app-wide convention this milestone preserves, not a new
-decision.
+It's a SEPARATE figure feeding a separate calculation, not a
+contradiction of it. The 65% factor represents the wage-earner's net
+take-home CASH (after their own W-2 withholding, an approximation this
+tool has never itemized) — that net figure funds the year's spending
+offset, unchanged. Dividing that net figure back out by the same 0.65
+factor recovers the GROSS salary, which is what actually determines
+the household's real ordinary-income tax bracket for THIS year's
+conversion decision — a real household's W-2 withholding doesn't
+somehow shrink their AGI or their bracket; it's a prepayment against
+the tax owed on the FULL gross amount. Treating the NET figure as if
+it were the household's only taxable income (the original, wrong
+approach) understated real income and overstated available bracket
+room; conversely, adding the GROSS figure on top of the net spending
+offset does NOT double-tax the same dollars, because the two figures
+answer different questions (cash available to spend vs. ordinary
+taxable income) and neither one is itself a tax charge — the actual
+tax charge is computed once, on `base_taxable` (now correctly
+including gross wages) plus the conversion, via the progressive
+formula in section 32. Full payroll-tax modeling (FICA/Medicare
+specifically) remains deferred, per the milestone's own scope — this
+fix is about ordinary federal/state income tax bracket capacity, not
+building a payroll-tax engine.
 
 ### 30.4 Order of operations: income, withdrawals, conversion, growth
 
@@ -2786,3 +2818,100 @@ Branch: `codex/two-age-roth-conversion`, pushed, **not merged** — per
 the explicit instruction ("Do not merge or start the next milestone
 until the current one is reviewed and approved"), for independent
 review.
+
+## 32. Two-age Roth Conversion — independent review fixes (2026-09-08, on `codex/two-age-roth-conversion`)
+
+Independent review of `codex/two-age-roth-conversion`'s prior commit
+found three issues, all now fixed. The first two are corrections to
+section 30's own working-income tax contract, not just the code —
+section 30.1-30.3 above are revised in place (marked CORRECTED) rather
+than left asserting a wrong rule.
+
+**P1 — working income must consume conversion bracket capacity.**
+`base_taxable` never included gross wages at all — reproduced: a
+$500,000 working salary, no other income, ample assets, recommended a
+$243,600 conversion inside the 22% bracket, when that salary alone
+(500000-32200=467800 > 211400) already leaves $0 room under the repo's
+own deductions/bracket table. Fixed by deriving a GROSS wage figure
+(`still_working_income_this_year / SECOND_EARNER_NET_OF_TAX_FACTOR` —
+exact, since the factor is a flat multiplier with no other
+nonlinearity) and adding it to `base_taxable` in full, alongside
+pension/SS/pretax draws. The existing 65% net-of-tax figure is
+UNCHANGED and still funds the spending-need offset only — the two
+figures serve different purposes (cash available to spend vs. ordinary
+taxable income) and using both is not a double-count, since neither
+one is itself a tax charge.
+
+**P2 — conversion tax must be progressive/incremental, not flat.**
+`simulate_conversion` charged a flat 22% x amount — reproduced: $0
+other taxable income, a $243,600 conversion cost $35,932 under the
+real progressive table, not the $53,592 flat 22% charged. Added two
+new module-level helpers: `_progressive_federal_tax(taxable_income,
+brackets)` (total tax owed on an amount under a bracket table, 0 for
+non-positive income) and `_incremental_conversion_tax(pre_conversion_
+taxable, conversion_amount, state_tax_rate, brackets)` (tax(base +
+conversion) − tax(base), both floored at 0 before subtracting — a
+negative `base_taxable`, this file's own convention for unused
+standard-deduction room, is absorbed tax-free by the conversion before
+progressive rates apply, exactly like a real return). The
+affordability cap (`_max_conversion_for_tax_budget`) walks the same
+bracket table greedily from the pre-conversion taxable-income point,
+replacing the old flat `budget / 0.22` cap, so the amount a household
+can actually AFFORD to convert and the tax it's actually CHARGED now
+agree with each other by construction — they didn't before (the old
+affordability cap priced every dollar at the top bracket's rate,
+underselling what a real progressive tax bill would actually cost for
+the same cash). `room_in_22` itself (the bracket-EDGE policy target)
+is unchanged in form — it's a "how far to fill" ceiling, not a tax-
+liability calculation, and stays meaningful under progressive taxation
+exactly as under flat. The future-RMD-tax-avoided ESTIMATE
+(`roth_fv_at_73`/`tax_avoided_at_73`, still a flat 24% marginal-rate
+assumption, matching single-axis's own documented convention and the
+frontend's own "Estimate assumes a 24% marginal rate" disclosure) is
+unchanged — this fix is scoped to the conversion's OWN tax cost, not
+that separate, deliberately-simplified future estimate.
+
+Both fixes are scoped to the two-age function only — single-axis
+`run_roth_conversion_analysis` is untouched (same boundary every prior
+milestone in this series has kept: single-axis behavior is preserved
+exactly, only two-age gets new behavior). Single-axis has the
+analogous gap (no gross-wage inclusion, flat-rate conversion tax) —
+documented here as a known, unresolved discrepancy between the two
+paths, not silently ignored, and out of scope for this milestone to
+fix (per the same "preserve existing single-axis meaning" precedent
+SWR's own review rounds established).
+
+9 of the 12 existing tests were rewritten with newly hand-computed
+progressive-tax numbers (all four bracket boundaries recomputed by
+hand from the real 2026 MFJ table, not inferred from the code under
+test); 3 were unaffected (no wages, and their own assertions didn't
+reference tax_cost). All 12 passed after the fix, matching the newly
+hand-computed values exactly. `TestWorkingIncomeNeverAffectsBracketCapacity`
+(the class whose own premise was the bug) is replaced by
+`TestWorkingIncomeConsumesBracketCapacitySymmetrically`, proving the
+CORRECT property instead: a $50,000 gross salary reduces room by
+exactly $50,000 (211400-(0+50000-32200)=193600, down from the no-wage
+baseline's 243600), identically regardless of which spouse earns it,
+and a $500,000 salary alone can exhaust the bracket entirely (the
+review's own reproduction, now correctly returning $0 room instead of
+$243,600).
+
+**P2 (frontend) — a staleness/generation guard was missing.**
+`RothConversion.jsx`'s fetch effect had no cancellation or generation
+check at all — an older, slower response could land after a newer one
+and overwrite it, or clear `loading` incorrectly after a mode switch
+had already superseded it. Fixed with the same `genRef` counter
+pattern `Simulation.jsx`'s own Monte Carlo/Stress sections already
+established: bumped on every effect firing, each `.then`/`.catch`/
+`.finally` checks the counter before touching state. New test
+simulates two out-of-order responses directly (the second, newer
+request's promise resolved before the first, older one) and asserts
+the final rendered state reflects the newer result, not the stale one
+that happened to resolve last.
+
+**Verified:** full backend suite 1223 passed, 97.62% coverage (12
+tests, 9 rewritten). Frontend suite 39 passed (was 38, +1 staleness
+test), build succeeds, sensitive-data check passed.
+
+Branch: `codex/two-age-roth-conversion`, pushed, **still not merged** —
+second review round, awaiting approval before Milestone 3 begins.

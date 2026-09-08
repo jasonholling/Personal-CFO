@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import axios from 'axios'
 import {
   BarChart, Bar, XAxis, YAxis, Tooltip, Legend, ResponsiveContainer
@@ -61,7 +61,19 @@ export default function RothConversion() {
   const [jasonRetAge, setJasonRetAge] = useState(65)
   const [justinRetAge, setJustinRetAge] = useState(65)
 
+  // Bumped on every effect firing (any age/timing/mode change) -- a
+  // response is only applied if this counter still matches the value
+  // captured when its request was fired, same staleness guard
+  // Simulation.jsx's own genRef already established (independent
+  // review, 2026-09-08, Roth Conversion follow-up, P2: changing ages,
+  // SS timing, or mode started another request with no cancellation or
+  // generation check at all -- an older, slower response landing after
+  // a newer one could overwrite the newer result, or clear loading
+  // incorrectly after a mode switch had already superseded it).
+  const genRef = useRef(0)
+
   useEffect(() => {
+    const gen = ++genRef.current
     setLoading(true)
     const request = twoAgeMode
       ? axios.post('/api/simulation/roth-conversion', {
@@ -69,9 +81,9 @@ export default function RothConversion() {
         })
       : axios.get(`/api/simulation/roth-conversion?ret_age=${retAge}&ss_timing=${ssTiming}`)
     request
-      .then(r => setData(r.data))
-      .catch(() => setData(null))
-      .finally(() => setLoading(false))
+      .then(r => { if (gen === genRef.current) setData(r.data) })
+      .catch(() => { if (gen === genRef.current) setData(null) })
+      .finally(() => { if (gen === genRef.current) setLoading(false) })
   }, [retAge, ssTiming, twoAgeMode, jasonRetAge, justinRetAge])
 
   // SecondEarnerNote's amount/years/personLabel differ by mode, same

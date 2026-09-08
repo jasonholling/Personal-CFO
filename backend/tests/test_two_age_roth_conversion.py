@@ -93,6 +93,17 @@ class TestBasicConversionMathTwoAge:
     above drains the IRA to exactly 0)."""
 
     def test_two_year_schedule_and_totals(self):
+        """Conversion tax is now PROGRESSIVE (tax(base+conversion) -
+        tax(base)), not a flat 22% -- independent review, 2026-09-08,
+        Roth Conversion follow-up, P2. Year 0: base_taxable=-32200 (no
+        other income), conversion=243600 -> post=max(0,-32200+243600)=
+        211400, pre=max(0,-32200)=0. Progressive tax(211400) = 2480
+        (10% of 24800) + 9120 (12% of 76000) + 24332 (22% of 110600) =
+        35932; tax(0)=0 -> tax_cost=35932 (not the old flat
+        243600*0.22=53592). Year 1: base_taxable=-32200 again,
+        conversion=56400 (pretax-bound) -> post=max(0,-32200+56400)=
+        24200, entirely within the 10% bracket -> tax_cost=2420 (not
+        the old flat 56400*0.22=12408)."""
         inputs = base_inputs()
         r = run_roth_conversion_analysis(inputs, PRETAX(300000) + TAXABLE(500000),
                                           jason_ret_age=71, justin_ret_age=71)
@@ -106,126 +117,132 @@ class TestBasicConversionMathTwoAge:
         assert y0["base_taxable_income"] == -32200
         assert y0["room_in_22_bracket"] == 243600
         assert y0["optimal_conversion"] == 243600
-        assert y0["tax_cost"] == 53592
+        assert y0["tax_cost"] == 35932
         assert y0["roth_fv_at_73"] == 243600
         assert y0["tax_avoided_at_73"] == 58464
-        assert y0["net_benefit"] == 4872
+        assert y0["net_benefit"] == 22532
         assert y0["pretax_after"] == 56400
         assert y0["roth_after"] == 243600
-        assert y0["taxable_after"] == 396408
+        assert y0["taxable_after"] == 414068
 
         assert y1["age"] == 72
         assert y1["optimal_conversion"] == 56400
-        assert y1["tax_cost"] == 12408
+        assert y1["tax_cost"] == 2420
         assert y1["roth_fv_at_73"] == 56400
         assert y1["tax_avoided_at_73"] == 13536
-        assert y1["net_benefit"] == 1128
+        assert y1["net_benefit"] == 11116
         assert y1["pretax_after"] == 0
         assert y1["roth_after"] == 300000
-        assert y1["taxable_after"] == 334000
+        assert y1["taxable_after"] == 361648
 
         assert r["total_conversions"] == 300000
-        assert r["total_tax_cost"] == 66000
+        assert r["total_tax_cost"] == 38352
         assert r["total_tax_avoided"] == 72000
-        assert r["net_lifetime_benefit"] == 6000
+        assert r["net_lifetime_benefit"] == 33648
         assert r["pretax_at_rmd_age_with_conversion"] == 0
         assert r["pretax_at_rmd_age_no_conversion"] == 300000
         assert r["estimated_rmd_without_conversions"] == 11321
 
 
 class TestEitherRetirementOrderIsSymmetric:
-    """Justin retires first (2 years before Jason, large working-spouse
-    salary folded into gap income) vs. Jason retiring first (mirror,
-    Jason's own salary instead) -- since gap income never touches
-    base_taxable/room_in_22 (section 30's contract), the conversion
-    schedule's own tax math must be IDENTICAL in both directions,
-    proving the two-age formulas are symmetric, not hardcoded to either
-    spouse. $300,000 pretax / $500,000 taxable, no pension/SS,
-    $50,000/yr spending, 0% inflation/growth. RMD_START_AGE=73 either
-    way (Jason's age drives it, and Jason is 71 in both cases)."""
+    """Justin retires first (2 years before Jason, a working-spouse
+    salary folded into both bracket capacity AND, net of tax, gap
+    income) vs. Jason retiring first (mirror, Jason's own salary
+    instead) -- the conversion schedule's own tax math must be
+    IDENTICAL in both directions, proving the two-age formulas are
+    symmetric, not hardcoded to either spouse. $100,000 salary (a
+    partial, not total, bracket reduction -- chosen so the comparison
+    is meaningful, not trivially zero both ways) -- gross wages fold
+    into base_taxable in full: 0(other income)+100000-32200=67800,
+    room_in_22=211400-67800=143600. optimal_conversion=143600
+    (bracket-bound, well under the $300,000 pretax balance).
+    tax_cost: post=67800+143600=211400 (progressive tax 35932, same
+    figure as the no-wage test's own 211400 boundary -- coincidence of
+    round numbers, verified independently), pre=67800 (progressive tax
+    7640: 2480 + 12%*43000=5160) -> incremental=35932-7640=28292."""
 
     def test_justin_retires_first_jason_two_years_later(self):
-        inputs = base_inputs(retirement_income_today_dollars=50000, w2_salary=500000)
+        inputs = base_inputs(retirement_income_today_dollars=50000, w2_salary=100000)
         r = run_roth_conversion_analysis(inputs, PRETAX(300000) + TAXABLE(500000),
                                           jason_ret_age=73, justin_ret_age=71)
         assert r["later_retiree"] == "jason"
-        # phase2_start_age = 71 (Justin, the earlier retiree) -- same
-        # conversion-window LENGTH as the simultaneous-retirement case
-        # (73-71=2), just anchored to Justin's earlier date instead of
-        # Jason's own.
         assert r["phase2_start_age"] == 71
         assert r["conversion_years"] == 2
-        y0, y1 = r["schedule"]
-        assert y0["optimal_conversion"] == 243600
-        assert y0["tax_cost"] == 53592
-        assert y1["optimal_conversion"] == 56400
-        assert y1["tax_cost"] == 12408
-        assert r["total_conversions"] == 300000
+        y0 = r["schedule"][0]
+        assert y0["base_taxable_income"] == 67800
+        assert y0["room_in_22_bracket"] == 143600
+        assert y0["optimal_conversion"] == 143600
+        assert y0["tax_cost"] == 28292
 
     def test_jason_retires_first_justin_two_years_later(self):
-        """Mirror -- Jason's own salary this time, same numbers."""
-        inputs = base_inputs(retirement_income_today_dollars=50000, justin_w2_salary=500000)
+        """Mirror -- Justin's own salary this time, same numbers."""
+        inputs = base_inputs(retirement_income_today_dollars=50000, justin_w2_salary=100000)
         r = run_roth_conversion_analysis(inputs, PRETAX(300000) + TAXABLE(500000),
                                           jason_ret_age=71, justin_ret_age=73)
         assert r["later_retiree"] == "justin"
         assert r["phase2_start_age"] == 71
         assert r["conversion_years"] == 2
-        y0, y1 = r["schedule"]
-        assert y0["optimal_conversion"] == 243600
-        assert y0["tax_cost"] == 53592
-        assert y1["optimal_conversion"] == 56400
-        assert y1["tax_cost"] == 12408
-        assert r["total_conversions"] == 300000
+        y0 = r["schedule"][0]
+        assert y0["base_taxable_income"] == 67800
+        assert y0["room_in_22_bracket"] == 143600
+        assert y0["optimal_conversion"] == 143600
+        assert y0["tax_cost"] == 28292
 
 
-class TestWorkingIncomeNeverAffectsBracketCapacity:
-    """Section 30.1/30.3's contract: working income (wages/bonus/RSU,
-    either spouse) is folded ONLY into the spending-need offset, never
-    into base_taxable/room_in_22 -- in either direction. A household
-    with a large pension (exhausting the 22% bracket on its own) and a
-    huge working-spouse salary must show EXACTLY the same base_taxable/
-    room_in_22/optimal_conversion as the identical household with no
-    working income at all."""
+class TestWorkingIncomeConsumesBracketCapacitySymmetrically:
+    """Independent review, 2026-09-08, Roth Conversion follow-up, P1:
+    the working spouse's GROSS wages (either spouse) now reduce
+    base_taxable/room_in_22 the same way pension/SS/pretax draws
+    already do -- the previous "no effect, in either direction" rule
+    was wrong. The 65% net-of-tax factor still funds the spending-need
+    offset unchanged; a separate gross figure (derived by dividing the
+    net figure back out, since the factor is applied as a flat
+    multiplier) now also enters base_taxable. Reproduced (the review's
+    own case): $500,000 salary, no other income, ample assets -- room
+    used to be $243,600 (as if the salary didn't exist); under the
+    repo's own deductions/bracket table, that salary ALONE
+    (500000-32200=467800 > 211400) already leaves $0 room."""
 
-    def test_identical_bracket_math_with_and_without_a_working_spouse(self):
-        # jason_ret_age=71 (immediate) is held IDENTICAL in both cases --
+    def test_a_partial_wage_reduces_room_identically_regardless_of_spouse(self):
+        # No pension here (unlike the other tests in this file) --
         # pension gates to Jason's own actual retirement
-        # (two_age_pension_for_year), so varying HIS ret_age would also
-        # change year0's pension timing, confounding the comparison.
-        # Only Justin's retirement age/salary differ between the two
-        # scenarios, isolating "does a working spouse's salary affect
-        # bracket capacity" from "does pension timing."
-        no_wages = base_inputs(retirement_income_today_dollars=50000,
-                                pension_55=150000, pension_60=150000, pension_65=150000)
-        with_wages = base_inputs(retirement_income_today_dollars=50000,
-                                  pension_55=150000, pension_60=150000, pension_65=150000,
-                                  justin_w2_salary=800000)
-        r_no = run_roth_conversion_analysis(no_wages, PRETAX(300000) + TAXABLE(500000),
-                                             jason_ret_age=71, justin_ret_age=71)
-        r_with = run_roth_conversion_analysis(with_wages, PRETAX(300000) + TAXABLE(500000),
-                                               jason_ret_age=71, justin_ret_age=73)
-        assert r_no["schedule"][0]["base_taxable_income"] == r_with["schedule"][0]["base_taxable_income"]
-        assert r_no["schedule"][0]["room_in_22_bracket"] == r_with["schedule"][0]["room_in_22_bracket"]
-        assert r_no["schedule"][0]["optimal_conversion"] == r_with["schedule"][0]["optimal_conversion"]
-        # Sanity: pension alone (150000-32200=117800) leaves real,
-        # nonzero room (211400-117800=93600) -- a meaningful comparison,
-        # not a trivially-zero one.
-        assert r_no["schedule"][0]["room_in_22_bracket"] == 93600
-        # And a real, substantial gap income actually is present in the
-        # with_wages case (proving the comparison isn't accidentally
-        # comparing two scenarios with zero gap income either) --
-        # 800000*0.65 = 520000.
-        assert r_with["still_working_spouse_income_first_year"] == 520000
+        # (two_age_pension_for_year), so a version of this test giving
+        # JASON the wage (making him the later, still-working retiree)
+        # would also defer HIS pension, confounding the wage-only
+        # comparison this test is isolating. Isolating just the wage
+        # effect (no pension at all) keeps both directions genuinely
+        # symmetric.
+        no_wages    = base_inputs(retirement_income_today_dollars=50000)
+        with_justin = base_inputs(retirement_income_today_dollars=50000, justin_w2_salary=50000)
+        with_jason  = base_inputs(retirement_income_today_dollars=50000, w2_salary=50000)
+        r_no     = run_roth_conversion_analysis(no_wages, PRETAX(300000) + TAXABLE(500000),
+                                                  jason_ret_age=71, justin_ret_age=71)
+        r_justin = run_roth_conversion_analysis(with_justin, PRETAX(300000) + TAXABLE(500000),
+                                                  jason_ret_age=71, justin_ret_age=73)
+        r_jason  = run_roth_conversion_analysis(with_jason, PRETAX(300000) + TAXABLE(500000),
+                                                  jason_ret_age=73, justin_ret_age=71)
+        # No wages, no other income: base_taxable=-32200, room=243600
+        # (matches TestBasicConversionMathTwoAge's own baseline).
+        assert r_no["schedule"][0]["room_in_22_bracket"] == 243600
+        # A $50,000 gross salary (regardless of which spouse) reduces
+        # room by exactly $50,000: 0+50000-32200=17800 ->
+        # room=211400-17800=193600 -- symmetric, and a REAL reduction
+        # from the no-wage baseline (not the same 243600).
+        assert r_justin["schedule"][0]["base_taxable_income"] == 17800
+        assert r_justin["schedule"][0]["room_in_22_bracket"] == 193600
+        assert r_jason["schedule"][0]["base_taxable_income"] == 17800
+        assert r_jason["schedule"][0]["room_in_22_bracket"] == 193600
+        assert r_justin["schedule"][0]["room_in_22_bracket"] != r_no["schedule"][0]["room_in_22_bracket"]
 
-    def test_pension_alone_can_exhaust_the_bracket_regardless_of_wages(self):
-        """A large enough pension leaves ZERO room -- and a huge working
-        salary alongside it doesn't create any either. jason_ret_age=71
-        (immediate) again, so pension is active in year0."""
-        inputs = base_inputs(retirement_income_today_dollars=50000,
-                              pension_55=300000, pension_60=300000, pension_65=300000,
-                              justin_w2_salary=900000)
+    def test_a_large_wage_alone_can_exhaust_the_bracket_entirely(self):
+        """The review's own reproduction: $500,000 salary, no other
+        income, ample assets -- room used to be reported as $243,600 as
+        if the salary were invisible to bracket math; it's actually $0
+        (500000-32200=467800 > 211400)."""
+        inputs = base_inputs(retirement_income_today_dollars=50000, justin_w2_salary=500000)
         r = run_roth_conversion_analysis(inputs, PRETAX(300000) + TAXABLE(500000),
                                           jason_ret_age=71, justin_ret_age=73)
+        assert r["schedule"][0]["base_taxable_income"] == 467800
         assert r["schedule"][0]["room_in_22_bracket"] == 0
         assert r["schedule"][0]["optimal_conversion"] == 0
         assert r["total_conversions"] == 0
