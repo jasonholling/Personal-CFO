@@ -47,6 +47,16 @@ JASON_SS_DELAYED_RATIO   = 1.0  # fallback ratio only — no assumption without 
 JUSTIN_SPOUSAL_ANNUAL = 0
 JUSTIN_SPOUSAL_AGE    = 67          # full benefit at his FRA
 
+# Flat net-of-tax approximation applied to income streams that land
+# directly in a taxable-equivalent bucket without going through this
+# engine's own marginal-bracket withdrawal-tax model: RSU/bonus proceeds,
+# and (2026-09-08) second-earner gap income. NOT a real payroll/capital-
+# gains tax calculation — no brackets, no FICA, no filing status, no
+# state tax. Named and centralized here per CALCULATION_CONTRACT.md
+# section 13, backlog item 3: previously three separate bare `0.65`
+# literals with the same meaning, now one documented, findable policy.
+SECOND_EARNER_NET_OF_TAX_FACTOR = 0.65
+
 # Kids contribution defaults — overridden by planning_inputs at runtime
 ABBY_MONTHLY_529_DEFAULT   = 0
 COOPER_MONTHLY_529_DEFAULT = 0
@@ -364,6 +374,60 @@ def _post_retirement_year_effects(post_events: List[Dict], calendar_year: int):
     return one_time_cash, monthly_adj
 
 
+def justin_years_to_retire_for(inputs: Dict, justin_age: int, years_to_retire: int) -> int:
+    """Justin's own years-to-retire: if justin_ret_age is set, his OWN
+    years-to-retire (independent of whichever Jason ret_age a scenario is
+    sweeping); if unset (0, the default), falls back to years_to_retire —
+    the pre-2026-09-08 age-gap-implied timing every consumer used before
+    independent Justin income existed. Single source of truth for this
+    value — used both for Justin's own contribution-accumulation window
+    (run_retirement_projection) and for second-earner gap income
+    (justin_gap_income_inputs below), which need to agree on it."""
+    justin_ret_age = inputs.get("justin_ret_age", 0)
+    return max(0, justin_ret_age - justin_age) if justin_ret_age else years_to_retire
+
+
+def justin_gap_income_inputs(inputs: Dict, justin_years_to_retire: int, years_to_retire: int,
+                              salary_growth_pct: float = 0.0):
+    """Second-earner gap income (2026-09-08, CALCULATION_CONTRACT.md
+    section 13, backlog items 1-3): if Justin's own years-to-retire is
+    LATER than a consumer's own effective withdrawal start
+    (years_to_retire), Justin is still earning during the first
+    `justin_gap_years` of that withdrawal phase — that income should
+    offset withdrawal need directly, the same mechanism bridge_income_55
+    already used for a fixed-duration income offset, generalized to any
+    ret_age and keyed to Justin's own real retirement date.
+
+    Returns (justin_gap_years, justin_gap_income_at_start) — the latter a
+    today's-dollar figure already grown to the loop's starting point
+    (years_to_retire years from now), using salary_growth_pct (the same
+    assumed-raise convention every other second-earner income stream —
+    401k contributions, RSU, bonus — already grows with), NOT CPI
+    inflation, which would conflate wage growth with a different
+    assumption entirely (fixed 2026-09-08 — this used to grow with
+    `inflation` instead, item 2 in the same backlog section). Defaults to
+    0 (flat nominal salary) if no raise assumption is set, matching every
+    other salary_growth_pct consumer's own default.
+
+    Net-of-tax at the flat SECOND_EARNER_NET_OF_TAX_FACTOR approximation
+    — not a real payroll-tax model (backlog item 3, same section).
+
+    Shared by every withdrawal-phase consumer so this formula lives in
+    exactly one place — projection_engine.py's own run_retirement_projection
+    (via annual_inputs.py's build_annual_income_inputs) and
+    simulation_engine.py's consumers both call this directly. Caller
+    applies further per-year growth via (1+salary_growth_pct)**yr for
+    yr < justin_gap_years, the same growing-annuity convention
+    contributions already use."""
+    justin_gap_years = max(0, justin_years_to_retire - years_to_retire)
+    justin_salary = inputs.get("justin_w2_salary", 0)
+    justin_gap_income_at_start = (
+        justin_salary * SECOND_EARNER_NET_OF_TAX_FACTOR * ((1 + salary_growth_pct) ** years_to_retire)
+        if justin_gap_years > 0 else 0.0
+    )
+    return justin_gap_years, justin_gap_income_at_start
+
+
 def pension_for_age(inputs: Dict, age: int) -> float:
     """Pension is defined at 55/60/65 in Settings; interpolate linearly between
     those anchor points for any other retirement age (e.g. a sensitivity sweep
@@ -540,10 +604,7 @@ def run_retirement_projection(inputs: Dict, accounts: List[Dict], ret_ages: List
         # — the same age-gap-implied timing every consumer already used
         # before this existed, so a household that never fills in Justin's
         # own retirement age sees identical numbers to before.
-        justin_ret_age = inputs.get("justin_ret_age", 0)
-        justin_years_to_retire = (
-            max(0, justin_ret_age - justin_age) if justin_ret_age else years_to_retire
-        )
+        justin_years_to_retire = justin_years_to_retire_for(inputs, justin_age, years_to_retire)
         # Justin's contributions only accrue up through whichever comes
         # first: his own retirement, or this scenario's own withdrawal
         # start (years_to_retire) — contributions he'd make WHILE Jason has
@@ -560,20 +621,13 @@ def run_retirement_projection(inputs: Dict, accounts: List[Dict], ret_ages: List
         justin_contrib_years = min(justin_years_to_retire, years_to_retire)
         justin_dormant_years = max(0, years_to_retire - justin_years_to_retire)
 
-        # Second-earner gap income (2026-09-08, closes backlog item 1 in
-        # docs/CALCULATION_CONTRACT.md section 13): the flip side of the
-        # cap above. If justin_ret_age is set LATER than this scenario's
-        # own withdrawal start (justin_years_to_retire > years_to_retire),
-        # Justin is still earning during the first justin_gap_years of the
-        # household's withdrawal phase. That income should offset
-        # withdrawal need directly, the same mechanism bridge_income_55
-        # already uses for a fixed-duration income offset — generalized
-        # here to any ret_age (not just 55) and keyed to Justin's own
-        # actual retirement date instead of a flat manually-entered bridge
-        # figure. Net-of-tax at the same flat 0.65 approximation this
-        # function already uses for RSU/bonus (not a real payroll-tax
-        # model — see backlog item 3, same section).
-        justin_gap_years = max(0, justin_years_to_retire - years_to_retire)
+        # Second-earner gap income — see justin_gap_income_inputs's own
+        # docstring (CALCULATION_CONTRACT.md section 13, backlog items
+        # 1-3). Computed once here (independent of ss_label, same as
+        # justin_contrib_years above) and reused in the yearly withdrawal
+        # loop below.
+        justin_gap_years, justin_gap_income_at_start = justin_gap_income_inputs(
+            inputs, justin_years_to_retire, years_to_retire, salary_growth_pct)
 
         def _justin_contrib_fv(annual_amount):
             if annual_amount <= 0:
@@ -641,8 +695,8 @@ def run_retirement_projection(inputs: Dict, accounts: List[Dict], ret_ages: List
                 _fv_annuity(annual_hsa, pre_ret, years_to_retire)
             )
             if annual_rsu > 0:
-                taxable_at_ret += _fv_annuity(annual_rsu * 0.65, pre_ret, years_to_retire)
-            taxable_at_ret += _justin_contrib_fv(justin_annual_rsu * 0.65)
+                taxable_at_ret += _fv_annuity(annual_rsu * SECOND_EARNER_NET_OF_TAX_FACTOR, pre_ret, years_to_retire)
+            taxable_at_ret += _justin_contrib_fv(justin_annual_rsu * SECOND_EARNER_NET_OF_TAX_FACTOR)
             if annual_bonus > 0:
                 # Same net-of-tax treatment as RSUs above (bonuses are
                 # withheld at a higher supplemental-wage rate in practice,
@@ -653,11 +707,11 @@ def run_retirement_projection(inputs: Dict, accounts: List[Dict], ret_ages: List
                 # contributions above, since this is defined as a % of
                 # salary rather than a flat dollar amount.
                 bonus_fv = (
-                    _fv_growing_annuity(annual_bonus * 0.65, pre_ret, salary_growth_pct, years_to_retire)
-                    if salary_growth_pct else _fv_annuity(annual_bonus * 0.65, pre_ret, years_to_retire)
+                    _fv_growing_annuity(annual_bonus * SECOND_EARNER_NET_OF_TAX_FACTOR, pre_ret, salary_growth_pct, years_to_retire)
+                    if salary_growth_pct else _fv_annuity(annual_bonus * SECOND_EARNER_NET_OF_TAX_FACTOR, pre_ret, years_to_retire)
                 )
                 taxable_at_ret += bonus_fv
-            taxable_at_ret += _justin_contrib_fv(justin_annual_bonus * 0.65)
+            taxable_at_ret += _justin_contrib_fv(justin_annual_bonus * SECOND_EARNER_NET_OF_TAX_FACTOR)
 
             # Sale proceeds — a sale is real regardless of which retirement
             # age this scenario column happens to be modeling, same as life
@@ -769,10 +823,6 @@ def run_retirement_projection(inputs: Dict, accounts: List[Dict], ret_ages: List
             healthcare_kids_at_ret  = healthcare_kids  * ((1 + inflation) ** years_to_retire)
             kids_annual_cost_at_ret = kids_annual_cost * ((1 + inflation) ** years_to_retire)
             bridge_income_at_ret    = bridge_income    * ((1 + inflation) ** years_to_retire)
-            justin_gap_income_at_ret = (
-                justin_salary * 0.65 * ((1 + inflation) ** years_to_retire)
-                if justin_gap_years > 0 else 0
-            )
 
             # ── Year-by-year with buckets and RMDs ───────────────────────────
             pretax  = pretax_at_ret
@@ -805,6 +855,8 @@ def run_retirement_projection(inputs: Dict, accounts: List[Dict], ret_ages: List
                     jason_ss_annual=jason_ss_annual, jason_ss_age=jason_ss_age,
                     justin_ss_annual=justin_ss_annual, justin_ss_age=justin_ss_age,
                     post_life_events=post_life_events, post_retirement_year_effects=_post_retirement_year_effects,
+                    justin_gap_years=justin_gap_years, justin_gap_income_at_start=justin_gap_income_at_start,
+                    salary_growth_pct=salary_growth_pct,
                 )
                 life_event_cash_this_year = income.life_event_cash
                 life_event_monthly_this_year = income.life_event_monthly
@@ -847,13 +899,16 @@ def run_retirement_projection(inputs: Dict, accounts: List[Dict], ret_ages: List
                 # via the shared builder for both branches.
                 year_need -= life_event_monthly_this_year
 
-                # Second-earner gap income — see justin_gap_years above.
-                # Active only for the first justin_gap_years of the
-                # withdrawal phase; Justin's contribution/salary timeline
-                # is otherwise entirely a pre-retirement concept, so this
-                # is the one place it reaches into the withdrawal loop.
-                if yr < justin_gap_years:
-                    year_need -= justin_gap_income_at_ret * ((1 + inflation) ** yr)
+                # Second-earner gap income — see justin_gap_income_inputs's
+                # docstring. Active only for the first justin_gap_years of
+                # the withdrawal phase; Justin's contribution/salary
+                # timeline is otherwise entirely a pre-retirement concept,
+                # so this is the one place it reaches into the withdrawal
+                # loop. Computed by the shared builder above (same
+                # salary_growth_pct wage-growth convention every other
+                # second-earner income stream uses — backlog item 2: this
+                # used to grow with inflation instead, fixed 2026-09-08).
+                year_need -= income.justin_gap_income
 
                 # Fixed income sources. Pension is frozen/no-COLA — a
                 # deliberate, consumer-specific policy this consolidation
@@ -947,6 +1002,10 @@ def run_retirement_projection(inputs: Dict, accounts: List[Dict], ret_ages: List
                     "pension":          round(year_pen),
                     "social_security":  round(year_jss + year_uss),
                     "bridge_income":    round(bridge_income_at_ret * ((1+inflation)**yr)) if ret_age == 55 and yr < bridge_years else 0,
+                    # Backlog item 5 (CALCULATION_CONTRACT.md section 13):
+                    # exposed as its own line so a lower income_need during
+                    # the gap years is explained, not just implied.
+                    "justin_gap_income": round(income.justin_gap_income),
                     "life_event_cash":              round(life_event_cash_this_year),
                     "life_event_monthly_adjustment": round(life_event_monthly_this_year),
                     "rmd":              round(rmd),

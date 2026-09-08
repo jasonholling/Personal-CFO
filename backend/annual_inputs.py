@@ -73,6 +73,7 @@ class AnnualIncomeInputs:
     social_security: float       # jason_ss + justin_ss, for callers that only want the combined figure
     life_event_cash: float       # one-time, signed (positive = windfall/asset sale, lands in taxable)
     life_event_monthly: float    # recurring annualized, signed (positive reduces need, negative increases it)
+    justin_gap_income: float     # second-earner gap income this year (2026-09-08) -- see build_annual_income_inputs
 
 
 def build_annual_income_inputs(
@@ -88,6 +89,9 @@ def build_annual_income_inputs(
     justin_ss_age: float,
     post_life_events: Optional[List[Dict]] = None,
     post_retirement_year_effects=None,
+    justin_gap_years: int = 0,
+    justin_gap_income_at_start: float = 0.0,
+    salary_growth_pct: float = 0.0,
 ) -> AnnualIncomeInputs:
     """Build the shared income-side bundle for withdrawal-loop year `yr`.
 
@@ -116,6 +120,18 @@ def build_annual_income_inputs(
     imports this module's sibling annual_engine.py); pass
     projection_engine._post_retirement_year_effects. Defaults to a
     always-(0, 0) no-op so callers with no life events can omit it.
+
+    justin_gap_years/justin_gap_income_at_start (2026-09-08,
+    CALCULATION_CONTRACT.md section 13, backlog item 1): from
+    projection_engine.justin_gap_income_inputs() -- see that function's
+    own docstring for the full second-earner-gap-income convention (net-
+    of-tax approximation, salary_growth_pct wage-growth, not inflation).
+    Both default to 0, so a caller that never touches this feature (or a
+    household that never fills in justin_ret_age) gets justin_gap_income
+    == 0 every year, identical to before this parameter existed.
+    salary_growth_pct only matters together with justin_gap_income_at_start
+    (grows the gap-year figure at the same wage-growth rate that produced
+    it) -- unrelated to any other field this function returns.
     """
     age = timeline.age(yr)
     justin_age_this_year = timeline.justin_age_at(age)
@@ -140,6 +156,11 @@ def build_annual_income_inputs(
     else:
         life_event_cash, life_event_monthly = post_retirement_year_effects(post_life_events or [], calendar_year)
 
+    justin_gap_income = (
+        justin_gap_income_at_start * ((1 + salary_growth_pct) ** yr)
+        if yr < justin_gap_years else 0.0
+    )
+
     return AnnualIncomeInputs(
         age=age,
         justin_age=justin_age_this_year,
@@ -150,4 +171,5 @@ def build_annual_income_inputs(
         social_security=jason_ss + justin_ss,
         life_event_cash=life_event_cash,
         life_event_monthly=life_event_monthly,
+        justin_gap_income=justin_gap_income,
     )

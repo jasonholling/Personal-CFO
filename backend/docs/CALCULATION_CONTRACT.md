@@ -1011,3 +1011,90 @@ per this doc's standing practice of not building ahead of a specific
 need. Item 3's payroll-tax gap is smaller in isolation but only really
 worth closing alongside a genuine per-person income/tax model, which is
 what items 2/3/5 all ultimately point at.
+
+## 14. Second-earner follow-up review (2026-09-08) — items 1, 2, 3 advanced
+
+A second review of the second-earner feature, after section 13's four
+closures, found the item-1 close was real but narrow, and caught a
+genuine consistency bug in the gap-income formula itself. Both addressed
+directly on `main` (no branch — this repo has no PR process):
+
+1. **Item 1 propagated from 1 of 6 withdrawal-phase consumers to 4 of
+   6.** Previously `run_retirement_projection` computed and applied
+   `justin_gap_income` entirely inline — Monte Carlo, Stress Tests, and
+   Roth Conversion had no way to see it at all, so the same household
+   could show a fully-funded Retirement Projection while every other
+   planner still modeled the full withdrawal. Fixed by:
+   - Extracting the formula into two shared, importable functions in
+     `projection_engine.py` — `justin_years_to_retire_for` (the one
+     `justin_ret_age`-or-fallback computation every second-earner
+     feature depends on) and `justin_gap_income_inputs` (gap years +
+     the today's-dollar gap-income figure, net-of-tax, wage-growth-
+     escalated — see item 2 below).
+   - Adding `justin_gap_years`/`justin_gap_income_at_start`/
+     `salary_growth_pct` parameters to `annual_inputs.py`'s
+     `build_annual_income_inputs` (the shared per-year income builder
+     three consumers already call), returning a new
+     `AnnualIncomeInputs.justin_gap_income` field. All default to 0, so
+     a caller that never passes them — or a household that never sets
+     `justin_ret_age` — sees zero change.
+   - Wiring `_run_single` (shared by Monte Carlo + Stress Tests) and
+     both of `run_roth_conversion_analysis`'s loops (with-conversion and
+     the no-conversion baseline, kept in sync so the comparison stays
+     apples-to-apples) to compute these once per call (same precedent as
+     `pension_annual`/`income_at_ret`) and subtract
+     `income.justin_gap_income` from spending need, same treatment as
+     `life_event_monthly` everywhere it already applies.
+   - `run_retirement_projection` itself now calls
+     `justin_years_to_retire_for`/`justin_gap_income_inputs` too, instead
+     of its own separate inline copy — one formula, not two that could
+     drift.
+   **Still not propagated: `run_swr_analysis`, `run_tax_efficiency_
+   simulation` (both documented performance exceptions — full engine
+   migration measured too slow, see section 4/10) and `run_survivor_
+   scenario` (never migrated onto the shared builder at all — single-
+   aggregate-bucket policy, a deliberate divergence per section 3).
+   These three remain open, correctly scoped now instead of assumed
+   fixed.** Verified: `TestJustinGapIncomeInputsHelper` (4 tests, the
+   formula in isolation), plus exact deterministic reconciliation tests
+   proving Monte Carlo's and Stress Tests' `median_final_balance`/
+   `final_balance` match `run_retirement_projection`'s own figure
+   bit-for-bit under zero-variance returns (same idiom as the existing
+   SS-COLA reconciliation tests), and a Roth Conversion test showing
+   `total_conversions`/`net_lifetime_benefit` both increase with gap
+   income present.
+2. **CLOSED — gap income was growing with CPI inflation, not wage
+   growth.** `justin_gap_income_at_start` used
+   `(1 + inflation) ** years_to_retire` (and per-year growth used
+   `(1 + inflation) ** yr`), while Justin's own 401k contributions/RSU/
+   bonus all grow with `salary_growth_pct` (the assumed-raise
+   convention) — two unrelated assumptions conflated into one. Fixed:
+   `justin_gap_income_inputs` now takes `salary_growth_pct` and uses it
+   exclusively; `inflation` never enters this formula. Defaults to 0
+   (flat nominal salary) if no raise assumption is set, matching every
+   other `salary_growth_pct` consumer's own default — a household that
+   never sets an explicit raise assumption sees gap income held flat in
+   nominal dollars, not implicitly inflation-adjusted. Verified:
+   `test_uses_salary_growth_pct_not_inflation` proves the figure is
+   completely independent of whatever inflation rate the caller passes.
+3. **Named constant, still not real payroll-tax modeling.** The three
+   independent `0.65` literals for RSU/bonus (pre-retirement
+   accumulation) and gap income (withdrawal-phase offset) are now one
+   `SECOND_EARNER_NET_OF_TAX_FACTOR` module constant in
+   `projection_engine.py`, documented as an explicit, deliberate flat
+   approximation — not a real payroll-tax calculation (no brackets, no
+   FICA, no filing status, no state tax). Making this a shared payroll/
+   tax helper instead of a named flat factor remains open, same
+   reasoning as section 13 item 3.
+5. **Partially addressed — `justin_gap_income` now its own field in
+   `run_retirement_projection`'s `yearly_detail`.** A lower
+   `income_need` during the gap years is no longer unexplained — each
+   row now also reports `justin_gap_income` directly (same pattern as
+   the existing `bridge_income` field). Not yet added to Monte Carlo/
+   Stress Tests/Roth Conversion's own output shapes, which don't carry
+   this level of per-year detail for other income sources either (e.g.
+   `bridge_income` isn't separately exposed there yet either) — a
+   broader per-year-output-detail gap, not specific to this feature.
+
+Full backend suite re-verified green after both fixes — see the commit
+this section was added in for the exact count.

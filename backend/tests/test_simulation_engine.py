@@ -201,6 +201,40 @@ class TestRunMonteCarlo:
         st = run_stress_tests(inputs, accounts, ret_age=67, ss_timing="early")
         assert st["scenarios"]["base"]["final_balance"] == pytest.approx(expected, abs=1)
 
+    def test_second_earner_gap_income_matches_deterministic_engine(self, sample_inputs, monkeypatch):
+        """Backlog item 1 (CALCULATION_CONTRACT.md section 13), closed
+        2026-09-08 for Monte Carlo: with zero-variance simulated returns,
+        Monte Carlo's median_final_balance must exactly match
+        run_retirement_projection's own (already-correct) figure for the
+        same second-earner gap-income inputs — same idiom as the SS-COLA
+        test above. Before this fix, Monte Carlo had no way to see
+        justin_gap_income at all."""
+        import random as random_module
+        monkeypatch.setattr(random_module, "gauss", lambda mu, sigma: 0.0)
+
+        inputs = {
+            **sample_inputs, "jason_age": 60, "justin_age": 60,
+            "retirement_income_today_dollars": 80000, "inflation_rate": 0.02,
+            "expected_return_pre_retirement": 0.0, "expected_return_post_retirement": 0.0,
+            "jason_social_security": 0, "jason_ss_delayed": 0, "justin_social_security": 0,
+            "healthcare_pre_medicare": 0, "healthcare_post_medicare": 0,
+            "pension_55": 0, "pension_60": 0, "pension_65": 0,
+            "w2_salary": 0, "annual_401k_contribution": 0, "annual_hsa_contribution": 0,
+            "annual_rsu_value": 0, "annual_bonus_pct": 0,
+            "justin_w2_salary": 100000, "justin_ret_age": 65,
+            "retirement_end_age": 68,
+        }
+        accounts = [{"name": "Brokerage", "account_type": "taxable", "owner": "joint", "balance": 1_000_000}]
+        proj = run_retirement_projection(inputs, accounts, ret_ages=[60])
+        expected = next(x for x in proj["scenarios"] if x["label"] == "age_60_early")["yearly_detail"][-1]["portfolio_balance"]
+
+        mc = run_monte_carlo(inputs, accounts, ret_age=60, ss_timing="early")
+        assert mc["median_final_balance"] == pytest.approx(expected, abs=1)
+        # Sanity: the gap income must actually be doing something --
+        # without it, the same household's balance would be lower.
+        no_gap = run_monte_carlo({**inputs, "justin_ret_age": 60}, accounts, ret_age=60, ss_timing="early")
+        assert mc["median_final_balance"] > no_gap["median_final_balance"]
+
 
 class TestRunStressTests:
     def test_returns_base_and_named_scenarios(self, sample_inputs, sample_accounts):
@@ -213,6 +247,32 @@ class TestRunStressTests:
     def test_intermediate_ages_do_not_crash(self, sample_inputs, sample_accounts, age):
         result = run_stress_tests(sample_inputs, sample_accounts, ret_age=age, ss_timing="early")
         assert "base" in result["scenarios"]
+
+    def test_second_earner_gap_income_matches_deterministic_engine(self, sample_inputs, monkeypatch):
+        """Same fix and same idiom as TestRunMonteCarlo's identical test
+        -- Stress Tests shares _run_single, so this closes backlog item 1
+        for Stress Tests too."""
+        import random as random_module
+        monkeypatch.setattr(random_module, "gauss", lambda mu, sigma: 0.0)
+
+        inputs = {
+            **sample_inputs, "jason_age": 60, "justin_age": 60,
+            "retirement_income_today_dollars": 20000, "inflation_rate": 0.02,
+            "expected_return_pre_retirement": 0.0, "expected_return_post_retirement": 0.0,
+            "jason_social_security": 0, "jason_ss_delayed": 0, "justin_social_security": 0,
+            "healthcare_pre_medicare": 0, "healthcare_post_medicare": 0,
+            "pension_55": 0, "pension_60": 0, "pension_65": 0,
+            "w2_salary": 0, "annual_401k_contribution": 0, "annual_hsa_contribution": 0,
+            "annual_rsu_value": 0, "annual_bonus_pct": 0,
+            "justin_w2_salary": 100000, "justin_ret_age": 65,
+            "retirement_end_age": 78,
+        }
+        accounts = [{"name": "Brokerage", "account_type": "taxable", "owner": "joint", "balance": 1_000_000}]
+        proj = run_retirement_projection(inputs, accounts, ret_ages=[60])
+        expected = next(x for x in proj["scenarios"] if x["label"] == "age_60_early")["yearly_detail"][-1]["portfolio_balance"]
+
+        st = run_stress_tests(inputs, accounts, ret_age=60, ss_timing="early")
+        assert st["scenarios"]["base"]["final_balance"] == pytest.approx(expected, abs=1)
 
 
 class TestRunRothConversionAnalysis:
@@ -240,6 +300,22 @@ class TestRunRothConversionAnalysis:
         assert with_brokerage["total_conversions"] > without_brokerage["total_conversions"]
         assert with_brokerage["schedule"][0]["taxable_balance"] > 0
         assert without_brokerage["schedule"][0]["taxable_balance"] == 0
+
+    def test_second_earner_gap_income_increases_conversion_room(self, sample_inputs, sample_accounts):
+        """Backlog item 1 (CALCULATION_CONTRACT.md section 13), closed
+        2026-09-08 for Roth conversion: continued spousal income during
+        the gap years reduces how much of the year's spending has to be
+        drawn from pretax, leaving more 22%-bracket room for conversions
+        -- both total_conversions and net_lifetime_benefit should
+        increase, in both the with-conversions and no-conversions-
+        baseline loops (both call build_annual_income_inputs)."""
+        inputs = {**sample_inputs, "jason_age": 60, "justin_age": 60, "justin_w2_salary": 100000}
+        no_gap = run_roth_conversion_analysis({**inputs, "justin_ret_age": 60}, sample_accounts, ret_age=60, ss_timing="early")
+        gap = run_roth_conversion_analysis({**inputs, "justin_ret_age": 65}, sample_accounts, ret_age=60, ss_timing="early")
+        assert gap["total_conversions"] > no_gap["total_conversions"]
+        assert gap["net_lifetime_benefit"] > no_gap["net_lifetime_benefit"]
+        assert gap["total_unmet_need"] == 0
+        assert no_gap["total_unmet_need"] == 0
 
     def test_post_retirement_asset_sale_reaches_conversion_schedule(self, sample_inputs, sample_accounts):
         """Regression (external audit 2026-09-07): this function only saw

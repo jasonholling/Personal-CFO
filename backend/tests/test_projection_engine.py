@@ -21,6 +21,9 @@ from projection_engine import (
     BOND_MAX_GROWTH_YEARS,
     CURRENT_YEAR,
     COLLEGE_YEARS,
+    justin_years_to_retire_for,
+    justin_gap_income_inputs,
+    SECOND_EARNER_NET_OF_TAX_FACTOR,
 )
 
 
@@ -479,6 +482,53 @@ class TestJustinGapIncomeOffsetsWithdrawalNeed:
         scenario = next(s for s in run_retirement_projection(inputs, sample_accounts, ret_ages=[60])["scenarios"] if s["ss_timing"] == "early")
         no_salary = next(s for s in run_retirement_projection({**sample_inputs, "jason_age": 55, "justin_age": 55}, sample_accounts, ret_ages=[60])["scenarios"] if s["ss_timing"] == "early")
         assert scenario["yearly_detail"][0]["income_need"] == no_salary["yearly_detail"][0]["income_need"]
+
+
+class TestJustinGapIncomeInputsHelper:
+    """Direct unit tests for the shared justin_gap_income_inputs/
+    justin_years_to_retire_for helpers (CALCULATION_CONTRACT.md section
+    13, backlog items 1-3), independent of any consumer -- reviewer
+    findings 2026-09-08: item 2 (gap income grew with CPI inflation
+    instead of the wage-growth convention every other second-earner
+    income stream uses) and item 3 (the net-of-tax factor should be a
+    named, documented policy, not a bare literal)."""
+
+    def test_uses_salary_growth_pct_not_inflation(self):
+        """The whole point of item 2's fix: growth must track
+        salary_growth_pct (wage growth / raises), completely independent
+        of whatever inflation rate the caller happens to be using
+        elsewhere -- these are two unrelated assumptions that used to be
+        conflated."""
+        years_to_retire = 5
+        justin_years_to_retire = 10  # 5-year gap
+        _, at_start_no_raises = justin_gap_income_inputs(
+            {"justin_w2_salary": 100000}, justin_years_to_retire, years_to_retire, salary_growth_pct=0.0)
+        _, at_start_with_raises = justin_gap_income_inputs(
+            {"justin_w2_salary": 100000}, justin_years_to_retire, years_to_retire, salary_growth_pct=0.03)
+        # 0% raises -> flat nominal salary, no growth at all to retirement start.
+        assert at_start_no_raises == pytest.approx(100000 * SECOND_EARNER_NET_OF_TAX_FACTOR)
+        # 3% raises compounds over years_to_retire, independent of any
+        # inflation figure (none was even passed to this function).
+        assert at_start_with_raises == pytest.approx(100000 * SECOND_EARNER_NET_OF_TAX_FACTOR * (1.03 ** years_to_retire))
+
+    def test_uses_the_named_net_of_tax_constant(self):
+        """Item 3: one findable, documented policy -- not a bare literal
+        this function invented independently of RSU/bonus's own
+        treatment elsewhere in projection_engine.py."""
+        _, at_start = justin_gap_income_inputs(
+            {"justin_w2_salary": 50000}, 10, 5, salary_growth_pct=0.0)
+        assert at_start == 50000 * SECOND_EARNER_NET_OF_TAX_FACTOR
+        assert SECOND_EARNER_NET_OF_TAX_FACTOR == 0.65  # pins the actual policy value
+
+    def test_no_gap_years_means_zero_income_regardless_of_salary(self):
+        gap_years, at_start = justin_gap_income_inputs(
+            {"justin_w2_salary": 200000}, justin_years_to_retire=5, years_to_retire=10, salary_growth_pct=0.03)
+        assert gap_years == 0
+        assert at_start == 0.0
+
+    def test_justin_years_to_retire_for_fallback_and_explicit(self):
+        assert justin_years_to_retire_for({"justin_ret_age": 0}, justin_age=50, years_to_retire=10) == 10
+        assert justin_years_to_retire_for({"justin_ret_age": 55}, justin_age=50, years_to_retire=10) == 5
 
 
 class TestWithdrawalWaterfallReconciliationFixes:

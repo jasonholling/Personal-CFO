@@ -12,7 +12,8 @@ from projection_engine import (
     JASON_SS_DELAYED_DEFAULT as JASON_SS_DELAYED,
     JUSTIN_SPOUSAL_ANNUAL, JUSTIN_SPOUSAL_AGE, CURRENT_YEAR,
     _fv, _fv_annuity, _fv_annuity_monthly, _rmd, pension_for_age, rmd_start_age,
-    _split_life_events, _post_retirement_year_effects, _post_retirement_asset_sale_events
+    _split_life_events, _post_retirement_year_effects, _post_retirement_asset_sale_events,
+    justin_years_to_retire_for, justin_gap_income_inputs,
 )
 from annual_engine import (AccountState, DEFAULT_ORDER, ROTH_FIRST_ORDER, marginal_bracket_tax_model, no_tax_model,
                            simulate_conversion, simulate_withdrawal_year)
@@ -184,6 +185,9 @@ def _run_single(
     justin_ss_age: float = JUSTIN_SPOUSAL_AGE,
     retirement_end_age: int = 99,
     state_tax_rate: float = 0.0,
+    justin_gap_years: int = 0,
+    justin_gap_income_at_start: float = 0.0,
+    salary_growth_pct: float = 0.0,
 ) -> Tuple[bool, List[float], List[float]]:
     """
     Run a single retirement simulation.
@@ -226,6 +230,14 @@ def _run_single(
     allowed (see the RMD-gate fix below) could still be counted a
     "success" (external audit 2026-09-06, same root cause as
     projection_engine.py's on_track fix).
+
+    justin_gap_years/justin_gap_income_at_start/salary_growth_pct
+    (2026-09-08, CALCULATION_CONTRACT.md section 13, backlog item 1):
+    from projection_engine.justin_gap_income_inputs() — the caller
+    (run_monte_carlo/run_stress_tests) computes these once outside the
+    N-run loop, same precedent as pension_annual/income_at_ret above.
+    All default to 0, so an existing caller that never touches this
+    feature sees no change.
     """
     # `timeline` is the single shared source of effective_start_age,
     # retirement_year, end_age/retire_yrs, and age-gap arithmetic —
@@ -317,6 +329,8 @@ def _run_single(
             jason_ss_annual=jason_ss_annual, jason_ss_age=jason_ss_age,
             justin_ss_annual=justin_ss_annual, justin_ss_age=justin_ss_age,
             post_life_events=post_life_events, post_retirement_year_effects=_post_retirement_year_effects,
+            justin_gap_years=justin_gap_years, justin_gap_income_at_start=justin_gap_income_at_start,
+            salary_growth_pct=salary_growth_pct,
         )
 
         if phase_inputs and ret_age == 55:
@@ -346,6 +360,14 @@ def _run_single(
         calendar_year = retirement_year + yr
         life_event_cash, life_event_monthly = income.life_event_cash, income.life_event_monthly
         year_need -= life_event_monthly
+
+        # Second-earner gap income (2026-09-08, CALCULATION_CONTRACT.md
+        # section 13, backlog item 1) — computed by the shared builder
+        # above from the justin_gap_years/justin_gap_income_at_start
+        # params this function's own callers pass in. 0 by default, so
+        # an existing caller that never touches this feature sees no
+        # change.
+        year_need -= income.justin_gap_income
 
         # SS COLA — computed above via the shared builder (same formula
         # this function's own comment/history documents: COLA relative to
@@ -654,6 +676,14 @@ def run_monte_carlo(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_ti
     annual_rsu   = inputs["annual_rsu_value"]
 
     years_to_ret = max(0, ret_age - jason_age)
+    # Second-earner gap income (2026-09-08, CALCULATION_CONTRACT.md
+    # section 13, backlog item 1) — computed once here, same precedent as
+    # pension_annual/income_at_ret below, and passed into every _run_single
+    # call in the N-run loop.
+    _salary_growth_pct = inputs.get("_salary_growth_pct", 0.0)
+    _justin_years_to_retire = justin_years_to_retire_for(inputs, justin_age, years_to_ret)
+    justin_gap_years, justin_gap_income_at_start = justin_gap_income_inputs(
+        inputs, _justin_years_to_retire, years_to_ret, _salary_growth_pct)
     pension_annual  = pension_for_age(inputs, ret_age)
     jason_ss_early  = inputs.get("jason_social_security", JASON_SS_EARLY)
     jason_ss_delayed = inputs.get("jason_ss_delayed", JASON_SS_DELAYED)
@@ -735,6 +765,9 @@ def run_monte_carlo(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_ti
             justin_ss_age=justin_ss_age,
             retirement_end_age=end_age,
             state_tax_rate=inputs.get("state_income_tax_rate", 0),
+            justin_gap_years=justin_gap_years,
+            justin_gap_income_at_start=justin_gap_income_at_start,
+            salary_growth_pct=_salary_growth_pct,
         )
         if survived: successes += 1
         all_balances.append(balances)
@@ -799,6 +832,13 @@ def run_stress_tests(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_t
     annual_rsu   = inputs["annual_rsu_value"]
 
     years_to_ret   = max(0, ret_age - jason_age)
+    # See run_monte_carlo's identical comment — second-earner gap income
+    # (2026-09-08, CALCULATION_CONTRACT.md section 13, backlog item 1),
+    # computed once here and passed into every _run_single call below.
+    _salary_growth_pct = inputs.get("_salary_growth_pct", 0.0)
+    _justin_years_to_retire = justin_years_to_retire_for(inputs, justin_age, years_to_ret)
+    justin_gap_years, justin_gap_income_at_start = justin_gap_income_inputs(
+        inputs, _justin_years_to_retire, years_to_ret, _salary_growth_pct)
     pension_annual  = pension_for_age(inputs, ret_age)
     jason_ss_early  = inputs.get("jason_social_security", JASON_SS_EARLY)
     jason_ss_delayed = inputs.get("jason_ss_delayed", JASON_SS_DELAYED)
@@ -856,6 +896,9 @@ def run_stress_tests(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_t
         justin_ss_age=justin_ss_age,
         retirement_end_age=end_age,
         state_tax_rate=inputs.get("state_income_tax_rate", 0),
+        justin_gap_years=justin_gap_years,
+        justin_gap_income_at_start=justin_gap_income_at_start,
+        salary_growth_pct=_salary_growth_pct,
     )
 
     results = {"base": {
@@ -939,6 +982,9 @@ def run_stress_tests(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_t
             justin_ss_age=justin_ss_age,
             retirement_end_age=end_age,
             state_tax_rate=inputs.get("state_income_tax_rate", 0),
+            justin_gap_years=justin_gap_years,
+            justin_gap_income_at_start=justin_gap_income_at_start,
+            salary_growth_pct=_salary_growth_pct,
         )
 
         # Find depletion age
@@ -1026,6 +1072,16 @@ def run_roth_conversion_analysis(inputs: Dict, accounts: List[Dict], ret_age: in
     roth_at_ret    = _s["roth_at_retirement"]
     taxable_at_ret = _s["taxable_at_retirement"]
 
+    # Second-earner gap income (2026-09-08, CALCULATION_CONTRACT.md
+    # section 13, backlog item 1) — see run_monte_carlo's identical
+    # comment. Computed once here, passed to both build_annual_income_inputs
+    # calls below (with-conversion and without-conversion loops), so the
+    # comparison stays apples-to-apples.
+    _salary_growth_pct = inputs.get("_salary_growth_pct", 0.0)
+    _justin_years_to_retire = justin_years_to_retire_for(inputs, justin_age, years_to_ret)
+    justin_gap_years, justin_gap_income_at_start = justin_gap_income_inputs(
+        inputs, _justin_years_to_retire, years_to_ret, _salary_growth_pct)
+
     schedule = []
     pretax  = pretax_at_ret
     roth    = roth_at_ret
@@ -1080,6 +1136,8 @@ def run_roth_conversion_analysis(inputs: Dict, accounts: List[Dict], ret_age: in
             jason_ss_annual=jason_ss, jason_ss_age=jason_ss_age,
             justin_ss_annual=justin_ss, justin_ss_age=justin_ss_age,
             post_life_events=post_events, post_retirement_year_effects=_post_retirement_year_effects,
+            justin_gap_years=justin_gap_years, justin_gap_income_at_start=justin_gap_income_at_start,
+            salary_growth_pct=_salary_growth_pct,
         )
         # Income this year (portfolio draw + pension + SS if active)
         income_need   = income_at_ret * ((1 + inflation) ** yr) + income.healthcare
@@ -1131,7 +1189,9 @@ def run_roth_conversion_analysis(inputs: Dict, accounts: List[Dict], ret_age: in
                                                       inputs.get("state_income_tax_rate", 0) or 0)
         base_result = simulate_withdrawal_year(
             opening=AccountState(pretax=pretax, roth=roth, taxable=taxable, hsa=0.0),
-            spending_need=income_need - life_event_monthly,
+            # Second-earner gap income (backlog item 1) offsets need
+            # directly, same as life_event_monthly.
+            spending_need=income_need - life_event_monthly - income.justin_gap_income,
             guaranteed_income=guaranteed,
             life_event_cash=life_event_cash,
             rmd_amount=0.0,
@@ -1260,6 +1320,8 @@ def run_roth_conversion_analysis(inputs: Dict, accounts: List[Dict], ret_age: in
             jason_ss_annual=jason_ss, jason_ss_age=jason_ss_age,
             justin_ss_annual=justin_ss, justin_ss_age=justin_ss_age,
             post_life_events=post_events, post_retirement_year_effects=_post_retirement_year_effects,
+            justin_gap_years=justin_gap_years, justin_gap_income_at_start=justin_gap_income_at_start,
+            salary_growth_pct=_salary_growth_pct,
         )
         income_need = income_at_ret * ((1 + inflation) ** yr) + income.healthcare
         year_pen = pension_annual
@@ -1275,7 +1337,9 @@ def run_roth_conversion_analysis(inputs: Dict, accounts: List[Dict], ret_age: in
                                                           inputs.get("state_income_tax_rate", 0) or 0)
         no_conv_result = simulate_withdrawal_year(
             opening=AccountState(pretax=no_conv_pretax, roth=no_conv_roth, taxable=no_conv_taxable, hsa=0.0),
-            spending_need=income_need - life_event_monthly,
+            # Second-earner gap income (backlog item 1) offsets need
+            # directly, same as the with-conversions loop above.
+            spending_need=income_need - life_event_monthly - income.justin_gap_income,
             guaranteed_income=guaranteed,
             life_event_cash=life_event_cash,
             rmd_amount=0.0,
