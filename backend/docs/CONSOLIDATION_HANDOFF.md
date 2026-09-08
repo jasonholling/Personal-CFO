@@ -10,7 +10,7 @@ history) — it's stale as of this closing update.
 
 **2026-09-08 addendum — second-earner (Justin) gap-income feature, a
 separate follow-on effort, NOT part of the 9-item list below.** Full
-detail lives in `CALCULATION_CONTRACT.md` sections 13-19. Status: gap
+detail lives in `CALCULATION_CONTRACT.md` sections 13-22. Status: gap
 income (a working spouse's continued income offsetting withdrawal need
 during the years between the household's own withdrawal start and that
 spouse's own retirement) reaches all 6 withdrawal-phase consumers, via
@@ -43,14 +43,19 @@ owner-attributed account ledger, and per-year output visibility for
 income offsets beyond Retirement Projection's own `yearly_detail` — see
 section 15's closing list for the full reasoning on each. The fourth
 item, the two-dimensional retirement-age redesign, is no longer purely
-deferred: a v1 (section 19) — explicit independent ages for both
+deferred: a v1 (sections 19-21) — explicit independent ages for both
 spouses, Retirement Projection reference implementation only, no
-Survivor/payroll-tax/ownership-ledger/heatmap — is built on
-`codex/two-dimensional-retirement`, pushed, **not yet merged**, per the
-instruction it was scoped under (review before merging). Propagating it
-to the other 5 consumers, Survivor integration, real payroll tax, the
-ownership ledger, and a heatmap UI all remain open, explicitly deferred
-per `docs/TWO_DIMENSIONAL_RETIREMENT_DESIGN.md` section 6.
+Survivor/payroll-tax/ownership-ledger/heatmap — was built on
+`codex/two-dimensional-retirement` and **has since merged to `main`**
+(commit `456484e`). A follow-on branch,
+`codex/two-age-monte-carlo-stress` (section 22), propagates the same
+explicit two-age timing to Monte Carlo and Stress Tests, sharing the
+reference implementation's own calculation-policy helpers rather than
+copying them — pushed, **not yet merged**, per the instruction it was
+scoped under (review before merging). SWR, Tax Efficiency, Roth
+Conversion, Survivor integration, real payroll tax, the ownership
+ledger, and a heatmap UI all remain open, explicitly deferred per
+`docs/TWO_DIMENSIONAL_RETIREMENT_DESIGN.md` section 6.
 
 ## Final status against Jason's 9-item follow-on task list
 

@@ -17,16 +17,17 @@ import { isPrivacyMode, MASK_CURRENCY } from '../utils/privacy'
 // 65%-of-gross POLICY FACTOR stays visible either way — it's a documented
 // methodology constant, not household-specific financial data.
 //
-// The trailing "single retirement-age model" line (added
-// TWO_DIMENSIONAL_RETIREMENT_DESIGN.md section 7.5, 2026-09-08) is a
-// documentation-only addition, not a behavior change: every page this
-// component appears on still models one household retirement date, with
+// The trailing model-description line (added TWO_DIMENSIONAL_
+// RETIREMENT_DESIGN.md section 7.5, 2026-09-08; made mode-aware in
+// CALCULATION_CONTRACT.md section 23 after independent review found it
+// still read "Single retirement-age model" even on a result that WAS
+// two-age) is documentation-only, not a calculation change: most pages
+// this component appears on model one household retirement date, with
 // this dollar figure as an income OFFSET during the gap, not a genuine
-// second, independently-timed retirement age. Retirement Projection's
-// "Two-Age Scenario" tab is the only tool in this app that models two
-// truly independent ages — this line exists so a user reading the offset
-// on any other page doesn't mistake it for that.
-export default function SecondEarnerNote({ amount, years, factor, personLabel = 'Justin' }) {
+// second, independently-timed retirement age -- pass `twoAge` (from the
+// result's own `mode === 'two_age'`) when that's not the case, so the
+// note doesn't misdescribe the very result it's attached to.
+export default function SecondEarnerNote({ amount, years, factor, personLabel = 'Justin', twoAge = false }) {
   if (!amount || amount <= 0 || !years) return null
   const pct = Math.round((factor ?? 0.65) * 100)
   const amountText = isPrivacyMode() ? MASK_CURRENCY : `$${Math.round(amount).toLocaleString()}`
@@ -34,8 +35,9 @@ export default function SecondEarnerNote({ amount, years, factor, personLabel = 
     <div style={{ fontSize: 11, color: 'var(--text3)', marginTop: 6, lineHeight: 1.5 }}>
       Includes ~{amountText}/yr from {personLabel}'s continued income
       for {years} more year{years === 1 ? '' : 's'} — approximated at {pct}% of gross
-      (not a full payroll-tax calculation). Single retirement-age model — see Retirement Projection's
-      Two-Age Scenario tab for two independent ages.
+      (not a full payroll-tax calculation). {twoAge
+        ? 'Two-age model — both retirement ages set independently.'
+        : "Single retirement-age model — see Retirement Projection's Two-Age Scenario tab for two independent ages."}
     </div>
   )
 }

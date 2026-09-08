@@ -1744,3 +1744,330 @@ Frontend unchanged this round (no UI code touched) -- 28 passed,
 production build succeeds. Sensitive-data check passed. Branch:
 `codex/two-dimensional-retirement` -- still **not merged**, per the
 same instruction, for continued review.
+
+## 22. Two-age Monte Carlo and Stress Tests (2026-09-08, on `codex/two-age-monte-carlo-stress`)
+
+Full design context: `docs/TWO_DIMENSIONAL_RETIREMENT_DESIGN.md` and
+sections 19-21 (the Retirement Projection reference implementation this
+extends). This section documents propagating explicit, independent
+two-age retirement timing to Monte Carlo and Stress Tests -- the next
+two of the five consumers named as deferred in section 19.
+
+**What this is:** new `jason_ret_age`/`justin_ret_age` parameters on
+`run_monte_carlo`/`run_stress_tests` -- both required together (a
+`ValueError` if only one is given), completely additive. The existing
+`ret_age`/`ss_timing` single-axis path is untouched when these are left
+at their `None` default; the full pre-existing `test_simulation_engine.py`
+suite passes unchanged.
+
+**Shared calculation policy, not a second copy.** Per the explicit
+instruction this branch was scoped under, three module-level helpers
+extracted from `run_two_dimensional_retirement_projection` in the
+first commit on this branch (`two_age_spending_need_fn`,
+`two_age_pension_for_year`, `two_age_still_working_income_inputs`,
+plus the already-shared `justin_gap_income_for_year`) are reused
+verbatim by a new `_run_single_two_age` (the two-age analog of
+`_run_single`) -- no independent second copy of income, pension,
+bridge, or contribution formulas. Starting bucket balances come from
+calling `run_two_dimensional_retirement_projection` once and reading
+its `pretax_at_phase2_start`/`roth_at_phase2_start`/etc. fields (added
+in the same first commit) -- the same "call the deterministic reference
+once, read its bucket breakdown" pattern the existing single-axis mode
+already uses against `run_retirement_projection`, so the
+accumulation-phase contribution/RSU/asset-sale/life-event/surplus-
+allocation math isn't re-derived either.
+
+**Test-first**, per instruction: `test_two_age_monte_carlo_stress.py`
+was written and committed BEFORE `_run_single_two_age` or the new
+params existed (19 of 21 cases failed at collection with
+`TypeError`/`ImportError`). Two verification strategies:
+1. **Deterministic parity** (`random.gauss` monkeypatched to `0.0`,
+   matching this codebase's existing single-axis technique): Monte
+   Carlo's `median_final_balance` and Stress Tests' `base` scenario
+   must reproduce `run_two_dimensional_retirement_projection`'s own
+   yearly balances exactly. Covers every category named in the
+   instruction: either spouse retiring first (2 directions, proving
+   the wiring is symmetric), simultaneous retirement, unequal ages, a
+   past retirement selection, pension timing, the age-55 bridge/kids
+   phase, an income surplus, and depletion/unmet need.
+2. **Hand-calculated adverse-return sequences** (explicit, non-random
+   `annual_returns` arrays, verified against `simulate_withdrawal_year`
+   arithmetic directly before writing each assertion): a -30% return
+   during the middle phase while gap income still covers spending
+   (portfolio still grows off a smaller base), and a -80% return
+   landing exactly on the phase2->phase3 boundary (guaranteed income no
+   longer covers the whole need once both are retired).
+
+Two real bugs were found and fixed while writing these tests against
+the first implementation attempt -- both in the TEST construction, not
+the implementation: a swapped `(pretax_start, taxable_start)` argument
+order in two hand-written `_run_single_two_age` calls, and a household
+where the intended "later retiree" and the salary field set didn't
+match (produced a $1,325,000 result instead of the intended $420,000
+until the pairing was corrected). Documented here since both looked
+initially like implementation bugs and are exactly the kind of mistake
+a future reviewer re-deriving these numbers should watch for.
+
+**A real latent bug WAS found and fixed in the implementation**: the
+`early_sequence` stress scenario's return-sequence construction used
+`dict.get(key, expensive_default_expression)` -- Python evaluates the
+default argument eagerly every call regardless of whether the key
+exists, so a short two-age horizon (`retire_yrs <= len(overrides)`)
+crashed with an out-of-range index that was never going to be used.
+Fixed with a lazy membership-test branch. The single-axis
+`run_stress_tests`'s own `early_sequence` code has the identical latent
+bug but was out of scope to touch here -- it never manifests there
+since production `retire_yrs` is always long enough.
+
+**Stress Tests scenario coverage:** the `base` scenario (required exact
+parity) plus the SCENARIOS dict's pure return-override entries
+(`crash_2008`, `lost_decade`, `early_sequence` -- all
+`inflation_mult: 1.0`, matching this function's flat-inflation v1 scope
+with zero special-casing needed). `stagflation_1970s` (variable
+inflation), `bridge_job_loss` (needs a two-age-aware bridge
+re-projection), and `ss_reduction` (a scenario-level SS multiplier not
+wired into the two-age per-year SS formula) are explicitly skipped --
+each needs feature support out of scope for this v1, documented in the
+code rather than silently misapplied. Named-scenario result dicts gain
+`depletion_age`/`lowest_balance`/`lowest_balance_age` (matching the
+single-axis shape exactly) so the existing `StressTestSection.jsx`
+scenario cards render two-age results with zero extra branching.
+
+**Success rate correctness**, per explicit instruction: `_run_single_
+two_age`'s `survived` computation is `(final balance > 0) and not
+any_unmet_need`, inherited by construction from `_run_single`'s own
+formula -- any single unfunded year fails the trial regardless of the
+final balance. Proven with a household engineered to end $420,000
+positive (a huge phase3 pension surplus) despite two real unfunded
+years earlier in phase2: `success_rate` is exactly 0.0%, not driven by
+the positive ending balance, checked via both Monte Carlo (deterministic,
+all 1000 trials identical) and Stress Tests' `base` scenario.
+
+**API:** `jason_ret_age`/`justin_ret_age` added as optional query params
+to `GET /api/simulation/monte-carlo` and `GET /api/simulation/stress-tests`
+-- a `ValueError` (only one age supplied) becomes a 400, not an
+unhandled 500.
+
+**Frontend:** a shared "Use Two Independent Retirement Ages" toggle in
+`StressTestWhatIf.jsx` (both Monte Carlo and Historical Stress tabs
+read it) replaces the single-age Retirement Age/Social Security
+selector with two explicit age inputs when on. `MonteCarloSection`/
+`StressTestSection` (`Simulation.jsx`) gain optional `jasonRetAge`/
+`justinRetAge` props; when both are set they call the two-age endpoints
+directly via the SAME stale-result-guard (`genRef` counter) the
+existing single-age flow already used -- an age change or a new run
+both invalidate any in-flight response, so a result can never outlive
+the inputs that produced it. A shared `secondEarnerNoteProps()` helper
+picks the right amount/years/personLabel for either result shape
+(single-axis `justin_gap_income_first_year` vs two-age
+`still_working_spouse_income_first_year`, where the still-working
+spouse can be EITHER person) so `SecondEarnerNote` -- and with it, the
+existing privacy-mode masking and the visible 65% factor -- renders
+correctly in both modes with no duplicated formatting logic. Both
+sections also display the exact age pair a result corresponds to, read
+from the API response (`data.jason_ret_age`/`justin_ret_age`), not
+local input state, matching the same anti-stale-labeling convention
+`TwoAgeScenario.jsx` established in section 19.
+
+**Runtime**, measured against the existing single-axis mode (same
+household, N=1000 trials, 5-run average): single-axis Monte Carlo
+~0.249s, two-age Monte Carlo ~0.175s -- two-age mode is faster, not
+slower, because its `TwoPersonTimeline` is built once outside the
+1000-trial loop and passed in, rather than `_run_single`'s existing
+per-trial `Timeline` rebuild (a deliberate efficiency choice
+documented in `_run_single_two_age`'s own docstring, not required for
+correctness but free to include). Stress Tests: both modes ~0.001-0.002s
+(a handful of deterministic scenarios, not 1000 trials).
+
+**Explicitly out of scope, unchanged from the design doc:** SWR, Tax
+Efficiency, Roth Conversion, Survivor Scenario, real payroll-tax
+modeling, an owner-attributed account ledger, and any heatmap/matrix
+UI. What-If Builder overrides don't carry into two-age mode in this
+v1 (the two-age GET endpoints, not the What-If-aware POST variants).
+
+**Verified:** 21 new backend tests (`test_two_age_monte_carlo_stress.py`)
+plus 4 new endpoint tests (`test_main.py`) plus 6 new frontend tests
+(`TwoAgeMonteCarloStress.test.jsx`) all pass. Full backend suite: see
+the commit history on this branch for the exact final count (350
+passed immediately after the `_run_single_two_age`/API commits, before
+the depletion-age-fields and doc commits that followed added their own
+coverage on top). Full frontend suite: 34 passed (was 28). Production
+build succeeds. Sensitive-data check passed. Branch:
+`codex/two-age-monte-carlo-stress`, pushed, **not merged** -- per the
+explicit instruction this was scoped under, for independent review.
+
+## 23. Two-age Monte Carlo/Stress Tests follow-up review (2026-09-08, on `codex/two-age-monte-carlo-stress`)
+
+Independent review of section 22's commit (`d347e4b`) found five issues.
+All five fixed on the same unmerged branch.
+
+**P1 -- two-age mode silently dropped selected assumptions.** Both
+`MonteCarloSection`/`StressTestSection`'s two-age branches called the
+plain `GET` endpoint with only `jason_ret_age`/`justin_ret_age`,
+omitting `ss_timing` entirely and never applying any What-If Builder
+overrides -- switching into two-age mode reverted to early SS claiming
+and saved Settings regardless of what was already selected. Reproduced
+as a real result difference ($400,000 with early SS vs $340,000 with
+delayed SS on the same household). **Fixed** on both ends: `post_
+monte_carlo`/`post_stress_tests` now read `jason_ret_age`/
+`justin_ret_age` from the request body (same two-age dispatch and
+400-on-`ValueError` handling the `GET` endpoints already have); the
+frontend now `POST`s in two-age mode too, with `ss_timing`/`overrides`
+threaded through the same way the single-age branch already does. The
+SS-claiming-timing selector, previously hidden entirely while two-age
+mode was on (so there was no way to change it), now stays visible and
+editable in both modes.
+
+**Incomplete scope -- three stress scenarios were silently skipped.**
+`stagflation_1970s`, `bridge_job_loss`, and `ss_reduction` were entirely
+absent from two-age Stress Tests' first cut, with the UI simply hiding
+them -- none of the three were an agreed deferral (only Survivor
+integration, real payroll tax, the ownership ledger, and a heatmap UI
+were). **Completed:**
+- `stagflation_1970s` (variable inflation): `two_age_spending_need_fn`
+  and `_run_single_two_age` gain an optional `inflation_mults`
+  parameter, using the same accumulate-don't-retroactively-erase-
+  history cumulative-inflation curve `timeline_engine.
+  build_cumulative_inflation` already provides for every other
+  consumer. Defaults to `None` (flat inflation every year), under
+  which the new formulas reduce to the *exact* originals -- verified
+  algebraically (both the phase2-anchored default branch and the
+  jason-effective-start-anchored bridge/kids branch, which rebases via
+  division onto the same underlying curve) and confirmed by every
+  existing test passing unchanged. Social Security's own COLA is
+  rebased onto the identical curve, relative to each spouse's own claim
+  age rather than phase2_start (also verified to reduce to the exact
+  original flat formula when `inflation_mults` is `None`), so SS and
+  spending need can't silently drift out of sync with each other during
+  a variable-inflation scenario.
+- `bridge_job_loss`: re-projects starting balances with a shortened
+  `bridge_years_55` via `run_two_dimensional_retirement_projection`,
+  the same re-projection pattern the single-axis version's own
+  `bridge_years_override` handling already uses, gated on
+  `jason_ret_age == 55` (bridge/kids timing is always anchored to
+  Jason's own retirement -- section 21) rather than the single-axis
+  `ret_age`.
+- `ss_reduction`: a scenario-level multiplier applied to both spouses'
+  SS annual amount before the trial call -- including Justin's own
+  benefit from the start, the exact gap the single-axis version needed
+  a separate follow-up fix for (external audit 2026-09-06).
+
+All 7 scenarios now run in two-age mode; the frontend's scenario-key
+filtering is kept as a defensive no-op rather than removed outright.
+
+**P2 -- a fully funded plan could report 0% success.** `_run_single_
+two_age`'s `survived` formula required `balances[-1] > 0` on top of
+"every year funded" -- a trial that funds every year in full but ends
+at exactly $0 (the money lasted precisely as long as the plan needed
+it to) is a real success, not a failure. Reproduced exactly: one year,
+$80,000 available, $80,000 spend, 0% return -- the deterministic
+Projection reports `on_track=True` (`unmet_need=0`), but Monte Carlo
+reported 0% success and Stress reported failure for the identical
+scenario. **Fixed:** `survived = not any_unmet_need`, matching `run_
+two_dimensional_retirement_projection`'s own `on_track` definition
+exactly. `_run_single`'s identical single-axis formula has the same
+property -- left unchanged, existing behavior for every other consumer,
+out of scope for this branch (documented in the code, not silently
+carried over).
+
+**P2 -- rounded starting balances broke deterministic parity.**
+`pretax_at_phase2_start`/`roth_at_phase2_start`/`taxable_at_phase2_
+start`/`hsa_at_phase2_start` were rounded before ever being consumed as
+`_run_single_two_age`'s opening balances, so Monte Carlo/Stress started
+from a slightly different number than the deterministic projection's
+own full-precision arithmetic for the identical scenario (reproduced: a
+$2 drift under fixed returns). **Fixed:** these four fields are now
+unrounded floats -- they're consumed as another engine's input, not
+displayed anywhere directly; `round()` belongs at display time only.
+
+**P2 -- two-age results described themselves as single-age.**
+`SecondEarnerNote`'s trailing model-description line still read "Single
+retirement-age model" even on a result whose own `mode` was
+`"two_age"`. **Fixed:** a new optional `twoAge` prop, set from
+`data.mode === 'two_age'` by the shared `secondEarnerNoteProps()`
+helper, switches the note to "Two-age model -- both retirement ages set
+independently."
+
+**Verified:** 9 new backend tests (success-rate contract, unrounded
+bucket fields, all 7 scenarios present, `ss_reduction`/`bridge_job_
+loss`/`stagflation_1970s` each verified with a hand-calculated or
+script-verified-before-asserting reproduction) plus 4 new endpoint
+tests plus 6 updated/new frontend tests, all passing. Full backend
+suite: 1181 passed, 97.56% coverage. Full frontend suite: 34 passed,
+production build succeeds. Sensitive-data check passed. Branch:
+`codex/two-age-monte-carlo-stress` -- still **not merged**, per the
+same instruction, for continued review.
+
+## 24. Two-age Stress Tests second follow-up review (2026-09-08, on `codex/two-age-monte-carlo-stress`)
+
+Independent review of section 23's commit (`d120da7`) found two more
+real bugs, both in the newly-completed stress-scenario support. Both
+fixed on the same unmerged branch.
+
+**P1 -- stagflation's cumulative inflation reset at the phase2/bridge
+boundary.** Section 23's `two_age_spending_need_fn` computed the
+bridge/kids branch's own dollar baselines (`income_at_jason_ret`,
+`healthcare_*_at_jason_ret`, etc.) anchored to `jason_effective_start_
+age` via `timeline.jason_years_to_retire`, then rebased the per-year
+cumulative-inflation multiplier as `cum_inflation[yr] /
+cum_inflation[jason_offset]`. Under FLAT inflation this was provably
+identical to anchoring at `phase2_start` instead -- compounding the
+same total number of years via two different splits is the same
+arithmetic either way, which is why the original section-21 design's
+choice of anchor never mattered. That equivalence breaks under a
+VARIABLE per-year rate: whenever Justin retires first,
+`jason_effective_start_age` can fall strictly after `phase2_start_age`,
+meaning the years between them are already inside the withdrawal loop
+and should be subject to `inflation_mults` like any other loop year --
+anchoring to `jason_effective_start_age` instead treated that whole
+span as flat pre-loop compounding, and the rebasing then reset the
+per-year multiplier to exactly 1.0 right at the boundary, discarding
+every year of already-accumulated elevated inflation outright.
+Reproduced exactly: both spouses currently 53, Justin already retired,
+Jason retiring at 55, $100,000 spend, 8% stressed inflation (2% base *
+the scenario's own 4x) -- year 3 (age 55, the first bridge year)
+reverted to $104,040 (the flat, no-stress figure) instead of the
+correct $116,640; the resulting final balance was overstated
+($736,603 vs the correct $723,751).
+
+**Fixed** by eliminating the second anchor entirely: every dollar
+baseline (`income_at_start`/`healthcare_*_at_start`/`kids_annual_cost_
+at_start`/`bridge_income_at_start`) now anchors to `phase2_start`
+unconditionally, matching the default branch's own convention exactly,
+and both branches share one `cum_inflation[yr]` multiplier with no
+rebasing. `jason_yr` (`age - jason_effective_start_age`) is kept, but
+narrowed to what it should have only ever been -- a duration counter
+compared against `bridge_years`/`kids_years`, not a second inflation
+clock. Verified algebraically that this reduces to the exact same
+formulas as before whenever `jason_offset == 0` (Jason retires first or
+simultaneously, which is every existing bridge/kids test's own
+configuration) and confirmed by the full suite passing unchanged;
+verified against the review's own reproduction directly
+(`two_age_spending_need_fn` called standalone, asserting the exact
+per-year need sequence `[100000, 108000, 116640]`) before checking the
+resulting `final_balance`.
+
+**P2 -- "bridge job loss" could invent income instead of removing it.**
+The scenario unconditionally set `bridge_years_55` to 2 for the
+stressed run, even when the household's own configured value was 0 or
+1 -- turning a scenario meant to model the bridge job ending EARLY into
+one that could instead give a household with no bridge job (or a
+shorter one) MORE bridge income than they actually planned for.
+Reproduced exactly: $30,000/yr bridge income configured with 0 bridge
+years -- the stress scenario ended $60,000 above the neutral base case
+($820,000 vs $760,000) instead of identical to it. **Fixed** by capping
+the override at the household's own existing value
+(`min(bridge_override, inputs.get("bridge_years_55", 0))`) in BOTH the
+two-age copy and the single-axis original it was copied from -- the
+identical bug was already present in the source this branch's own
+`_run_stress_tests_two_age` mirrored, per the explicit instruction to
+fix it in both places rather than only the newer copy.
+
+**Verified:** 2 new backend tests (the exact stagflation phase-boundary
+reproduction via `two_age_spending_need_fn` called directly, and the
+zero-bridge-years `bridge_job_loss` reproduction), full backend suite
+1183 passed / 97.51% coverage, full frontend suite 34 passed (no
+frontend code changed this round), production build succeeds,
+sensitive-data check passed. Branch: `codex/two-age-monte-carlo-stress`
+-- still **not merged**, per the same instruction, for continued
+review.

@@ -1476,7 +1476,13 @@ def _apply_whatif_overrides(inputs: dict, body: dict) -> dict:
     return inputs
 
 @app.get("/api/simulation/monte-carlo")
-def get_monte_carlo(ret_age: int = 60, ss_timing: str = "early"):
+def get_monte_carlo(ret_age: int = 60, ss_timing: str = "early",
+                     jason_ret_age: int = None, justin_ret_age: int = None):
+    """jason_ret_age/justin_ret_age (2026-09-08, CALCULATION_CONTRACT.md
+    section 22): explicit two-age mode, both required together (a
+    ValueError from run_monte_carlo becomes a 400, not a silent
+    single-axis fallback) -- ret_age/ss_timing's existing single-axis
+    behavior is unaffected when these are left unset."""
     conn = get_db()
     inputs_row = conn.execute("SELECT * FROM planning_inputs WHERE id=1").fetchone()
     accounts   = [dict(r) for r in conn.execute("SELECT * FROM accounts").fetchall()]
@@ -1486,7 +1492,12 @@ def get_monte_carlo(ret_age: int = 60, ss_timing: str = "early"):
     if not inputs_row:
         raise HTTPException(status_code=400, detail="Planning inputs not set yet")
     from simulation_engine import run_monte_carlo
-    return run_monte_carlo(dict(inputs_row), accounts, ret_age, ss_timing, life_events=life_events, surplus_allocations=surplus_allocations)
+    try:
+        return run_monte_carlo(dict(inputs_row), accounts, ret_age, ss_timing, life_events=life_events,
+                                surplus_allocations=surplus_allocations,
+                                jason_ret_age=jason_ret_age, justin_ret_age=justin_ret_age)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 @app.post("/api/simulation/monte-carlo")
 def post_monte_carlo(body: dict):
@@ -1495,9 +1506,20 @@ def post_monte_carlo(body: dict):
     inflation, healthcare_pre, income_target, bridge_income, pension_mult,
     ss_mult) so the Monte Carlo tab can actually reflect the scenario just
     built in the What-If Builder instead of silently re-running against
-    saved Settings (external audit 2026-09-06 — see StressTestWhatIf.jsx)."""
+    saved Settings (external audit 2026-09-06 — see StressTestWhatIf.jsx).
+
+    jason_ret_age/justin_ret_age (2026-09-08, CALCULATION_CONTRACT.md
+    section 23): two-age mode, both required together, same as the GET
+    endpoint — added here so switching into two-age mode doesn't also
+    silently drop whatever What-If overrides/ss_timing were already
+    selected (independent review finding: the frontend used to call the
+    plain GET endpoint unconditionally in two-age mode, always reverting
+    to early SS and saved Settings regardless of what the user had
+    actually chosen)."""
     ret_age    = body.get("ret_age", 60)
     ss_timing  = body.get("ss_timing", "early")
+    jason_ret_age  = body.get("jason_ret_age")
+    justin_ret_age = body.get("justin_ret_age")
     conn = get_db()
     inputs_row = conn.execute("SELECT * FROM planning_inputs WHERE id=1").fetchone()
     accounts   = [dict(r) for r in conn.execute("SELECT * FROM accounts").fetchall()]
@@ -1508,7 +1530,12 @@ def post_monte_carlo(body: dict):
         raise HTTPException(status_code=400, detail="Planning inputs not set yet")
     inputs = _apply_whatif_overrides(dict(inputs_row), body)
     from simulation_engine import run_monte_carlo
-    return run_monte_carlo(inputs, accounts, ret_age, ss_timing, life_events=life_events, surplus_allocations=surplus_allocations)
+    try:
+        return run_monte_carlo(inputs, accounts, ret_age, ss_timing, life_events=life_events,
+                                surplus_allocations=surplus_allocations,
+                                jason_ret_age=jason_ret_age, justin_ret_age=justin_ret_age)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 @app.post("/api/projections/whatif")
 def get_whatif(body: dict):
@@ -1728,7 +1755,10 @@ def get_swr(ret_age: int = 60, ss_timing: str = "early", body: dict = None):
     return run_swr_analysis(_apply_whatif_overrides(dict(inputs_row), body or {}), accounts, ret_age, ss_timing, life_events=life_events, surplus_allocations=surplus_allocations)
 
 @app.get("/api/simulation/stress-tests")
-def get_stress_tests(ret_age: int = 60, ss_timing: str = "early"):
+def get_stress_tests(ret_age: int = 60, ss_timing: str = "early",
+                      jason_ret_age: int = None, justin_ret_age: int = None):
+    """jason_ret_age/justin_ret_age: see get_monte_carlo's identical
+    params (CALCULATION_CONTRACT.md section 22)."""
     conn = get_db()
     inputs_row = conn.execute("SELECT * FROM planning_inputs WHERE id=1").fetchone()
     accounts   = [dict(r) for r in conn.execute("SELECT * FROM accounts").fetchall()]
@@ -1738,15 +1768,24 @@ def get_stress_tests(ret_age: int = 60, ss_timing: str = "early"):
     if not inputs_row:
         raise HTTPException(status_code=400, detail="Planning inputs not set yet")
     from simulation_engine import run_stress_tests
-    return run_stress_tests(dict(inputs_row), accounts, ret_age, ss_timing, life_events=life_events, surplus_allocations=surplus_allocations)
+    try:
+        return run_stress_tests(dict(inputs_row), accounts, ret_age, ss_timing, life_events=life_events,
+                                 surplus_allocations=surplus_allocations,
+                                 jason_ret_age=jason_ret_age, justin_ret_age=justin_ret_age)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 @app.post("/api/simulation/stress-tests")
 def post_stress_tests(body: dict):
     """What-If-aware variant of the GET endpoint above — see
     post_monte_carlo's docstring; same override fields, same reason
-    (external audit 2026-09-06)."""
+    (external audit 2026-09-06). jason_ret_age/justin_ret_age: see
+    post_monte_carlo's identical params (CALCULATION_CONTRACT.md
+    section 23)."""
     ret_age    = body.get("ret_age", 60)
     ss_timing  = body.get("ss_timing", "early")
+    jason_ret_age  = body.get("jason_ret_age")
+    justin_ret_age = body.get("justin_ret_age")
     conn = get_db()
     inputs_row = conn.execute("SELECT * FROM planning_inputs WHERE id=1").fetchone()
     accounts   = [dict(r) for r in conn.execute("SELECT * FROM accounts").fetchall()]
@@ -1757,4 +1796,9 @@ def post_stress_tests(body: dict):
         raise HTTPException(status_code=400, detail="Planning inputs not set yet")
     inputs = _apply_whatif_overrides(dict(inputs_row), body)
     from simulation_engine import run_stress_tests
-    return run_stress_tests(inputs, accounts, ret_age, ss_timing, life_events=life_events, surplus_allocations=surplus_allocations)
+    try:
+        return run_stress_tests(inputs, accounts, ret_age, ss_timing, life_events=life_events,
+                                 surplus_allocations=surplus_allocations,
+                                 jason_ret_age=jason_ret_age, justin_ret_age=justin_ret_age)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
