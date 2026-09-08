@@ -1593,3 +1593,81 @@ suite 24 passed (was 20); production build succeeds; sensitive-data
 check passed. Branch: `codex/two-dimensional-retirement`, pushed,
 **not merged** — per the explicit instruction this was scoped under,
 for independent review.
+
+## 20. Two-dimensional retirement timing — pension gating, age-55 rules preserved, UI fixes (2026-09-08, follow-up review)
+
+Independent review of section 19's commit found two real calculation
+bugs and two UI issues. All four fixed on the same unmerged branch.
+
+**P1 — Jason's pension started before he actually retired.** During
+phase 2, `year_pen = pension_annual` was added unconditionally from
+`phase2_start`, regardless of whether Jason himself had retired yet.
+Whenever Justin retired first (Jason is `later_retiree`, still working
+during phase 2), his own future pension was paid two years early on top
+of his salary-funded gap income. Reproduction: both spouses 60, Justin
+retires at 61, Jason at 63, $30,000 pension, $100,000 Jason salary,
+$80,000 spend, $200,000 taxable, 0% growth/inflation. Old (buggy) final
+balance: $180,000 (two premature $30,000 payments swept in as
+surplus). Correct: $120,000. **Fixed:** a new
+`jason_pension_start_age = jason_age + timeline.jason_years_to_retire`
+gates `year_pen` to `age >= jason_pension_start_age` — pension only
+pays once Jason has actually reached his own selected retirement age,
+independent of when the withdrawal loop itself started.
+
+**P1 — The age-55 bridge-job/kids-at-home spending phases were
+entirely absent.** `run_retirement_projection`'s own `if ret_age ==
+55:` branch (bridge income covering healthcare net of a bridge job,
+family healthcare while kids are still home, then the normal
+pre-/post-Medicare split) had no analog in the new function at all —
+every household saw the plain default formula regardless of age.
+Reproduction: both spouses at 55 retiring simultaneously (zero phase-2
+years), $80,000 spend, $30,000/yr bridge income for 5 years, $200,000
+taxable. Existing single-axis tool's year-1 balance: $150,000. The new
+function's (buggy) year-1 balance: $120,000 — the bridge offset was
+silently dropped. **Fixed:** the same branch, ported verbatim (same
+formulas, same four sub-phases), gated on `jason_ret_age == 55` and
+anchored to `timeline.jason_years_to_retire` rather than
+`phase2_years` — this spending phase is inherently pegged to *Jason's
+own* retirement date (`bridge_years_55`/`kids_years_at_home_55` are
+"years since Jason retired" concepts), which is not always the same
+year the withdrawal loop itself starts (phase2_start can be earlier,
+when Justin retires first). A direct parity test now calls both
+functions on the same inputs and asserts identical
+`portfolio_balance` for the first three years, not just this
+function's own arithmetic in isolation.
+
+**P2 — "Portfolio Draw" column showed net spending need, not the
+actual withdrawal.** `TwoAgeScenario.jsx` displayed `row.draw` (need
+minus guaranteed income, before withdrawal-order/tax mechanics) in a
+column implying it was the real amount leaving the portfolio. An
+$80,000 need funded from pretax accounts can mean $88,889 actually
+withdrawn once grossed up for tax. **Fixed:** the column now displays
+`row.withdrawal` (the real total from `simulate_withdrawal_year`,
+already computed and returned by the API, just not read by the UI) and
+is relabeled "Withdrawal" instead of "Portfolio Draw."
+
+**P2 — Stale results stayed on screen after editing either age, and a
+failed rerun kept the old result with no indication it no longer
+matched the inputs.** **Fixed:** `result` is cleared immediately when
+either age input changes, and at the start of every run (success or
+failure) rather than only replaced on success — so a displayed result
+can never outlive the inputs that produced it. The summary card now
+also states the exact ages the displayed result corresponds to, read
+from the API response (`result.jason_ret_age`/`justin_ret_age`) rather
+than the current input state, so a result can't be silently mislabeled
+if the inputs changed again while a request was still in flight.
+
+New backend tests: `TestPensionGatedToJasonsOwnRetirement` (2 cases)
+and `TestAge55BridgeAndKidsRulesPreserved` (2 cases, one a direct
+parity check against `run_retirement_projection`) in
+`test_two_dimensional_retirement.py`. New frontend tests: withdrawal-
+vs-draw display, the age-pair label, stale-result clearing on both an
+age edit and a failed rerun — 4 new cases in `TwoAgeScenario.test.jsx`.
+
+**Verified:** full backend suite, 1141 passed, 97.44% coverage (was
+1135 immediately after section 19's calculation-engine commit — the 4
+new backend tests plus the API/UI commits' own tests account for the
+rest of the difference already reflected in that commit's own count).
+Frontend: 28 passed (was 24). Production build succeeds. Sensitive-data
+check passed. Branch: `codex/two-dimensional-retirement` — still
+**not merged**, per the same instruction, for continued review.
