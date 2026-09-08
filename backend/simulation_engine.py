@@ -14,6 +14,7 @@ from projection_engine import (
     _fv, _fv_annuity, _fv_annuity_monthly, _rmd, pension_for_age, rmd_start_age,
     _split_life_events, _post_retirement_year_effects, _post_retirement_asset_sale_events,
     justin_years_to_retire_for, justin_gap_income_inputs, justin_gap_income_for_year,
+    SECOND_EARNER_NET_OF_TAX_FACTOR,
 )
 from annual_engine import (AccountState, DEFAULT_ORDER, ROTH_FIRST_ORDER, marginal_bracket_tax_model, no_tax_model,
                            simulate_conversion, simulate_withdrawal_year)
@@ -669,6 +670,16 @@ def run_swr_analysis(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_t
         "retirement_age":            ret_age,
         "ss_timing":                 ss_timing,
         "hit_search_limit":          hit_search_limit,
+        # Second-earner gap income visibility (backlog P1,
+        # CALCULATION_CONTRACT.md section 16): this loop applies it
+        # inside the withdrawal math (folded into event_monthly, see
+        # section 15) without ever surfacing WHY the number moved. Same
+        # "first year, today's-dollars-grown-to-start" convention as
+        # pension_annual/jason_ss_annual above — SWR has no per-year
+        # schedule for ANY income source to attach a full series to.
+        "justin_gap_income_first_year": round(justin_gap_income_at_start),
+        "justin_gap_years":          justin_gap_years,
+        "second_earner_net_of_tax_factor": SECOND_EARNER_NET_OF_TAX_FACTOR,
     }
 
 
@@ -833,6 +844,15 @@ def run_monte_carlo(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_ti
         "median_depletion_age": depletion_age,
         "simulations": N,
         "chart": chart,
+        # Second-earner gap income visibility (backlog P1,
+        # CALCULATION_CONTRACT.md section 16) — same convention as SWR's
+        # own new fields: this figure is deterministic (doesn't vary by
+        # trial), so it's a single first-year/duration summary, not a
+        # per-trial series. Monte Carlo has no per-year schedule for ANY
+        # income source to attach a full series to either.
+        "justin_gap_income_first_year": round(justin_gap_income_at_start),
+        "justin_gap_years": justin_gap_years,
+        "second_earner_net_of_tax_factor": SECOND_EARNER_NET_OF_TAX_FACTOR,
     }
 
 
@@ -1034,6 +1054,14 @@ def run_stress_tests(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_t
         "retirement_end_age": end_age,
         "ss_timing": ss_timing,
         "scenarios": results,
+        # Second-earner gap income visibility (backlog P1,
+        # CALCULATION_CONTRACT.md section 16) — same convention as Monte
+        # Carlo's own new fields, shared across every named scenario
+        # below (the gap-income figure itself doesn't vary by scenario,
+        # only the market-return sequence does).
+        "justin_gap_income_first_year": round(justin_gap_income_at_start),
+        "justin_gap_years": justin_gap_years,
+        "second_earner_net_of_tax_factor": SECOND_EARNER_NET_OF_TAX_FACTOR,
     }
 
 def run_roth_conversion_analysis(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_timing: str = "early",
@@ -1304,6 +1332,13 @@ def run_roth_conversion_analysis(inputs: Dict, accounts: List[Dict], ret_age: in
             # a schedule row is NOT a fully-funded trajectory if this is
             # nonzero, regardless of how healthy the balances look.
             "unmet_need":         round(base_result.unmet_need),
+            # Second-earner gap income visibility (backlog P1,
+            # CALCULATION_CONTRACT.md section 16) — this loop already has
+            # a per-year schedule and already computes `income` via the
+            # shared builder (see section 15), so it gets a real per-year
+            # field, same name as run_retirement_projection's own
+            # yearly_detail.
+            "justin_gap_income":  round(income.justin_gap_income),
         })
 
         pretax  = pretax_after
@@ -1397,6 +1432,7 @@ def run_roth_conversion_analysis(inputs: Dict, accounts: List[Dict], ret_age: in
         "rmd_start_age":          RMD_START_AGE,
         "total_unmet_need":       round(sum(s["unmet_need"] for s in schedule)),
         "any_unmet_need":         any(s["unmet_need"] > 0 for s in schedule),
+        "second_earner_net_of_tax_factor": SECOND_EARNER_NET_OF_TAX_FACTOR,
     }
 
 def _cash_available_offsets_need(year_need, guaranteed_income, life_event_cash, life_event_monthly):
@@ -1823,6 +1859,14 @@ def run_tax_efficiency_simulation(inputs: Dict, accounts: List[Dict], ret_age: i
         },
         "best_strategy_tax": best_tax,
         "simulations": N,
+        # Second-earner gap income visibility (backlog P1,
+        # CALCULATION_CONTRACT.md section 16) — shared by all 3
+        # strategies above (computed once, before they branch — see
+        # section 15), so it's surfaced once here rather than repeated
+        # inside each strategy's own dict.
+        "justin_gap_income_first_year": round(justin_gap_income_at_start),
+        "justin_gap_years": justin_gap_years,
+        "second_earner_net_of_tax_factor": SECOND_EARNER_NET_OF_TAX_FACTOR,
     }
 
 
@@ -1956,6 +2000,43 @@ def run_contribution_sensitivity(inputs: Dict, accounts: List[Dict], ret_age: in
     }
 
 
+def _minimum_survivor_funding(net_needs: List[float], post_ret: float) -> float:
+    """Minimum non-negative starting capital that funds every year of a
+    dated, signed cash-flow sequence, replaying the same spend-then-grow
+    order the shared annual engine uses (independent review,
+    2026-09-08, sixth pass -- CALCULATION_CONTRACT.md section 18).
+
+    `net_needs[i]` is that year's UNFLOORED (need - guaranteed) figure --
+    positive means a real shortfall to fund, negative means a real
+    surplus (e.g. Justin's gap wages exceeding spending) that reduces
+    what must be funded *for that year*, but a surplus in a later year
+    can never retroactively cover an earlier year's shortfall, because
+    the money simply isn't available yet at that point in the timeline.
+
+    Solved by backward substitution: walk the years in reverse, and at
+    each step compute the capital that must exist at the START of that
+    year to (a) cover its own net need immediately -- funds are spent
+    before that year's growth is applied, matching
+    simulate_withdrawal_year's own order, so the first year in the
+    sequence must be entirely undiscounted -- and (b) still leave enough,
+    after one year of growth, to cover everything required from the
+    years after it:
+
+        required = max(0, net_need + required_from_later_years / (1 + post_ret))
+
+    The max(0, ...) at each step is what prevents an early surplus from
+    "spending forward" into a later shortfall: once a year's own need is
+    covered, any leftover from later requirements is dropped, not carried
+    backward past that point either -- each year is only ever asked to
+    hold what the years at-or-after it still need, discounted to its own
+    start.
+    """
+    required = 0.0
+    for net_need in reversed(net_needs):
+        required = max(0.0, net_need + required / (1 + post_ret))
+    return required
+
+
 def run_survivor_scenario(inputs: Dict, accounts: List[Dict], ret_age: int = 60,
                            deceased: str = "jason", death_age: int = None,
                            survivor_need_factor: float = 0.75,
@@ -1980,8 +2061,38 @@ def run_survivor_scenario(inputs: Dict, accounts: List[Dict], ret_age: int = 60,
     life_events/surplus_allocations: threaded through to
     run_retirement_projection below for the pre-death baseline portfolio
     only; both default to None/no-op.
+
+    **Second-earner gap income — explicit timing contract** (backlog P2,
+    CALCULATION_CONTRACT.md section 16): justin_gap_years/
+    justin_gap_income_at_start are computed ONCE, from the household's
+    original withdrawal timeline (`years_to_ret = max(0, ret_age -
+    jason_age)`, the same scenario-relative window every other consumer
+    uses) — death does not shift or reset this window. Concretely:
+    - `deceased == "jason"` (Justin survives): gap income applies for
+      each survivor-schedule year `age` (Jason-age terms) where
+      `age - timeline.effective_start_age < justin_gap_years` — i.e.
+      exactly the years that would have been gap-income years in the
+      pre-death baseline, restricted to the years AFTER death (the
+      schedule already starts at `death_jason_age + 1`, never the death
+      year itself — see the loop's own comment on that boundary). If
+      Justin's own gap window ends before death, or death happens after
+      Justin has already retired, gap income is 0 for the entire
+      survivor schedule — there's no year left in the window to apply
+      it to.
+    - `deceased == "justin"`: gap income is 0 for every year, full stop
+      — Justin's income doesn't exist once he's the one who died,
+      regardless of where death falls relative to his own gap window.
+    - An already-past `ret_age` selection (household older than the
+      selected scenario age) still uses `timeline.effective_start_age`
+      (the real current age, not the fictional selected one) as the
+      window's anchor — same past-ret_age correction every other
+      consumer already applies, so the gap window's start doesn't shift
+      just because a stale ret_age was picked.
+    See `TestRunSurvivorScenario`'s gap-income tests for hand-calculated
+    cases covering Justin dying before/during/after his own gap window,
+    and a past-selected-ret_age scenario.
     """
-    from projection_engine import run_retirement_projection, _pv_annuity
+    from projection_engine import run_retirement_projection
 
     jason_age  = inputs["jason_age"]
     justin_age = inputs["justin_age"]
@@ -2080,6 +2191,14 @@ def run_survivor_scenario(inputs: Dict, accounts: List[Dict], ret_age: int = 60,
     income_need_at_death = income_today * ((1 + inflation) ** years_since_today) * survivor_need_factor
 
     schedule = []
+    # Signed, UNFLOORED net need per year (need - guaranteed, before the
+    # max(0, ...) that produces the displayed `draw`) — a negative value
+    # is a real savings surplus that year. Collected alongside `schedule`
+    # so additional_insurance_needed below can compute minimum funding
+    # from the exact same ordered cash flows, without the flooring that
+    # silently discarded wage surpluses (backlog P1, CALCULATION_CONTRACT.md
+    # section 18).
+    net_needs = []
     bal = starting_balance
     depleted_age = None
     # The baseline's death_row["portfolio_balance"] is an END-OF-YEAR
@@ -2117,6 +2236,7 @@ def run_survivor_scenario(inputs: Dict, accounts: List[Dict], ret_age: int = 60,
         )
         need -= gap_income_this_year
         draw       = max(0, need - guaranteed)
+        net_needs.append(need - guaranteed)  # unfloored -- see net_needs' own comment above
         # Catch the edge case where the portfolio is already at (or below)
         # zero going into this year and there's still a real gap to cover —
         # without this check, a starting_balance of 0 never triggers the
@@ -2151,7 +2271,14 @@ def run_survivor_scenario(inputs: Dict, accounts: List[Dict], ret_age: int = 60,
             order=("taxable",),
         )
         bal_after = result.closing.total()
-        schedule.append({"age": age, "starting_balance": round(bal), "draw": round(draw), "ending_balance": round(bal_after)})
+        # Second-earner gap income visibility (backlog P1,
+        # CALCULATION_CONTRACT.md section 16): this loop already has a
+        # per-year schedule, so it gets a real per-year field, same name
+        # as run_retirement_projection's own yearly_detail — 0 whenever
+        # deceased == "justin" (see gap_income_this_year's own gating
+        # above), not just omitted.
+        schedule.append({"age": age, "starting_balance": round(bal), "draw": round(draw),
+                          "ending_balance": round(bal_after), "justin_gap_income": round(gap_income_this_year)})
         if bal_after <= 0 and depleted_age is None and bal > 0:
             depleted_age = age
         bal = bal_after
@@ -2160,16 +2287,51 @@ def run_survivor_scenario(inputs: Dict, accounts: List[Dict], ret_age: int = 60,
 
     additional_insurance_needed = 0
     if not survives:
-        # Day-one (pre-COLA) guaranteed figure — same today's-dollars
-        # approximation this capitalized-need estimate already made
-        # before the death-year-boundary fix above.
-        guaranteed_day_one = pension_annual + survivor_ss_annual
-        net_need  = max(0, income_need_at_death - guaranteed_day_one)
-        real_rate = ((1 + post_ret) / (1 + inflation) - 1) if post_ret != inflation else 0.0001
-        # Years remaining is now end_age - (death_jason_age + 1), matching
-        # the loop's actual range above (the death year itself is no
-        # longer part of the survivor's own spending window).
-        cap_need  = _pv_annuity(net_need, real_rate, end_age - death_jason_age - 1)
+        # Capitalize the SAME dated cash flows the survivor simulation
+        # loop above actually used (backlog P1, CALCULATION_CONTRACT.md
+        # section 17) — each year's real `draw` from `schedule`, which
+        # already reflects justin_gap_income (its exact end date and
+        # salary_growth_pct escalation), the survivor_need_factor
+        # scaling, and every other year-to-year variation in need — NOT
+        # a flat constant-real-annuity approximation. That approximation
+        # (previously `_pv_annuity(net_need, real_rate, ...)`, net_need
+        # a single day-one figure with no gap income subtracted at all)
+        # silently ignored gap income entirely: a household with real
+        # future wages between death and the working spouse's own
+        # retirement reported the IDENTICAL insurance need as a
+        # household with no such income, understating the fix by
+        # exactly the capitalized value of those missing wages
+        # (independent review, 2026-09-08 — reproduced: $100K spend/
+        # 75% survivor factor/$100K Justin salary through 65/$135K
+        # taxable/0% everything gave $574,663 either way; the correct,
+        # dated-cash-flow answer is $315,000).
+        #
+        # Two further findings from the same review, both fixed here
+        # (CALCULATION_CONTRACT.md section 18):
+        #
+        # 1. The engine spends BEFORE applying that year's growth
+        #    (simulate_withdrawal_year's own convention, matched above) —
+        #    the first survivor year's need must be funded immediately,
+        #    not discounted by one extra year as a naive
+        #    sum(draw[i]/(1+post_ret)**(i+1)) does. Reproduced: a single
+        #    survivor year, $75,000 need, 10% return -- the discounted
+        #    formula asked for only $68,182, which still leaves
+        #    survives=False when actually injected as the payout.
+        # 2. Using the FLOORED `draw` (not the signed, unfloored net
+        #    need) discarded real wage surpluses the simulator itself
+        #    preserves as savings -- overstating the funding required for
+        #    later years. Reproduced: Justin's wages exceed spending in
+        #    the first survivor year by $55,000; the correct answer
+        #    ($65,000) is $55,000 less than what flooring produced
+        #    ($120,000).
+        #
+        # _minimum_survivor_funding solves both by replaying the exact
+        # ordered, signed cash flows via backward substitution (see its
+        # own docstring) rather than a flat sum in either direction —
+        # this also correctly refuses to let a LATER surplus retroactively
+        # fund an EARLIER shortfall, which a full-horizon signed sum alone
+        # would get wrong.
+        cap_need = _minimum_survivor_funding(net_needs, post_ret)
         additional_insurance_needed = max(0, round(cap_need - starting_balance))
 
     if survives:
@@ -2205,4 +2367,19 @@ def run_survivor_scenario(inputs: Dict, accounts: List[Dict], ret_age: int = 60,
         "additional_insurance_needed": additional_insurance_needed,
         "recommendation": recommendation,
         "schedule": schedule[::2],
+        # Second-earner gap income visibility (backlog P1/P2,
+        # CALCULATION_CONTRACT.md section 16) — the factor is the same
+        # everywhere it's used; surfaced once here for the UI/docs,
+        # matching every other consumer's own new field of this name.
+        "second_earner_net_of_tax_factor": SECOND_EARNER_NET_OF_TAX_FACTOR,
+        # Explicit remaining-gap-income duration (backlog P2,
+        # CALCULATION_CONTRACT.md section 18): counted from the FULL
+        # per-year `schedule` list above (not the [::2] sampling applied
+        # just above for `schedule` itself) — a frontend deriving "years
+        # remaining" by filtering the SAMPLED schedule for
+        # justin_gap_income > 0 undercounts by roughly half whenever the
+        # gap spans more than one displayed row (independent review,
+        # 2026-09-08 — reproduced: wages continuing at ages 61-64 sampled
+        # down to just 61 and 63, reporting "2 more years" instead of 4).
+        "justin_gap_income_years_remaining": sum(1 for row in schedule if row["justin_gap_income"] > 0),
     }

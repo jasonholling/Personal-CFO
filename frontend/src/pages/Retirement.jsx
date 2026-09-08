@@ -6,6 +6,7 @@ import { usePersonNames } from '../hooks/usePersonNames'
 import { useScenario } from '../hooks/useScenario'
 import { nearestOf } from '../utils/scenario'
 import { isPrivacyMode, MASK_CURRENCY } from '../utils/privacy'
+import SecondEarnerNote from '../components/SecondEarnerNote'
 
 const NAVY = '#5C7CE0' // was #1B3A6B — nearly the same luminance as the dark card background, effectively invisible
 
@@ -142,6 +143,9 @@ export default function Retirement({ onNavigate }) {
           <div className="label">Portfolio at Retirement</div>
           <div className="number-lg" style={{ color:'var(--accent)', marginTop:8 }}>{fmtK(s.portfolio_at_retirement)}</div>
           <div style={{ fontSize:12, color:'var(--text2)', marginTop:4 }}>From {fmtK(s.current_investable_assets)} today</div>
+          <SecondEarnerNote amount={s.yearly_detail?.[0]?.justin_gap_income}
+                             years={s.yearly_detail?.filter(y => y.justin_gap_income > 0).length}
+                             factor={s.second_earner_net_of_tax_factor} personLabel={person2Name} />
         </div>
         <div className="card">
           <div className="label">Projected Surplus</div>

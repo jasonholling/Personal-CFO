@@ -971,6 +971,171 @@ class TestWithdrawalWaterfallReconciliationFixes:
 
 
 class TestRunSurvivorScenario:
+    def test_additional_insurance_needed_reflects_gap_income(self, sample_accounts):
+        """Backlog P1 (CALCULATION_CONTRACT.md section 17), independent
+        review finding, 2026-09-08: additional_insurance_needed used to
+        capitalize a flat constant-real-annuity approximation
+        (_pv_annuity(net_need, real_rate, ...)) that never subtracted
+        gap income at all -- a household with real future wages between
+        death and the working spouse's own retirement reported the
+        IDENTICAL insurance need as a household with no such income.
+        Fixed: capitalizes the SAME dated per-year `draw` values
+        (already correctly gap-income-adjusted) the survivor schedule
+        itself used, discounted at the nominal post_ret rate.
+
+        Exact reproduction, hand-calculated by the reviewer: both
+        spouses 60, ret_age 60, Jason dies at 60 (schedule starts at
+        61), horizon 70 (exclusive) -- $100K annual household spending,
+        75% survivor factor, 0% returns/inflation/pension/SS/insurance
+        payout, Justin salary $100K/retirement 65 (net $65K/yr through
+        64), $135K starting taxable. Years 61-64 need $10K/yr
+        ($75K survivor need - $65K wages); years 65-69 need $75K/yr
+        (wages gone). Total need = 4*10000 + 5*75000 = $415,000; minus
+        the $100K available at death = exactly $315,000 -- not the old
+        formula's $574,663, which was identical regardless of whether
+        gap income existed at all."""
+        inputs = {
+            "jason_age": 60, "justin_age": 60,
+            "retirement_income_today_dollars": 100000, "inflation_rate": 0.0,
+            "expected_return_pre_retirement": 0.0, "expected_return_post_retirement": 0.0,
+            "jason_social_security": 0, "jason_ss_delayed": 0, "justin_social_security": 0,
+            "jason_ss_age": 62, "justin_ss_age": 67,
+            "annual_401k_contribution": 0, "annual_roth_contribution": 0, "annual_hsa_contribution": 0,
+            "annual_rsu_value": 0, "annual_bonus_pct": 0, "mortgage_balance": 0,
+            "retirement_end_age": 70,
+            "justin_w2_salary": 100000, "justin_ret_age": 65,
+        }
+        accounts = [{"name": "Brokerage", "account_type": "taxable", "owner": "joint", "balance": 135000}]
+        result = run_survivor_scenario(inputs, accounts, ret_age=60, deceased="jason", death_age=60,
+                                        survivor_need_factor=0.75)
+        assert result["survives"] is False
+        assert result["starting_balance_after_payout"] == 100000
+        assert result["additional_insurance_needed"] == 315000
+
+        # Reconstruct exactly what the OLD (pre-fix) flat-annuity formula
+        # would have produced from this same result's own reported
+        # figures, to demonstrate precisely what the bug dropped: it
+        # never subtracted gap income from net_need at all, so it always
+        # capitalized the full $75,000/yr need for all 9 years
+        # regardless of Justin's real future wages.
+        from projection_engine import _pv_annuity
+        net_need = result["income_need_at_death"]  # no gap income subtracted -- the bug
+        real_rate = 0.0001  # post_ret == inflation == 0 here, so the fallback applies
+        years = 70 - 60 - 1  # end_age - death_jason_age - 1, same as the old code
+        old_buggy_value = max(0, round(_pv_annuity(net_need, real_rate, years) - result["starting_balance_after_payout"]))
+        assert old_buggy_value == 574663  # matches the independent review's own reported old value
+        assert result["additional_insurance_needed"] < old_buggy_value
+        assert old_buggy_value - result["additional_insurance_needed"] == pytest.approx(259663, abs=1)
+
+    def test_additional_insurance_needed_does_not_discount_first_year(self):
+        """Backlog P1 (CALCULATION_CONTRACT.md section 18), independent
+        review, 2026-09-08, sixth pass: the section-17 fix's
+        `cap_need = sum(row["draw"] / (1+post_ret)**(i+1) ...)` discounted
+        the FIRST survivor year by one extra year it shouldn't have --
+        the shared annual engine (simulate_withdrawal_year) spends BEFORE
+        applying that year's growth, so the first year's need must be
+        funded immediately, undiscounted.
+
+        Exact reproduction, hand-calculated by the reviewer: both spouses
+        60, Jason dies at 60 (schedule starts at 61), horizon 62
+        (exclusive) -- one survivor year only. $100K spend, 75% survivor
+        factor, 0% everything except a 10% post-retirement return, zero
+        assets. The only year requires $75,000 immediately -- the old
+        (buggy) discounted formula asked for only $68,182
+        ($75,000 / 1.10), which still leaves the plan depleted if actually
+        injected as the payout."""
+        inputs = {
+            "jason_age": 60, "justin_age": 60,
+            "retirement_income_today_dollars": 100000, "inflation_rate": 0.0,
+            "expected_return_pre_retirement": 0.0, "expected_return_post_retirement": 0.10,
+            "jason_social_security": 0, "jason_ss_delayed": 0, "justin_social_security": 0,
+            "jason_ss_age": 62, "justin_ss_age": 67,
+            "annual_401k_contribution": 0, "annual_roth_contribution": 0, "annual_hsa_contribution": 0,
+            "annual_rsu_value": 0, "annual_bonus_pct": 0, "mortgage_balance": 0,
+            "retirement_end_age": 62,
+        }
+        accounts = [{"name": "Brokerage", "account_type": "taxable", "owner": "joint", "balance": 0}]
+        result = run_survivor_scenario(inputs, accounts, ret_age=60, deceased="jason", death_age=60,
+                                        survivor_need_factor=0.75)
+        assert result["survives"] is False
+        assert result["starting_balance_after_payout"] == 0
+        assert result["additional_insurance_needed"] == 75000
+        old_buggy_value = round(75000 / 1.10)
+        assert old_buggy_value == 68182  # matches the independent review's own reported old value
+        assert result["additional_insurance_needed"] > old_buggy_value
+
+        # Inject the recommendation and replay: verifies it actually funds
+        # the year, not just that the formula changed. round() can
+        # underfund by up to $0.50, so a $1 buffer is added -- the exact
+        # rounded recommendation alone lands exactly on a $0 ending
+        # balance, which this codebase's own depleted-portfolio check
+        # (bal_after <= 0) treats as "did not survive," same as it would
+        # for any minimum-funding recommendation that (by definition)
+        # spends the portfolio down to exactly zero in its final year.
+        funded_inputs = {**inputs, "jason_life_basic": result["additional_insurance_needed"] + 1}
+        funded = run_survivor_scenario(funded_inputs, accounts, ret_age=60, deceased="jason", death_age=60,
+                                        survivor_need_factor=0.75)
+        assert funded["survives"] is True
+        assert funded["depleted_age"] is None
+        assert all(row["ending_balance"] >= 0 for row in funded["schedule"])
+
+    def test_additional_insurance_needed_credits_wage_surplus_without_borrowing_from_the_future(self):
+        """Backlog P1 (CALCULATION_CONTRACT.md section 18), independent
+        review, 2026-09-08, sixth pass: the section-17 fix summed
+        `row["draw"]`, which is floored at zero, discarding real wage
+        surpluses the simulator itself preserves as savings -- and a
+        naive signed full-horizon sum would have the opposite defect,
+        letting a LATER surplus retroactively fund an EARLIER shortfall
+        that the year-by-year simulation would never actually allow.
+
+        Exact reproduction, hand-calculated by the reviewer: both
+        spouses 60, selected retirement/death age 60 (schedule starts at
+        61), horizon 64 (exclusive) -- 3 survivor years (61, 62, 63).
+        $100K household spend, 75% survivor factor, zero starting
+        assets/returns/inflation/pension/SS, Justin salary $200,000 until
+        his own retirement at 62 (net wages at the 65% factor =
+        $130,000/yr while working). Death-year baseline saves $30,000
+        (that's starting_balance_after_payout, from the pre-death
+        projection). Survivor year 61 saves another $55,000 ($130,000
+        wages - $75,000 spend); years 62-63 each need $75,000 once wages
+        stop = $150,000. Required extra funding: $150,000 - $55,000
+        surplus - $30,000 already on hand = $65,000. The old (buggy)
+        floored-draw sum instead reported $120,000, silently dropping the
+        $55,000 wage surplus entirely."""
+        inputs = {
+            "jason_age": 60, "justin_age": 60,
+            "retirement_income_today_dollars": 100000, "inflation_rate": 0.0,
+            "expected_return_pre_retirement": 0.0, "expected_return_post_retirement": 0.0,
+            "jason_social_security": 0, "jason_ss_delayed": 0, "justin_social_security": 0,
+            "jason_ss_age": 62, "justin_ss_age": 67,
+            "annual_401k_contribution": 0, "annual_roth_contribution": 0, "annual_hsa_contribution": 0,
+            "annual_rsu_value": 0, "annual_bonus_pct": 0, "mortgage_balance": 0,
+            "retirement_end_age": 64,
+            "justin_w2_salary": 200000, "justin_ret_age": 62,
+        }
+        accounts = [{"name": "Brokerage", "account_type": "taxable", "owner": "joint", "balance": 0}]
+        result = run_survivor_scenario(inputs, accounts, ret_age=60, deceased="jason", death_age=60,
+                                        survivor_need_factor=0.75)
+        assert result["survives"] is False
+        assert result["starting_balance_after_payout"] == 30000
+        assert result["additional_insurance_needed"] == 65000
+        old_buggy_value = 120000  # matches the independent review's own reported old value
+        assert result["additional_insurance_needed"] < old_buggy_value
+        assert old_buggy_value - result["additional_insurance_needed"] == 55000
+
+        # Inject the recommendation (plus a $1 rounding buffer, same
+        # reasoning as the sibling test above) and replay year-by-year:
+        # every year's ending balance must be non-negative, proving the
+        # early wage surplus was correctly credited without letting the
+        # later, wage-free years borrow against income that hadn't
+        # existed yet at that point in the timeline.
+        funded_inputs = {**inputs, "jason_life_basic": result["additional_insurance_needed"] + 1}
+        funded = run_survivor_scenario(funded_inputs, accounts, ret_age=60, deceased="jason", death_age=60,
+                                        survivor_need_factor=0.75)
+        assert funded["survives"] is True
+        assert funded["depleted_age"] is None
+        assert all(row["ending_balance"] >= 0 for row in funded["schedule"])
+
     def test_returns_has_data_true_for_valid_scenario(self, sample_inputs, sample_accounts):
         result = run_survivor_scenario(sample_inputs, sample_accounts, ret_age=60, deceased="jason", death_age=70)
         assert result["has_data"] is True
@@ -993,6 +1158,56 @@ class TestRunSurvivorScenario:
         # working gap through age 65) should show a smaller draw with
         # gap income present.
         assert with_gap["schedule"][0]["draw"] < without_gap["schedule"][0]["draw"]
+
+    def test_gap_income_timing_contract_death_before_justins_retirement(self, sample_inputs, sample_accounts):
+        """Hand-calculated (backlog P2, CALCULATION_CONTRACT.md section
+        16): jason_age=justin_age=60, ret_age=60 (years_to_retire=0),
+        justin_w2_salary=100000, justin_ret_age=65 -> justin_gap_years=5,
+        gap_income_at_start=100000*0.65*(1+0)**0=65000 flat (default
+        salary_growth_pct=0). Death at 61 -> survivor schedule starts at
+        62; 62-60=2 < 5, still well within Justin's own working window."""
+        inputs = {**sample_inputs, "jason_age": 60, "justin_age": 60,
+                  "justin_w2_salary": 100000, "justin_ret_age": 65}
+        result = run_survivor_scenario(inputs, sample_accounts, ret_age=60, deceased="jason", death_age=61)
+        row = next(r for r in result["schedule"] if r["age"] == 62)
+        assert row["justin_gap_income"] == 65000
+
+    def test_gap_income_timing_contract_death_during_ends_exactly_at_retirement(self, sample_inputs, sample_accounts):
+        """Same household, death at 64 -> schedule starts at 65;
+        65-60=5, NOT < 5 -- gap income must be exactly 0 starting this
+        very year, even though death happened WHILE Justin was still
+        mid-gap (64 < 65)."""
+        inputs = {**sample_inputs, "jason_age": 60, "justin_age": 60,
+                  "justin_w2_salary": 100000, "justin_ret_age": 65}
+        result = run_survivor_scenario(inputs, sample_accounts, ret_age=60, deceased="jason", death_age=64)
+        row = next(r for r in result["schedule"] if r["age"] == 65)
+        assert row["justin_gap_income"] == 0
+
+    def test_gap_income_timing_contract_death_after_justins_retirement(self, sample_inputs, sample_accounts):
+        """Same household, death at 70 -- well after Justin's own
+        retirement at 65. Every year of the survivor schedule must show
+        0, not just the first."""
+        inputs = {**sample_inputs, "jason_age": 60, "justin_age": 60,
+                  "justin_w2_salary": 100000, "justin_ret_age": 65}
+        result = run_survivor_scenario(inputs, sample_accounts, ret_age=60, deceased="jason", death_age=70)
+        assert all(row["justin_gap_income"] == 0 for row in result["schedule"])
+
+    def test_gap_income_timing_contract_past_selected_retirement_age(self, sample_inputs, sample_accounts):
+        """Hand-calculated past-ret_age case: household is actually 65
+        (jason_age=justin_age=65) but selects the already-past ret_age=55
+        -- timeline.effective_start_age must anchor to the REAL current
+        age (65), not the stale selection, same correction every other
+        consumer already applies. justin_ret_age=70 ->
+        justin_years_to_retire=5, years_to_retire=max(0,55-65)=0 ->
+        gap_years=5, gap_income_at_start=100000*0.65=65000 flat. Death at
+        67 -> schedule starts at 68; 68-65=3 < 5, gap income applies --
+        this only comes out right if the window anchored to 65, not 55
+        or some other value."""
+        inputs = {**sample_inputs, "jason_age": 65, "justin_age": 65,
+                  "justin_w2_salary": 100000, "justin_ret_age": 70}
+        result = run_survivor_scenario(inputs, sample_accounts, ret_age=55, deceased="jason", death_age=67)
+        row = next(r for r in result["schedule"] if r["age"] == 68)
+        assert row["justin_gap_income"] == 65000
 
     def test_gap_income_does_not_apply_when_justin_is_deceased(self, sample_inputs, sample_accounts):
         """The other selection path: deceased='justin' means Justin's own
@@ -1333,3 +1548,117 @@ class TestSecondEarnerGapIncomeZeroImpactAcrossAllConsumers:
         a = run_survivor_scenario(sample_inputs, sample_accounts, ret_age=60, deceased="jason", death_age=70)
         b = run_survivor_scenario(self._explicit_defaults(sample_inputs), sample_accounts, ret_age=60, deceased="jason", death_age=70)
         assert a["schedule"] == b["schedule"]
+
+
+class TestSecondEarnerGapIncomePublicOutputParityAcrossAllConsumers:
+    """Backlog P1 (CALCULATION_CONTRACT.md section 16): the strongest
+    regression compares COMPLETE public outputs across all 6 withdrawal-
+    phase consumers for the same deterministic household -- not just the
+    unit-level parity tests against each consumer's own internal helper
+    (_swr_year_step, _cash_available_offsets_need). One fixed household,
+    one fixed gap-income configuration, checked at the public-API level:
+    the displayed income field itself must be numerically identical
+    everywhere it's surfaced (same formula, same inputs), and each
+    consumer's own headline balance/unmet-need/success-rate metric must
+    move in the expected direction with gap income present vs. absent."""
+
+    HOUSEHOLD = {
+        "jason_age": 60, "justin_age": 60,
+        # Modest spending + a shorter horizon than sample_accounts' own
+        # ~$870K would otherwise fully deplete under 0% returns -- the
+        # headline-metric-direction test needs both the with- and
+        # without-gap runs to land on a REAL nonzero balance, not both
+        # floored at 0 (which would compare equal regardless of gap
+        # income and prove nothing).
+        "retirement_income_today_dollars": 30000, "inflation_rate": 0.02,
+        "expected_return_pre_retirement": 0.0, "expected_return_post_retirement": 0.0,
+        "jason_social_security": 0, "jason_ss_delayed": 0, "justin_social_security": 0,
+        "jason_ss_age": 62, "justin_ss_age": 67,
+        "healthcare_pre_medicare": 0, "healthcare_post_medicare": 0,
+        "pension_55": 0, "pension_60": 0, "pension_65": 0,
+        "w2_salary": 0, "annual_401k_contribution": 0, "annual_hsa_contribution": 0,
+        "annual_rsu_value": 0, "annual_bonus_pct": 0,
+        "retirement_end_age": 70,
+        "justin_w2_salary": 100000, "justin_ret_age": 65,
+    }
+
+    def test_displayed_gap_income_figure_is_identical_across_all_consumers(self, sample_accounts, monkeypatch):
+        """justin_gap_income_first_year (SWR/Monte Carlo/Stress/Tax
+        Efficiency) and the yr=0 justin_gap_income (Retirement
+        Projection/Roth Conversion, both years_to_retire=0 in this
+        household so their first schedule row IS the first withdrawal
+        year) must all report the exact same number: $65,000
+        (100000 * SECOND_EARNER_NET_OF_TAX_FACTOR, flat since
+        years_to_retire=0 and salary_growth_pct defaults to 0)."""
+        import random as random_module
+        monkeypatch.setattr(random_module, "gauss", lambda mu, sigma: 0.0)
+        inputs = self.HOUSEHOLD
+        expected = 100000 * 0.65
+
+        proj = run_retirement_projection(inputs, sample_accounts, ret_ages=[60])
+        proj_row0 = next(s for s in proj["scenarios"] if s["label"] == "age_60_early")["yearly_detail"][0]
+        assert proj_row0["justin_gap_income"] == pytest.approx(expected)
+
+        swr = run_swr_analysis(inputs, sample_accounts, ret_age=60, ss_timing="early")
+        assert swr["justin_gap_income_first_year"] == pytest.approx(expected)
+
+        mc = run_monte_carlo(inputs, sample_accounts, ret_age=60, ss_timing="early")
+        assert mc["justin_gap_income_first_year"] == pytest.approx(expected)
+
+        st = run_stress_tests(inputs, sample_accounts, ret_age=60, ss_timing="early")
+        assert st["justin_gap_income_first_year"] == pytest.approx(expected)
+
+        te = run_tax_efficiency_simulation(inputs, sample_accounts, ret_age=60, ss_timing="early")
+        assert te["justin_gap_income_first_year"] == pytest.approx(expected)
+
+        roth = run_roth_conversion_analysis(inputs, sample_accounts, ret_age=60, ss_timing="early")
+        assert roth["schedule"][0]["justin_gap_income"] == pytest.approx(expected)
+
+        survivor = run_survivor_scenario(inputs, sample_accounts, ret_age=60, deceased="jason", death_age=61)
+        survivor_row = next(r for r in survivor["schedule"] if r["age"] == 62)
+        assert survivor_row["justin_gap_income"] == pytest.approx(expected)
+
+    def test_headline_metric_moves_in_expected_direction_across_all_consumers(self, sample_accounts, monkeypatch):
+        """Balances up, unmet need down/unchanged, success rate up/
+        unchanged, withdrawal-derived figures improve -- for every one of
+        the 6 consumers, comparing this household against the same
+        household with justin_ret_age == ret_age (no gap)."""
+        import random as random_module
+        monkeypatch.setattr(random_module, "gauss", lambda mu, sigma: 0.0)
+        gap = self.HOUSEHOLD
+        no_gap = {**self.HOUSEHOLD, "justin_ret_age": 60}
+
+        proj_gap = run_retirement_projection(gap, sample_accounts, ret_ages=[60])
+        proj_no_gap = run_retirement_projection(no_gap, sample_accounts, ret_ages=[60])
+        s_gap = next(s for s in proj_gap["scenarios"] if s["label"] == "age_60_early")
+        s_no_gap = next(s for s in proj_no_gap["scenarios"] if s["label"] == "age_60_early")
+        assert s_gap["projected_surplus"] > s_no_gap["projected_surplus"]
+
+        mc_gap = run_monte_carlo(gap, sample_accounts, ret_age=60, ss_timing="early")
+        mc_no_gap = run_monte_carlo(no_gap, sample_accounts, ret_age=60, ss_timing="early")
+        assert mc_gap["median_final_balance"] > mc_no_gap["median_final_balance"]
+
+        st_gap = run_stress_tests(gap, sample_accounts, ret_age=60, ss_timing="early")
+        st_no_gap = run_stress_tests(no_gap, sample_accounts, ret_age=60, ss_timing="early")
+        assert st_gap["scenarios"]["base"]["final_balance"] > st_no_gap["scenarios"]["base"]["final_balance"]
+
+        swr_gap = run_swr_analysis(gap, sample_accounts, ret_age=60, ss_timing="early")
+        swr_no_gap = run_swr_analysis(no_gap, sample_accounts, ret_age=60, ss_timing="early")
+        assert swr_gap["safe_withdrawal_annual"] > swr_no_gap["safe_withdrawal_annual"]
+
+        te_gap = run_tax_efficiency_simulation(gap, sample_accounts, ret_age=60, ss_timing="early")
+        te_no_gap = run_tax_efficiency_simulation(no_gap, sample_accounts, ret_age=60, ss_timing="early")
+        for strategy in ("taxable_first", "roth_first", "optimal"):
+            assert te_gap["strategies"][strategy]["median_final_balance"] >= te_no_gap["strategies"][strategy]["median_final_balance"]
+
+        roth_gap = run_roth_conversion_analysis(gap, sample_accounts, ret_age=60, ss_timing="early")
+        roth_no_gap = run_roth_conversion_analysis(no_gap, sample_accounts, ret_age=60, ss_timing="early")
+        assert roth_gap["net_lifetime_benefit"] >= roth_no_gap["net_lifetime_benefit"]
+        assert roth_gap["total_unmet_need"] == 0
+        assert roth_no_gap["total_unmet_need"] == 0
+
+        surv_gap = run_survivor_scenario(gap, sample_accounts, ret_age=60, deceased="jason", death_age=61)
+        surv_no_gap = run_survivor_scenario(no_gap, sample_accounts, ret_age=60, deceased="jason", death_age=61)
+        row_gap = next(r for r in surv_gap["schedule"] if r["age"] == 62)
+        row_no_gap = next(r for r in surv_no_gap["schedule"] if r["age"] == 62)
+        assert row_gap["draw"] < row_no_gap["draw"]

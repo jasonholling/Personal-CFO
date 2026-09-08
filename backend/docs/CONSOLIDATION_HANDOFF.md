@@ -10,18 +10,35 @@ history) — it's stale as of this closing update.
 
 **2026-09-08 addendum — second-earner (Justin) gap-income feature, a
 separate follow-on effort, NOT part of the 9-item list below.** Full
-detail lives in `CALCULATION_CONTRACT.md` sections 13-15. Status: gap
+detail lives in `CALCULATION_CONTRACT.md` sections 13-18. Status: gap
 income (a working spouse's continued income offsetting withdrawal need
 during the years between the household's own withdrawal start and that
-spouse's own retirement) now reaches all 6 withdrawal-phase consumers,
-via an allocation-free shared helper
+spouse's own retirement) reaches all 6 withdrawal-phase consumers, via
+an allocation-free shared helper
 (`projection_engine.justin_gap_income_for_year`) cheap enough for SWR's
-and Tax Efficiency's performance-sensitive inner loops. **This specific
-piece of work is on an isolated branch
-(`codex/second-earner-gap-income-all-consumers`), pushed but NOT merged
-to `main`, per the explicit instruction it was built under — review
-before merging**, unlike everything else in this file which already
-merged. Four larger items remain open and correctly scoped (not
+and Tax Efficiency's performance-sensitive inner loops — that work
+(section 15) was reviewed on an isolated branch, verified, and **has
+since merged to `main`** (commit `050a6bd`). A fourth pass (section 16)
+added public-output visibility for the figure across all 6 consumers,
+a cross-consumer public-output parity test, and an explicit timing
+contract for Survivor Scenario. A fifth pass (section 17) fixed a real
+bug the earlier passes' checks never caught — Survivor's
+`additional_insurance_needed` never subtracted gap income at all, a
+separate formula from the (correct) schedule it sat next to — and
+wired the new fields into actual frontend UI (a prior pass had only
+closed the API-output half). A sixth pass (section 18) fixed two
+further real bugs in that same insurance figure found by continued
+review — an off-by-one discount on the first survivor year, and a
+floored-`draw` sum that discarded real wage surpluses — replacing the
+capitalization with a backward-substitution replay of the exact signed
+per-year cash flows; plus two P2 fixes, an explicit backend
+remaining-gap-duration field (Survivor's `schedule` is the only
+sampled schedule anywhere in the backend, which had been silently
+undercounting years in the frontend note) and privacy-mode masking for
+the note's dollar amount. **This piece is on its own isolated branch
+(`codex/second-earner-output-visibility-and-parity`), pushed but NOT
+yet merged, per the same instruction — review before merging.**
+Four larger items remain open and correctly scoped (not
 silently dropped): the two-dimensional retirement-age redesign, real
 payroll-tax modeling, an owner-attributed account ledger, and per-year
 output visibility for income offsets beyond Retirement Projection's own

@@ -1104,6 +1104,12 @@ def run_retirement_projection(inputs: Dict, accounts: List[Dict], ret_ages: List
                 "retirement_end_age":            mort_age,
                 "state_income_tax_rate":         inputs.get("state_income_tax_rate", 0),
                 "yearly_detail":                 yearly,
+                # Second-earner net-of-tax approximation transparency
+                # (backlog P2, CALCULATION_CONTRACT.md section 16) —
+                # surfaced so the UI/docs can flag that justin_gap_income
+                # (and RSU/bonus accumulation) use this flat factor, not
+                # a real payroll-tax calculation.
+                "second_earner_net_of_tax_factor": SECOND_EARNER_NET_OF_TAX_FACTOR,
             })
 
     return {"scenarios": scenarios, "generated_at": datetime.datetime.now().isoformat()}
