@@ -910,3 +910,69 @@ follow-up (section 8); two further review passes since then (section
 `main`, per this repo's no-PR workflow. Full backend suite: 1064
 passed. `CONSOLIDATION_HANDOFF.md` is superseded by this section and by
 its own closing update -- see that file for the final status.
+
+## 13. Second-earner (Justin) support — independent review, backlog (2026-09-08)
+
+The 2026-09-08 second-earner feature (justin_w2_salary/justin_ret_age/etc.,
+section 12's sibling work in projection_engine.py — see
+run_retirement_projection's own docstring) was reviewed independently.
+Verdict: **the contribution math itself is coherent** — Justin's own
+401k/RSU/bonus accumulation, capped at the earlier of his own retirement
+or the household's withdrawal start, with correct dormant-compounding
+after an early stop, checks out. Seven real gaps were found, all
+pre-existing scope limitations rather than bugs in what's actually
+implemented — logged here as backlog, not fixed yet:
+
+1. **Working spouse income is ignored after the first spouse retires.**
+   `justin_w2_salary` only creates pre-retirement contributions/assets. If
+   Jason retires at 60 and Justin works until 65, Justin's wages don't
+   reduce portfolio withdrawals, appear in guaranteed income, or affect
+   taxes during those years — this is exactly the "phased retirement, one
+   spouse still working" gap already flagged in the function's own
+   docstring and the Settings UI warning, restated here for the backlog
+   record. Justin's own contributions are also capped at Jason's
+   withdrawal start (`years_to_retire`), by the same limitation.
+2. **No symmetric case for Jason continuing to work while Justin is
+   retired.** The implementation handles Justin stopping earlier (his sum
+   sits and compounds), but there's no path for the reverse — only
+   Jason's `ret_age` ever starts the household's withdrawal phase. The
+   feature is asymmetric by construction, not by oversight, but that
+   asymmetry isn't stated anywhere as a product decision.
+3. **Second salary never appears in tax or cash-flow outputs.** Justin's
+   salary is split into Roth/pre-tax contribution amounts only — gross
+   pay, payroll taxes, withholding, and disposable income never reach
+   `cash_flow_engine.py` or any tax calculation (confirmed:
+   `justin_w2_salary` appears nowhere outside `projection_engine.py`/
+   `db.py`). The app can show a larger projected portfolio without ever
+   showing the income that funded it.
+4. **No spouse-specific pension/benefit retirement timing.**
+   `justin_ret_age` controls only his own contribution window — pension
+   and other guaranteed-income logic still key off Jason's selected
+   `ret_age` exclusively. May be an intentional product simplification,
+   but it isn't stated as one anywhere in the model contract or UI.
+5. **Aggregated account ownership stays ambiguous.** Justin's
+   contributions flow into the same household pretax/Roth totals every
+   other consumer already used (consistent with the existing aggregate
+   ledger — see section 3's material assumptions), with no owner-specific
+   contribution/account rules. Consistent with existing design, but it
+   caps survivor/tax/RMD/estate accuracy for a genuine two-earner
+   household more than it did for the one-earner case this ledger shape
+   was designed around.
+6. **`justin_ret_age = 0` reads as "independent default," isn't one.**
+   Leaving it unset makes Justin's contributions stop with Jason's
+   scenario `ret_age` — useful backward compatibility (see section 12),
+   but it's Jason's retirement date wearing Justin's field, not Justin's
+   actual plan. The UI warns about this today; worth considering whether
+   a second salary entered without an explicit `justin_ret_age` should be
+   *required* to prompt for one rather than silently falling back.
+7. **Second-earner fields aren't declared on the `PlanningInputs`
+   Pydantic model** — they persist purely because `save_planning_inputs`
+   whitelists against the live SQLite columns (see main.py's own comment
+   on `extra: allow`), the same pattern most Settings fields already use
+   (e.g. `w2_salary` itself isn't declared there either). Not a
+   functional bug, but it weakens request validation, any generated API
+   docs, and type clarity specifically for this feature.
+
+**Not scheduled yet** — revisit if/when phased-retirement or true
+per-spouse tax/cash-flow modeling becomes a real ask, per this doc's own
+standing practice of not building ahead of a specific need.
