@@ -291,6 +291,64 @@ class TestHouseholdSpendingSearchIsGenuinelyValidated:
         assert r_large["cushion_pct"] > r_small["cushion_pct"] > 0
         assert r_large["total_safe_spend"] > r_small["total_safe_spend"]
 
+    def test_unfundable_fixed_costs_report_zero_not_the_fixed_cost_itself(self, monkeypatch):
+        """Independent review, 2026-09-08, third follow-up, P1: the
+        search's lower bound started at candidate_income_today=0 WITHOUT
+        verifying that even zero discretionary spending was fundable,
+        then unconditionally added healthcare_pre (a fixed cost, held
+        constant during the search) back onto whatever boundary was
+        found. With $0 assets, $0 discretionary spending, and a $20,000
+        fixed healthcare cost, this reported $20,000 as a safe,
+        on-track recommendation -- while Projection correctly reports
+        the full $20,000 as unmet need, since nothing funds it. Now
+        verified explicitly: if even $0 discretionary spending fails,
+        there is no valid recommendation -- total_safe_spend is 0, not
+        the unfunded fixed cost."""
+        monkeypatch.setattr(random_module, "gauss", lambda mu, sigma: 0.0)
+        inputs = base_inputs(jason_age=61, justin_age=61, retirement_end_age=62,
+                              retirement_income_today_dollars=0, healthcare_pre_medicare=20000)
+        r = run_swr_analysis(inputs, TAXABLE(0), jason_ret_age=61, justin_ret_age=61, target_success=1.0)
+        assert r["total_safe_spend"] == 0
+        assert r["on_track"] is False
+        assert r["cushion_pct"] == -100.0
+
+    def test_exactly_funded_target_reports_on_track(self, monkeypatch):
+        """Independent review, 2026-09-08, third follow-up, P2: a
+        20-iteration bisection converges to WITHIN a tiny epsilon of the
+        true boundary, approaching from below -- an exactly-funded plan
+        (true boundary == target) reliably lands a hair short of it
+        (e.g. $99,999.9998, not exactly $100,000), so the old
+        `total_safe_spend >= income_target` comparison reported
+        on_track=False for a plan Projection itself confirms is fully
+        funded. $200,000 taxable, both retire now at 61, 2-year horizon,
+        $100,000/yr spending, 0% inflation/growth -- exactly funded
+        (200000 = 2*100000)."""
+        monkeypatch.setattr(random_module, "gauss", lambda mu, sigma: 0.0)
+        inputs = base_inputs(jason_age=61, justin_age=61, retirement_end_age=63,
+                              retirement_income_today_dollars=100000)
+        r = run_swr_analysis(inputs, TAXABLE(200000), jason_ret_age=61, justin_ret_age=61, target_success=1.0)
+        assert r["on_track"] is True
+        assert r["total_safe_spend"] == pytest.approx(100000, abs=1)
+        assert r["cushion_pct"] == 0.0
+
+    def test_targets_just_above_and_just_below_the_boundary(self, monkeypatch):
+        """$220,000 taxable, both retire now at 61, 2-year horizon,
+        $30,000 fixed healthcare cost, 0% inflation/growth -- the true
+        household-spending boundary (hand-verified, matches the
+        healthcare/kids-costs test above) is exactly $80,000: 2*(80000+
+        30000) = 220000. $79,999 (year totals 2*109999=219998 <=
+        220000) must be on_track; $80,001 (2*110001=220002 > 220000,
+        $2 short in year two) must not."""
+        monkeypatch.setattr(random_module, "gauss", lambda mu, sigma: 0.0)
+        just_below = base_inputs(jason_age=61, justin_age=61, retirement_end_age=63,
+                                  retirement_income_today_dollars=79999, healthcare_pre_medicare=30000)
+        just_above = base_inputs(jason_age=61, justin_age=61, retirement_end_age=63,
+                                  retirement_income_today_dollars=80001, healthcare_pre_medicare=30000)
+        r_below = run_swr_analysis(just_below, TAXABLE(220000), jason_ret_age=61, justin_ret_age=61, target_success=1.0)
+        r_above = run_swr_analysis(just_above, TAXABLE(220000), jason_ret_age=61, justin_ret_age=61, target_success=1.0)
+        assert r_below["on_track"] is True
+        assert r_above["on_track"] is False
+
 
 class TestZeroPortfolioSearchBoundIsIndependentOfPortfolioSize:
     """Independent review, 2026-09-08, P2: with a $0 starting portfolio,

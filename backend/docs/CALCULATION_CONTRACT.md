@@ -2460,3 +2460,58 @@ number; the hash reference was removed, not the denylist).
 
 Branch: `codex/two-age-swr`, pushed, **still not merged** -- third
 review round pending before Milestone 2 begins.
+
+## 29. Two-age SWR — third independent review round (2026-09-08, on `codex/two-age-swr`)
+
+Third review found two boundary bugs in the section 28 household
+spending search, both narrow to that search's edges (its zero lower
+bound, and the final on-track comparison) rather than its core
+formulas, which the reviewer confirmed correct.
+
+**P1 — the search's zero lower bound was assumed feasible, not
+verified.** The search always started `hh_lo = 0` and, after
+converging, added `healthcare_pre` (a fixed cost held constant during
+the search) back onto whatever boundary was found -- without ever
+checking that `candidate_income_today = 0` itself actually succeeds.
+With $0 assets, $0 discretionary spending, and a $20,000 fixed
+healthcare cost, nothing funds that $20,000 at all, but the old code
+still reported `total_safe_spend = 0 + 20000 = 20000` and `on_track =
+True` -- while `run_two_dimensional_retirement_projection` correctly
+reports the full $20,000 as unmet need. Fixed by evaluating
+`success_at_household_spending(0)` first: if it fails, there is no
+valid household-spending recommendation to search for at all --
+`total_safe_spend` is reported as `0`, not the unfunded fixed cost,
+and the search itself is skipped.
+
+**P2 — an exactly-funded plan could still read on_track=False.** The
+20-iteration bisection converges to WITHIN a tiny epsilon of the true
+boundary, approaching from below by construction (`hh_lo` only ever
+moves up when a trial succeeds) -- so a plan whose true boundary
+exactly equals its target reliably lands the searched number a hair
+short of it (e.g. `$99,999.9998` instead of exactly `$100,000`).
+Comparing that approximate number against `income_target` with `>=`
+then reports `on_track=False` for a plan Projection itself confirms is
+fully funded (reproduced: $200,000/2yr/$100,000 spending/0% returns,
+exactly funded). Fixed by evaluating `on_track` independently of the
+search's own numeric result: `success_at_household_spending(income_today)
+>= target_success` -- a direct, separate yes/no test of the household's
+actual stated target through the same success-rate function the search
+itself uses, sidestepping the search's approximation error entirely.
+`cushion_pct`/`total_safe_spend` still use the searched boundary (its
+tiny approximation error is invisible at the 1-decimal rounding both
+already apply).
+
+New tests: 3 added (22 total in test_two_age_swr.py, up from 19) -- an infeasible zero-spending floor (fixed costs alone
+unfundable), an exactly-funded target at the true boundary, and targets
+$1 above/below a known boundary (confirming on_track flips exactly
+where it should, not one search-precision epsilon off).
+
+**Verified:** full backend suite 1208 passed, 97.61% coverage --
+1205 tests total after section 28 (1204 passing plus the sensitive-
+data-check test, which failed that round on a commit-hash fragment in
+this file's own prose and is passing again now) plus the 3 new tests
+above, all passed on first attempt. Frontend suite still 35 passed,
+build succeeds, sensitive-data check passed.
+
+Branch: `codex/two-age-swr`, pushed, **still not merged** -- fourth
+review round pending before Milestone 2 begins.

@@ -945,35 +945,70 @@ def _run_swr_analysis_two_age(inputs: Dict, accounts: List[Dict], jason_ret_age:
     healthcare_pre = inputs.get("healthcare_pre_medicare", 0)
     income_target  = (income_today + healthcare_pre) * ((1 + inflation) ** timeline.phase2_start_years)
 
-    hh_hi_seed = max(income_today, healthcare_pre, 1000.0) * 1.5
-    hh_lo, hh_hi = 0, hh_hi_seed
-    hh_expansions = 0
-    while success_at_household_spending(hh_hi) >= target_success and hh_expansions < 12:
-        hh_lo = hh_hi
-        hh_hi *= 2
-        hh_expansions += 1
-    hh_hit_search_limit = hh_expansions >= 12
-    for _ in range(20):
-        hh_mid = (hh_lo + hh_hi) / 2
-        hh_rate = success_at_household_spending(hh_mid)
-        if hh_rate >= target_success:
-            hh_lo = hh_mid
-        else:
-            hh_hi = hh_mid
+    # Verify the $0-discretionary-spending floor is actually feasible
+    # BEFORE searching, rather than assuming it (independent review,
+    # 2026-09-08, third follow-up, P1). The search's lower bound starts
+    # at candidate_income_today=0 and healthcare_pre (a fixed cost, not
+    # part of the search) gets added back onto whatever boundary is
+    # found -- with $0 assets and a $20,000 fixed healthcare cost, the
+    # old code never checked whether even $0 discretionary spending was
+    # fundable, so it silently added the $20,000 fixed cost back onto an
+    # unverified $0 "boundary" and reported $20,000 as a safe,
+    # on-track recommendation -- while Projection correctly reports the
+    # full $20,000 as unmet need, since nothing funds it at all. If even
+    # zero discretionary spending fails, there is no valid household
+    # spending recommendation to search for: report that the household's
+    # fixed costs themselves aren't funded (total_safe_spend=0) rather
+    # than returning a number built on an unverified assumption.
+    if not success_at_household_spending(0) >= target_success:
+        safe_household_spend_today = 0.0
+        total_safe_spend = 0.0
+        hh_hit_search_limit = False
+    else:
+        hh_hi_seed = max(income_today, healthcare_pre, 1000.0) * 1.5
+        hh_lo, hh_hi = 0, hh_hi_seed
+        hh_expansions = 0
+        while success_at_household_spending(hh_hi) >= target_success and hh_expansions < 12:
+            hh_lo = hh_hi
+            hh_hi *= 2
+            hh_expansions += 1
+        hh_hit_search_limit = hh_expansions >= 12
+        for _ in range(20):
+            hh_mid = (hh_lo + hh_hi) / 2
+            hh_rate = success_at_household_spending(hh_mid)
+            if hh_rate >= target_success:
+                hh_lo = hh_mid
+            else:
+                hh_hi = hh_mid
 
-    # safe_household_spend_today is the searched boundary for the
-    # discretionary income_today figure itself (healthcare_pre, like
-    # every other fixed household cost, is held constant during the
-    # search, not treated as part of the recommendation) -- add it back
-    # in before growing to phase2_start-nominal dollars so total_safe_spend
-    # is on the exact same basis as income_target (income_today +
-    # healthcare_pre, both grown the same way), not an apples-to-oranges
-    # comparison between an income-only figure and a target that also
-    # bundles healthcare.
-    safe_household_spend_today = hh_lo
-    total_safe_spend = (safe_household_spend_today + healthcare_pre) * ((1 + inflation) ** timeline.phase2_start_years)
+        # safe_household_spend_today is the searched boundary for the
+        # discretionary income_today figure itself (healthcare_pre, like
+        # every other fixed household cost, is held constant during the
+        # search, not treated as part of the recommendation) -- add it
+        # back in before growing to phase2_start-nominal dollars so
+        # total_safe_spend is on the exact same basis as income_target
+        # (income_today + healthcare_pre, both grown the same way), not
+        # an apples-to-oranges comparison between an income-only figure
+        # and a target that also bundles healthcare.
+        safe_household_spend_today = hh_lo
+        total_safe_spend = (safe_household_spend_today + healthcare_pre) * ((1 + inflation) ** timeline.phase2_start_years)
+
     cushion_pct = round((total_safe_spend / income_target - 1) * 100, 1) if income_target > 0 else 0
-    on_track = total_safe_spend >= income_target
+    # on_track evaluates the household's ACTUAL stated target directly
+    # (independent review, 2026-09-08, third follow-up, P2), not a
+    # `total_safe_spend >= income_target` comparison against the search's
+    # own numeric boundary -- a 20-iteration bisection converges to
+    # WITHIN a tiny epsilon of the true boundary, approaching from below,
+    # so an exactly-funded plan (the true boundary EQUALS the target)
+    # reliably lands a hair short of it, e.g. $99,999.9998 instead of
+    # exactly $100,000, and `>=` then reports on_track=False for a plan
+    # Projection itself confirms is fully funded. Testing the target
+    # itself through the exact same success-rate function the search
+    # already uses sidesteps the search's own approximation error
+    # entirely -- this is a direct, independent yes/no answer to "is the
+    # household's current target affordable at the requested success
+    # rate," not an inference from a nearby searched number.
+    on_track = success_at_household_spending(income_today) >= target_success
     shortfall_pct = round(-cushion_pct, 1) if cushion_pct < 0 else 0.0
 
     return {
