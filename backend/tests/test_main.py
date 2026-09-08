@@ -474,6 +474,20 @@ class TestSimulationEndpoints:
         post_result = client.post("/api/simulation/monte-carlo", json={"ret_age": 60, "ss_timing": "early"}).json()
         assert post_result["success_rate"] == get_result["success_rate"]
 
+    def test_monte_carlo_two_age_mode(self, client, sample_inputs, sample_accounts):
+        self._seed(client, sample_inputs, sample_accounts)
+        r = client.get("/api/simulation/monte-carlo", params={"jason_ret_age": 61, "justin_ret_age": 63})
+        assert r.status_code == 200
+        body = r.json()
+        assert body["mode"] == "two_age"
+        assert body["jason_ret_age"] == 61
+        assert body["justin_ret_age"] == 63
+
+    def test_monte_carlo_two_age_mode_requires_both_ages(self, client, sample_inputs, sample_accounts):
+        self._seed(client, sample_inputs, sample_accounts)
+        r = client.get("/api/simulation/monte-carlo", params={"jason_ret_age": 61})
+        assert r.status_code == 400
+
 
     def test_swr(self, client, sample_inputs, sample_accounts):
         self._seed(client, sample_inputs, sample_accounts)
@@ -506,6 +520,19 @@ class TestSimulationEndpoints:
         get_result = client.get("/api/simulation/stress-tests?ret_age=55&ss_timing=early").json()
         post_result = client.post("/api/simulation/stress-tests", json={"ret_age": 55, "ss_timing": "early"}).json()
         assert post_result["scenarios"]["base"]["final_balance"] == get_result["scenarios"]["base"]["final_balance"]
+
+    def test_stress_tests_two_age_mode(self, client, sample_inputs, sample_accounts):
+        self._seed(client, sample_inputs, sample_accounts)
+        r = client.get("/api/simulation/stress-tests", params={"jason_ret_age": 61, "justin_ret_age": 63})
+        assert r.status_code == 200
+        body = r.json()
+        assert body["mode"] == "two_age"
+        assert "base" in body["scenarios"]
+
+    def test_stress_tests_two_age_mode_requires_both_ages(self, client, sample_inputs, sample_accounts):
+        self._seed(client, sample_inputs, sample_accounts)
+        r = client.get("/api/simulation/stress-tests", params={"justin_ret_age": 63})
+        assert r.status_code == 400
 
     def test_sequence_risk(self, client, sample_inputs, sample_accounts):
         """Regression test for the endpoint that 500'd at every age due to
