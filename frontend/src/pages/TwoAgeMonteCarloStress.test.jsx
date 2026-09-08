@@ -41,6 +41,18 @@ const mcTwoAgeResult = {
   account_ownership_limitation: 'Portfolio buckets are a single aggregated household total.',
 }
 
+const swrTwoAgeResult = {
+  mode: 'two_age', jason_ret_age: 61, justin_ret_age: 63,
+  phase2_start_age: 61, phase3_start_age: 63, later_retiree: 'justin',
+  ss_timing: 'early',
+  safe_withdrawal_annual: 45000, safe_withdrawal_rate: 5.0,
+  total_safe_spend: 55000, income_target: 50000, cushion_pct: 10.0,
+  guaranteed_income_steadystate: 10000, ss_start_age: 67,
+  pension_annual: 0, jason_ss_annual: 0, justin_ss_annual: 0,
+  still_working_spouse_income_first_year: 65000, second_earner_net_of_tax_factor: 0.65,
+  account_ownership_limitation: 'Portfolio buckets are a single aggregated household total.',
+}
+
 const stTwoAgeResult = {
   mode: 'two_age', jason_ret_age: 61, justin_ret_age: 63,
   phase2_start_age: 61, phase3_start_age: 63, later_retiree: 'justin',
@@ -78,6 +90,7 @@ beforeEach(() => {
   axios.post.mockImplementation((url, body) => {
     if (url === '/api/simulation/monte-carlo') return Promise.resolve({ data: mcTwoAgeResult })
     if (url === '/api/simulation/stress-tests') return Promise.resolve({ data: stTwoAgeResult })
+    if (url === '/api/simulation/swr') return Promise.resolve({ data: swrTwoAgeResult })
     return Promise.resolve({ data: { scenarios: [] } })
   })
 })
@@ -181,6 +194,25 @@ describe('Two-Age Monte Carlo', () => {
     })
     await flush()
     expect(container.textContent).not.toContain('88.5%')
+  })
+
+  it('fetches SWR alongside Monte Carlo and renders the Safe Spending Power card', async () => {
+    // Milestone 1 (CALCULATION_CONTRACT.md section 25/26): SWR now
+    // supports two-age mode too, fetched alongside Monte Carlo so the
+    // existing "Safe Spending Power" card (previously stuck on "Run
+    // simulation to calculate" in two-age mode) actually renders.
+    await act(async () => root.render(<StressTestWhatIf />))
+    await flush()
+    await click('Monte Carlo')
+    await flush()
+    await click('Use Two Independent Retirement Ages')
+    await flush()
+    await click('Run Monte Carlo Simulation')
+    await flush()
+    expect(axios.post).toHaveBeenCalledWith('/api/simulation/swr',
+      expect.objectContaining({ jason_ret_age: 65, justin_ret_age: 65 }))
+    expect(container.textContent).not.toContain('Run simulation to calculate')
+    expect(container.textContent).toContain('$45,000')
   })
 })
 
