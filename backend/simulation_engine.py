@@ -1231,12 +1231,22 @@ def _run_stress_tests_two_age(inputs: Dict, accounts: List[Dict], jason_ret_age:
             state_tax_rate=inputs.get("state_income_tax_rate", 0),
             salary_growth_pct=_salary_growth_pct,
         )
+        dep_age = end_age
+        for i, b in enumerate(bals):
+            if b <= 0:
+                dep_age = phase2_start_age + i
+                break
+
         results[key] = {
             "label": scenario["label"],
             "description": scenario["description"],
             "survived": survived,
             "final_balance": bals[-1],
-            "chart": [{"age": phase2_start_age+i, "balance": b} for i, b in enumerate(bals) if i % 2 == 0],
+            "depletion_age": dep_age,
+            "lowest_balance": min(bals),
+            "lowest_balance_age": phase2_start_age + bals.index(min(bals)),
+            "chart": [{"age": phase2_start_age+i, "balance": b, "base": base_bals[i]}
+                      for i, b in enumerate(bals) if i % 2 == 0],
         }
 
     _, still_working_income_at_start = two_age_still_working_income_inputs(inputs, timeline, _salary_growth_pct)
