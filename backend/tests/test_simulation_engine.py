@@ -22,8 +22,13 @@ from simulation_engine import (
     run_contribution_sensitivity,
     run_survivor_scenario,
     _run_single,
+    _swr_year_step,
+    _cash_available_offsets_need,
 )
-from projection_engine import CURRENT_YEAR, run_retirement_projection
+from projection_engine import (
+    CURRENT_YEAR, run_retirement_projection,
+    justin_gap_income_for_year, justin_gap_income_inputs, justin_years_to_retire_for,
+)
 
 # Every age the Retirement Sensitivity / Simulation pages let you pick,
 # not just the three Settings anchor points.
@@ -38,6 +43,42 @@ class TestRunSwrAnalysis:
         assert result["retirement_age"] == age
         assert result["safe_withdrawal_annual"] >= 0
         assert result["total_safe_spend"] >= result["safe_withdrawal_annual"]
+
+    def test_gap_income_increases_safe_withdrawal(self, sample_inputs, sample_accounts):
+        """Backlog item 1 (CALCULATION_CONTRACT.md section 15), closed
+        for SWR: continued spousal income during the gap years should
+        let the household safely withdraw more from the portfolio."""
+        inputs = {**sample_inputs, "jason_age": 60, "justin_age": 60, "justin_w2_salary": 100000}
+        no_gap = run_swr_analysis({**inputs, "justin_ret_age": 60}, sample_accounts, ret_age=60, ss_timing="early")
+        gap = run_swr_analysis({**inputs, "justin_ret_age": 65}, sample_accounts, ret_age=60, ss_timing="early")
+        assert gap["safe_withdrawal_annual"] > no_gap["safe_withdrawal_annual"]
+
+    def test_gap_income_parity_via_swr_year_step(self):
+        """SWR folds gap income into _swr_year_step's existing
+        event_monthly channel (see run_swr_analysis's own comment on
+        this) rather than adding a new parameter to that shared,
+        parity-tested helper. Verify that channel is EXACT: adding a
+        given gap-income dollar amount via event_monthly must reduce
+        `remaining` (unmet need) by exactly that amount, all else equal
+        -- the same allocation-free helper (justin_gap_income_for_year)
+        SWR's inner loop actually calls."""
+        # justin_gap_income_at_start is already the net-of-tax figure
+        # (that factor is applied upstream, in justin_gap_income_inputs)
+        # -- this function only applies wage growth on top of it.
+        gap_income = justin_gap_income_for_year(2, justin_gap_years=5, justin_gap_income_at_start=20000, salary_growth_pct=0.0)
+        assert gap_income == pytest.approx(20000)  # flat, no growth (0% salary_growth_pct)
+
+        # All buckets empty and portfolio_draw > gap_income, so `remaining`
+        # (unmet need) isn't floored at 0 by either the internal
+        # max(0, portfolio_draw - event_monthly) clamp or by successfully
+        # drawing from a nonempty bucket -- isolates event_monthly's exact
+        # effect on the number this test actually cares about.
+        args_without = dict(pretax=0, roth=0, taxable=0, hsa=0, portfolio_draw=40000,
+                             event_cash=0, event_monthly=0, rmd=0, pretax_tax_rate=0.2)
+        args_with = {**args_without, "event_monthly": gap_income}
+        *_, remaining_without = _swr_year_step(**args_without)
+        *_ , remaining_with = _swr_year_step(**args_with)
+        assert remaining_without - remaining_with == pytest.approx(gap_income)
 
     def test_justin_ss_age_setting_is_respected(self, sample_inputs, sample_accounts):
         """Regression (external audit 2026-09-07): ss_start_age (and the
@@ -494,6 +535,33 @@ class TestRunTaxEfficiencySimulation:
         result = run_tax_efficiency_simulation(sample_inputs, sample_accounts, ret_age=age, ss_timing="early")
         assert result is not None
 
+    def test_gap_income_improves_every_strategy(self, sample_inputs, sample_accounts):
+        """Backlog item 1 (CALCULATION_CONTRACT.md section 15), closed
+        for Tax Efficiency: gap income is folded into net_need once,
+        shared by all 3 strategies (taxable_first/roth_first/optimal) --
+        each should show a higher (or equal, for a strategy already
+        unconstrained) final balance with it present."""
+        inputs = {**sample_inputs, "jason_age": 60, "justin_age": 60, "justin_w2_salary": 100000}
+        no_gap = run_tax_efficiency_simulation({**inputs, "justin_ret_age": 60}, sample_accounts, ret_age=60, ss_timing="early")
+        gap = run_tax_efficiency_simulation({**inputs, "justin_ret_age": 65}, sample_accounts, ret_age=60, ss_timing="early")
+        for strategy in ("taxable_first", "roth_first", "optimal"):
+            assert gap["strategies"][strategy]["median_final_balance"] >= no_gap["strategies"][strategy]["median_final_balance"]
+
+    def test_gap_income_parity_via_cash_available_offsets_need(self):
+        """Tax Efficiency folds gap income into the existing
+        life_event_monthly channel of _cash_available_offsets_need (see
+        run_tax_efficiency_simulation's own comment) rather than adding a
+        new parameter. Verify that channel is exact: net_need must drop
+        by precisely the gap-income amount, all else equal."""
+        gap_income = justin_gap_income_for_year(1, justin_gap_years=5, justin_gap_income_at_start=15000, salary_growth_pct=0.0)
+        assert gap_income == pytest.approx(15000)
+
+        net_need_without, _ = _cash_available_offsets_need(
+            year_need=50000, guaranteed_income=10000, life_event_cash=0, life_event_monthly=0)
+        net_need_with, _ = _cash_available_offsets_need(
+            year_need=50000, guaranteed_income=10000, life_event_cash=0, life_event_monthly=gap_income)
+        assert net_need_without - net_need_with == pytest.approx(gap_income)
+
     def test_spending_inflates_to_retirement_before_the_yearly_loop(self, sample_inputs, monkeypatch):
         """Regression (external audit 2026-09-07): year_need used to
         inflate income_today only by `yr` (years INTO retirement),
@@ -908,6 +976,48 @@ class TestRunSurvivorScenario:
         assert result["has_data"] is True
         assert result["deceased"] == "jason"
 
+    def test_gap_income_applies_when_justin_survives(self, sample_inputs, sample_accounts):
+        """Backlog item 1 (CALCULATION_CONTRACT.md section 15), closed
+        for Survivor: deceased='jason' means Justin is the SURVIVOR --
+        his continued gap income should reduce the survivor's own draw
+        on the portfolio, same as every other consumer's offset."""
+        inputs = {
+            **sample_inputs, "jason_age": 60, "justin_age": 60,
+            "justin_w2_salary": 100000, "justin_ret_age": 65,
+        }
+        baseline = {**sample_inputs, "jason_age": 60, "justin_age": 60}
+        with_gap = run_survivor_scenario(inputs, sample_accounts, ret_age=60, deceased="jason", death_age=62)
+        without_gap = run_survivor_scenario(baseline, sample_accounts, ret_age=60, deceased="jason", death_age=62)
+        assert with_gap["has_data"] and without_gap["has_data"]
+        # First survivor-schedule year (age 63, within Justin's own
+        # working gap through age 65) should show a smaller draw with
+        # gap income present.
+        assert with_gap["schedule"][0]["draw"] < without_gap["schedule"][0]["draw"]
+
+    def test_gap_income_does_not_apply_when_justin_is_deceased(self, sample_inputs, sample_accounts):
+        """The other selection path: deceased='justin' means Justin's own
+        working income doesn't exist anymore at all -- not tapered off at
+        his own retirement age like every other consumer's version of
+        this offset, just gone. Compares each year's `draw` specifically
+        (computed purely from this function's own need/guaranteed --
+        independent of the pre-death starting balance), not the full
+        schedule: starting_balance legitimately differs between these two
+        input sets because justin_w2_salary/justin_ret_age also changes
+        the pre-death baseline portfolio via run_retirement_projection's
+        own (already-closed, section 14) gap-income offset -- a real,
+        separate effect this test isn't about."""
+        inputs = {
+            **sample_inputs, "jason_age": 60, "justin_age": 60,
+            "justin_w2_salary": 100000, "justin_ret_age": 65,
+        }
+        baseline = {**sample_inputs, "jason_age": 60, "justin_age": 60}
+        with_salary_configured = run_survivor_scenario(inputs, sample_accounts, ret_age=60, deceased="justin", death_age=62)
+        without_salary_configured = run_survivor_scenario(baseline, sample_accounts, ret_age=60, deceased="justin", death_age=62)
+        assert with_salary_configured["has_data"] and without_salary_configured["has_data"]
+        draws_with = [row["draw"] for row in with_salary_configured["schedule"]]
+        draws_without = [row["draw"] for row in without_salary_configured["schedule"]]
+        assert draws_with == draws_without
+
     def test_default_death_age_anchors_to_real_current_age_not_a_past_ret_age(
             self, sample_inputs, sample_accounts):
         """Regression (independent review, 2026-09-07, third follow-up —
@@ -1179,3 +1289,47 @@ class TestSurplusAllocationsInSimulation:
         assert run_tax_efficiency_simulation(sample_inputs, sample_accounts, ret_age=60, ss_timing="early", surplus_allocations=allocations) is not None
         assert run_contribution_sensitivity(sample_inputs, sample_accounts, ret_age=60, surplus_allocations=allocations) is not None
         assert run_survivor_scenario(sample_inputs, sample_accounts, ret_age=60, deceased="jason", death_age=70, surplus_allocations=allocations) is not None
+
+
+class TestSecondEarnerGapIncomeZeroImpactAcrossAllConsumers:
+    """Explicit cross-consumer check (reviewer request, 2026-09-08):
+    justin_w2_salary=0 or justin_ret_age=0 (both defaults) must change
+    NOTHING, in every one of the 6 withdrawal-phase consumers gap income
+    now reaches -- Retirement Projection, Monte Carlo, Stress Tests, SWR,
+    Tax Efficiency, and Survivor Scenario. Each compares plain
+    sample_inputs against the same inputs with both fields set
+    explicitly to their default/unset values."""
+
+    def _explicit_defaults(self, sample_inputs):
+        return {**sample_inputs, "justin_w2_salary": 0, "justin_ret_age": 0}
+
+    def test_retirement_projection_unaffected(self, sample_inputs, sample_accounts):
+        a = run_retirement_projection(sample_inputs, sample_accounts, ret_ages=[60])
+        b = run_retirement_projection(self._explicit_defaults(sample_inputs), sample_accounts, ret_ages=[60])
+        assert a["scenarios"] == b["scenarios"]
+
+    def test_monte_carlo_unaffected(self, sample_inputs, sample_accounts):
+        a = run_monte_carlo(sample_inputs, sample_accounts, ret_age=60, ss_timing="early")
+        b = run_monte_carlo(self._explicit_defaults(sample_inputs), sample_accounts, ret_age=60, ss_timing="early")
+        assert a["median_final_balance"] == b["median_final_balance"]
+
+    def test_stress_tests_unaffected(self, sample_inputs, sample_accounts):
+        a = run_stress_tests(sample_inputs, sample_accounts, ret_age=60, ss_timing="early")
+        b = run_stress_tests(self._explicit_defaults(sample_inputs), sample_accounts, ret_age=60, ss_timing="early")
+        assert a["scenarios"]["base"]["final_balance"] == b["scenarios"]["base"]["final_balance"]
+
+    def test_swr_unaffected(self, sample_inputs, sample_accounts):
+        a = run_swr_analysis(sample_inputs, sample_accounts, ret_age=60, ss_timing="early")
+        b = run_swr_analysis(self._explicit_defaults(sample_inputs), sample_accounts, ret_age=60, ss_timing="early")
+        assert a["safe_withdrawal_annual"] == b["safe_withdrawal_annual"]
+
+    def test_tax_efficiency_unaffected(self, sample_inputs, sample_accounts):
+        a = run_tax_efficiency_simulation(sample_inputs, sample_accounts, ret_age=60, ss_timing="early")
+        b = run_tax_efficiency_simulation(self._explicit_defaults(sample_inputs), sample_accounts, ret_age=60, ss_timing="early")
+        for strategy in ("taxable_first", "roth_first", "optimal"):
+            assert a["strategies"][strategy]["median_final_balance"] == b["strategies"][strategy]["median_final_balance"]
+
+    def test_survivor_scenario_unaffected(self, sample_inputs, sample_accounts):
+        a = run_survivor_scenario(sample_inputs, sample_accounts, ret_age=60, deceased="jason", death_age=70)
+        b = run_survivor_scenario(self._explicit_defaults(sample_inputs), sample_accounts, ret_age=60, deceased="jason", death_age=70)
+        assert a["schedule"] == b["schedule"]

@@ -8,6 +8,26 @@ merged and closed out. Do not act on the "paused for review, not
 merged" language further down this file (visible in the repo's git
 history) — it's stale as of this closing update.
 
+**2026-09-08 addendum — second-earner (Justin) gap-income feature, a
+separate follow-on effort, NOT part of the 9-item list below.** Full
+detail lives in `CALCULATION_CONTRACT.md` sections 13-15. Status: gap
+income (a working spouse's continued income offsetting withdrawal need
+during the years between the household's own withdrawal start and that
+spouse's own retirement) now reaches all 6 withdrawal-phase consumers,
+via an allocation-free shared helper
+(`projection_engine.justin_gap_income_for_year`) cheap enough for SWR's
+and Tax Efficiency's performance-sensitive inner loops. **This specific
+piece of work is on an isolated branch
+(`codex/second-earner-gap-income-all-consumers`), pushed but NOT merged
+to `main`, per the explicit instruction it was built under — review
+before merging**, unlike everything else in this file which already
+merged. Four larger items remain open and correctly scoped (not
+silently dropped): the two-dimensional retirement-age redesign, real
+payroll-tax modeling, an owner-attributed account ledger, and per-year
+output visibility for income offsets beyond Retirement Projection's own
+`yearly_detail` — see section 15's closing list for the full reasoning
+on each.
+
 ## Final status against Jason's 9-item follow-on task list
 
 All 9 items are resolved:

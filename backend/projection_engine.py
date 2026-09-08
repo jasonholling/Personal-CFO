@@ -428,6 +428,39 @@ def justin_gap_income_inputs(inputs: Dict, justin_years_to_retire: int, years_to
     return justin_gap_years, justin_gap_income_at_start
 
 
+def justin_gap_income_for_year(yr: int, justin_gap_years: int, justin_gap_income_at_start: float,
+                                salary_growth_pct: float) -> float:
+    """Allocation-free per-year lookup for second-earner gap income —
+    pure floats in/out, no object construction, so it's cheap enough to
+    call inside run_swr_analysis's binary-search inner loop and
+    run_tax_efficiency_simulation's per-trial strategies (both
+    documented performance exceptions to the shared annual_engine.py/
+    annual_inputs.py machinery — see CALCULATION_CONTRACT.md sections
+    4/10, and 13/14 for why this feature needed its own lightweight
+    path rather than requiring those two to eat the migration cost they
+    were explicitly measured too slow for).
+
+    Single documented wage-growth convention: salary_growth_pct (the
+    same assumed-raise rate every other second-earner income stream —
+    401k contributions, RSU, bonus, and justin_gap_income_at_start
+    itself — already uses), never inflation. See
+    justin_gap_income_inputs's own docstring for the full reasoning
+    (CALCULATION_CONTRACT.md section 14, item 2).
+
+    annual_inputs.py's build_annual_income_inputs calls this directly
+    too (2026-09-08 second follow-up) rather than keeping its own
+    parallel copy of the same one-line formula — every consumer now
+    reads gap income for a given year through exactly this function,
+    whether via the dataclass-returning shared builder or directly.
+
+    Returns 0.0 for yr >= justin_gap_years — Justin has already retired
+    by this year (or was never given a gap to begin with, the
+    justin_gap_years == 0 default-safe case)."""
+    if yr >= justin_gap_years:
+        return 0.0
+    return justin_gap_income_at_start * ((1 + salary_growth_pct) ** yr)
+
+
 def pension_for_age(inputs: Dict, age: int) -> float:
     """Pension is defined at 55/60/65 in Settings; interpolate linearly between
     those anchor points for any other retirement age (e.g. a sensitivity sweep
