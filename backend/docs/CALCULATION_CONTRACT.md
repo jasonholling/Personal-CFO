@@ -1493,3 +1493,103 @@ build succeeds (same pre-existing large-chunk warning, unrelated).
 Sensitive-data check passed. Branch:
 `codex/second-earner-output-visibility-and-parity` (same branch as
 sections 16-17 — still unmerged, pending review).
+
+## 19. Two-dimensional retirement timing — v1 (Phase 2 only), Retirement Projection reference implementation (2026-09-08, on `codex/two-dimensional-retirement`)
+
+Full design lives in `docs/TWO_DIMENSIONAL_RETIREMENT_DESIGN.md`
+(sections 1-6 written before any code, section 7 the concrete v1
+contract). This section is the calculation-contract-style summary; the
+design doc has the full reasoning and is the canonical reference.
+
+**What this is:** a new, additive function,
+`run_two_dimensional_retirement_projection` (`projection_engine.py`),
+and a new `TwoPersonTimeline`/`build_two_person_timeline`
+(`timeline_engine.py`) — explicit, independent retirement ages for both
+spouses, one scenario at a time (no sweep, no heatmap), for the
+Retirement Projection reference implementation only. **Nothing about
+the existing `run_retirement_projection`, `Timeline`/`build_timeline`,
+or any of the other 5 withdrawal-phase consumers changed** — this is
+new code alongside them, not a modification.
+
+**Key design finding:** the existing second-earner gap-income mechanism
+(section 15, `justin_gap_income_for_year`) already implements most of
+what a two-axis middle phase needs — it just only ever ran in one
+direction (Justin working, Jason's `ret_age` as the sole axis) and only
+ever started at Jason's own retirement. `justin_gap_income_for_year`'s
+signature was already fully generic, and `simulate_withdrawal_year`
+already sweeps income surplus into savings automatically (proven
+correct by this session's own Survivor insurance-calc fixes, section
+18). Reusing both meant v1 needed no new withdrawal-engine machinery —
+only a two-axis timeline and a symmetric version of the existing
+gap-income call site (either spouse can be the "still-working" side,
+not just Justin).
+
+**Model:** a household passes through "phase 2" (one spouse retired,
+one still working — new) then "phase 3" (both retired, identical to
+`run_retirement_projection`'s existing single-phase withdrawal loop).
+`phase2_start_years`/`phase3_start_years` are the earlier/later of the
+two spouses' own years-to-retirement (each independently clamped to 0
+if already past, mirroring `build_timeline`'s existing per-person
+convention). During phase 2, the still-working spouse's income offsets
+spending need at the same flat `SECOND_EARNER_NET_OF_TAX_FACTOR` (0.65)
+every other consumer's gap income already uses — no continued 401k
+contribution is modeled from that income once the withdrawal loop has
+started (a documented simplification: real payroll-tax modeling during
+an active withdrawal loop is out of scope for v1). Withdrawal order,
+tax treatment, and RMDs are unchanged — reuses `simulate_withdrawal_year`
+exactly as the reference implementation does.
+
+**Regression property:** equal ages (or `justin_ret_age` left at the
+existing 0/unset sentinel) produce zero phase-2 years and reduce
+exactly to `run_retirement_projection`'s own single-axis output for
+that age — checked numerically in
+`test_two_dimensional_retirement.py`'s simultaneous-retirement case,
+which calls both functions on the same inputs and asserts identical
+`portfolio_balance` values.
+
+**Test-first:** `test_two_person_timeline.py` (12 cases) and
+`test_two_dimensional_retirement.py` (7 cases) were written and
+committed BEFORE either piece of implementation existed, with every
+expected number hand-calculated against the design doc's contract, not
+derived by running a draft implementation first. Categories covered:
+either spouse retiring first (2 cases, proving the 65% offset applies
+symmetrically), simultaneous retirement (+ the regression cross-check
+above), a 10-year spousal age gap, an already-3-years-past retirement
+age for one spouse, an income surplus swept into savings, and
+insufficient funds reported correctly across the phase2→phase3
+boundary. All 19 cases passed on the first implementation attempt — no
+expected numbers were adjusted to fit the code.
+
+**API:** `GET /api/projections/two-dimensional-retirement` —
+`jason_ret_age`/`justin_ret_age` both required query params, no
+defaults (a 422 if either is omitted, so this endpoint is not reachable
+by accident from a page that only knows the single-axis model).
+
+**Frontend:** a new "Two-Age Scenario" tab in Retirement Projection
+(`TwoAgeScenario.jsx`) — two age inputs, a year-by-year table showing
+the phase split and still-working income, and the account-ownership
+limitation note (below) rendered directly from the API response. Kept
+as its own tab rather than folded into the existing Overview/Side by
+Side/Sensitivity tabs, so the two models stay visibly distinct. Every
+existing `SecondEarnerNote` usage (Monte Carlo, Stress Tests, Roth
+Conversion, Survivor Scenario) now also links back to this tab with a
+one-line "single retirement-age model" cross-reference — documentation
+only, no behavior change — so a user reading one of those pages cannot
+mistake that offset for a genuine second, independently-timed
+retirement age.
+
+**Explicitly deferred (unchanged from the design doc):** Survivor
+Scenario integration, real payroll-tax modeling, an owner-attributed
+account ledger (the aggregated-bucket limitation is now surfaced
+directly in the API response and UI, not just documented), and any
+heatmap/matrix UI. Monte Carlo, Stress Tests, SWR, Tax Efficiency, and
+Roth Conversion are completely unchanged.
+
+**Verified:** all 19 new tests pass; full backend suite re-run (see the
+commit history on this branch for the exact count — 1135 passed
+immediately after the calculation-engine commit, before the API/UI
+commits that followed added their own tests on top); full frontend
+suite 24 passed (was 20); production build succeeds; sensitive-data
+check passed. Branch: `codex/two-dimensional-retirement`, pushed,
+**not merged** — per the explicit instruction this was scoped under,
+for independent review.

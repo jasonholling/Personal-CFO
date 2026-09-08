@@ -10,7 +10,7 @@ history) — it's stale as of this closing update.
 
 **2026-09-08 addendum — second-earner (Justin) gap-income feature, a
 separate follow-on effort, NOT part of the 9-item list below.** Full
-detail lives in `CALCULATION_CONTRACT.md` sections 13-18. Status: gap
+detail lives in `CALCULATION_CONTRACT.md` sections 13-19. Status: gap
 income (a working spouse's continued income offsetting withdrawal need
 during the years between the household's own withdrawal start and that
 spouse's own retirement) reaches all 6 withdrawal-phase consumers, via
@@ -35,15 +35,22 @@ per-year cash flows; plus two P2 fixes, an explicit backend
 remaining-gap-duration field (Survivor's `schedule` is the only
 sampled schedule anywhere in the backend, which had been silently
 undercounting years in the frontend note) and privacy-mode masking for
-the note's dollar amount. **This piece is on its own isolated branch
-(`codex/second-earner-output-visibility-and-parity`), pushed but NOT
-yet merged, per the same instruction — review before merging.**
-Four larger items remain open and correctly scoped (not
-silently dropped): the two-dimensional retirement-age redesign, real
-payroll-tax modeling, an owner-attributed account ledger, and per-year
-output visibility for income offsets beyond Retirement Projection's own
-`yearly_detail` — see section 15's closing list for the full reasoning
-on each.
+the note's dollar amount. This piece
+(`codex/second-earner-output-visibility-and-parity`) **has since merged
+to `main`** (commit `0f4fa62`). Three larger items remain open and
+correctly scoped (not silently dropped): real payroll-tax modeling, an
+owner-attributed account ledger, and per-year output visibility for
+income offsets beyond Retirement Projection's own `yearly_detail` — see
+section 15's closing list for the full reasoning on each. The fourth
+item, the two-dimensional retirement-age redesign, is no longer purely
+deferred: a v1 (section 19) — explicit independent ages for both
+spouses, Retirement Projection reference implementation only, no
+Survivor/payroll-tax/ownership-ledger/heatmap — is built on
+`codex/two-dimensional-retirement`, pushed, **not yet merged**, per the
+instruction it was scoped under (review before merging). Propagating it
+to the other 5 consumers, Survivor integration, real payroll tax, the
+ownership ledger, and a heatmap UI all remain open, explicitly deferred
+per `docs/TWO_DIMENSIONAL_RETIREMENT_DESIGN.md` section 6.
 
 ## Final status against Jason's 9-item follow-on task list
 
