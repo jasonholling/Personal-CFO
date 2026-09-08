@@ -292,6 +292,24 @@ export default function StressTestWhatIf({ onNavigate }) {
             <div className="label" style={{ marginBottom:8 }}>{person2Name}'s Retirement Age</div>
             <input type="number" value={justinRetAge} onChange={e => setJustinRetAge(parseInt(e.target.value) || 0)} />
           </div>
+          {/* Independent review, 2026-09-08 (P1): two-age mode used to
+              hide this entirely, so there was no way to change SS timing
+              while it was on -- the request silently kept whatever
+              ssTiming happened to already be set (always 'early' on
+              first load), not necessarily what the user actually wants
+              for a two-age scenario. Kept visible here so the selection
+              persists AND stays user-editable across the mode switch. */}
+          <div>
+            <div className="label" style={{ marginBottom:8 }}>Social Security</div>
+            <div style={{ display:'flex', gap:6 }}>
+              {SS_OPTS.map(o => (
+                <button key={o.value}
+                  className={ssTiming===o.value ? 'btn-primary' : 'btn-secondary'}
+                  onClick={() => setSsTiming(o.value)}
+                >{o.label}</button>
+              ))}
+            </div>
+          </div>
         </div>
       )}
 

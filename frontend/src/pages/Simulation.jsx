@@ -37,6 +37,7 @@ function secondEarnerNoteProps(data, person1Name, person2Name) {
       years: data.phase3_start_age - data.phase2_start_age,
       factor: data.second_earner_net_of_tax_factor,
       personLabel: data.later_retiree === 'jason' ? person1Name : person2Name,
+      twoAge: true,
     }
   }
   return {
@@ -109,7 +110,13 @@ export function MonteCarloSection({ retAge, ssTiming, overrides, jasonRetAge, ju
     setError(null)
     setData(null); setSwr(null); setIncSrc(null)
     if (twoAge) {
-      axios.get('/api/simulation/monte-carlo', { params: { jason_ret_age: jasonRetAge, justin_ret_age: justinRetAge } })
+      // Independent review, 2026-09-08 (P1): this used to always GET the
+      // plain endpoint, silently dropping ss_timing and any What-If
+      // Builder overrides -- POSTing (same as the single-age branch
+      // below) with both threaded through fixes that; the POST endpoint
+      // applies overrides==null the same as its own GET does when no
+      // What-If assumptions have been set yet.
+      axios.post('/api/simulation/monte-carlo', { ...overrides, ss_timing: ssTiming, jason_ret_age: jasonRetAge, justin_ret_age: justinRetAge })
         .then(mc => {
           if (gen !== genRef.current) return
           setData(mc.data)
@@ -368,7 +375,9 @@ export function StressTestSection({ retAge, ssTiming, overrides, jasonRetAge, ju
     setError(null)
     setData(null); setRoth(null); setContrib(null)
     if (twoAge) {
-      axios.get('/api/simulation/stress-tests', { params: { jason_ret_age: jasonRetAge, justin_ret_age: justinRetAge } })
+      // See MonteCarloSection's identical comment above -- POST with
+      // ss_timing/overrides threaded through instead of the plain GET.
+      axios.post('/api/simulation/stress-tests', { ...overrides, ss_timing: ssTiming, jason_ret_age: jasonRetAge, justin_ret_age: justinRetAge })
         .then(st => {
           if (gen !== genRef.current) return
           setData(st.data)
@@ -419,10 +428,11 @@ export function StressTestSection({ retAge, ssTiming, overrides, jasonRetAge, ju
 
   const scenarios = data.scenarios
   const base = scenarios.base
-  // stagflation_1970s/bridge_job_loss/ss_reduction aren't run in two-age
-  // mode (each needs feature support out of scope for this v1 --
-  // simulation_engine.py's own comment on _run_stress_tests_two_age) --
-  // filtered here so these cards don't try to render an absent scenario.
+  // All 7 scenarios run in both single-age and two-age mode
+  // (CALCULATION_CONTRACT.md section 23 -- stagflation_1970s/
+  // bridge_job_loss/ss_reduction used to be skipped in two-age mode's
+  // first cut). .filter() stays as a defensive no-op rather than an
+  // unguarded index, in case a future response is ever missing a key.
   const stressKeys = ['crash_2008', 'stagflation_1970s', 'lost_decade'].filter(k => scenarios[k])
   const newStressKeys = ['early_sequence', 'bridge_job_loss', 'ss_reduction'].filter(k => scenarios[k])
   const current = scenarios[active] || scenarios[stressKeys[0]]

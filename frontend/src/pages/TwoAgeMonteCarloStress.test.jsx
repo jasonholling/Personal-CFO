@@ -4,6 +4,7 @@ import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest'
 import axios from 'axios'
 import StressTestWhatIf from './StressTestWhatIf'
 import { setPrivacyMode } from '../utils/privacy'
+import { setSsTiming as setGlobalSsTiming } from '../utils/scenario'
 
 // Two-age Monte Carlo/Stress Tests UI (backend/docs/
 // CALCULATION_CONTRACT.md section 22) -- rendered-DOM coverage for the
@@ -64,15 +65,21 @@ beforeEach(() => {
   vi.clearAllMocks()
   localStorage.clear()
   setPrivacyMode(false)
+  // ../utils/scenario.js keeps ssTiming/retAge as module-level state
+  // outside React on purpose (shared across pages) -- localStorage.clear()
+  // alone doesn't reset the in-memory value once a prior test has
+  // changed it (initScenarioFromStorage only overwrites it when
+  // localStorage actually has a stored value), so reset explicitly.
+  setGlobalSsTiming('early')
   container = document.createElement('div')
   document.body.appendChild(container)
   root = createRoot(container)
-  axios.get.mockImplementation(url => {
+  axios.get.mockResolvedValue({ data: {} })
+  axios.post.mockImplementation((url, body) => {
     if (url === '/api/simulation/monte-carlo') return Promise.resolve({ data: mcTwoAgeResult })
     if (url === '/api/simulation/stress-tests') return Promise.resolve({ data: stTwoAgeResult })
-    return Promise.resolve({ data: {} })
+    return Promise.resolve({ data: { scenarios: [] } })
   })
-  axios.post.mockResolvedValue({ data: { scenarios: [] } })
 })
 afterEach(async () => {
   await act(async () => root.unmount())
@@ -80,7 +87,7 @@ afterEach(async () => {
 })
 
 describe('Two-Age Monte Carlo', () => {
-  it('toggling two-age mode replaces the single-age selector with two age inputs', async () => {
+  it('toggling two-age mode replaces the retirement-age buttons with two age inputs, keeping SS visible', async () => {
     await act(async () => root.render(<StressTestWhatIf />))
     await flush()
     await click('Monte Carlo')
@@ -89,21 +96,22 @@ describe('Two-Age Monte Carlo', () => {
     await flush()
     expect(container.textContent).toContain("Alex's Retirement Age")
     expect(container.textContent).toContain("Sam's Retirement Age")
-    // The single-age SS-claiming-timing selector (its own labeled
-    // buttons, not the What-If Builder's always-mounted-but-hidden
-    // "Social Security" slider) must not render in two-age mode.
-    const ssButtons = [...container.querySelectorAll('button')].map(b => b.textContent.trim())
-    expect(ssButtons).not.toContain('SS at 62')
-    expect(ssButtons).not.toContain('SS at 67')
+    // Independent review, 2026-09-08 (P1): the SS-claiming-timing
+    // selector used to disappear entirely in two-age mode, with no way
+    // to change it -- it must stay visible and editable.
+    const buttons = [...container.querySelectorAll('button')].map(b => b.textContent.trim())
+    expect(buttons).toContain('SS at 62')
+    expect(buttons).toContain('SS at 67')
   })
 
-  it('sends both ages as explicit query params when running in two-age mode', async () => {
+  it('sends both ages, the current ss_timing, and any What-If overrides via POST', async () => {
     await act(async () => root.render(<StressTestWhatIf />))
     await flush()
     await click('Monte Carlo')
     await flush()
     await click('Use Two Independent Retirement Ages')
     await flush()
+    await click('SS at 67')
     const inputs = container.querySelectorAll('input[type=number]')
     await act(async () => {
       Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(inputs[0], '61')
@@ -113,9 +121,13 @@ describe('Two-Age Monte Carlo', () => {
     })
     await click('Run Monte Carlo Simulation')
     await flush()
-    expect(axios.get).toHaveBeenCalledWith('/api/simulation/monte-carlo', {
-      params: { jason_ret_age: 61, justin_ret_age: 63 },
-    })
+    // The always-mounted (but hidden until visited) What-If Builder
+    // computes its own default assumptions on load, same as it already
+    // does for single-age mode -- those are expected here too (that IS
+    // "preserve What-If overrides"), so this asserts the two-age-
+    // specific fields via objectContaining rather than exact equality.
+    expect(axios.post).toHaveBeenCalledWith('/api/simulation/monte-carlo',
+      expect.objectContaining({ ss_timing: 'delayed', jason_ret_age: 61, justin_ret_age: 63 }))
   })
 
   it('renders the age pair used, the working-spouse income, and the 65% factor', async () => {
@@ -131,6 +143,11 @@ describe('Two-Age Monte Carlo', () => {
     expect(container.textContent).toContain('Sam 63')
     expect(container.textContent).toContain('$65,000')
     expect(container.textContent).toContain('65%')
+    // Independent review, 2026-09-08 (P2): SecondEarnerNote used to
+    // describe every result as "Single retirement-age model" even when
+    // the result itself was two-age.
+    expect(container.textContent).toContain('Two-age model')
+    expect(container.textContent).not.toContain('Single retirement-age model')
   })
 
   it('masks the working-spouse income in privacy mode', async () => {
@@ -168,7 +185,7 @@ describe('Two-Age Monte Carlo', () => {
 })
 
 describe('Two-Age Stress Tests', () => {
-  it('sends both ages and renders the base scenario plus the working-spouse note', async () => {
+  it('sends both ages and ss_timing via POST, and renders the base scenario plus the working-spouse note', async () => {
     await act(async () => root.render(<StressTestWhatIf />))
     await flush()
     await click('Historical Stress')
@@ -177,9 +194,8 @@ describe('Two-Age Stress Tests', () => {
     await flush()
     await click('Run Stress Tests')
     await flush()
-    expect(axios.get).toHaveBeenCalledWith('/api/simulation/stress-tests', {
-      params: { jason_ret_age: 65, justin_ret_age: 65 },
-    })
+    expect(axios.post).toHaveBeenCalledWith('/api/simulation/stress-tests',
+      expect.objectContaining({ ss_timing: 'early', jason_ret_age: 65, justin_ret_age: 65 }))
     expect(container.textContent).toContain('$65,000')
     expect(container.textContent).toContain('65%')
   })
