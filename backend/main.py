@@ -1663,7 +1663,13 @@ def get_income_sources(ret_age: int = 60, ss_timing: str = "early", body: dict =
     return {"chart": chart, "label": scenario["label"]}
 
 @app.get("/api/simulation/tax-efficiency")
-def get_tax_efficiency(ret_age: int = 60, ss_timing: str = "early"):
+def get_tax_efficiency(ret_age: int = 60, ss_timing: str = "early",
+                        jason_ret_age: int = None, justin_ret_age: int = None):
+    """jason_ret_age/justin_ret_age (2026-09-08, CALCULATION_CONTRACT.md
+    section 34/35, Milestone 3 of 4): two-age mode, both required
+    together -- read from the query string, matching this endpoint's
+    existing GET-only shape (no What-If overrides/POST body support
+    exists here for single-axis either, so none is added for two-age)."""
     conn = get_db()
     inputs_row = conn.execute("SELECT * FROM planning_inputs ORDER BY id DESC LIMIT 1").fetchone()
     accounts   = [dict(r) for r in conn.execute("SELECT * FROM accounts").fetchall()]
@@ -1672,7 +1678,12 @@ def get_tax_efficiency(ret_age: int = 60, ss_timing: str = "early"):
     conn.close()
     if not inputs_row: return {"error": "No planning inputs found"}
     from simulation_engine import run_tax_efficiency_simulation
-    return run_tax_efficiency_simulation(dict(inputs_row), accounts, ret_age, ss_timing, life_events=life_events, surplus_allocations=surplus_allocations)
+    try:
+        return run_tax_efficiency_simulation(dict(inputs_row), accounts, ret_age, ss_timing,
+                                              life_events=life_events, surplus_allocations=surplus_allocations,
+                                              jason_ret_age=jason_ret_age, justin_ret_age=justin_ret_age)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 @app.post("/api/simulation/contribution-sensitivity")
 @app.get("/api/simulation/contribution-sensitivity")

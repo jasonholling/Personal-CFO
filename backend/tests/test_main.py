@@ -638,6 +638,21 @@ class TestSimulationEndpoints:
         r = client.get("/api/simulation/tax-efficiency?ret_age=60&ss_timing=early")
         assert r.status_code == 200
 
+    def test_tax_efficiency_two_age_mode(self, client, sample_inputs, sample_accounts):
+        self._seed(client, sample_inputs, sample_accounts)
+        r = client.get("/api/simulation/tax-efficiency",
+                        params={"jason_ret_age": 61, "justin_ret_age": 63})
+        assert r.status_code == 200
+        body = r.json()
+        assert body["mode"] == "two_age"
+        assert body["jason_ret_age"] == 61
+        assert body["justin_ret_age"] == 63
+
+    def test_tax_efficiency_two_age_mode_requires_both_ages(self, client, sample_inputs, sample_accounts):
+        self._seed(client, sample_inputs, sample_accounts)
+        r = client.get("/api/simulation/tax-efficiency", params={"jason_ret_age": 61})
+        assert r.status_code == 400
+
     def test_contribution_sensitivity(self, client, sample_inputs, sample_accounts):
         self._seed(client, sample_inputs, sample_accounts)
         r = client.get("/api/simulation/contribution-sensitivity?ret_age=60")
