@@ -319,3 +319,117 @@ class TestAge55BridgeAndKidsRulesPreserved:
         # yr2: bridge over (jason_yr=2, not <2), kids still home (2<4) -> family healthcare $10,000, need=80000+10000=90000
         assert [y["draw"] for y in yearly] == [50000, 50000, 90000]
         assert [y["healthcare_cost"] for y in yearly] == [0, 0, 10000]
+
+    def test_bridge_and_inflation_use_jasons_effective_start_not_the_raw_selected_age(self):
+        """Independent review, 2026-09-08, third follow-up (P1):
+        `jason_yr = age - jason_ret_age` used the raw SELECTED age (55)
+        even when the household is already well past it today -- for a
+        household already 5 years past the selected age, the first
+        withdrawal-loop year (which IS the household's real effective
+        retirement start) got treated as "5 years into the bridge
+        phase" instead of year 0, both over-inflating the spending need
+        and expiring bridge income 5 years too early.
+
+        Reproduction: both spouses currently 60, retirement selected at
+        55 (already 5 years past -> jason_years_to_retire clamps to 0,
+        so the effective start is THIS year, age 60), $80,000 spend,
+        3% inflation, $30,000/yr bridge income for 5 years (from the
+        effective start, not from the fictional age-55 date). The buggy
+        formula compounded 5 years of inflation immediately AND treated
+        bridge income as already expired (jason_yr=5, not <
+        bridge_years=5, so the bridge branch wasn't even entered) --
+        old (buggy) income_need: $80,000 * 1.03**5 = $92,742, with no
+        bridge offset applied at all. Correct: no elapsed years yet, so
+        the $80,000 base is untouched by inflation, bridge income is
+        still active, and it fully applies -- year 1 need (net of
+        bridge, same field convention run_retirement_projection's own
+        equivalent row already uses for a bridge year) is $50,000."""
+        inputs = base_inputs(jason_age=60, justin_age=60, inflation_rate=0.03, retirement_end_age=63,
+                              bridge_income_55=30000, bridge_years_55=5)
+        result = run_two_dimensional_retirement_projection(inputs, TAXABLE(500000), jason_ret_age=55, justin_ret_age=55)
+        yearly = result["yearly_detail"]
+        assert result["phase2_start_age"] == 60  # effective start -- this year, not the fictional 55
+        assert yearly[0]["bridge_income"] == 30000  # still active -- not yet expired
+        assert yearly[0]["income_need"] == 50000    # net of the still-active bridge offset
+        assert yearly[0]["draw"] == 50000
+        old_buggy_income_need = 92742  # matches the independent review's own reported old value (bridge NOT applied)
+        assert yearly[0]["income_need"] != old_buggy_income_need
+
+
+class TestJasonRsuStaysFlatUnlikeSalaryDerivedContributions:
+    def test_jason_rsu_does_not_grow_with_salary_growth_pct(self):
+        """Independent review, 2026-09-08, third follow-up (P2):
+        run_retirement_projection treats Jason's own RSU grant as a
+        FLAT dollar amount every year (`_fv_annuity`, unconditionally --
+        never the growing-annuity variant 401k contributions/bonus use),
+        but the new function's shared _contrib_fv helper applied
+        salary_growth_pct to RSU too.
+
+        Reproduction: 3 years to simultaneous retirement, $100,000
+        annual RSU, 10% salary growth, 0% investment returns -- at the
+        65% net-of-tax factor, flat contributions sum to
+        $65,000 * 3 = $195,000. The buggy growing-annuity version added
+        $215,150 instead."""
+        inputs = base_inputs(retirement_income_today_dollars=0, annual_rsu_value=100000,
+                              retirement_end_age=64, _salary_growth_pct=0.10)
+        result = run_two_dimensional_retirement_projection(inputs, [], jason_ret_age=63, justin_ret_age=63)
+        assert result["portfolio_at_phase2_start"] == 195000
+        old_buggy_value = 215150  # matches the independent review's own reported old value
+        assert result["portfolio_at_phase2_start"] != old_buggy_value
+
+    def test_justin_rsu_still_grows_with_salary_growth_pct_matching_reference(self):
+        """The asymmetry itself is an EXISTING, preserved convention --
+        run_retirement_projection's own justin_annual_rsu handling (via
+        _justin_contrib_fv) already lets Justin's RSU grow with
+        salary_growth_pct, unlike Jason's. This function must match
+        that existing asymmetry exactly, not "fix" it into a new,
+        different symmetric behavior."""
+        inputs = base_inputs(retirement_income_today_dollars=0,
+                              justin_annual_rsu_value=100000, retirement_end_age=64, _salary_growth_pct=0.10)
+        result = run_two_dimensional_retirement_projection(inputs, [], jason_ret_age=63, justin_ret_age=63)
+        assert result["portfolio_at_phase2_start"] == 215150  # matches the reference's own growing-annuity value for Justin
+
+
+class TestExpandedSimultaneousRetirementParity:
+    """Independent review, 2026-09-08, third follow-up -- explicit
+    instruction: expand the simultaneous-retirement parity check
+    (already present as TestSimultaneousRetirement's own case) to also
+    cover a past retirement selection, nonzero inflation, nonzero
+    salary growth, and RSUs -- the exact dimensions the two bugs above
+    were found in, none of which the original parity check exercised."""
+
+    def test_past_retirement_selection_with_inflation(self):
+        """Both spouses currently 60, retirement selected at 55
+        (already past), 3% inflation, $80,000 spend, $500,000 taxable,
+        0% returns -- direct numeric parity against
+        run_retirement_projection's own output for the same inputs
+        across the first three years, not just this function's own
+        arithmetic in isolation."""
+        inputs = base_inputs(jason_age=60, justin_age=60, inflation_rate=0.03, retirement_end_age=64)
+        accounts = TAXABLE(500000)
+        result = run_two_dimensional_retirement_projection(inputs, accounts, jason_ret_age=55, justin_ret_age=55)
+
+        from projection_engine import run_retirement_projection
+        reference = run_retirement_projection({**inputs, "justin_ret_age": 55}, accounts, ret_ages=[55])
+        ref_scenario = next(s for s in reference["scenarios"] if s["label"] == "age_55_early")
+        ref_balances = [y["portfolio_balance"] for y in ref_scenario["yearly_detail"][:3]]
+        assert [y["portfolio_balance"] for y in result["yearly_detail"][:3]] == ref_balances
+
+    def test_salary_growth_and_rsus(self):
+        """Both spouses currently 57, retiring simultaneously at 60 (3
+        years away -- not yet retired, so contributions are still
+        accruing), 5% salary growth, Jason's RSU $50,000/yr, 0%
+        pre/post returns, zero starting balance -- isolates the
+        accumulation-phase arithmetic (portfolio at the moment
+        withdrawal starts) against the reference's own output for the
+        same inputs."""
+        inputs = base_inputs(jason_age=57, justin_age=57, retirement_income_today_dollars=0,
+                              annual_rsu_value=50000, retirement_end_age=61, _salary_growth_pct=0.05)
+        accounts = []
+        result = run_two_dimensional_retirement_projection(inputs, accounts, jason_ret_age=60, justin_ret_age=60)
+
+        from projection_engine import run_retirement_projection
+        reference = run_retirement_projection({**inputs, "justin_ret_age": 60}, accounts, ret_ages=[60],
+                                                salary_growth_pct=0.05)
+        ref_scenario = next(s for s in reference["scenarios"] if s["label"] == "age_60_early")
+        assert result["portfolio_at_phase2_start"] == ref_scenario["portfolio_at_retirement"]

@@ -1239,6 +1239,28 @@ def run_two_dimensional_retirement_projection(inputs: Dict, accounts: List[Dict]
         )
         return _fv(fv_at_stop, pre_ret, dormant_years)
 
+    def _contrib_fv_flat(annual_amount, contrib_years, dormant_years):
+        """Same dormant-years compounding pattern as _contrib_fv, but
+        NEVER escalates with salary_growth_pct -- Jason's own RSU grant
+        is a flat dollar amount in run_retirement_projection (line
+        ~731: `_fv_annuity(annual_rsu * ..., pre_ret, years_to_retire)`,
+        unconditionally, unlike 401k contributions/bonus which ARE
+        salary-derived percentages and DO grow). Independent review,
+        2026-09-08, second follow-up: this function's shared _contrib_fv
+        helper incorrectly applied salary growth to Jason's RSU too,
+        reproduced ($195,000 correct vs. $215,150 with growth wrongly
+        applied over 3 years at 10% salary growth). Justin's own RSU
+        deliberately stays on the growing-eligible _contrib_fv above --
+        run_retirement_projection's own justin_annual_rsu handling
+        (via _justin_contrib_fv) already lets it grow with
+        salary_growth_pct, an existing asymmetry between the two
+        spouses' RSU treatment that predates this branch and is
+        preserved here exactly, not resolved."""
+        if annual_amount <= 0:
+            return 0.0
+        fv_at_stop = _fv_annuity(annual_amount, pre_ret, contrib_years)
+        return _fv(fv_at_stop, pre_ret, dormant_years)
+
     pension_annual = pension_for_age(inputs, jason_ret_age)
 
     retirement_year_for_events = timeline.retirement_year
@@ -1256,7 +1278,7 @@ def run_two_dimensional_retirement_projection(inputs: Dict, accounts: List[Dict]
     taxable_at_start = _fv(taxable_start, pre_ret, phase2_years)
     hsa_at_start = _fv(hsa_start, pre_ret, phase2_years) + _fv_annuity(annual_hsa, pre_ret, phase2_years)
 
-    taxable_at_start += _contrib_fv(annual_rsu * SECOND_EARNER_NET_OF_TAX_FACTOR, jason_contrib_years, jason_dormant_years)
+    taxable_at_start += _contrib_fv_flat(annual_rsu * SECOND_EARNER_NET_OF_TAX_FACTOR, jason_contrib_years, jason_dormant_years)
     taxable_at_start += _contrib_fv(justin_annual_rsu * SECOND_EARNER_NET_OF_TAX_FACTOR, justin_contrib_years, justin_dormant_years)
     taxable_at_start += _contrib_fv(annual_bonus * SECOND_EARNER_NET_OF_TAX_FACTOR, jason_contrib_years, jason_dormant_years)
     taxable_at_start += _contrib_fv(justin_annual_bonus * SECOND_EARNER_NET_OF_TAX_FACTOR, justin_contrib_years, justin_dormant_years)
@@ -1317,14 +1339,30 @@ def run_two_dimensional_retirement_projection(inputs: Dict, accounts: List[Dict]
     kids_annual_cost_at_jason_ret = kids_annual_cost * ((1 + inflation) ** timeline.jason_years_to_retire)
     bridge_income_at_jason_ret    = bridge_income    * ((1 + inflation) ** timeline.jason_years_to_retire)
 
-    # Jason's own pension starts only once JASON has actually retired --
-    # not from phase2_start unconditionally (independent review,
-    # 2026-09-08, P1: when Justin retires first, phase2's still-working
-    # spouse is Jason, so pension payments landing before his own
-    # retirement were two years too early in the reproduction that found
-    # this). age >= jason_pension_start_age is the same "already past"
-    # semantics build_timeline/TwoPersonTimeline already apply elsewhere.
-    jason_pension_start_age = jason_age + timeline.jason_years_to_retire
+    # Jason's own EFFECTIVE retirement start age -- max(jason_ret_age,
+    # jason_age), the same "already past" clamp build_timeline/
+    # TwoPersonTimeline apply everywhere else, expressed as an absolute
+    # age here since jason_years_to_retire is already clamped to 0 for
+    # an already-past selection. Two independent uses below:
+    # 1. Jason's own pension starts only once JASON has actually
+    #    retired -- not from phase2_start unconditionally (independent
+    #    review, 2026-09-08, P1: when Justin retires first, phase2's
+    #    still-working spouse is Jason, so pension payments landing
+    #    before his own retirement were two years too early in the
+    #    reproduction that found this).
+    # 2. The age-55 bridge/kids block below must count elapsed years
+    #    from THIS age, not the raw selected jason_ret_age (independent
+    #    review, 2026-09-08, third follow-up: for a household already
+    #    past age 55 today, `age - jason_ret_age` counted years that had
+    #    already elapsed before the household's real current age as if
+    #    they were still ahead of it -- reproduced: both spouses
+    #    currently 60, retirement selected at 55, 3% inflation -- the
+    #    first loop year (age 60, which IS Jason's effective retirement
+    #    start) incorrectly compounded 5 years of inflation it already
+    #    had a `jason_years_to_retire`-based reference for, giving
+    #    $92,742 instead of $80,000, and expired bridge/kids timing 5
+    #    years early for the same reason).
+    jason_effective_start_age = jason_age + timeline.jason_years_to_retire
 
     # Still-working spouse's phase2 income baseline -- symmetric reuse of
     # the same 0.65 net-of-tax approximation and per-year lookup every
@@ -1355,8 +1393,8 @@ def run_two_dimensional_retirement_projection(inputs: Dict, accounts: List[Dict]
         justin_age_this_year = timeline.justin_age_at(age)
         phase = "phase2" if timeline.in_phase2(age) else "phase3"
 
-        if jason_ret_age == 55 and age >= jason_ret_age:
-            jason_yr = age - jason_ret_age
+        if jason_ret_age == 55 and age >= jason_effective_start_age:
+            jason_yr = age - jason_effective_start_age
             kids_still_home = jason_yr < kids_years
             bridge_active   = jason_yr < bridge_years
             if bridge_active:
@@ -1392,7 +1430,7 @@ def run_two_dimensional_retirement_projection(inputs: Dict, accounts: List[Dict]
         # here instead since that builder is coupled to Timeline's
         # single-axis fields (effective_start_age/claim_year_index), not
         # TwoPersonTimeline's.
-        year_pen = pension_annual if age >= jason_pension_start_age else 0.0
+        year_pen = pension_annual if age >= jason_effective_start_age else 0.0
         year_jss = jason_ss_annual * ((1 + inflation) ** max(0, age - jason_ss_age)) if age >= jason_ss_age else 0.0
         year_uss = (justin_ss_annual * ((1 + inflation) ** max(0, justin_age_this_year - justin_ss_age))
                     if justin_age_this_year >= justin_ss_age else 0.0)
@@ -1430,7 +1468,7 @@ def run_two_dimensional_retirement_projection(inputs: Dict, accounts: List[Dict]
             "phase":      phase,
             "income_need": round(year_need + still_working_income_this_year),  # need BEFORE the still-working offset, matching run_retirement_projection's own field meaning
             "still_working_spouse_income": round(still_working_income_this_year),
-            "bridge_income": round(bridge_income_at_jason_ret * ((1 + inflation) ** (age - jason_ret_age))) if jason_ret_age == 55 and age >= jason_ret_age and (age - jason_ret_age) < bridge_years else 0,
+            "bridge_income": round(bridge_income_at_jason_ret * ((1 + inflation) ** (age - jason_effective_start_age))) if jason_ret_age == 55 and age >= jason_effective_start_age and (age - jason_effective_start_age) < bridge_years else 0,
             "healthcare_cost": round(healthcare_inflated),
             "pension":         round(year_pen),
             "social_security": round(year_jss + year_uss),
