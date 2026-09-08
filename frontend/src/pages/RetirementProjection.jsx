@@ -2,6 +2,7 @@ import { useState } from 'react'
 import Retirement from './Retirement'
 import SideBySide from './SideBySide'
 import RetirementSensitivity from './RetirementSensitivity'
+import TwoAgeScenario from './TwoAgeScenario'
 
 // Combines Retirement + Side by Side + Age Sensitivity under one nav entry —
 // these were 3 separate top-level tabs, but they're all the same base
@@ -14,6 +15,12 @@ const TABS = [
   { id:'overview',    label:'Overview' },
   { id:'sidebyside',  label:'Side by Side' },
   { id:'sensitivity', label:'Sensitivity' },
+  // Two-Age Scenario is a deliberately separate, additive tool (backend/
+  // docs/TWO_DIMENSIONAL_RETIREMENT_DESIGN.md section 7) -- the other 3
+  // tabs above all still model a single household retirement date. Kept
+  // as its own tab rather than folded in, so the two models stay
+  // visibly distinct instead of quietly merged.
+  { id:'twoage',      label:'Two-Age Scenario' },
 ]
 
 export default function RetirementProjection({ onNavigate }) {
@@ -44,6 +51,7 @@ export default function RetirementProjection({ onNavigate }) {
       {tab === 'overview'    && <Retirement onNavigate={onNavigate} />}
       {tab === 'sidebyside'  && <SideBySide onNavigate={onNavigate} />}
       {tab === 'sensitivity' && <RetirementSensitivity onNavigate={onNavigate} />}
+      {tab === 'twoage'      && <TwoAgeScenario />}
     </div>
   )
 }
