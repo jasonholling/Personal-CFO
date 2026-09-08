@@ -2295,7 +2295,7 @@ current one is reviewed and approved"), for independent review.
 
 ## 27. Two-age SWR — independent review fixes (2026-09-08, on `codex/two-age-swr`)
 
-First independent review of `codex/two-age-swr` (commit `7b4245d`) found
+First independent review of `codex/two-age-swr`'s prior commit found
 three issues in `_run_swr_analysis_two_age`, all now fixed and covered
 by new hand/script-verified tests (`test_two_age_swr.py`). None touch
 `_swr_success_rate_two_age`'s own withdrawal search loop or
@@ -2374,3 +2374,89 @@ affordability fields correctly flag the shortfall.
 
 Branch: `codex/two-age-swr`, pushed, **still not merged** — second
 review round, awaiting approval before Milestone 2 begins.
+
+## 28. Two-age SWR — second independent review round (2026-09-08, on `codex/two-age-swr`)
+
+Second review found the section 27 fix only partially correct: on_track/
+cushion_pct were now derived from run_two_dimensional_retirement_
+projection's complete dated cash flow, but only for the household's
+ORIGINAL stated spending target -- not for total_safe_spend (the
+number this tool actually recommends), which was still the unvalidated
+sum `safe_withdrawal_annual + guaranteed_day_one`. Replaying that sum
+back through the full pension/inflation scenario could still come up
+short. Two more issues (cushion always non-positive for a funded plan;
+a regression in the steady-state pension-timing fix) came with it.
+
+**P1 — the recommendation itself wasn't validated.** Added
+`_household_spending_success_rate_two_age`, a genuine second search
+(same N=1000 randomized-return-trial structure and target_success
+convergence as `safe_withdrawal_annual`'s own search) over
+`candidate_income_today` -- the same input `two_age_spending_need_fn`
+already takes, so this search runs the exact bridge/kids/healthcare
+formulas, with guaranteed income (pension/SS) and still-working income
+netted directly against the full year's need exactly the way
+`run_two_dimensional_retirement_projection`'s `simulate_withdrawal_year`
+call does (unlike `_swr_success_rate_two_age`'s deliberately separate
+treatment, section 25's contract, untouched). `total_safe_spend` is now
+this search's own converged boundary (household fixed costs like
+`healthcare_pre_medicare` held constant, only the discretionary income
+figure searched, then added back so the basis matches `income_target`
+exactly) -- a number that is, by construction, safe to replay.
+`on_track`/`cushion_pct` now compare this validated boundary against
+`income_target`, not a second, unvalidated formula.
+`safe_withdrawal_annual`/`safe_withdrawal_rate` (the portfolio-only
+search) are completely unchanged -- verified directly by a new test
+asserting the portfolio-only boundary is unaffected by any of this.
+
+**P2 — cushion now reflects genuine spare capacity.** The section 27
+formula measured `(total_need − total_unmet) / total_need`, which is
+always <= 0% for a funded plan (a household either has 0% unfunded or
+some positive shortfall -- there's no way for that formula to express
+"how much MORE could this plan afford"). `cushion_pct` is now
+`(total_safe_spend / income_target − 1) × 100`, using the validated
+search boundary above, so materially different portfolios against the
+identical target now report materially different (not just
+zero-or-negative) cushions -- new test: a $200,000 and a $1,000,000
+portfolio against the same $80,000 target both report on_track but
+with clearly different cushion_pct, the $1M portfolio's larger. A new
+`shortfall_pct` field (`-cushion_pct` when negative, else 0) surfaces
+the magnitude of a real shortfall without overloading cushion_pct's
+sign.
+
+**P2 — steady-state pension timing regressed in the section 27 fix.**
+That fix computed `ss_start_age` from SS claim ages alone, dropping the
+ORIGINAL (section 26) code's implicit `max(years_to_ss,
+years_to_pension)` -- so `guaranteed_income_steadystate` could include
+a pension before it had actually started whenever pension commencement
+falls later than both SS claims. Reproduced: both 65 today, Justin
+retires now, Jason at 70 -- SS fully active by 67, pension not until
+70 -- reported $63,185 (age-67 SS plus a pension unavailable for three
+more years); correct, measured at 70 (the later of the two dates, with
+SS COLA'd three additional years): $66,726. Fixed with a separate
+internal `steadystate_age = phase2_start_age + max(years_to_ss,
+years_to_pension)`, gating pension on `steadystate_age >=
+jason_effective_start_age` and computing each spouse's own SS exponent
+from that same date -- restores the original code's timing guarantee
+while keeping the per-spouse claim-date correctness from section 27.
+The exposed `ss_start_age` field itself is unchanged (still SS-only,
+as before) -- only the internal steady-state date used for
+`guaranteed_income_steadystate` changed.
+
+**Performance:** this necessarily doubles SWR's search cost -- two
+full N=1000/20-iteration binary searches instead of one. Benchmarked
+(5-run average, matched household/inputs) at ~1.37s for single-axis,
+~2.91s for two-age (was ~1.36s before this round). This is a real,
+material cost of validating the household-spending recommendation the
+same way the portfolio-only search already is -- reported plainly, not
+minimized. Still well within interactive request latency; no further
+optimization attempted this round.
+
+**Verified:** full backend suite 1204 passed, 97.61% coverage (test
+count unchanged from section 27 -- three tests rewritten to the new
+semantics, two added). Frontend suite still 35 passed, build succeeds,
+sensitive-data check passed (a review-round artifact -- a commit hash
+fragment in this file's own prose incidentally matched a denylisted
+number; the hash reference was removed, not the denylist).
+
+Branch: `codex/two-age-swr`, pushed, **still not merged** -- third
+review round pending before Milestone 2 begins.

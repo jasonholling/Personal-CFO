@@ -194,60 +194,102 @@ class TestSummaryFieldsGatedToJasonsOwnRetirement:
         assert "on_track" in r
 
 
-class TestHouseholdAffordabilityUsesCompleteDatedCashFlows:
-    """Independent review, 2026-09-08, P1: SWR's own withdrawal search
-    never models bridge/kids costs or per-year healthcare (preserved
-    exactly per section 25's contract -- safe_withdrawal_annual itself
-    is untouched by these tests), but on_track/cushion_pct used to
-    compare that portfolio-only search result against a flat, one-year
-    income_target -- silently missing exactly the costs the search
-    itself never modeled. Fixed by reusing run_two_dimensional_
-    retirement_projection's own complete dated cash flows (already
-    computed for starting balances) instead of a second, cruder
-    comparison. Both cases below were reproduced against this exact bug
-    during review and hand/script-verified against
-    run_two_dimensional_retirement_projection directly."""
+class TestHouseholdSpendingSearchIsGenuinelyValidated:
+    """Independent review, 2026-09-08, second follow-up, P1/P2: the
+    first fix compared the household's ORIGINAL stated spending target
+    against run_two_dimensional_retirement_projection's on_track flag --
+    that answers "is the current target affordable," not "is the
+    RECOMMENDED number (total_safe_spend) itself safe" (total_safe_spend
+    was left as safe_withdrawal + guaranteed_day_one, never validated
+    against bridge/kids/healthcare or the target_success rate at all).
+    total_safe_spend now comes directly from
+    _household_spending_success_rate_two_age's own search boundary --
+    the largest total household spending (income_today + the household's
+    own fixed costs like healthcare_pre_medicare) that funds every
+    single year in full across the N randomized trials at target_success
+    -- so replaying it back is guaranteed safe by construction, and
+    cushion_pct is genuine spare capacity relative to the stated target,
+    not a proportion-unfunded figure (which was always <= 0 for a funded
+    plan, regardless of how much MORE it could actually afford).
 
-    def test_kids_and_healthcare_costs_produce_a_real_shortfall(self):
+    Every case below monkeypatches random.gauss to a fixed 0.0 (with the
+    0%-return default from base_inputs) so every one of the N trials is
+    identical -- success_at_household_spending(x) becomes a clean 100%/
+    0% step function right at the true boundary, and target_success=1.0
+    makes the search converge to exactly that boundary. Each boundary is
+    then hand-verified by replaying the arithmetic directly (shown in
+    each docstring) -- ground truth independent of the code under test."""
+
+    def test_kids_and_healthcare_costs_are_held_fixed_while_income_is_searched(self, monkeypatch):
         """$220,000 taxable, both retire now at 61, 2-year horizon,
-        $100,000 income + $30,000 healthcare/kids cost (via
-        healthcare_pre_medicare, the default branch's own healthcare
-        term), 0% inflation/growth. Household need is $130,000/yr x 2 =
-        $260,000 against a $220,000 portfolio -- a real $40,000
-        shortfall, hand-verified via simulate_withdrawal_year's own
-        waterfall (year0: 220000-130000=90000 remaining; year1:
-        90000-130000 = -40000 unmet)."""
+        $100,000 stated income + $30,000 fixed healthcare cost (via
+        healthcare_pre_medicare), 0% inflation/growth. healthcare_pre
+        stays fixed at $30,000 every year (it's a household cost, not
+        part of the recommendation) while income_today is searched --
+        2*(candidate+30000) = 220000 -> candidate = 80000 exactly.
+        total_safe_spend = (80000+30000)*1 = 110000 -- against a
+        $130,000 stated target (100000+30000), a real ~15.4% shortfall,
+        NOT the safe_withdrawal_annual search's own portfolio-only
+        number (still computed independently, asserted unaffected)."""
+        monkeypatch.setattr(random_module, "gauss", lambda mu, sigma: 0.0)
         inputs = base_inputs(jason_age=61, justin_age=61, retirement_end_age=63,
                               retirement_income_today_dollars=100000, healthcare_pre_medicare=30000)
-        r = run_swr_analysis(inputs, TAXABLE(220000), jason_ret_age=61, justin_ret_age=61, target_success=0.5)
-        assert r["total_unmet_need"] == 40000
+        r = run_swr_analysis(inputs, TAXABLE(220000), jason_ret_age=61, justin_ret_age=61, target_success=1.0)
+        assert r["total_safe_spend"] == pytest.approx(110000, abs=1)
         assert r["on_track"] is False
         assert r["cushion_pct"] == -15.4
+        assert r["shortfall_pct"] == 15.4
+        # The portfolio-only search is untouched by this fix -- with no
+        # guaranteed income/gap income here, its own boundary is simply
+        # $220,000 / 2 years = $110,000 (matches
+        # TestSwrSearchBoundaryDeterministic's own simultaneous-
+        # retirement case, same household shape).
+        assert r["safe_withdrawal_annual"] == 110000
 
-    def test_inflation_and_a_frozen_pension_produce_a_real_shortfall(self):
+    def test_replaying_the_recommendation_against_a_frozen_pension_and_inflation_is_safe(self, monkeypatch):
         """$200,000 taxable, both retire now at 61, 2-year horizon,
-        $125,000 income, 10% inflation, a frozen (no-COLA) $30,000
-        pension. Year0: need 125000, pension 30000, draw 95000 ->
-        200000-95000=105000. Year1: need 137500 (10% inflation), pension
-        still 30000 (frozen), draw 107500 -> 105000-107500 = -2500 unmet
-        -- hand-verified the same way as the case above."""
+        $125,000 stated income, 10% inflation, a frozen (no-COLA)
+        $30,000 pension, no separate healthcare cost. The boundary
+        candidate income_today satisfies (candidate) + (1.1*candidate) -
+        2*30000 = 200000 (total spend over 2 years, minus 2 years of
+        frozen pension, funded exactly from the $200,000 portfolio) ->
+        2.1*candidate = 260000 -> candidate = 123809.52. Replaying THIS
+        number (not the original $125,000 target) is, by construction,
+        exactly at the edge of funded -- the fix's whole point: the
+        OLD total_safe_spend (safe_withdrawal + guaranteed_day_one, an
+        unvalidated sum) could recommend a number that comes up short
+        when replayed; this one cannot, since it IS the searched
+        boundary."""
+        monkeypatch.setattr(random_module, "gauss", lambda mu, sigma: 0.0)
         inputs = base_inputs(jason_age=61, justin_age=61, retirement_end_age=63,
                               retirement_income_today_dollars=125000, inflation_rate=0.10,
                               pension_55=30000, pension_60=30000, pension_65=30000)
-        r = run_swr_analysis(inputs, TAXABLE(200000), jason_ret_age=61, justin_ret_age=61, target_success=0.5)
-        assert r["total_unmet_need"] == 2500
+        r = run_swr_analysis(inputs, TAXABLE(200000), jason_ret_age=61, justin_ret_age=61, target_success=1.0)
+        assert r["total_safe_spend"] == pytest.approx(123809.52, abs=1)
         assert r["on_track"] is False
         assert r["cushion_pct"] == -1.0
 
-    def test_fully_funded_household_still_reports_on_track(self):
-        """Sanity check the fix isn't one-directional: a household with
-        ample portfolio for its real (kids/healthcare-inclusive) need
-        must still report on_track=True, total_unmet_need=0."""
-        inputs = base_inputs(jason_age=61, justin_age=61, retirement_end_age=63,
-                              retirement_income_today_dollars=100000, healthcare_pre_medicare=30000)
-        r = run_swr_analysis(inputs, TAXABLE(1000000), jason_ret_age=61, justin_ret_age=61, target_success=0.5)
-        assert r["total_unmet_need"] == 0
-        assert r["on_track"] is True
+    def test_a_much_larger_portfolio_reports_a_larger_cushion_for_the_same_target(self, monkeypatch):
+        """Independent review, 2026-09-08, second follow-up, P2:
+        cushion_pct used to measure the proportion of a FIXED target
+        left unfunded, which is always exactly 0% for any funded plan --
+        a $200,000 portfolio and a $1,000,000 portfolio against the same
+        $80,000 target both reported 0% cushion despite very different
+        real spending capacity. cushion_pct now comes from the searched
+        household-spending boundary itself, so a materially larger
+        portfolio reports a materially larger (not just non-negative)
+        cushion for the identical target."""
+        monkeypatch.setattr(random_module, "gauss", lambda mu, sigma: 0.0)
+        smaller = base_inputs(jason_age=61, justin_age=61, retirement_end_age=63,
+                               retirement_income_today_dollars=80000)
+        larger = base_inputs(jason_age=61, justin_age=61, retirement_end_age=63,
+                              retirement_income_today_dollars=80000)
+        r_small = run_swr_analysis(smaller, TAXABLE(200000), jason_ret_age=61, justin_ret_age=61, target_success=1.0)
+        r_large = run_swr_analysis(larger, TAXABLE(1000000), jason_ret_age=61, justin_ret_age=61, target_success=1.0)
+        assert r_small["on_track"] is True
+        assert r_large["on_track"] is True
+        assert r_large["cushion_pct"] > r_small["cushion_pct"] > 0
+        assert r_large["total_safe_spend"] > r_small["total_safe_spend"]
 
 
 class TestZeroPortfolioSearchBoundIsIndependentOfPortfolioSize:
@@ -309,6 +351,29 @@ class TestGuaranteedIncomeSummaryUsesEachSpousesOwnClaimDate:
         r = run_swr_analysis(inputs, TAXABLE(500000), jason_ret_age=64, justin_ret_age=64,
                               ss_timing="early", target_success=0.5)
         assert r["guaranteed_income_steadystate"] == 41878
+
+    def test_steadystate_waits_for_the_later_of_ss_and_pension(self):
+        """Independent review, 2026-09-08, second follow-up, P2: fixing
+        the per-spouse SS claim-date exponent (test above) dropped the
+        previous code's implicit max() against years_to_pension --
+        steadystate_age became "both SS claims active" only, so a
+        pension starting LATER than that could get included before it
+        actually starts. Both spouses 65 today, Justin retires now,
+        Jason at 70 (age_gap=0). SS is fully active by 67 (Justin's
+        spousal claim, the later of the two), but Jason's pension not
+        until 70 -- three years later. Correct steady-state is measured
+        at 70 (the later of the two): 25000 pension + 20000*1.03**8 +
+        15000*1.03**3 = 66726. The regressed formula measured at 67
+        (SS-only) but still added the age-70-only pension: 25000 +
+        20000*1.03**5 + 15000*1.03**0 = 63185 -- a different, wrong
+        number that includes a pension three years before it starts."""
+        inputs = base_inputs(jason_age=65, justin_age=65, retirement_end_age=90,
+                              inflation_rate=0.03, jason_social_security=20000,
+                              justin_social_security=15000,
+                              pension_55=25000, pension_60=25000, pension_65=25000)
+        r = run_swr_analysis(inputs, TAXABLE(500000), jason_ret_age=70, justin_ret_age=65,
+                              ss_timing="early", target_success=0.5)
+        assert r["guaranteed_income_steadystate"] == 66726
 
 
 class TestTwoAgeSwrModeRequiresBothAges:
