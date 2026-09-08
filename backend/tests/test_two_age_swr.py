@@ -172,6 +172,28 @@ class TestSwrSearchFailsAboveTheBoundary:
         assert remaining_above == pytest.approx(10000.0)  # $10,000 short -- a real, meaningful failure
 
 
+class TestSummaryFieldsGatedToJasonsOwnRetirement:
+    def test_pension_absent_from_guaranteed_income_annual_until_jason_actually_retires(self):
+        """Justin retires first (61), Jason later (63), $30,000 pension
+        -- guaranteed_income_annual (the DAY-ONE figure, at phase2_start
+        = age 61) must NOT include the pension yet, since Jason hasn't
+        retired. guaranteed_income_steadystate (once pension AND both
+        SS claims are active) must include it."""
+        inputs = base_inputs(retirement_end_age=64, w2_salary=100000,
+                              pension_55=30000, pension_60=30000, pension_65=30000)
+        r = run_swr_analysis(inputs, TAXABLE(200000), jason_ret_age=63, justin_ret_age=61, target_success=0.5)
+        assert r["phase2_start_age"] == 61
+        assert r["guaranteed_income_annual"] == 0
+        assert r["guaranteed_income_steadystate"] == 30000
+
+    def test_on_track_and_income_target_fields_present(self):
+        inputs = base_inputs(retirement_end_age=64)
+        r = run_swr_analysis(inputs, TAXABLE(500000), jason_ret_age=61, justin_ret_age=61, target_success=0.5)
+        assert "income_target" in r
+        assert "cushion_pct" in r
+        assert "on_track" in r
+
+
 class TestTwoAgeSwrModeRequiresBothAges:
     def test_only_jason_ret_age_raises(self):
         inputs = base_inputs(retirement_end_age=64)

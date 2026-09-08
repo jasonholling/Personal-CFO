@@ -776,12 +776,25 @@ def _run_swr_analysis_two_age(inputs: Dict, accounts: List[Dict], jason_ret_age:
     still_working_income_at_start = two_age_still_working_income_inputs(inputs, timeline, _salary_growth_pct)[1]
     total_safe_spend = safe_withdrawal + guaranteed_day_one
 
+    # Same "on track" comparison the single-axis summary reports --
+    # income_target is today's household spending target grown to
+    # phase2_start (the same basis income_at_start/_swr_success_rate
+    # itself never touches, matching section 25's "no bridge/kids/
+    # healthcare in the search loop, only in this summary" contract).
+    income_today   = inputs["retirement_income_today_dollars"]
+    healthcare_pre = inputs.get("healthcare_pre_medicare", 0)
+    income_target  = (income_today + healthcare_pre) * ((1 + inflation) ** timeline.phase2_start_years)
+    cushion_pct    = round((total_safe_spend / income_target - 1) * 100, 1) if income_target > 0 else 0
+
     return {
         "portfolio_at_retirement":   round(portfolio),
         "safe_withdrawal_annual":    round(safe_withdrawal),
         "safe_withdrawal_rate":      round(safe_withdrawal_rate * 100, 2),
         "guaranteed_income_annual":  round(guaranteed_day_one),
         "guaranteed_income_steadystate": round(guaranteed_first_year),
+        "income_target":             round(income_target),
+        "cushion_pct":               cushion_pct,
+        "on_track":                  total_safe_spend >= income_target,
         "pension_annual":            round(pension_annual),
         "jason_ss_annual":           round(jason_ss_annual),
         "justin_ss_annual":          round(justin_ss_annual),

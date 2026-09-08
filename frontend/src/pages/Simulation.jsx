@@ -116,10 +116,18 @@ export function MonteCarloSection({ retAge, ssTiming, overrides, jasonRetAge, ju
       // below) with both threaded through fixes that; the POST endpoint
       // applies overrides==null the same as its own GET does when no
       // What-If assumptions have been set yet.
-      axios.post('/api/simulation/monte-carlo', { ...overrides, ss_timing: ssTiming, jason_ret_age: jasonRetAge, justin_ret_age: justinRetAge })
-        .then(mc => {
+      // SWR now also supports two-age mode (CALCULATION_CONTRACT.md
+      // section 25/26, Milestone 1) -- fetched alongside Monte Carlo so
+      // the existing "Safe Spending Power" card (already reused for
+      // two-age mode) is actually populated instead of permanently
+      // showing "Run simulation to calculate".
+      Promise.all([
+        axios.post('/api/simulation/monte-carlo', { ...overrides, ss_timing: ssTiming, jason_ret_age: jasonRetAge, justin_ret_age: justinRetAge }),
+        axios.post('/api/simulation/swr', { ...overrides, ss_timing: ssTiming, jason_ret_age: jasonRetAge, justin_ret_age: justinRetAge }),
+      ]).then(([mc, sw]) => {
           if (gen !== genRef.current) return
           setData(mc.data)
+          setSwr(sw.data)
           setLoading(false)
         }).catch(() => {
           if (gen !== genRef.current) return
@@ -205,7 +213,7 @@ export function MonteCarloSection({ retAge, ssTiming, overrides, jasonRetAge, ju
             <div style={{ fontSize:12, color:'var(--text2)', marginTop:4 }}>
               of 1,000 scenarios fund your planned lifestyle to age {data.retirement_end_age ?? 99}
             </div>
-            {retAge === 55 ? (
+            {retAge === 55 && data.mode !== 'two_age' ? (
               <div style={{ marginTop:12, fontSize:12, lineHeight:1.7 }}>
                 <div style={{ color:'var(--text2)', marginBottom:8 }}>Phased plan modeled — see Settings for your bridge income/years inputs:</div>
                 <div style={{ display:'flex', justifyContent:'space-between' }}>
@@ -249,8 +257,7 @@ export function MonteCarloSection({ retAge, ssTiming, overrides, jasonRetAge, ju
                     {swr.cushion_pct > 0 ? '+' : ''}{swr.cushion_pct}%
                   </span>
                 </div>
-                <SecondEarnerNote amount={swr.justin_gap_income_first_year} years={swr.justin_gap_years}
-                                   factor={swr.second_earner_net_of_tax_factor} personLabel={person2Name} />
+                <SecondEarnerNote {...secondEarnerNoteProps(swr, person1Name, person2Name)} />
               </div>
             )}
           </>) : <div style={{ fontSize:12, color:'var(--text2)', marginTop:8 }}>Run simulation to calculate</div>}
