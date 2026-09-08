@@ -488,6 +488,26 @@ class TestSimulationEndpoints:
         r = client.get("/api/simulation/monte-carlo", params={"jason_ret_age": 61})
         assert r.status_code == 400
 
+    def test_monte_carlo_post_two_age_mode_with_whatif_overrides(self, client, sample_inputs, sample_accounts):
+        """Independent review, 2026-09-08, P1: two-age mode used to only
+        ever call the plain GET endpoint, silently dropping ss_timing
+        and any What-If Builder overrides. The POST variant must apply
+        both in two-age mode too."""
+        self._seed(client, sample_inputs, sample_accounts)
+        r = client.post("/api/simulation/monte-carlo", json={
+            "jason_ret_age": 61, "justin_ret_age": 63, "ss_timing": "delayed",
+            "income_target": 500000,
+        })
+        assert r.status_code == 200
+        body = r.json()
+        assert body["mode"] == "two_age"
+        assert body["ss_timing"] == "delayed"
+
+    def test_monte_carlo_post_two_age_requires_both_ages(self, client, sample_inputs, sample_accounts):
+        self._seed(client, sample_inputs, sample_accounts)
+        r = client.post("/api/simulation/monte-carlo", json={"jason_ret_age": 61})
+        assert r.status_code == 400
+
 
     def test_swr(self, client, sample_inputs, sample_accounts):
         self._seed(client, sample_inputs, sample_accounts)
@@ -532,6 +552,24 @@ class TestSimulationEndpoints:
     def test_stress_tests_two_age_mode_requires_both_ages(self, client, sample_inputs, sample_accounts):
         self._seed(client, sample_inputs, sample_accounts)
         r = client.get("/api/simulation/stress-tests", params={"justin_ret_age": 63})
+        assert r.status_code == 400
+
+    def test_stress_tests_post_two_age_mode_with_whatif_overrides(self, client, sample_inputs, sample_accounts):
+        """Same fix as Monte Carlo's POST variant above, applied to
+        Historical Stress."""
+        self._seed(client, sample_inputs, sample_accounts)
+        r = client.post("/api/simulation/stress-tests", json={
+            "jason_ret_age": 61, "justin_ret_age": 63, "ss_timing": "delayed",
+            "healthcare_pre": 90000,
+        })
+        assert r.status_code == 200
+        body = r.json()
+        assert body["mode"] == "two_age"
+        assert body["ss_timing"] == "delayed"
+
+    def test_stress_tests_post_two_age_requires_both_ages(self, client, sample_inputs, sample_accounts):
+        self._seed(client, sample_inputs, sample_accounts)
+        r = client.post("/api/simulation/stress-tests", json={"justin_ret_age": 63})
         assert r.status_code == 400
 
     def test_sequence_risk(self, client, sample_inputs, sample_accounts):
