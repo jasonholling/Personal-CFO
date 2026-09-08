@@ -22,7 +22,7 @@ import random as random_module
 from simulation_engine import run_tax_efficiency_simulation
 
 TAXABLE = lambda balance: [{"name": "Brokerage", "account_type": "taxable", "owner": "joint", "balance": balance}]
-PRETAX = lambda balance: [{"name": "IRA", "account_type": "pretax", "owner": "joint", "balance": balance}]
+PRETAX = lambda balance: [{"name": "IRA", "account_type": "ira", "owner": "joint", "balance": balance}]
 
 
 def base_inputs(**overrides):
@@ -55,17 +55,30 @@ class TestBasicTaxableFirstTwoAge:
     """Both retire now at 61, 2-year horizon (ages 61-62), $80,000
     taxable / $300,000 pretax, $50,000/yr spending, 0% inflation/growth,
     no guaranteed income. taxable_first (DEFAULT_ORDER = taxable,
-    pretax, hsa, roth):
+    pretax, hsa, roth) -- taxable draws are NOT tax-free in this tool:
+    _ordered_draw is called with tax_taxable_rate=TAX_TAXABLE=0.15 (the
+    LTCG approximation this tool's own docstring documents), unlike
+    Roth Conversion's simulate_withdrawal_year calls (taxable_rate=0.0
+    there). Every number below replays _ordered_draw's own grossed-up
+    arithmetic by hand with THAT rate, not assumed tax-free.
 
-    Year 0 (age 61): taxable draw min(50000,80000)=50000, untaxed ->
-    taxable=30000, need fully funded, $0 tax.
-    Year 1 (age 62): taxable draw min(50000,30000)=30000 (untaxed),
-    remaining=20000 -> pretax grossed-up: gross=20000/0.78=25641.03,
-    tax=25641.03*0.22=5641.03, pretax_after=300000-25641.03=274358.97.
+    Year 0 (age 61): taxable draw grossed up for the 15% rate:
+    gross=50000/0.85=58823.53, tax=58823.53*0.15=8823.53,
+    draw=min(58823.53,80000)=58823.53 (affordable) ->
+    taxable=80000-58823.53=21176.47, need fully funded.
+    Year 1 (age 62): taxable draw grossed up again, but bal=21176.47 <
+    the full 58823.53 needed -> draw=21176.47 (all of it),
+    tax=21176.47*0.15=3176.47, net=21176.47-3176.47=18000.00,
+    remaining=50000-18000=32000 -> falls through to pretax (22%):
+    gross=32000/0.78=41025.64, tax=41025.64*0.22=9025.64,
+    pretax_after=300000-41025.64=258974.36. Year 1 total tax =
+    3176.47+9025.64=12202.11.
 
-    final_balance = round(274358.97) = 274359. lifetime_tax =
-    round(5641.03) = 5641. Fully funded both years -> success_rate=100%
-    (every one of the N=1000 identical deterministic trials)."""
+    lifetime_tax (rounded ONCE per trial, not per year) =
+    round(8823.53+12202.11) = round(21025.64) = 21026. final_balance =
+    round(258974.36+0+0+0) = 258974. Fully funded both years ->
+    success_rate=100% (every one of the N=1000 identical deterministic
+    trials)."""
 
     def test_two_year_taxable_first(self):
         inputs = base_inputs()
@@ -73,26 +86,31 @@ class TestBasicTaxableFirstTwoAge:
                                            jason_ret_age=61, justin_ret_age=61)
         assert r["mode"] == "two_age"
         tf = r["strategies"]["taxable_first"]
-        assert tf["median_lifetime_tax"] == 5641
-        assert tf["p10_lifetime_tax"] == 5641
-        assert tf["p90_lifetime_tax"] == 5641
-        assert tf["median_final_balance"] == 274359
+        assert tf["median_lifetime_tax"] == 21026
+        assert tf["p10_lifetime_tax"] == 21026
+        assert tf["p90_lifetime_tax"] == 21026
+        assert tf["median_final_balance"] == 258974
         assert tf["success_rate"] == 100.0
 
     def test_roth_first_draws_roth_before_taxable_or_pretax(self):
         """Same household, $50,000 Roth added -- ROTH_FIRST_ORDER (roth,
-        taxable, pretax, hsa) draws entirely from Roth first (untaxed),
-        so with $50,000/yr spending and $50,000 Roth, year 0 is fully
-        funded from Roth alone ($0 tax); year 1 draws from taxable
-        (untaxed, $80,000 available) -> $0 tax both years, unlike
-        taxable_first's $5,641 in the same household."""
+        taxable, pretax, hsa) draws entirely from Roth first (untaxed --
+        Roth is the one bucket with a real 0% rate in this tool), so
+        with $50,000/yr spending and $50,000 Roth, year 0 is fully
+        funded from Roth alone: $0 tax. Year 1: Roth exhausted, falls to
+        taxable at the 15% rate exactly like the basic test's own year 0
+        (ample $80,000 balance): gross=50000/0.85=58823.53,
+        tax=8823.53, taxable_after=80000-58823.53=21176.47.
+        lifetime_tax=round(0+8823.53)=8824 -- LESS than taxable_first's
+        21026 in the same household (Roth's own 0% rate + one less year
+        needing the 15%/22% brackets at all), but not $0."""
         inputs = base_inputs()
         r = run_tax_efficiency_simulation(inputs, PRETAX(300000) + TAXABLE(80000) +
                                            [{"name": "Roth", "account_type": "roth_ira", "owner": "joint", "balance": 50000}],
                                            jason_ret_age=61, justin_ret_age=61)
         rf = r["strategies"]["roth_first"]
-        assert rf["median_lifetime_tax"] == 0
-        assert rf["median_final_balance"] == round(300000 + 80000 - 100000)  # 280000
+        assert rf["median_lifetime_tax"] == 8824
+        assert rf["median_final_balance"] == 321176  # 300000 (pretax, untouched) + 21176.47 (taxable_after)
         assert rf["success_rate"] == 100.0
 
 
@@ -139,7 +157,7 @@ class TestPastRetirementSelectionAndUnequalAges:
                                            jason_ret_age=61, justin_ret_age=61)
         # No SS active in year 0 (Justin only 53) -- same taxable_first
         # numbers as the no-SS baseline test above.
-        assert r["strategies"]["taxable_first"]["median_lifetime_tax"] == 5641
+        assert r["strategies"]["taxable_first"]["median_lifetime_tax"] == 21026
 
 
 class TestNonzeroInflationAndReturns:
@@ -152,7 +170,33 @@ class TestNonzeroInflationAndReturns:
         r = run_tax_efficiency_simulation(inputs, PRETAX(300000) + TAXABLE(80000),
                                            jason_ret_age=61, justin_ret_age=61)
         tf = r["strategies"]["taxable_first"]
-        assert tf["median_final_balance"] != 274359
+        assert tf["median_final_balance"] != 258974
+        assert tf["success_rate"] == 100.0
+
+
+class TestRmdIsForcedRegardlessOfSpendingNeed:
+    """Both 76 today (RMD_START_AGE=73, born 1950), retiring now, $0
+    spending need -- RMD is still forced every year and its after-tax
+    proceeds sweep into taxable as pure surplus (no spending to absorb
+    them), same "cash_available exceeds need" surplus path
+    _cash_available_offsets_need's own contract already establishes for
+    every other income source in this file. $500,000 pretax, 0%
+    inflation/growth. Year 0 (age 76): rmd=500000/23.7=21097.05,
+    tax=21097.05*0.22=4641.35, pretax_after=478902.95, the $16455.70
+    after-tax remainder swept to taxable. Year 1 (age 77):
+    rmd=478902.95/22.9=20912.79, tax=4600.81,
+    pretax_after=457990.16, taxable+=16311.98 (total 32767.67).
+    lifetime_tax=round(4641.35+4600.81)=9242. final_balance=
+    round(457990.16+32767.67)=490758."""
+
+    def test_rmd_forces_a_taxable_pretax_draw_with_no_spending_need(self):
+        inputs = base_inputs(jason_age=76, justin_age=76, retirement_income_today_dollars=0,
+                              retirement_end_age=78)
+        r = run_tax_efficiency_simulation(inputs, PRETAX(500000),
+                                           jason_ret_age=76, justin_ret_age=76)
+        tf = r["strategies"]["taxable_first"]
+        assert tf["median_lifetime_tax"] == 9242
+        assert tf["median_final_balance"] == 490758
         assert tf["success_rate"] == 100.0
 
 

@@ -3042,16 +3042,219 @@ def _optimal_draw(pretax, roth, taxable, hsa, remaining, cap_gains_limit, tax_pr
     return pretax, roth, taxable, hsa, remaining, total_tax
 
 
+def _run_tax_efficiency_simulation_two_age(inputs: Dict, accounts: List[Dict], jason_ret_age: int, justin_ret_age: int,
+                                            ss_timing: str, life_events: List[Dict],
+                                            surplus_allocations: List[Dict]) -> Dict:
+    """Two-age Tax Efficiency -- explicit, independent retirement ages
+    for both spouses instead of run_tax_efficiency_simulation's single
+    ret_age (CALCULATION_CONTRACT.md section 34, written and committed
+    before any of this existed). Reuses the shared timeline/income/
+    spending helpers section 25-33's SWR/Roth Conversion work already
+    established -- two_age_pension_for_year, two_age_spending_need_fn,
+    two_age_still_working_income_inputs, justin_gap_income_for_year,
+    build_two_person_timeline, run_two_dimensional_retirement_projection
+    for starting balances -- and the completely UNMODIFIED
+    _ordered_draw/_optimal_draw/_cash_available_offsets_need every
+    other consumer of this file's own draw-order strategies already
+    uses. Per section 34's contract: this tool has never had bracket-
+    aware or marginal-rate-aware taxation (a single flat TAX_PRETAX/
+    TAX_TAXABLE/TAX_ROTH rate set, regardless of income), so there is no
+    base_taxable/room_in_22 concept for the Roth milestone's actual bug
+    (gross wages omitted from bracket capacity) to recur in -- working
+    income here is modeled exactly as every other two-age consumer's
+    gap income already is, net-of-tax, folded only into the spending-
+    need offset."""
+    random.seed(42)
+
+    jason_age    = inputs["jason_age"]
+    justin_age   = inputs["justin_age"]
+    inflation    = inputs["inflation_rate"]
+    post_ret     = inputs["expected_return_post_retirement"]
+    income_today = inputs["retirement_income_today_dollars"]
+    _salary_growth_pct = inputs.get("_salary_growth_pct", 0.0)
+
+    pension_annual = pension_for_age(inputs, jason_ret_age)
+    jason_ss_early   = inputs.get("jason_social_security", JASON_SS_EARLY)
+    jason_ss_delayed = inputs.get("jason_ss_delayed", JASON_SS_DELAYED)
+    jason_ss_annual  = jason_ss_early if ss_timing == "early" else jason_ss_delayed
+    jason_ss_age     = 62 if ss_timing == "early" else 67
+    justin_ss_annual = inputs.get("justin_social_security", JUSTIN_SPOUSAL_ANNUAL)
+    justin_ss_age    = inputs.get("justin_ss_age", JUSTIN_SPOUSAL_AGE)
+
+    from projection_engine import run_two_dimensional_retirement_projection
+    _proj = run_two_dimensional_retirement_projection(inputs, accounts, jason_ret_age=jason_ret_age,
+                                                        justin_ret_age=justin_ret_age, ss_timing=ss_timing,
+                                                        life_events=life_events,
+                                                        surplus_allocations=surplus_allocations)
+    pretax_start  = _proj["pretax_at_phase2_start"]
+    roth_start    = _proj["roth_at_phase2_start"]
+    taxable_start = _proj["taxable_at_phase2_start"]
+    hsa_start     = _proj["hsa_at_phase2_start"]
+
+    timeline = build_two_person_timeline(jason_age, justin_age, jason_ret_age, justin_ret_age,
+                                          inputs.get("retirement_end_age"))
+    phase2_start_age = jason_age + timeline.phase2_start_years
+    phase3_start_age = jason_age + timeline.phase3_start_years
+    jason_effective_start_age = timeline.jason_effective_start_age
+    end_age = timeline.end_age
+    retire_yrs = timeline.retire_yrs
+    N = 1000
+    TAX_PRETAX  = 0.22
+    TAX_TAXABLE = 0.15
+
+    all_returns = [[random.gauss(post_ret, PORT_STD) for _ in range(retire_yrs)] for _ in range(N)]
+    _rmd_start = rmd_start_age(jason_age)
+
+    retirement_year_te = timeline.retirement_year
+    _, post_events_te = _split_life_events(life_events, retirement_year_te)
+    post_events_te = post_events_te + _post_retirement_asset_sale_events(inputs, jason_age, phase2_start_age)
+
+    need_for_year = two_age_spending_need_fn(inputs, income_today, inflation, timeline)
+    phase2_duration_years, still_working_income_at_start = two_age_still_working_income_inputs(
+        inputs, timeline, _salary_growth_pct)
+
+    def run_strategy(strategy):
+        """strategy: 'taxable_first', 'roth_first', 'optimal' -- same
+        three policies, same shared all_returns/timeline/income/
+        starting balances as every other strategy call, so only the
+        draw POLICY differs between them (section 34's explicit
+        requirement)."""
+        total_taxes = []
+        final_balances = []
+        unmet_flags = []
+
+        for returns in all_returns:
+            pretax  = pretax_start
+            roth    = roth_start
+            taxable = taxable_start
+            hsa     = hsa_start
+            lifetime_tax = 0
+            any_unmet_need = False
+
+            for yr in range(retire_yrs):
+                age = timeline.age(yr)
+                ret = returns[yr]
+                justin_age_this_year = timeline.justin_age_at(age)
+
+                year_need, _healthcare_inflated, _bridge_income = need_for_year(age, yr)
+                year_pen = two_age_pension_for_year(pension_annual, age, jason_effective_start_age)
+                year_jss = jason_ss_annual * ((1 + inflation) ** max(0, age - jason_ss_age)) if age >= jason_ss_age else 0.0
+                year_uss = (justin_ss_annual * ((1 + inflation) ** max(0, justin_age_this_year - justin_ss_age))
+                            if justin_age_this_year >= justin_ss_age else 0.0)
+                guaranteed = year_pen + year_jss + year_uss
+
+                calendar_year_te = retirement_year_te + yr
+                life_event_cash, life_event_monthly = _post_retirement_year_effects(post_events_te, calendar_year_te)
+                still_working_income_this_year = justin_gap_income_for_year(
+                    yr, phase2_duration_years, still_working_income_at_start, _salary_growth_pct)
+                net_need, surplus_credit = _cash_available_offsets_need(
+                    year_need, guaranteed, life_event_cash, life_event_monthly + still_working_income_this_year)
+                taxable += surplus_credit
+
+                rmd = _rmd(pretax, age, _rmd_start)
+                tax_this_year = 0
+                remaining = net_need
+
+                if rmd > 0:
+                    actual_rmd = min(rmd, pretax)
+                    pretax -= actual_rmd
+                    rmd_tax = actual_rmd * TAX_PRETAX
+                    tax_this_year += rmd_tax
+                    after_tax_rmd = actual_rmd - rmd_tax
+                    if after_tax_rmd <= remaining:
+                        remaining -= after_tax_rmd
+                    else:
+                        taxable += after_tax_rmd - remaining
+                        remaining = 0
+
+                if strategy in ('taxable_first', 'roth_first'):
+                    _order = DEFAULT_ORDER if strategy == 'taxable_first' else ROTH_FIRST_ORDER
+                    pretax, roth, taxable, hsa, remaining, _tax = _ordered_draw(
+                        pretax, roth, taxable, hsa, remaining, _order, TAX_PRETAX, TAX_TAXABLE)
+                    tax_this_year += _tax
+                else:  # optimal
+                    cap_gains_limit = 98900
+                    pretax, roth, taxable, hsa, remaining, _tax = _optimal_draw(
+                        pretax, roth, taxable, hsa, remaining, cap_gains_limit, TAX_PRETAX, TAX_TAXABLE)
+                    tax_this_year += _tax
+
+                if remaining > 0:
+                    any_unmet_need = True
+
+                lifetime_tax += tax_this_year
+                pretax  = max(0, pretax  * (1 + ret))
+                roth    = max(0, roth    * (1 + ret))
+                taxable = max(0, taxable * (1 + ret))
+                hsa     = max(0, hsa     * (1 + ret))
+
+            total_taxes.append(round(lifetime_tax))
+            final_balances.append(round(pretax + roth + taxable + hsa))
+            unmet_flags.append(any_unmet_need)
+
+        taxes_sorted = sorted(total_taxes)
+        bals_sorted  = sorted(final_balances)
+        return {
+            "median_lifetime_tax":  taxes_sorted[N // 2],
+            "p10_lifetime_tax":     taxes_sorted[int(N * 0.10)],
+            "p90_lifetime_tax":     taxes_sorted[int(N * 0.90)],
+            "median_final_balance": bals_sorted[N // 2],
+            "success_rate": round(sum(1 for b, unmet in zip(final_balances, unmet_flags) if b > 0 and not unmet) / N * 100, 1),
+        }
+
+    taxable_first = run_strategy('taxable_first')
+    roth_first    = run_strategy('roth_first')
+    optimal       = run_strategy('optimal')
+
+    best_tax = min(taxable_first["median_lifetime_tax"],
+                   roth_first["median_lifetime_tax"],
+                   optimal["median_lifetime_tax"])
+
+    return {
+        "retirement_age": jason_ret_age,
+        "retirement_end_age": end_age,
+        "ss_timing": ss_timing,
+        "strategies": {
+            "taxable_first": {**taxable_first, "label": "Taxable First", "description": "Draw taxable → pretax → Roth last"},
+            "roth_first":    {**roth_first,    "label": "Roth First",    "description": "Draw Roth → taxable → pretax last"},
+            "optimal":       {**optimal,        "label": "Optimal",       "description": "Fill 0% cap gains bracket, then pretax, Roth as buffer"},
+        },
+        "best_strategy_tax": best_tax,
+        "simulations": N,
+        "mode": "two_age",
+        "jason_ret_age": jason_ret_age,
+        "justin_ret_age": justin_ret_age,
+        "phase2_start_age": phase2_start_age,
+        "phase3_start_age": phase3_start_age,
+        "later_retiree": timeline.later_retiree,
+        "still_working_spouse_income_first_year": round(still_working_income_at_start),
+        "second_earner_net_of_tax_factor": SECOND_EARNER_NET_OF_TAX_FACTOR,
+        "account_ownership_limitation": _proj["account_ownership_limitation"],
+    }
+
+
 def run_tax_efficiency_simulation(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_timing: str = "early",
                                    life_events: List[Dict] = None,
-                                   surplus_allocations: List[Dict] = None) -> Dict:
+                                   surplus_allocations: List[Dict] = None,
+                                   jason_ret_age: int = None, justin_ret_age: int = None) -> Dict:
     """
     Run 1000 market scenarios for 3 draw order strategies.
     Simplified tax: flat 22% on pretax withdrawals, 0% on Roth, 15% on taxable gains.
 
     life_events/surplus_allocations: threaded through to
     run_retirement_projection below for the starting bucket balances only;
-    both default to None/no-op."""
+    both default to None/no-op.
+
+    jason_ret_age/justin_ret_age (2026-09-08, CALCULATION_CONTRACT.md
+    section 34, Milestone 3 of 4): explicit, independent retirement ages
+    for both spouses instead of the single ret_age above -- BOTH
+    required together (a ValueError if only one is given), delegating
+    entirely to _run_tax_efficiency_simulation_two_age. ret_age/
+    ss_timing's own single-axis behavior below is completely unaffected
+    when these are left at their None default."""
+    if _require_both_two_age_or_neither(jason_ret_age, justin_ret_age):
+        return _run_tax_efficiency_simulation_two_age(inputs, accounts, jason_ret_age, justin_ret_age, ss_timing,
+                                                        life_events, surplus_allocations)
+
     random.seed(42)
 
     jason_age    = inputs["jason_age"]
