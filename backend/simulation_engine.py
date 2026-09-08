@@ -586,9 +586,227 @@ def _run_single_two_age(
     return survived, balances, pretax_bals, roth_bals, taxable_bals
 
 
+def _swr_success_rate_two_age(
+    annual_withdrawal_today, pretax_start, roth_start, taxable_start, hsa_start,
+    timeline, inputs, pension_annual, jason_ss_annual, jason_ss_age,
+    justin_ss_annual, justin_ss_age, inflation, all_returns, post_events,
+    retirement_year, salary_growth_pct, state_tax_rate,
+) -> float:
+    """Two-age SWR's own per-withdrawal success rate -- the two-age
+    analog of run_swr_analysis's local success_at_withdrawal closure,
+    but a real, independently-callable module-level function (matching
+    _run_single_two_age's own precedent) so the search itself can be
+    tested directly, not just inferred from the converged result
+    (CALCULATION_CONTRACT.md section 25/26, explicit instruction:
+    "Independently test the search itself").
+
+    Reuses the exact same allocation-free primitives the single-axis
+    version's own documented performance exception already established
+    -- _swr_year_step, _pretax_marginal_tax_rate, _rmd/rmd_start_age,
+    _post_retirement_year_effects, justin_gap_income_for_year -- plus
+    the two-age-specific two_age_pension_for_year (gates pension to
+    Jason's own retirement) and two_age_still_working_income_inputs
+    (the still-working spouse's phase2 income, symmetric to whichever
+    spouse is later_retiree). No new performance exception: these are
+    the same primitives, just fed two-age inputs.
+
+    Per section 25's contract, guaranteed income (pension/SS) is NOT
+    folded into event_monthly and has no direct effect on how much a
+    trial can withdraw from the portfolio -- it only affects the tax
+    rate used for pretax withdrawals, exactly the existing single-axis
+    behavior. Only the still-working spouse's phase2 income gets folded
+    into event_monthly, the same treatment the existing gap-income
+    offset already receives.
+
+    Returns the fraction of all_returns trials (already pre-generated
+    by the caller, same reproducible-seed pattern the single-axis
+    version uses) that fund every single loop year in full."""
+    retire_yrs = timeline.retire_yrs
+    jason_effective_start_age = timeline.jason_effective_start_age
+    _rmd_start = rmd_start_age(timeline.jason_age)
+    phase2_duration_years, still_working_income_at_start = two_age_still_working_income_inputs(
+        inputs, timeline, salary_growth_pct)
+
+    successes = 0
+    for returns in all_returns:
+        pretax, roth, taxable, hsa = pretax_start, roth_start, taxable_start, hsa_start
+        survived = True
+        for yr in range(retire_yrs):
+            age = timeline.age(yr)
+            ret = returns[yr]
+            justin_age_this_year = timeline.justin_age_at(age)
+
+            year_pen = two_age_pension_for_year(pension_annual, age, jason_effective_start_age)
+            year_jss = jason_ss_annual * ((1 + inflation) ** max(0, age - jason_ss_age)) if age >= jason_ss_age else 0.0
+            year_uss = (justin_ss_annual * ((1 + inflation) ** max(0, justin_age_this_year - justin_ss_age))
+                        if justin_age_this_year >= justin_ss_age else 0.0)
+
+            portfolio_draw = annual_withdrawal_today * ((1 + inflation) ** yr)
+
+            rmd = _rmd(pretax, age, _rmd_start)
+            event_cash, event_monthly = _post_retirement_year_effects(post_events, retirement_year + yr)
+            still_working_income_this_year = justin_gap_income_for_year(
+                yr, phase2_duration_years, still_working_income_at_start, salary_growth_pct)
+            pretax_tax_rate = _pretax_marginal_tax_rate(year_pen, year_jss, year_uss, rmd, state_tax_rate)
+            pretax, roth, taxable, hsa, remaining = _swr_year_step(
+                pretax, roth, taxable, hsa, portfolio_draw, event_cash,
+                event_monthly + still_working_income_this_year,
+                rmd, pretax_tax_rate)
+
+            if remaining > 0:
+                survived = False
+                break
+
+            pretax  = max(0, pretax  * (1 + ret))
+            roth    = max(0, roth    * (1 + ret))
+            taxable = max(0, taxable * (1 + ret))
+            hsa     = max(0, hsa     * (1 + ret))
+
+        if survived:
+            successes += 1
+    return successes / len(all_returns)
+
+
+def _run_swr_analysis_two_age(inputs: Dict, accounts: List[Dict], jason_ret_age: int, justin_ret_age: int,
+                               ss_timing: str, target_success: float, life_events: List[Dict],
+                               surplus_allocations: List[Dict]) -> Dict:
+    """Two-age SWR -- explicit, independent retirement ages for both
+    spouses instead of run_swr_analysis's single ret_age
+    (CALCULATION_CONTRACT.md section 25). Same N=1000/20-iteration
+    binary-search structure and the same "additional portfolio-funded
+    spending on top of guaranteed income" search meaning as the
+    single-axis version -- see section 25 for the full contract this
+    was written against before any code existed."""
+    random.seed(42)
+
+    jason_age    = inputs["jason_age"]
+    justin_age   = inputs["justin_age"]
+    inflation    = inputs["inflation_rate"]
+    post_ret     = inputs["expected_return_post_retirement"]
+    _salary_growth_pct = inputs.get("_salary_growth_pct", 0.0)
+
+    pension_annual = pension_for_age(inputs, jason_ret_age)
+    jason_ss_early   = inputs.get("jason_social_security", JASON_SS_EARLY)
+    jason_ss_delayed = inputs.get("jason_ss_delayed", JASON_SS_DELAYED)
+    jason_ss_annual  = jason_ss_early if ss_timing == "early" else jason_ss_delayed
+    jason_ss_age     = 62 if ss_timing == "early" else 67
+    justin_ss_annual = inputs.get("justin_social_security", JUSTIN_SPOUSAL_ANNUAL)
+    justin_ss_age    = inputs.get("justin_ss_age", JUSTIN_SPOUSAL_AGE)
+
+    from projection_engine import run_two_dimensional_retirement_projection
+    _proj = run_two_dimensional_retirement_projection(inputs, accounts, jason_ret_age=jason_ret_age,
+                                                        justin_ret_age=justin_ret_age, ss_timing=ss_timing,
+                                                        life_events=life_events,
+                                                        surplus_allocations=surplus_allocations)
+    pretax_at_start  = _proj["pretax_at_phase2_start"]
+    roth_at_start    = _proj["roth_at_phase2_start"]
+    taxable_at_start = _proj["taxable_at_phase2_start"]
+    hsa_at_start     = _proj["hsa_at_phase2_start"]
+    portfolio = pretax_at_start + roth_at_start + taxable_at_start + hsa_at_start
+
+    timeline = build_two_person_timeline(jason_age, justin_age, jason_ret_age, justin_ret_age,
+                                          inputs.get("retirement_end_age"))
+    phase2_start_age = jason_age + timeline.phase2_start_years
+    phase3_start_age = jason_age + timeline.phase3_start_years
+    end_age = timeline.end_age
+    retire_yrs = timeline.retire_yrs
+    N = 1000
+    state_tax_rate = inputs.get("state_income_tax_rate", 0)
+
+    all_returns = [[random.gauss(post_ret, PORT_STD) for _ in range(retire_yrs)] for _ in range(N)]
+
+    retirement_year_for_events = timeline.retirement_year
+    _, post_events = _split_life_events(life_events, retirement_year_for_events)
+    post_events = post_events + _post_retirement_asset_sale_events(inputs, jason_age, phase2_start_age)
+
+    def success_at_withdrawal(annual_withdrawal_today):
+        return _swr_success_rate_two_age(
+            annual_withdrawal_today, pretax_at_start, roth_at_start, taxable_at_start, hsa_at_start,
+            timeline, inputs, pension_annual, jason_ss_annual, jason_ss_age,
+            justin_ss_annual, justin_ss_age, inflation, all_returns, post_events,
+            retirement_year_for_events, _salary_growth_pct, state_tax_rate,
+        )
+
+    # Same expanding-then-bisecting search as the single-axis version --
+    # see its own comment for why the upper bound isn't a fixed cap.
+    lo, hi = 0, portfolio * 0.15 if portfolio > 0 else 0
+    hit_search_limit = False
+    if portfolio > 0:
+        expansions = 0
+        while success_at_withdrawal(hi) >= target_success and expansions < 12:
+            lo = hi
+            hi *= 2
+            expansions += 1
+        hit_search_limit = expansions >= 12
+    for _ in range(20):
+        mid = (lo + hi) / 2
+        rate = success_at_withdrawal(mid)
+        if rate >= target_success:
+            lo = mid
+        else:
+            hi = mid
+
+    safe_withdrawal = lo
+    safe_withdrawal_rate = safe_withdrawal / portfolio if portfolio > 0 else 0
+
+    # Guaranteed-income summary -- pension gates to Jason's own
+    # retirement (jason_effective_start_age), not phase2_start_age,
+    # same as the withdrawal loop itself. SS steady-state uses each
+    # spouse's own claim age exactly as the single-axis version does.
+    jason_effective_start_age = timeline.jason_effective_start_age
+    age_gap = timeline.age_gap
+    justin_age_at_phase2_start = phase2_start_age - age_gap
+    years_until_jason_claims  = max(0, jason_ss_age  - phase2_start_age)
+    years_until_justin_claims = max(0, justin_ss_age - justin_age_at_phase2_start)
+    years_to_ss = max(years_until_jason_claims, years_until_justin_claims)
+    years_to_pension = max(0, jason_effective_start_age - phase2_start_age)
+    years_to_steadystate = max(years_to_ss, years_to_pension)
+    ss_start_age = phase2_start_age + years_to_ss
+    guaranteed_first_year = (
+        pension_annual +
+        jason_ss_annual * ((1 + inflation) ** years_to_steadystate) +
+        justin_ss_annual * ((1 + inflation) ** years_to_steadystate)
+    )
+    guaranteed_day_one = pension_annual if phase2_start_age >= jason_effective_start_age else 0.0
+    if phase2_start_age >= jason_ss_age:
+        guaranteed_day_one += jason_ss_annual
+    if justin_age_at_phase2_start >= justin_ss_age:
+        guaranteed_day_one += justin_ss_annual
+
+    still_working_income_at_start = two_age_still_working_income_inputs(inputs, timeline, _salary_growth_pct)[1]
+    total_safe_spend = safe_withdrawal + guaranteed_day_one
+
+    return {
+        "portfolio_at_retirement":   round(portfolio),
+        "safe_withdrawal_annual":    round(safe_withdrawal),
+        "safe_withdrawal_rate":      round(safe_withdrawal_rate * 100, 2),
+        "guaranteed_income_annual":  round(guaranteed_day_one),
+        "guaranteed_income_steadystate": round(guaranteed_first_year),
+        "pension_annual":            round(pension_annual),
+        "jason_ss_annual":           round(jason_ss_annual),
+        "justin_ss_annual":          round(justin_ss_annual),
+        "ss_start_age":              ss_start_age,
+        "total_safe_spend":          round(total_safe_spend),
+        "target_success_rate":       round(target_success * 100),
+        "hit_search_limit":          hit_search_limit,
+        "mode": "two_age",
+        "jason_ret_age": jason_ret_age,
+        "justin_ret_age": justin_ret_age,
+        "phase2_start_age": phase2_start_age,
+        "phase3_start_age": phase3_start_age,
+        "later_retiree": timeline.later_retiree,
+        "retirement_end_age": end_age,
+        "ss_timing": ss_timing,
+        "still_working_spouse_income_first_year": round(still_working_income_at_start),
+        "second_earner_net_of_tax_factor": SECOND_EARNER_NET_OF_TAX_FACTOR,
+        "account_ownership_limitation": _proj["account_ownership_limitation"],
+    }
+
+
 def run_swr_analysis(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_timing: str = "early",
                       target_success: float = 0.95, life_events: List[Dict] = None,
-                      surplus_allocations: List[Dict] = None) -> Dict:
+                      surplus_allocations: List[Dict] = None,
+                      jason_ret_age: int = None, justin_ret_age: int = None) -> Dict:
     """Find the safe withdrawal rate at target success rate (default 95%).
 
     life_events: threaded through to run_retirement_projection below so
@@ -598,7 +816,20 @@ def run_swr_analysis(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_t
     surplus_allocations: threaded through to run_retirement_projection
     below for the starting portfolio only — this feature has no
     withdrawal-phase half at all (see projection_engine.py), so there is
-    nothing further to wire in here."""
+    nothing further to wire in here.
+
+    jason_ret_age/justin_ret_age (2026-09-08, CALCULATION_CONTRACT.md
+    section 25, Milestone 1 of 4): explicit, independent retirement ages
+    for both spouses instead of the single ret_age above -- BOTH
+    required together (a ValueError if only one is given), delegating
+    entirely to _run_swr_analysis_two_age. ret_age/ss_timing's own
+    single-axis behavior below is completely unaffected when these are
+    left at their None default -- this is new, additive behavior, not a
+    modification of the existing search."""
+    if _require_both_two_age_or_neither(jason_ret_age, justin_ret_age):
+        return _run_swr_analysis_two_age(inputs, accounts, jason_ret_age, justin_ret_age, ss_timing,
+                                          target_success, life_events, surplus_allocations)
+
     random.seed(42)
 
     jason_age    = inputs["jason_age"]
