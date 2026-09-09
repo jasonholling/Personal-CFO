@@ -48,6 +48,43 @@ JASON_SS_DELAYED_RATIO   = 1.0  # fallback ratio only — no assumption without 
 JUSTIN_SPOUSAL_ANNUAL = 0
 JUSTIN_SPOUSAL_AGE    = 67          # full benefit at his FRA
 
+# Social Security claiming-age formula (CALCULATION_CONTRACT.md section
+# 44, design approved by Jason 2026-09-08) -- the real SSA early-
+# reduction rate (5/9%/month for the first 36 months before FRA, 5/12%/
+# month beyond that) and delayed-credit rate (2/3%/month, i.e. 8%/year,
+# from FRA to 70). FRA is assumed 67 everywhere in this app (matching
+# JUSTIN_SPOUSAL_AGE's own existing convention) -- birth-year-dependent
+# FRA has never been modeled here and stays out of scope.
+SS_FRA_AGE = 67
+_SS_REDUCTION_FRACTION_AT_AGE = {62: 0.30, 63: 0.25, 64: 0.20, 65: 2/15, 66: 1/15}
+_SS_CREDIT_FRACTION_AT_AGE    = {68: 0.08, 69: 0.16, 70: 0.24}
+
+
+def ss_benefit_for_claim_age(benefit_62: float, benefit_67: float, benefit_70: float, claim_age: int) -> float:
+    """The household's own annual SS benefit for claiming at `claim_age`
+    (62-70), anchored EXACTLY to its three real dollar inputs (from a
+    real SSA.gov statement) at 62/FRA/70 -- ages in between are
+    interpolated using the real SSA formula's own shape (the reduction
+    rate genuinely changes at the 3-year-early mark, so simple linear
+    interpolation between 62 and 67 would be measurably wrong), scaled
+    so the endpoints match the household's own real numbers exactly
+    rather than a single derived PIA (which could disagree with the
+    real anchors due to that household's own COLA/rounding history).
+
+    Ages outside 62-70 clamp to the nearest anchor (SS cannot be claimed
+    before 62 or credited past 70 in this app's model)."""
+    if claim_age <= 62:
+        return benefit_62
+    if claim_age >= 70:
+        return benefit_70
+    if claim_age == SS_FRA_AGE:
+        return benefit_67
+    if claim_age < SS_FRA_AGE:
+        progress = (0.30 - _SS_REDUCTION_FRACTION_AT_AGE[claim_age]) / 0.30  # 0 at 62, 1 at 67
+        return benefit_62 + progress * (benefit_67 - benefit_62)
+    progress = _SS_CREDIT_FRACTION_AT_AGE[claim_age] / 0.24  # 0 at 67, 1 at 70
+    return benefit_67 + progress * (benefit_70 - benefit_67)
+
 # Flat net-of-tax approximation applied to income streams that land
 # directly in a taxable-equivalent bucket without going through this
 # engine's own marginal-bracket withdrawal-tax model: RSU/bonus proceeds,
@@ -543,6 +580,18 @@ def run_retirement_projection(inputs: Dict, accounts: List[Dict], ret_ages: List
     # Cannot claim until Jason has filed, so start age = max(Justin FRA, Jason SS age)
     justin_ss_annual = inputs.get("justin_social_security", JUSTIN_SPOUSAL_ANNUAL)
     justin_ss_age    = inputs.get("justin_ss_age", JUSTIN_SPOUSAL_AGE)
+    # Continuous SS claiming age 62-70 (CALCULATION_CONTRACT.md section
+    # 44, milestone 1, 2026-09-08) -- opt-in only: a caller that supplies
+    # justin_ss_claim_age gets Justin's own benefit recomputed via
+    # ss_benefit_for_claim_age's real-anchor formula instead of the
+    # binary early(62)/FRA(67) figure above; every existing caller that
+    # doesn't set this field is completely unaffected.
+    justin_ss_claim_age = inputs.get("justin_ss_claim_age")
+    if justin_ss_claim_age is not None:
+        justin_ss_62 = inputs.get("justin_ss_early", justin_ss_annual)
+        justin_ss_70 = inputs.get("justin_ss_70", justin_ss_annual)
+        justin_ss_annual = ss_benefit_for_claim_age(justin_ss_62, justin_ss_annual, justin_ss_70, justin_ss_claim_age)
+        justin_ss_age = justin_ss_claim_age
 
     # ── Starting balances by bucket ───────────────────────────────────────────
     # Get 401k total from accounts, apply split % from planning_inputs
@@ -604,6 +653,26 @@ def run_retirement_projection(inputs: Dict, accounts: List[Dict], ret_ages: List
 
     jason_ss_early   = inputs.get("jason_social_security", JASON_SS_EARLY_DEFAULT)
     jason_ss_delayed = inputs.get("jason_ss_delayed", jason_ss_early * JASON_SS_DELAYED_RATIO)
+
+    # Continuous SS claiming age 62-70 (CALCULATION_CONTRACT.md section
+    # 44, milestone 1) -- opt-in only, mirrors the Justin override above.
+    # When set, this REPLACES the two-scenario early/delayed sweep below
+    # with a single "custom" scenario at the exact claim age, computed
+    # via the same real-anchor formula -- every existing caller that
+    # doesn't set jason_ss_claim_age gets the unchanged early+delayed
+    # pair, same scenarios/labels as before.
+    jason_ss_claim_age = inputs.get("jason_ss_claim_age")
+    if jason_ss_claim_age is not None:
+        jason_ss_70 = inputs.get("jason_ss_70", jason_ss_delayed)
+        jason_ss_options = [
+            ("custom", ss_benefit_for_claim_age(jason_ss_early, jason_ss_delayed, jason_ss_70, jason_ss_claim_age),
+             jason_ss_claim_age),
+        ]
+    else:
+        jason_ss_options = [
+            ("early",   jason_ss_early,   62),
+            ("delayed", jason_ss_delayed, 67),
+        ]
 
     for ret_age in (ret_ages if ret_ages is not None else [55, 60, 65]):
         years_to_retire = max(0, ret_age - jason_age)
@@ -687,10 +756,7 @@ def run_retirement_projection(inputs: Dict, accounts: List[Dict], ret_ages: List
         # once here (independent of ss_label) same as the life events above.
         surplus_at_ret = _surplus_allocations_at_retirement(surplus_allocations, pre_ret, years_to_retire)
 
-        for ss_label, jason_ss_annual, jason_ss_age in [
-            ("early",   jason_ss_early,   62),
-            ("delayed", jason_ss_delayed, 67),
-        ]:
+        for ss_label, jason_ss_annual, jason_ss_age in jason_ss_options:
             # ── Project each bucket to retirement ─────────────────────────────
             # Contributions run every year up to retirement regardless of
             # retirement age — this used to stop entirely for the 55

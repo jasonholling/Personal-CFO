@@ -4057,3 +4057,135 @@ floor. Sensitive-data check passed. All prior review-round tests
 Branch: `codex/two-age-survivor-design`, pushed — **not merged to
 `main`** beyond Milestone 1, same standing instruction as sections
 39-42.
+
+## 44. Social Security claiming age 62-70 — design proposal (2026-09-08, on `codex/ss-claim-age`)
+
+Jason's request: model Social Security continuously across every
+claiming age 62-70 (not just the existing binary early/delayed
+toggle), and asked specifically whether modeling to 70 (not just 67)
+has real value. It does — delayed retirement credits keep accruing
+past full retirement age (assumed 67 in this app, matching
+`JUSTIN_SPOUSAL_AGE`'s existing convention) all the way to 70, and the
+resulting difference (a ~24% higher benefit at 70 than at 67, ~77%
+higher than at 62) is frequently the single highest-value lever in a
+real retirement plan — an inflation-adjusted, guaranteed-for-life
+increase, and for many households a better risk-adjusted return than
+continuing to hold market assets. A tool that only compares 62 vs. 67
+can recommend a materially suboptimal claiming strategy.
+
+**Current state, confirmed by reading the code (not assumed):**
+Social Security is NOT a single household-level setting today —
+`ss_timing: "early" | "delayed"` is a query/body parameter re-derived
+independently in roughly 20 separate call sites across
+`simulation_engine.py` and `projection_engine.py`, each with its own
+local `jason_ss_age = 62 if ss_timing == "early" else 67`. Jason
+already has two real dollar inputs (`jason_social_security` at 62,
+`jason_ss_delayed` at 67); Justin has only one
+(`justin_social_security`, implicitly at his own FRA=67 via the
+`JUSTIN_SPOUSAL_AGE` default) — no early option at all, an existing
+asymmetry this proposal also closes. A `jason_ss_age`/`justin_ss_age`
+field already exists on the `PlanningInputs` Pydantic model and in
+`db.py`'s schema, but is dead: nothing in the engine reads it (every
+consumer derives its own local `jason_ss_age` from `ss_timing`
+instead) and the frontend never surfaces it.
+
+**Decided (Jason, 2026-09-08):**
+1. A real THIRD dollar input at age 70 (not formula-derived) for both
+   spouses — matches exactly what a real SSA.gov statement shows
+   (amounts at 62, FRA, and 70), avoiding the error a pure-formula
+   projection could introduce against a household's real benefit
+   history/COLA record.
+2. Symmetric treatment for both spouses — Justin gains the same
+   62/67/70 structure Jason has, closing the existing asymmetry.
+
+**New inputs (additive, no existing field renamed or removed):**
+- `jason_social_security` (62) — existing, unchanged.
+- `jason_ss_delayed` (67/FRA) — existing, unchanged.
+- `jason_ss_70` — NEW.
+- `justin_ss_early` — NEW (justin's own 62 figure; `justin_social_security`
+  keeps its existing meaning as Justin's 67/FRA figure, unchanged, to
+  avoid a breaking rename of a field that's persisted for every
+  existing household).
+- `justin_ss_70` — NEW.
+- `jason_ss_claim_age` (62-70, default 62) — NEW, replaces the
+  *concept* `ss_timing` maps Jason onto; independent of Justin's.
+- `justin_ss_claim_age` (62-70, default 67) — NEW, independent of
+  Jason's — real households often have spouses claim at different
+  ages, and this app already models fully independent per-spouse
+  retirement ages (`jason_ret_age`/`justin_ret_age`) elsewhere, so
+  independent per-spouse SS claim ages is the same philosophy, not a
+  new one.
+
+**Benefit formula** (whole-year ages only, matching this app's
+existing whole-year-age precision everywhere else — no monthly
+granularity needed since claim age is itself a whole-year input):
+anchored EXACTLY to the household's own three real dollar inputs at
+62/67/70, with ages IN BETWEEN interpolated using the real SSA
+reduction/credit formula's own shape (5/9%/month for the first 36
+months before FRA, 5/12%/month beyond that, 2/3%/month — 8%/year —
+after FRA), scaled so the endpoints match the real anchors exactly
+rather than a single derived PIA (more accurate than simple linear
+interpolation, since the reduction rate changes at the 3-year-early
+mark, and more accurate than a pure single-PIA formula projection,
+since it never disagrees with the household's own real numbers at 62,
+67, or 70):
+
+```
+reduction_fraction(age) for age in 62..66 (months before FRA = (67-age)*12):
+  62: 30.0000%   63: 25.0000%   64: 20.0000%   65: 13.3333%   66: 6.6667%   67: 0%
+credit_fraction(age) for age in 68..70 (months after FRA = (age-67)*12):
+  68: 8.0000%    69: 16.0000%   70: 24.0000%
+
+def ss_benefit_for_claim_age(benefit_62, benefit_67, benefit_70, claim_age):
+    if claim_age <= 62: return benefit_62
+    if claim_age >= 70: return benefit_70
+    if claim_age == 67: return benefit_67
+    if claim_age < 67:
+        progress = (30.0 - reduction_fraction[claim_age]) / 30.0   # 0 at 62, 1 at 67
+        return benefit_62 + progress * (benefit_67 - benefit_62)
+    else:
+        progress = credit_fraction[claim_age] / 24.0                # 0 at 67, 1 at 70
+        return benefit_67 + progress * (benefit_70 - benefit_67)
+```
+
+Shared helper, module-level in `projection_engine.py` next to the
+other SS constants — every consumer calls this instead of hand-rolling
+`jason_ss_age = 62 if ss_timing == "early" else 67`.
+
+**Migration is ADDITIVE, not a breaking replacement** — `ss_timing`
+stays fully functional (its own ~20 call sites and their existing test
+suites are untouched) for any caller that doesn't supply the new
+per-spouse claim-age inputs. Each consumer, migrated one at a time
+across the milestones below, prefers `jason_ss_claim_age`/
+`justin_ss_claim_age` when present and falls back to its existing
+`ss_timing`-derived age otherwise — mirrors the same additive-
+parameter pattern `death_jason_age`/`deceased` used on
+`run_owner_split_two_dimensional_projection` (section 43).
+
+**Milestone sequence** (each its own reviewed step, matching the
+two-age project's own successful pattern):
+1. **This milestone**: design doc (above) + `ss_benefit_for_claim_age`
+   shared helper + hand-verified unit tests + wire into the reference
+   single-axis `run_retirement_projection` (the function every other
+   consumer has historically been reconciled against).
+2. Monte Carlo + Stress Tests (already share helpers with each other).
+3. SWR, Tax Efficiency, Roth Conversion (single-axis).
+4. Survivor Scenario (single-axis) — needs care around the survivor's
+   own "higher of the two benefits" rule (section 18-era logic),
+   revisited against real per-spouse claim ages instead of a flat
+   `max(raw early inputs)`.
+5. Two-age consumers (`run_two_dimensional_retirement_projection`,
+   the owner-split walk, and every two-age sibling) — these already
+   track jason/justin independently, so wiring in per-spouse claim
+   ages is the more natural fit than the single-axis versions were.
+6. Frontend: new Settings fields (age-70 for both spouses, an early
+   input for Justin), replacing every early/delayed toggle with two
+   independent age selectors (62-70) per relevant page.
+
+**Explicitly out of scope for this proposal:** the heatmap/sweep UI
+item from the backlog (a separate ask, composes well with this once
+claim age is continuous, but is its own piece of work); modeling
+survivor benefits' own reduction rules beyond the existing "higher of
+the two" simplification; any FRA value other than 67 (this app has
+never modeled birth-year-dependent FRA, an existing simplification
+left unchanged).
