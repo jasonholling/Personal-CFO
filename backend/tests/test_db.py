@@ -154,6 +154,41 @@ class TestMigrateLegacyKids:
         assert owners == {f"kid_{kids[0]['id']}", f"kid_{kids[1]['id']}"}
         conn.close()
 
+    def test_legacy_education_surplus_goals_remap_to_new_kid_keys(self, temp_db):
+        """Regression (external audit follow-up, 2026-09-09): a household
+        with existing surplus_allocations rows earmarking money to a
+        kid's education fund under the OLD fixed goal key ("Education
+        funding - Abby"/"Cooper") would have that money silently become
+        invisible -- nothing after this migration ever looks up the old
+        literal key again, only "Education funding - kid_<id>". The
+        migration must remap the goal string using the SAME new id it
+        just assigned that kid, not just leave the row behind."""
+        conn = db_module.get_db()
+        conn.execute(
+            "UPDATE planning_inputs SET kids_migrated=0, kid1_name=?, kid1_age=?, "
+            "kid2_name=?, kid2_age=? WHERE id=1",
+            ("Riley", 12, "Sam", 8),
+        )
+        conn.execute(
+            "INSERT INTO surplus_allocations (goal, monthly_amount) VALUES (?,?)",
+            ("Education funding - Abby", 500),
+        )
+        conn.execute(
+            "INSERT INTO surplus_allocations (goal, monthly_amount) VALUES (?,?)",
+            ("Education funding - Cooper", 200),
+        )
+        conn.commit()
+
+        db_module.migrate_legacy_kids(conn)
+
+        kids = {r["name"]: r["id"] for r in conn.execute("SELECT * FROM kids").fetchall()}
+        goals = {r["goal"]: r["monthly_amount"] for r in conn.execute("SELECT * FROM surplus_allocations").fetchall()}
+        assert "Education funding - Abby" not in goals
+        assert "Education funding - Cooper" not in goals
+        assert goals[f"Education funding - kid_{kids['Riley']}"] == 500
+        assert goals[f"Education funding - kid_{kids['Sam']}"] == 200
+        conn.close()
+
     def test_only_one_legacy_kid_with_signal_migrates_alone(self, temp_db):
         """kid2 stays at every default (name 'Child 2', age 0, no
         'cooper' accounts) -- indistinguishable from "never configured,"

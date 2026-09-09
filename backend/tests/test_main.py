@@ -1692,6 +1692,37 @@ class TestCfoOperatingSystem:
         assert len(client.get("/api/accounts").json()) == len(sample_accounts)
         assert client.get("/api/planning-inputs").status_code == 200
 
+    def test_backup_export_includes_kids_and_restore_round_trips_them(self, client):
+        """Regression (external audit follow-up, 2026-09-09,
+        kids-variable-count): the kids table was added after backup/
+        export|restore shipped and got left out of _BACKUP_TABLES --
+        export_backup silently omitted it (every OTHER table survived a
+        backup/restore cycle; kids quietly didn't), and a household's
+        edited name/age/monthly_529 would revert to whatever was in the
+        db before the restore, or (worse) restoring a backup taken
+        before this fix would need to be rejected outright rather than
+        silently leaving kids stale -- covered by the missing-table
+        check above, since "kids" not being a key in an old payload now
+        makes it into `missing`."""
+        created = client.post("/api/kids", json={"name": "Riley", "age": 9, "monthly_529": 150}).json()
+        payload = client.get("/api/backup/export").json()
+        assert "kids" in payload["tables"]
+        assert payload["tables"]["kids"][0]["name"] == "Riley"
+
+        # Change everything about the kid after taking the backup, then
+        # restore -- the restore must bring back the AT-BACKUP-TIME
+        # values, proving the table round-trips instead of being
+        # skipped (a skipped table would instead retain "Changed").
+        client.put(f"/api/kids/{created['id']}", json={"name": "Changed", "age": 99, "monthly_529": 999})
+        r = client.post("/api/backup/restore", params={"confirm": "true"},
+                         files={"file": ("b.json", json.dumps(payload), "application/json")})
+        assert r.status_code == 200, r.text
+        kids = client.get("/api/kids").json()
+        assert len(kids) == 1
+        assert kids[0]["name"] == "Riley"
+        assert kids[0]["age"] == 9
+        assert kids[0]["monthly_529"] == 150
+
 
 class TestSavedScenariosSsTiming:
     """Regression (external audit 2026-09-07, finding #15): POST

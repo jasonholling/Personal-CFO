@@ -18,7 +18,17 @@ import auth
 
 app = FastAPI(title="Personal CFO API")
 
-_BACKUP_TABLES = ("accounts", "planning_inputs", "insurance_policies", "property_policies", "snapshots", "tasks", "cash_flow_items", "surplus_allocations", "saved_scenarios", "life_events", "estate_documents", "assumption_reviews")
+# "kids" added 2026-09-09 (external audit follow-up, kids-variable-count)
+# -- a backup taken before this table existed omits it entirely, same as
+# any other table added after export_backup/restore_backup shipped; the
+# gap this closes is going forward, not retroactive to already-taken
+# backups. Restoring a backup that predates this line will (correctly,
+# per restore_backup's own "every table in _BACKUP_TABLES must be
+# present" check below) reject with a missing-table error rather than
+# silently restoring every table except kids and leaving whatever kids
+# existed before the restore untouched -- which would have looked like
+# a successful restore while actually leaving that one table stale.
+_BACKUP_TABLES = ("accounts", "planning_inputs", "insurance_policies", "property_policies", "snapshots", "tasks", "cash_flow_items", "surplus_allocations", "saved_scenarios", "life_events", "estate_documents", "assumption_reviews", "kids")
 
 app.add_middleware(
     CORSMiddleware,
@@ -1179,7 +1189,22 @@ def delete_kid(kid_id: int):
     # that would have surfaced them is gone. No balances are deleted or
     # reassigned -- reversible by re-adding a kid and manually editing
     # those accounts' owner back, if that's ever wanted.
+    #
+    # The per-kid education-funding surplus_allocations row IS deleted,
+    # though (external audit follow-up, 2026-09-09) -- unlike an
+    # account, it holds no real balance, only a monthly earmarking
+    # instruction ("$X/mo toward this kid's 529"). Left in place, that
+    # instruction becomes silently unreachable: SurplusPlan.jsx only
+    # ever renders a row per CURRENT kid, so there's no UI left to see
+    # or edit it, yet GET /api/surplus-allocations' own "assigned" total
+    # sums every row unconditionally -- the deleted kid's dollars would
+    # keep counting as "spoken for" and reducing "unassigned" forever,
+    # with no way to ever reclaim or even see them again. Deleting the
+    # row (rather than leaving it orphaned like the account is) returns
+    # that money to "unassigned" where it's visible and re-allocatable.
+    from projection_engine import surplus_goal_key_for_kid
     conn = get_db()
+    conn.execute("DELETE FROM surplus_allocations WHERE goal=?", (surplus_goal_key_for_kid(kid_id),))
     conn.execute("DELETE FROM kids WHERE id=?", (kid_id,))
     conn.commit()
     conn.close()

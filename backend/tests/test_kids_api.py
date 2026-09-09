@@ -80,6 +80,29 @@ class TestKidsCrud:
         nw = client.get("/api/net-worth").json()
         assert nw["kids_assets"] == 5000  # still excluded from the parents' own totals
 
+    def test_deleting_a_kid_clears_their_orphaned_surplus_allocation_goal(self, client):
+        """Regression (external audit follow-up, 2026-09-09): unlike an
+        account (a real balance, kept on purpose), the per-kid education-
+        funding surplus_allocations row holds no balance -- only a
+        monthly earmarking INSTRUCTION. Left behind after the kid is
+        deleted, that $/mo became permanently invisible (SurplusPlan.jsx
+        only ever renders a row per current kid) while still counting
+        toward GET /api/surplus-allocations' "assigned" total forever,
+        silently shrinking "unassigned" with no way to ever reclaim it.
+        Deleting the kid must also delete that goal row, returning the
+        money to unassigned."""
+        kid = client.post("/api/kids", json={"name": "Riley", "age": 9}).json()
+        goal = f"Education funding - kid_{kid['id']}"
+        client.put(f"/api/surplus-allocations/{goal}", json={"goal": goal, "monthly_amount": 500, "notes": None})
+        before = client.get("/api/surplus-allocations").json()
+        assert before["assigned"] == 500
+
+        client.delete(f"/api/kids/{kid['id']}")
+
+        after = client.get("/api/surplus-allocations").json()
+        assert after["assigned"] == 0
+        assert goal not in {row["goal"] for row in after["allocations"]}
+
 
 class TestZeroToFiveKidsFeedProjections:
     """The whole point of kids-variable-count: 0 kids must not error or

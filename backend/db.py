@@ -393,11 +393,11 @@ def migrate_legacy_kids(conn):
     # give a fresh install 2 kids by default, defeating the whole point
     # of "could have zero kids."
     legacy_slots = [
-        ("kid1_name", "kid1_age", "abby_529_monthly",   "abby",   "Child 1"),
-        ("kid2_name", "kid2_age", "cooper_529_monthly", "cooper", "Child 2"),
+        ("kid1_name", "kid1_age", "abby_529_monthly",   "abby",   "Child 1", "Education funding - Abby"),
+        ("kid2_name", "kid2_age", "cooper_529_monthly", "cooper", "Child 2", "Education funding - Cooper"),
     ]
     order = 0
-    for name_col, age_col, monthly_col, legacy_owner, default_name in legacy_slots:
+    for name_col, age_col, monthly_col, legacy_owner, default_name, legacy_goal in legacy_slots:
         name    = inputs.get(name_col) or default_name
         age     = inputs.get(age_col) or 0
         monthly = inputs.get(monthly_col) or 0
@@ -411,6 +411,25 @@ def migrate_legacy_kids(conn):
         new_owner = f"kid_{cur.lastrowid}"
         if "accounts" in tables:
             conn.execute("UPDATE accounts SET owner=? WHERE owner=?", (new_owner, legacy_owner))
+        # External audit follow-up, 2026-09-09: the account-owner remap
+        # above was the whole story for accounts, but a household could
+        # ALSO have an existing surplus_allocations row earmarking money
+        # to this kid's education fund under the OLD fixed goal key
+        # ("Education funding - Abby"/"Cooper" -- see SurplusPlan.jsx's
+        # and main.py's _get_kids_surplus_529_monthly's own history).
+        # That row's goal string was never touched by anything else in
+        # this migration, so a household with e.g. $500/mo already
+        # earmarked would have it silently become invisible: the new
+        # UI/backend only ever look up "Education funding - kid_<id>",
+        # never the old literal name, so that $500/mo would vanish from
+        # every education projection while still sitting in the table
+        # under a goal string nothing reads anymore. Remap it here,
+        # using the exact new id just assigned above, same as accounts.
+        if "surplus_allocations" in tables:
+            conn.execute(
+                "UPDATE surplus_allocations SET goal=? WHERE goal=?",
+                (f"Education funding - {new_owner}", legacy_goal),
+            )
         order += 1
     # Set unconditionally, even when neither slot had signal (0 kids is a
     # valid, real outcome) -- this is what makes the conversion run only
