@@ -2,6 +2,7 @@ import { useState } from 'react'
 import axios from 'axios'
 import { usePersonNames } from '../hooks/usePersonNames'
 import { isPrivacyMode, MASK_CURRENCY } from '../utils/privacy'
+import { TWO_AGE_MIN, TWO_AGE_MAX, clampTwoAge } from '../utils/scenario'
 
 // Minimal v1 UI for two-dimensional retirement timing (backend/docs/
 // TWO_DIMENSIONAL_RETIREMENT_DESIGN.md section 7) -- two explicit ages,
@@ -56,13 +57,19 @@ export default function TwoAgeScenario() {
 
       <div className="card" style={{ marginBottom:24 }}>
         <div className="grid-3" style={{ marginBottom:12 }}>
+          {/* External audit review, 2026-09-09: see clampTwoAge's own
+              comment in utils/scenario.js. */}
           <div>
             <div className="label" style={{ marginBottom:8 }}>{person1Name}'s Retirement Age</div>
-            <input type="number" value={jasonRetAge} onChange={e => updateJasonAge(parseInt(e.target.value) || 0)} />
+            <input type="number" min={TWO_AGE_MIN} max={TWO_AGE_MAX} step={1} value={jasonRetAge}
+                   onChange={e => updateJasonAge(clampTwoAge(e.target.value))} />
+            <div style={{ fontSize:11, color:'var(--text3)', marginTop:4 }}>Ages {TWO_AGE_MIN}-{TWO_AGE_MAX}</div>
           </div>
           <div>
             <div className="label" style={{ marginBottom:8 }}>{person2Name}'s Retirement Age</div>
-            <input type="number" value={justinRetAge} onChange={e => updateJustinAge(parseInt(e.target.value) || 0)} />
+            <input type="number" min={TWO_AGE_MIN} max={TWO_AGE_MAX} step={1} value={justinRetAge}
+                   onChange={e => updateJustinAge(clampTwoAge(e.target.value))} />
+            <div style={{ fontSize:11, color:'var(--text3)', marginTop:4 }}>Ages {TWO_AGE_MIN}-{TWO_AGE_MAX}</div>
           </div>
         </div>
         <button className="btn-primary" onClick={run} disabled={loading}>{loading ? 'Calculating…' : 'Run Scenario'}</button>

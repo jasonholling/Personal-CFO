@@ -7,6 +7,7 @@ import { isPrivacyMode, MASK_CURRENCY } from '../utils/privacy'
 import { useScenario } from '../hooks/useScenario'
 import { usePersonNames } from '../hooks/usePersonNames'
 import { useSsAnchors } from '../hooks/useSsAnchors'
+import { TWO_AGE_MIN, TWO_AGE_MAX, clampTwoAge } from '../utils/scenario'
 import SecondEarnerNote from '../components/SecondEarnerNote'
 import ClaimAgeSlider from '../components/ClaimAgeSlider'
 
@@ -206,13 +207,19 @@ export default function RothConversion() {
           </div>
         ) : (
           <div style={{ display:'flex', gap:24, flexWrap:'wrap', alignItems:'flex-end' }}>
+            {/* External audit review, 2026-09-09: see clampTwoAge's own
+                comment in utils/scenario.js. */}
             <div>
               <div className="label" style={{ marginBottom:8 }}>{person1Name}'s Retirement Age</div>
-              <input type="number" value={jasonRetAge} onChange={e => setJasonRetAge(parseInt(e.target.value) || 0)} />
+              <input type="number" min={TWO_AGE_MIN} max={TWO_AGE_MAX} step={1} value={jasonRetAge}
+                     onChange={e => setJasonRetAge(clampTwoAge(e.target.value))} />
+              <div style={{ fontSize:11, color:'var(--text3)', marginTop:4 }}>Ages {TWO_AGE_MIN}-{TWO_AGE_MAX}</div>
             </div>
             <div>
               <div className="label" style={{ marginBottom:8 }}>{person2Name}'s Retirement Age</div>
-              <input type="number" value={justinRetAge} onChange={e => setJustinRetAge(parseInt(e.target.value) || 0)} />
+              <input type="number" min={TWO_AGE_MIN} max={TWO_AGE_MAX} step={1} value={justinRetAge}
+                     onChange={e => setJustinRetAge(clampTwoAge(e.target.value))} />
+              <div style={{ fontSize:11, color:'var(--text3)', marginTop:4 }}>Ages {TWO_AGE_MIN}-{TWO_AGE_MAX}</div>
             </div>
             {!jasonOverridden && (
               <div>

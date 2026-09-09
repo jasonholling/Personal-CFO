@@ -46,6 +46,81 @@ function secondEarnerNoteProps(data, person1Name, person2Name) {
   }
 }
 
+// External audit review, 2026-09-09: a result on this page previously
+// showed two-age retirement ages (if two-age mode) but nothing else --
+// not the effective SS claim ages, return/inflation assumptions, income
+// target, bridge income, or SS multiplier. The blue "reflecting What-If
+// assumptions" notice said overrides were active, but a result couldn't
+// be audited from the screen afterward -- which assumption produced
+// THIS number. Compact by default (native <details>, no extra state),
+// expandable to the full list. jasonSsClaimAge/justinSsClaimAge here are
+// EFFECTIVE values (this page's own slider, else null meaning "resolved
+// server-side from saved Settings or the Early/Delayed toggle" -- the
+// UI can't know which without asking the backend, so it's labeled
+// accordingly rather than guessed).
+function AssumptionsUsed({ retAge, ssTiming, jasonRetAge, justinRetAge, jasonSsClaimAge, justinSsClaimAge, overrides, person1Name, person2Name, data }) {
+  const twoAge = jasonRetAge != null && justinRetAge != null
+  // Prefer the RESPONSE's own echoed ages over the request props when
+  // available -- the authoritative "what was actually computed," not
+  // just "what was asked for" (they can differ, e.g. a snapped age).
+  const displayJasonAge  = data?.jason_ret_age  ?? jasonRetAge
+  const displayJustinAge = data?.justin_ret_age ?? justinRetAge
+  const ageLine = twoAge
+    ? `${person1Name} retires ${displayJasonAge} · ${person2Name} retires ${displayJustinAge}`
+    : `Retire at ${retAge}`
+  const ssLine = [
+    jasonSsClaimAge != null
+      ? `${person1Name} claims SS at ${jasonSsClaimAge}`
+      : `${person1Name} SS: ${ssTiming === 'delayed' ? 'wait until 67' : 'take at 62'}${ssTiming ? ' (or Settings, if saved)' : ''}`,
+    justinSsClaimAge != null ? `${person2Name} claims SS at ${justinSsClaimAge}` : null,
+  ].filter(Boolean).join(' · ')
+  const pct = (v) => v == null ? null : `${(v * 100).toFixed(1)}%`
+  const overrideRows = overrides ? [
+    overrides.pre_return  != null && ['Pre-retirement return', pct(overrides.pre_return)],
+    overrides.post_return != null && ['Post-retirement return', pct(overrides.post_return)],
+    overrides.inflation   != null && ['Inflation', pct(overrides.inflation)],
+    overrides.income_target != null && ['Income target', `${fmtK(overrides.income_target)}/yr`],
+    overrides.bridge_income  != null && overrides.bridge_income > 0 && ['Bridge income', `${fmtK(overrides.bridge_income)}/yr`],
+    overrides.pension_mult != null && overrides.pension_mult !== 1 && ['Pension multiplier', `${Math.round(overrides.pension_mult * 100)}%`],
+    overrides.ss_mult != null && overrides.ss_mult !== 1 && ['SS multiplier', `${Math.round(overrides.ss_mult * 100)}% of projected`],
+  ].filter(Boolean) : []
+  return (
+    <details style={{ marginBottom:16, fontSize:12, color:'var(--text3)' }}>
+      <summary style={{ cursor:'pointer', color:'var(--text2)' }}>
+        Assumptions used: {ageLine} · {ssLine}{overrideRows.length > 0 ? ` · ${overrideRows.length} What-If override${overrideRows.length > 1 ? 's' : ''}` : ''}
+      </summary>
+      <div style={{ marginTop:8, paddingLeft:4, display:'grid', gridTemplateColumns:'auto auto', gap:'4px 16px', maxWidth:400 }}>
+        <span>{ageLine}</span><span />
+        <span>{ssLine}</span><span />
+        {overrideRows.map(([k, v]) => (
+          <span key={k} style={{ display:'contents' }}><span>{k}</span><span style={{ color:'var(--text2)' }}>{v}</span></span>
+        ))}
+      </div>
+    </details>
+  )
+}
+
+// External audit review, 2026-09-09: changing any control here silently
+// cleared the previous result back to a generic "Ready to simulate"
+// state, with nothing on screen saying WHY -- a user moving a slider
+// had no visible confirmation the app even noticed, just an
+// unexplained reset. Compares the previous render's snapshot to the
+// current one and returns a short, specific description of whichever
+// single input changed (checked in a fixed, most-to-least-specific
+// order so only one reason is ever shown even if several changed at
+// once, e.g. a two-age-mode toggle that changes several deps together).
+function describeAssumptionChange(prev, next, person1Name, person2Name) {
+  if (!prev) return null
+  if (prev.retAge !== next.retAge) return `retirement age changed to ${next.retAge}`
+  if (prev.jasonRetAge !== next.jasonRetAge) return `${person1Name}'s retirement age changed to ${next.jasonRetAge}`
+  if (prev.justinRetAge !== next.justinRetAge) return `${person2Name}'s retirement age changed to ${next.justinRetAge}`
+  if (prev.ssTiming !== next.ssTiming) return `Social Security timing changed to "${next.ssTiming === 'delayed' ? 'wait until 67' : 'take at 62'}"`
+  if (prev.jasonSsClaimAge !== next.jasonSsClaimAge) return `${person1Name}'s SS claim age changed`
+  if (prev.justinSsClaimAge !== next.justinSsClaimAge) return `${person2Name}'s SS claim age changed`
+  if (prev.overrides !== next.overrides) return 'What-If Builder assumptions changed'
+  return null
+}
+
 export const RET_AGES = [55,56,57,58,59,60,61,62,63,64,65,66,67]
 export const SS_OPTS  = [
   { value:'early',   label:'SS at 62' },
@@ -98,8 +173,14 @@ export function MonteCarloSection({ retAge, ssTiming, overrides, jasonRetAge, ju
   // input change instead of leaving it stuck true forever, since a stale
   // response now takes the early-return path instead of clearing it.
   const genRef = useRef(0)
+  // See describeAssumptionChange's own comment above.
+  const prevSnapshotRef = useRef(null)
+  const [clearReason, setClearReason] = useState(null)
 
   useEffect(() => {
+    const snapshot = { retAge, ssTiming, overrides, jasonRetAge, justinRetAge, jasonSsClaimAge, justinSsClaimAge }
+    setClearReason(describeAssumptionChange(prevSnapshotRef.current, snapshot, person1Name, person2Name))
+    prevSnapshotRef.current = snapshot
     genRef.current++
     setData(null); setSwr(null); setIncSrc(null); setError(null); setLoading(false)
   }, [retAge, ssTiming, overrides, jasonRetAge, justinRetAge, jasonSsClaimAge, justinSsClaimAge])
@@ -178,6 +259,11 @@ export function MonteCarloSection({ retAge, ssTiming, overrides, jasonRetAge, ju
       <div style={{ fontSize:32, marginBottom:16 }}>◎</div>
       <div style={{ fontSize:15, fontWeight:600, marginBottom:8 }}>Ready to simulate</div>
       <div style={{ fontSize:13, color:'var(--text2)', marginBottom:24 }}>1,000 random market scenarios across your full retirement</div>
+      {clearReason && (
+        <div style={{ fontSize:12, color:'var(--text3)', marginBottom:16 }}>
+          Cleared the previous result — {clearReason}. Run again to see the updated numbers.
+        </div>
+      )}
       {error && <div style={{ fontSize:13, color:'var(--red)', marginBottom:16 }}>{error}</div>}
       <button className="btn-primary" onClick={run} style={{ padding:'12px 32px', fontSize:14 }}>
         Run Monte Carlo Simulation
@@ -190,11 +276,9 @@ export function MonteCarloSection({ retAge, ssTiming, overrides, jasonRetAge, ju
 
   return (
     <div>
-      {data.mode === 'two_age' && (
-        <div style={{ fontSize:12, color:'var(--text3)', marginBottom:16 }}>
-          Ages used: {person1Name} {data.jason_ret_age} · {person2Name} {data.justin_ret_age}
-        </div>
-      )}
+      <AssumptionsUsed retAge={retAge} ssTiming={ssTiming} jasonRetAge={jasonRetAge} justinRetAge={justinRetAge}
+                        jasonSsClaimAge={jasonSsClaimAge} justinSsClaimAge={justinSsClaimAge} overrides={overrides}
+                        person1Name={person1Name} person2Name={person2Name} data={data} />
       {/* Success rate hero */}
       <div className="grid-4" style={{ marginBottom:24 }}>
         <div className="card" style={{ gridColumn:'span 1' }}>
@@ -219,11 +303,17 @@ export function MonteCarloSection({ retAge, ssTiming, overrides, jasonRetAge, ju
         <div className="card">
           <div className="label">Safe Spending Power</div>
           {swr ? (<>
+            {/* External audit review, 2026-09-09: this headline used to
+                repeat data.success_rate -- the exact same number as the
+                "Probability of Success" card immediately to the left.
+                The actually-useful figure (the safe annual draw) was
+                buried in the detail rows below. Headline is now the
+                dollar amount, with rate + cushion right underneath it. */}
             <div className="number-lg" style={{ color: data.success_rate >= 95 ? GREEN : data.success_rate >= 85 ? AMBER : RED, marginTop:8 }}>
-              {data.success_rate}%
+              {fmtK(swr.safe_withdrawal_annual)}/yr
             </div>
             <div style={{ fontSize:12, color:'var(--text2)', marginTop:4 }}>
-              of 1,000 scenarios fund your planned lifestyle to age {data.retirement_end_age ?? 99}
+              {swr.safe_withdrawal_rate}% draw rate · {swr.cushion_pct > 0 ? '+' : ''}{swr.cushion_pct}% cushion vs {fmtK(swr.income_target)}/yr target
             </div>
             {retAge === 55 && data.mode !== 'two_age' ? (
               <div style={{ marginTop:12, fontSize:12, lineHeight:1.7 }}>
@@ -251,23 +341,8 @@ export function MonteCarloSection({ retAge, ssTiming, overrides, jasonRetAge, ju
             ) : (
               <div style={{ marginTop:12, fontSize:12, lineHeight:1.7 }}>
                 <div style={{ display:'flex', justifyContent:'space-between' }}>
-                  <span style={{ color:'var(--text2)' }}>Safe portfolio draw</span>
-                  <span>{fmt(swr.safe_withdrawal_annual)}/yr ({swr.safe_withdrawal_rate}%)</span>
-                </div>
-                <div style={{ display:'flex', justifyContent:'space-between' }}>
                   <span style={{ color:'var(--text2)' }}>Total safe spend</span>
                   <span>{fmtK(swr.total_safe_spend)}/yr</span>
-                </div>
-                <div style={{ display:'flex', justifyContent:'space-between' }}>
-                  <span style={{ color:'var(--text2)' }}>vs target</span>
-                  <span>{fmtK(swr.income_target)}/yr</span>
-                </div>
-                <div style={{ height:1, background:'var(--border)', margin:'6px 0' }} />
-                <div style={{ display:'flex', justifyContent:'space-between', fontWeight:600 }}>
-                  <span>Cushion</span>
-                  <span style={{ color: data.success_rate >= 95 ? GREEN : AMBER }}>
-                    {swr.cushion_pct > 0 ? '+' : ''}{swr.cushion_pct}%
-                  </span>
                 </div>
                 <SecondEarnerNote {...secondEarnerNoteProps(swr, person1Name, person2Name)} />
               </div>
@@ -381,8 +456,14 @@ export function StressTestSection({ retAge, ssTiming, overrides, jasonRetAge, ju
   // See MonteCarloSection's genRef comment above — same stale-response
   // guard and error surfacing (external audit 2026-09-07, finding #13).
   const genRef = useRef(0)
+  // See MonteCarloSection's identical describeAssumptionChange comment.
+  const prevSnapshotRef = useRef(null)
+  const [clearReason, setClearReason] = useState(null)
 
   useEffect(() => {
+    const snapshot = { retAge, ssTiming, overrides, jasonRetAge, justinRetAge, jasonSsClaimAge, justinSsClaimAge }
+    setClearReason(describeAssumptionChange(prevSnapshotRef.current, snapshot, person1Name, person2Name))
+    prevSnapshotRef.current = snapshot
     genRef.current++
     setData(null); setRoth(null); setContrib(null); setError(null); setLoading(false)
   }, [retAge, ssTiming, overrides, jasonRetAge, justinRetAge, jasonSsClaimAge, justinSsClaimAge])
@@ -444,6 +525,11 @@ export function StressTestSection({ retAge, ssTiming, overrides, jasonRetAge, ju
       <div style={{ fontSize:32, marginBottom:16 }}>⊗</div>
       <div style={{ fontSize:15, fontWeight:600, marginBottom:8 }}>Ready to stress test</div>
       <div style={{ fontSize:13, color:'var(--text2)', marginBottom:24 }}>Run your portfolio through 2008, 1970s stagflation, and the lost decade</div>
+      {clearReason && (
+        <div style={{ fontSize:12, color:'var(--text3)', marginBottom:16 }}>
+          Cleared the previous result — {clearReason}. Run again to see the updated numbers.
+        </div>
+      )}
       {error && <div style={{ fontSize:13, color:'var(--red)', marginBottom:16 }}>{error}</div>}
       <button className="btn-primary" onClick={run} style={{ padding:'12px 32px', fontSize:14 }}>
         Run Stress Tests
@@ -464,11 +550,9 @@ export function StressTestSection({ retAge, ssTiming, overrides, jasonRetAge, ju
 
   return (
     <div>
-      {data.mode === 'two_age' && (
-        <div style={{ fontSize:12, color:'var(--text3)', marginBottom:16 }}>
-          Ages used: {person1Name} {data.jason_ret_age} · {person2Name} {data.justin_ret_age}
-        </div>
-      )}
+      <AssumptionsUsed retAge={retAge} ssTiming={ssTiming} jasonRetAge={jasonRetAge} justinRetAge={justinRetAge}
+                        jasonSsClaimAge={jasonSsClaimAge} justinSsClaimAge={justinSsClaimAge} overrides={overrides}
+                        person1Name={person1Name} person2Name={person2Name} data={data} />
       <SecondEarnerNote {...secondEarnerNoteProps(data, person1Name, person2Name)} />
       {/* Summary cards */}
       <div className="grid-3" style={{ marginBottom:24 }}>

@@ -3,6 +3,7 @@ import axios from 'axios'
 import { useScenario } from '../hooks/useScenario'
 import { usePersonNames } from '../hooks/usePersonNames'
 import { SS_ANCHORS_DEFAULTS, ssAnchorsFromPlanningInputs } from '../hooks/useSsAnchors'
+import { TWO_AGE_MIN, TWO_AGE_MAX, clampTwoAge } from '../utils/scenario'
 import { isPrivacyMode, MASK_CURRENCY } from '../utils/privacy'
 import WhatIf from './WhatIf'
 import { MonteCarloSection, StressTestSection, RET_AGES, SS_OPTS } from './Simulation'
@@ -356,43 +357,6 @@ export default function StressTestWhatIf({ onNavigate }) {
         </div>
       )}
 
-      {/* Custom claim age (2026-09-09, CALCULATION_CONTRACT.md section
-          54): shared jasonSsClaimAge/justinSsClaimAge scenario state,
-          same in single-axis and two-age mode -- resolve_ss_claim_ages
-          applies identically either way (section 48). Carries over to
-          Retirement.jsx and RothConversion.jsx too, since all three
-          read the same shared state. */}
-      {(tab === 'monte_carlo' || tab === 'stress') && (
-        <div className="card" style={{ marginBottom:20, padding:'16px 20px' }}>
-          <div className="label" style={{ marginBottom:8 }}>Custom Social Security Claim Age (62-70)</div>
-          <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:24 }}>
-            <ClaimAgeSlider
-              label={`${person1Name}'s claim age`}
-              claimAge={jasonSsClaimAge}
-              onChange={setJasonSsClaimAge}
-              benefit62={ssAnchors.jason.b62}
-              benefit67={ssAnchors.jason.b67}
-              benefit70={ssAnchors.jason.b70}
-              benefitType="worker"
-              offHint="off = use whatever's saved in Settings, if anything"
-              compact
-            />
-            <ClaimAgeSlider
-              label={`${person2Name}'s claim age`}
-              claimAge={justinSsClaimAge}
-              onChange={setJustinSsClaimAge}
-              benefit62={ssAnchors.justin.b62}
-              benefit67={ssAnchors.justin.b67}
-              benefit70={ssAnchors.justin.b70}
-              benefitType="spousal"
-              checkEarlyAnchor
-              offHint="off = use whatever's saved in Settings, if anything"
-              compact
-            />
-          </div>
-        </div>
-      )}
-
       {/* What-If Builder has its own full 55-67 retirement-age slider, and
           Survivor Scenario has its own controls, so the coarse retAge/
           ssTiming selector below is only shown for Monte Carlo/Historical
@@ -446,13 +410,19 @@ export default function StressTestWhatIf({ onNavigate }) {
       )}
       {tab !== 'whatif' && tab !== 'survivor' && twoAgeMode && (
         <div style={{ display:'flex', gap:24, marginBottom:!jasonOverridden && justinOverridden ? 8 : 28, flexWrap:'wrap', alignItems:'flex-end' }}>
+          {/* External audit review, 2026-09-09: see clampTwoAge's own
+              comment in utils/scenario.js. */}
           <div>
             <div className="label" style={{ marginBottom:8 }}>{person1Name}'s Retirement Age</div>
-            <input type="number" value={jasonRetAge} onChange={e => setJasonRetAge(parseInt(e.target.value) || 0)} />
+            <input type="number" min={TWO_AGE_MIN} max={TWO_AGE_MAX} step={1} value={jasonRetAge}
+                   onChange={e => setJasonRetAge(clampTwoAge(e.target.value))} />
+            <div style={{ fontSize:11, color:'var(--text3)', marginTop:4 }}>Ages {TWO_AGE_MIN}-{TWO_AGE_MAX}</div>
           </div>
           <div>
             <div className="label" style={{ marginBottom:8 }}>{person2Name}'s Retirement Age</div>
-            <input type="number" value={justinRetAge} onChange={e => setJustinRetAge(parseInt(e.target.value) || 0)} />
+            <input type="number" min={TWO_AGE_MIN} max={TWO_AGE_MAX} step={1} value={justinRetAge}
+                   onChange={e => setJustinRetAge(clampTwoAge(e.target.value))} />
+            <div style={{ fontSize:11, color:'var(--text3)', marginTop:4 }}>Ages {TWO_AGE_MIN}-{TWO_AGE_MAX}</div>
           </div>
           {/* Independent review, 2026-09-08 (P1): two-age mode used to
               hide this entirely, so there was no way to change SS timing
@@ -489,6 +459,65 @@ export default function StressTestWhatIf({ onNavigate }) {
       {tab !== 'whatif' && tab !== 'survivor' && twoAgeMode && !jasonOverridden && justinOverridden && (
         <div style={{ padding:'8px 14px', background:'var(--bg3)', borderRadius:8, marginBottom:20, fontSize:12, color:'var(--text2)' }}>
           ℹ {overrideNote}
+        </div>
+      )}
+
+      {/* Custom claim age (2026-09-09, CALCULATION_CONTRACT.md section
+          54): shared jasonSsClaimAge/justinSsClaimAge scenario state,
+          same in single-axis and two-age mode -- resolve_ss_claim_ages
+          applies identically either way (section 48). Carries over to
+          Retirement.jsx and RothConversion.jsx too, since all three
+          read the same shared state.
+          External audit review, 2026-09-09 (control hierarchy finding):
+          moved below the retirement-age controls -- Mode, then
+          Retirement Ages, then SS Claim Ages, then What-If (optional),
+          then Run, matching the order the reviewer laid out rather than
+          claim age appearing before the ages it's claimed alongside. */}
+      {(tab === 'monte_carlo' || tab === 'stress') && (
+        <div className="card" style={{ marginBottom:20, padding:'16px 20px' }}>
+          <div className="label" style={{ marginBottom:8 }}>
+            Custom Social Security Claim Age (62-70)
+            {whatIfAssumptions?.ss_mult != null && whatIfAssumptions.ss_mult !== 1 && (
+              <span style={{ fontWeight:400, color:'var(--text3)', textTransform:'none', letterSpacing:'normal' }}>
+                {' '}— previews below reflect the What-If Builder's {Math.round(whatIfAssumptions.ss_mult * 100)}% SS multiplier
+              </span>
+            )}
+          </div>
+          <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:24 }}>
+            {/* External audit review, 2026-09-09: this preview used to
+                read raw Settings anchors even though the simulation
+                these sliders feed applies the What-If Builder's own SS
+                multiplier (ss_mult) to the actual result -- with the
+                multiplier at 50%, the run would be on half the benefit
+                while the preview kept showing the full figure.
+                ssMultiplier makes the preview match what the
+                simulation actually uses. */}
+            <ClaimAgeSlider
+              label={`${person1Name}'s claim age`}
+              claimAge={jasonSsClaimAge}
+              onChange={setJasonSsClaimAge}
+              benefit62={ssAnchors.jason.b62}
+              benefit67={ssAnchors.jason.b67}
+              benefit70={ssAnchors.jason.b70}
+              benefitType="worker"
+              offHint="off = use whatever's saved in Settings, if anything"
+              ssMultiplier={whatIfAssumptions?.ss_mult}
+              compact
+            />
+            <ClaimAgeSlider
+              label={`${person2Name}'s claim age`}
+              claimAge={justinSsClaimAge}
+              onChange={setJustinSsClaimAge}
+              benefit62={ssAnchors.justin.b62}
+              benefit67={ssAnchors.justin.b67}
+              benefit70={ssAnchors.justin.b70}
+              benefitType="spousal"
+              checkEarlyAnchor
+              offHint="off = use whatever's saved in Settings, if anything"
+              ssMultiplier={whatIfAssumptions?.ss_mult}
+              compact
+            />
+          </div>
         </div>
       )}
 

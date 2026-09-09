@@ -17,7 +17,7 @@ import { ssBenefitForClaimAge, SS_CLAIM_AGE_MIN, SS_CLAIM_AGE_MAX, SS_FRA_AGE } 
 // similar), since the same wording doesn't fit everywhere this is used.
 export default function ClaimAgeSlider({
   label, claimAge, onChange, benefit62, benefit67, benefit70, benefitType,
-  checkEarlyAnchor = false, scopeNote, offHint, compact = false,
+  checkEarlyAnchor = false, scopeNote, offHint, compact = false, ssMultiplier,
 }) {
   const enabled = claimAge != null
   const age = claimAge ?? SS_FRA_AGE
@@ -33,7 +33,17 @@ export default function ClaimAgeSlider({
   const anchorMissing = anchorMissingLate || anchorMissingEarly
   const resolvedBenefit70 = benefit70 || benefit67
   const resolvedBenefit62 = anchorMissingEarly ? benefit67 : benefit62
-  const computed = ssBenefitForClaimAge(resolvedBenefit62 ?? 0, benefit67 ?? 0, resolvedBenefit70 ?? 0, age, benefitType)
+  // External audit review, 2026-09-09: this preview used to read the
+  // raw Settings anchors even on a page whose simulation applies the
+  // What-If "SS % of projected" multiplier (main.py's
+  // _apply_whatif_overrides, ss_mult) to the actual result -- with the
+  // multiplier set to 50%, the simulation would run on half the
+  // benefit while this preview kept showing the full, unscaled figure.
+  // ssMultiplier (default 1, i.e. no scaling) lets a page pass its own
+  // active What-If multiplier through so the preview and the result
+  // it's next to share the same effective assumption.
+  const effectiveMultiplier = ssMultiplier ?? 1
+  const computed = ssBenefitForClaimAge(resolvedBenefit62 ?? 0, benefit67 ?? 0, resolvedBenefit70 ?? 0, age, benefitType) * effectiveMultiplier
   return (
     <div style={compact ? {} : { padding:'10px 0', borderBottom:'1px solid var(--border)' }}>
       <label style={{ display:'flex', alignItems:'center', gap:8, fontSize:13, cursor:'pointer' }}>
@@ -72,6 +82,7 @@ export default function ClaimAgeSlider({
           </div>
           <div style={{ fontSize:12, color:'var(--text2)', marginTop:4 }}>
             Benefit at {age}: <strong>${Math.round(computed).toLocaleString('en-US')}/yr</strong> {anchorMissing ? '(estimated)' : '(computed)'}
+            {effectiveMultiplier !== 1 && ` · ${Math.round(effectiveMultiplier * 100)}% of projected (What-If)`}
           </div>
         </div>
       )}

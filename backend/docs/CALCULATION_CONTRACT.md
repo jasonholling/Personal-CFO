@@ -4859,3 +4859,80 @@ existing RothConversion.test.jsx test updated to filter its
 call-order assertions by URL instead of raw call order, since this
 page now also fetches `/api/planning-inputs` once on mount for its own
 slider's anchor preview), `npm run build` clean.
+
+## 55. Social Security claiming age 62-70 — Monte Carlo/Stress UX review, fixes (2026-09-09, on `main`)
+
+Independent UX review of the Monte Carlo/Stress Test tabs (built on the
+new claim-age sliders, sections 44-54) found five issues.
+
+**Finding 1 — "Safe Spending Power" repeated the success probability.**
+Its headline read `data.success_rate` -- the exact same number the
+adjacent "Probability of Success" card already showed -- while the
+actually-useful figure (the safe annual draw) was buried in a detail
+row below. Fixed: headline is now `fmtK(swr.safe_withdrawal_annual)`
+(e.g. "$45K/yr"), with the draw rate and cushion moved up directly
+underneath it; the now-redundant "Safe portfolio draw" detail row
+(duplicating the new headline) and its accompanying "Cushion" row
+(duplicating the new subline) were removed. Same fix applied to the
+phased-plan (age 55) branch, which had the identical duplicate.
+
+**Finding 2 — the claim-age slider preview ignored What-If's SS
+multiplier.** The slider reads its anchors from saved Settings, but
+the simulation it feeds applies `_apply_whatif_overrides`' `ss_mult`
+(main.py) to the actual result -- at 50%, the simulation runs on half
+the benefit while the slider kept showing the full, unscaled figure.
+Fixed: `ClaimAgeSlider` gained an `ssMultiplier` prop (default 1) that
+scales its own preview computation; StressTestWhatIf.jsx passes
+`whatIfAssumptions?.ss_mult` through on both sliders, and the "Benefit
+at N" line now appends "· N% of projected (What-If)" whenever the
+multiplier is active, so the preview and the result next to it share
+the same effective assumption.
+
+**Finding 3 — a result didn't show the assumptions that produced it.**
+Only two-age retirement ages were shown (when in two-age mode); not
+the effective SS claim ages, return/inflation assumptions, income
+target, bridge income, or SS multiplier. New `AssumptionsUsed`
+component (native `<details>`, no extra state) renders a compact
+one-line summary (ages · SS · N What-If overrides) that expands to the
+full list. Sources the two-age retirement ages from the RESPONSE's own
+`jason_ret_age`/`justin_ret_age` (not just the request props) so a
+snapped/adjusted age is still shown accurately.
+
+**Finding 4 — two-age retirement inputs accepted invalid values.** The
+six `<input type="number">` fields across StressTestWhatIf.jsx,
+RothConversion.jsx, and TwoAgeScenario.jsx had no `min`/`max`/`step`
+and no clamping, relying on a generic simulation error for 0,
+negative, decimal, or out-of-range ages. New `TWO_AGE_MIN`/
+`TWO_AGE_MAX`/`clampTwoAge` in `utils/scenario.js` (50-75, the same
+range `save_scenario`'s own backend validation already uses) applied
+to all six fields, with a "Ages 50-75" hint under each.
+
+**Finding 5 — changing a control silently cleared the result.** The
+existing stale-response-guard effect (external audit 2026-09-07,
+finding #13) reset `data`/`swr`/etc. to null on any dependency change
+with no visible explanation -- a user moving a slider had no
+confirmation the app even noticed. New `describeAssumptionChange(prev,
+next, ...)` compares the previous render's snapshot to the current one
+and returns a short, specific description of whichever single input
+changed (checked in a fixed, most-to-least-specific order); the
+"Ready to simulate"/"Ready to stress test" panels now show "Cleared
+the previous result — {reason}. Run again to see the updated numbers."
+
+**Also, reordering (control-hierarchy finding):** the "Custom Social
+Security Claim Age" card was moved to render AFTER the retirement-age
+controls (both single-axis and two-age variants) instead of before
+them, matching Mode → Retirement Ages → SS Claim Ages → What-If →
+Run — the order the reviewer laid out — rather than claim age
+appearing above the ages it's claimed alongside.
+
+Two existing tests in `TwoAgeMonteCarloStress.test.jsx` updated to
+match the corrected rendering: the old literal "Alex 61"/"Sam 63" (from
+the removed "Ages used" line) now reads "Alex retires 61"/"Sam retires
+63" (AssumptionsUsed's own wording); "$45,000" (the old duplicate-
+headline detail row) now reads "$45K" (the new dollar-amount headline,
+`fmtK`-formatted).
+
+Frontend only. `npm test` 39/39, `npm run build` clean. No backend
+changes.
+
+Branch: `main`, pushed.

@@ -152,8 +152,15 @@ describe('Two-Age Monte Carlo', () => {
     await flush()
     await click('Run Monte Carlo Simulation')
     await flush()
-    expect(container.textContent).toContain('Alex 61')
-    expect(container.textContent).toContain('Sam 63')
+    // External audit review, 2026-09-09: the old "Ages used: {p1} {age}"
+    // line was replaced by AssumptionsUsed's fuller summary (retirement
+    // ages, effective SS claim ages, and any active What-If overrides,
+    // so a result can be audited from the screen afterward) -- still
+    // sourced from the RESPONSE's own echoed jason_ret_age/justin_ret_age,
+    // not just the request, so a snapped/adjusted age is still shown
+    // accurately rather than the raw request value.
+    expect(container.textContent).toContain('Alex retires 61')
+    expect(container.textContent).toContain('Sam retires 63')
     expect(container.textContent).toContain('$65,000')
     expect(container.textContent).toContain('65%')
     // Independent review, 2026-09-08 (P2): SecondEarnerNote used to
@@ -212,7 +219,11 @@ describe('Two-Age Monte Carlo', () => {
     expect(axios.post).toHaveBeenCalledWith('/api/simulation/swr',
       expect.objectContaining({ jason_ret_age: 65, justin_ret_age: 65 }))
     expect(container.textContent).not.toContain('Run simulation to calculate')
-    expect(container.textContent).toContain('$45,000')
+    // External audit review, 2026-09-09: the card's headline used to
+    // repeat data.success_rate (the exact number the "Probability of
+    // Success" card already shows) -- now the safe annual draw dollar
+    // amount itself, formatted with fmtK ($45K, not $45,000).
+    expect(container.textContent).toContain('$45K')
   })
 })
 

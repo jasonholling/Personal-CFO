@@ -103,3 +103,21 @@ export function subscribeScenario(fn) {
 export function nearestOf(age, options) {
   return options.reduce((best, o) => Math.abs(o - age) < Math.abs(best - age) ? o : best, options[0])
 }
+
+// External audit review, 2026-09-09: two-age mode's Jason/Justin
+// retirement-age number inputs (StressTestWhatIf.jsx, RothConversion.jsx,
+// TwoAgeScenario.jsx) were unrestricted -- 0, negative, decimal, or
+// out-of-range values all reached the backend, which has no explicit
+// validation for jason_ret_age/justin_ret_age and just surfaces
+// whatever generic error the simulation happens to throw. Bounded to
+// the same 50-75 range save_scenario's own validation already uses
+// elsewhere in this app (main.py: "Enter a name and retirement age
+// from 50 to 75"). clampTwoAge is applied on every keystroke, not just
+// checked at submit time.
+export const TWO_AGE_MIN = 50
+export const TWO_AGE_MAX = 75
+export function clampTwoAge(rawValue) {
+  const n = parseInt(rawValue)
+  if (isNaN(n)) return TWO_AGE_MIN
+  return Math.min(TWO_AGE_MAX, Math.max(TWO_AGE_MIN, n))
+}
