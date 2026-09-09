@@ -2515,3 +2515,1545 @@ build succeeds, sensitive-data check passed.
 
 Branch: `codex/two-age-swr`, pushed, **still not merged** -- fourth
 review round pending before Milestone 2 begins.
+
+## 30. Two-age Roth Conversion — working-income tax contract, written before implementation (2026-09-08, on `codex/two-age-roth-conversion`)
+
+**CORRECTED 2026-09-08 (independent review, Roth Conversion follow-up,
+P1/P2) — sections 30.1-30.3 below originally asserted that gross
+working income never affects bracket capacity "in either direction."
+That rule was wrong and is corrected in place here (not append-only
+for this specific point, since leaving a known-false rule as the
+"authoritative" design contract would actively mislead Milestone 3,
+which is required to reuse it). The corrected rule: gross wages ARE
+ordinary taxable income and DO reduce 22%-bracket room, the same way
+pension/SS/pretax draws already do — only the SEPARATE 65% net-of-tax
+figure continues to fund the spending-need offset, unchanged. Section
+32 has the full reproduction, fix, and reasoning; sections 30.1-30.3
+below now state the corrected rule directly rather than leaving the
+wrong one on the record with a footnote.**
+
+**CORRECTED AGAIN 2026-09-08 (independent review, second follow-up
+pass) — the FIRST correction above was itself incomplete in three
+ways, all now fixed and folded into 30.1-30.3's text directly: (1) the
+gross-income figure only covered salary (derived by dividing the net
+spending-offset figure back out, which structurally can't recover
+bonus/RSU since the underlying helper never reads those fields) — now
+computed directly from salary+bonus+RSU; (2) the SAME gross figure now
+also feeds `_pretax_marginal_tax_rate`'s estimate for the year's own
+ordinary SPENDING withdrawal, not just the conversion's own
+bracket-capacity math — a household's real marginal rate for a given
+tax year can't correctly exclude income that same year's conversion
+math already counts; (3) the progressive-tax affordability cap
+(section 32) was dropping unused standard-deduction room instead of
+treating it as a free zone, understating what a low-income household
+could actually afford. Section 33 has the full detail.**
+
+Milestone 2 of 4 (SWR done and merged, section 25-29). Required by the
+milestone's own instruction: document the working-income tax contract
+BEFORE any implementation code, so bracket-capacity treatment is a
+deliberate decision, not an accident of how the code happened to get
+written. Everything below was read directly from the existing
+single-axis `run_roth_conversion_analysis` (unmodified by this
+milestone) and the shared two-age helpers already built for SWR/Monte
+Carlo/Stress/Projection — not assumed.
+
+### 30.1 What counts toward taxable income (bracket capacity) — CORRECTED
+
+`base_taxable` (the figure `room_in_22 = BRACKET_TOP_22 - base_taxable`
+is measured against) is, in the existing single-axis tool:
+
+    base_taxable = pension + 0.85 * (jason_SS + justin_SS) + pretax_draw - STD_DEDUCTION
+
+Confirmed by reading the code: single-axis Roth Conversion (and every
+other withdrawal-phase engine in this app — SWR, Monte Carlo, Stress
+Tests, Projection) never adds a working spouse's gross wages to any
+ordinary-income figure at all — but that's a **pre-existing gap in
+those tools, not a rule to preserve**. It went uncaught there because
+none of those other tools ever has BOTH a still-working spouse's
+income AND a bracket-capacity calculation in the same year the way
+Roth Conversion's own conversion-window can (a household can retire
+one spouse and start converting while the other is still earning a
+real W-2 salary). Two-age Roth Conversion's own `base_taxable` DOES
+include gross wages — see 30.2/30.3. Reproduced during review: a
+$500,000 working salary, no other income, ample assets — this
+originally recommended a $243,600 conversion inside the 22% bracket,
+when the repo's own deductions/bracket table says that salary alone
+(500000-32200=467800 > 211400) already leaves $0 room.
+
+The existing `SECOND_EARNER_NET_OF_TAX_FACTOR = 0.65` net-of-tax
+approximation is UNCHANGED and still funds the year's SPENDING-NEED
+OFFSET exactly as before (`justin_gap_income_for_year`'s return value,
+folded into `event_monthly`/`spending_need` the same way life-event
+cash is) — that half of the picture wasn't wrong. What was missing is
+a SEPARATE gross-income figure that now ALSO enters `base_taxable`.
+**Computed directly from salary + bonus + RSU** (`w2_salary`/
+`justin_w2_salary`, `annual_bonus_pct`/`justin_annual_bonus_pct` —
+applied to salary, and `annual_rsu_value`/`justin_annual_rsu_value` — a
+flat dollar figure), the same input fields `run_two_dimensional_
+retirement_projection`'s own accumulation-phase math already reads for
+this exact spouse — NOT by dividing the net spending-offset figure
+back out, which was tried first and only ever recovered the salary
+component, since the net figure's own source
+(`two_age_still_working_income_inputs`) never reads bonus/RSU inputs
+at all. The gross figure is then run through the same
+`justin_gap_income_for_year` per-year lookup every other two-age
+gap-income figure already uses, just fed a different "at_start" base.
+The two figures (net and gross) serve genuinely different purposes and
+are BOTH needed, not a contradiction: the net figure answers "how much
+cash does this household actually have to spend," the gross figure
+answers "how much ordinary taxable income does this household actually
+have" — using only one of the two for both questions (or an incomplete
+version of the gross one) is what produced the original bugs. The same
+gross figure also now feeds `_pretax_marginal_tax_rate`'s estimate for
+the year's own pretax SPENDING withdrawal (an optional `gross_income`
+parameter, default 0, so every other existing call site across this
+file is unaffected) — a household's real marginal bracket for a given
+tax year has to reflect ALL of that year's ordinary income, not just
+the portion the conversion's own bracket math happens to count.
+
+### 30.2 How each income source affects bracket capacity — CORRECTED
+
+| Source | Effect on `base_taxable` |
+|---|---|
+| Pension (`two_age_pension_for_year`, gated to Jason's own retirement) | Added in full — no exclusion. |
+| Social Security (each spouse's own claim-date formula) | 85% included, same flat approximation as every other consumer's `_pretax_marginal_tax_rate` estimate. |
+| Standard deduction | Flat `STD_DEDUCTION_MFJ_2026` subtracted — unchanged constant, no itemization modeled. |
+| Pretax-funded portion of the year's spending draw | Added (`pretax_draw` from `simulate_withdrawal_year`'s own `draws["pretax"]`) — taxable- and Roth-funded spending is NOT added, matching single-axis exactly. |
+| Taxable- or Roth-funded spending | No effect (principal draws aren't ordinary income; this tool doesn't model capital-gains tax on taxable-account growth, an existing, unchanged limitation). |
+| **Working income (wages/bonus/RSU, either spouse)** | **Added in full, gross** — see 30.1/30.3. The SEPARATE net-of-tax figure still funds spending only; this is not a double-count of the same dollars for the same purpose, since one figure feeds cash flow and the other feeds tax liability. |
+| Pretax (401k) contributions during phase2 (the still-working spouse may still be contributing) | **Not modeled at all.** This app only models contributions during the pre-retirement accumulation phase (`run_retirement_projection`'s own contribution formulas, run once to produce the starting Roth-conversion-window balances via `run_two_dimensional_retirement_projection`). No withdrawal-phase consumer in this app — single-axis or two-age — reduces a still-working spouse's OWN taxable income for ongoing contributions once the OTHER spouse has already started the conversion window; this is a pre-existing, explicit approximation, not new scope for this milestone. |
+| The conversion amount itself | **Not blended into `base_taxable`/`room_in_22` at all.** `base_taxable` determines how much ROOM exists in the selected bracket (a policy target — "fill up through the 22% bracket"); the conversion that fills that room is taxed separately — see section 32 for the progressive/incremental fix to HOW that tax is computed (no longer a flat rate). The conversion still cannot itself push the household into a higher bracket in this tool's `room_in_22` model — that ceiling is a deliberate, unchanged policy choice, not an oversight. |
+
+### 30.3 How the 65% take-home approximation interacts with conversion taxes — CORRECTED
+
+It's a SEPARATE figure feeding a separate calculation, not a
+contradiction of it. The 65% factor represents the wage-earner's net
+take-home CASH (after their own W-2 withholding, an approximation this
+tool has never itemized) — that net figure funds the year's spending
+offset, unchanged. Dividing that net figure back out by the same 0.65
+factor recovers the GROSS salary, which is what actually determines
+the household's real ordinary-income tax bracket for THIS year's
+conversion decision — a real household's W-2 withholding doesn't
+somehow shrink their AGI or their bracket; it's a prepayment against
+the tax owed on the FULL gross amount. Treating the NET figure as if
+it were the household's only taxable income (the original, wrong
+approach) understated real income and overstated available bracket
+room; conversely, adding the GROSS figure on top of the net spending
+offset does NOT double-tax the same dollars, because the two figures
+answer different questions (cash available to spend vs. ordinary
+taxable income) and neither one is itself a tax charge — the actual
+tax charge is computed once, on `base_taxable` (now correctly
+including gross wages) plus the conversion, via the progressive
+formula in section 32. Full payroll-tax modeling (FICA/Medicare
+specifically) remains deferred, per the milestone's own scope — this
+fix is about ordinary federal/state income tax bracket capacity, not
+building a payroll-tax engine.
+
+### 30.4 Order of operations: income, withdrawals, conversion, growth
+
+Per year, unchanged from single-axis and preserved exactly for
+two-age:
+
+1. Compute the year's guaranteed income (pension + each spouse's own
+   SS), the still-working spouse's gap income (if in phase2), life
+   events, and total spending need (`two_age_spending_need_fn` for
+   two-age, bridge/kids/healthcare-aware — see 30.6).
+2. `simulate_withdrawal_year` runs the full waterfall against the
+   YEAR'S OPENING balances: guaranteed income and life-event cash
+   offset need first (surplus swept into taxable if income exceeds
+   need); any shortfall draws `("taxable", "pretax", "roth")` in
+   order, each draw grossed up for tax; **growth is applied LAST**, to
+   every bucket's post-withdrawal (and post-surplus-sweep) balance —
+   `annual_engine.py`'s own documented contract.
+3. `simulate_conversion` is layered ON TOP of that ALREADY-GROWN
+   closing state — no further growth is applied within it. The
+   conversion amount is therefore valued at the END of the current
+   year / START of the next, which is why compounding it forward to
+   RMD age uses `RMD_START_AGE - age - 1` (one fewer year than the
+   naive age difference), the existing single-axis fix this milestone
+   does not touch.
+4. The conversion's own tax is paid from OUTSIDE the IRA (taxable,
+   by default) — capped by what remaining taxable can actually afford,
+   never leaving an unfunded tax bill, exactly as `simulate_conversion`'s
+   own docstring requires.
+
+Income "stopping" (the still-working spouse's own retirement,
+`phase2 -> phase3`) is handled entirely by
+`justin_gap_income_for_year`'s existing `phase2_duration_years` gate —
+the same mechanism SWR/Monte Carlo/Stress two-age already use, not a
+new one.
+
+### 30.5 What stays explicitly deferred
+
+- **Full payroll-tax modeling** (FICA/Medicare on wages, employer
+  matching, etc.) — out of scope per the milestone instruction. Still
+  folded, approximately, into the flat 0.65 net-of-tax factor alongside
+  ordinary income tax, exactly as it already is everywhere else in this
+  app.
+- **The conversion pushing the household into a higher bracket** — this
+  tool has never modeled that (the conversion is taxed flat at the
+  target bracket's own rate, not incrementally against `base_taxable +
+  conversion`); unchanged, pre-existing, not addressed by this
+  milestone.
+- **Ongoing 401k contributions during phase2** — not modeled in any
+  withdrawal-phase consumer, single-axis or two-age; unchanged.
+- **Capital-gains tax on taxable-account growth/draws** — not modeled
+  anywhere in this app; unchanged.
+- **Owner-specific tax treatment** (per-spouse account ownership) —
+  out of scope until Milestone 4's ownership foundation; conversions
+  here, like every other two-age tool, operate on the household's
+  pooled/joint bucket totals (`account_ownership_limitation`).
+
+### 30.6 Two-age-specific additive scope (new for this milestone)
+
+- Both `jason_ret_age`/`justin_ret_age` required together, via the
+  existing `_require_both_two_age_or_neither` gate (unchanged).
+- The conversion window starts at `phase2_start_age` (the earlier
+  retiree's own retirement — the same anchor every other two-age
+  withdrawal-phase consumer uses), not Jason's own
+  `jason_effective_start_age` — a household where Justin retires first
+  can start converting as soon as ANY retirement income exists to
+  spend from, matching the household's actual timeline. It still runs
+  through `RMD_START_AGE` (Jason's own age — RMDs and the pretax
+  account being converted are Jason-anchored throughout this entire
+  app, an existing, unchanged convention; there is no separate
+  justin_ret_age-anchored pretax pool). Built via
+  `build_two_person_timeline(..., retirement_end_age=RMD_START_AGE)` —
+  reusing the exact same timeline object every other two-age consumer
+  builds, just with a different horizon endpoint, rather than a new
+  timeline abstraction.
+- Spending need uses the FULL `two_age_spending_need_fn` (bridge/kids/
+  healthcare-aware, age-55 branch included) instead of single-axis
+  Roth Conversion's own simpler `income + healthcare` formula (which
+  never modeled bridge/kids at all, a pre-existing, documented
+  single-axis limitation). **This is an intentional, documented
+  difference from reuse, not a bug**: two-age's own shared spending
+  helper is strictly more complete, and per the milestone's own
+  instruction ("reuse the shared ... spending ... helpers"), the
+  richer shared formula is used rather than reimplementing single-axis's
+  narrower one a second time for two-age.
+- Guaranteed income and gap income use the exact same helpers section
+  25-29's SWR work already established:
+  `two_age_pension_for_year`, per-spouse SS claim-date formulas (the
+  same inline pattern four other call sites in this file already use),
+  `two_age_still_working_income_inputs` + `justin_gap_income_for_year`.
+- Starting pretax/Roth/taxable balances come from
+  `run_two_dimensional_retirement_projection`'s own UNROUNDED bucket
+  fields (`pretax_at_phase2_start`/`roth_at_phase2_start`/
+  `taxable_at_phase2_start`), the same pattern SWR/Monte Carlo/Stress
+  two-age already use — not a second, independent accumulation-phase
+  calculation.
+- The with-conversion vs. no-conversion comparison remains a single
+  deterministic pass under identical assumptions/return path for both
+  (this tool has never used randomized trials, unlike SWR/Monte Carlo)
+  — unchanged methodology, just run against the two-age timeline and
+  income/spending helpers above.
+
+Heatmaps, a full payroll-tax engine, and unrelated cleanup remain out
+of scope, per the overall instruction.
+
+## 31. Two-age Roth Conversion — implementation report (2026-09-08, on `codex/two-age-roth-conversion`)
+
+Milestone 2 of 4 (SWR done, merged to main). Full working-income tax
+contract in section 30, written and committed before any code. This
+section is the required accuracy/performance report for the completed
+implementation.
+
+**What was built:** `jason_ret_age`/`justin_ret_age` on
+`run_roth_conversion_analysis`, both required together, delegating to
+`_run_roth_conversion_analysis_two_age`. Reuses the exact shared
+helpers section 25-30 already established: `two_age_pension_for_year`,
+`two_age_spending_need_fn`, `two_age_still_working_income_inputs`,
+`justin_gap_income_for_year`, `build_two_person_timeline`,
+`run_two_dimensional_retirement_projection` for starting balances. The
+per-year tax math itself (`base_taxable`/`room_in_22`,
+`simulate_withdrawal_year` then `simulate_conversion` layered on the
+already-grown closing state) is the identical shape single-axis
+already uses -- no second, independent formula set, only fed two-age
+inputs.
+
+**Accuracy — test-first, per instruction:** 12 tests, all hand-computed
+by replaying the shared, already-reviewed primitives' own documented
+contracts (not inferred from the code under test), written and
+committed RED before any implementation code (confirmed failing with
+`TypeError` against the not-yet-existing params). Two bugs were found
+against this RED suite during implementation, both fixed before the
+first green commit:
+
+1. `build_two_person_timeline`'s own `end_age` is floored at
+   `phase2_start_age + 1` (every OTHER two-age consumer needs at least
+   one withdrawal-loop year -- "already retired" never means "zero
+   years of retirement" for SWR/Monte Carlo/Stress/Projection).
+   Reusing it via `retirement_end_age=RMD_START_AGE` for
+   `conversion_years` silently forced at least 1 conversion year even
+   for a household already at or past RMD age, where 0 is the correct
+   answer. Fixed by building the timeline with no `retirement_end_age`
+   override at all (`age()`/`justin_age_at()`/`jason_effective_start_age`
+   don't depend on it) and computing `conversion_years =
+   max(0, RMD_START_AGE - phase2_start_age)` directly.
+2. Two of the new tests were internally inconsistent: they varied
+   `jason_ret_age` between a "with working spouse" and "without" case
+   to introduce gap income, which also moved Jason's own pension
+   timing (gated to his actual retirement) -- confounding the
+   comparison the tests claimed to make. Fixed by holding
+   `jason_ret_age` constant and using Justin as the later-retiring,
+   working spouse in both cases instead.
+
+All 12 tests passed after both fixes, no adjustment to any
+hand-computed expected number. Covers: a full 2-year schedule with
+every per-year field hand-verified (bracket room, conversion amount,
+tax cost, Roth future value, tax avoided, net benefit, ending
+balances); both retirement orders (proving symmetry -- identical
+bracket math and conversion amounts regardless of which spouse's
+salary funds the gap income); working income's zero effect on bracket
+capacity in either direction (a direct comparison plus a pension-alone-
+exhausts-the-bracket case, the milestone's explicit "no room in the
+bracket" requirement); a past retirement selection (conversion window
+starts at the real current age, zero years once already at RMD age);
+unequal ages (each spouse's own SS claim age); nonzero inflation/growth
+(the one-fewer-year-of-compounding relationship holds under real
+growth, not just 0%); a full shortfall case; and the both-ages-required
+gate.
+
+**Performance:** unlike SWR/Monte Carlo, this tool has never used
+randomized trials -- it's a single deterministic pass per call, same
+methodology single-axis already uses. Benchmarked (20-run average,
+matched household/inputs): single-axis ~0.97ms, two-age ~0.45ms per
+call. Both effectively instant; no performance exception needed or
+expected, and none was.
+
+**Frontend:** Roth Conversion has its own standalone page
+(`RothConversion.jsx`, not part of Simulation.jsx's Monte Carlo/Stress
+tabs) -- confirmed by reading the nav/page list before touching
+anything, not assumed. Added the same "Use Two Independent Retirement
+Ages" toggle/two-input pattern `StressTestWhatIf.jsx` already
+established for Monte Carlo/Historical Stress, POSTing both ages
+instead of GETting the single `ret_age` when on. The summary header
+shows both ages in two-age mode; `SecondEarnerNote` (mode-aware
+amount/years/personLabel, the same convention `Simulation.jsx`'s own
+`secondEarnerNoteProps` uses) discloses the working spouse's gap
+income. SS timing stays visible and editable in both modes, matching
+the SWR/Monte Carlo precedent (independent review, section 23).
+
+**Verified:** full backend suite 1223 passed, 97.66% coverage. Full
+frontend suite 38 passed (was 35), production build succeeds.
+Sensitive-data check passed.
+
+**Explicitly out of scope for this milestone**, unchanged from the
+overall plan: full payroll-tax modeling, the conversion itself pushing
+into a higher bracket, ongoing 401k contributions during phase2,
+capital-gains tax, owner-specific treatment (Milestone 4), Tax
+Efficiency (Milestone 3), Survivor Scenario (Milestone 4).
+
+Branch: `codex/two-age-roth-conversion`, pushed, **not merged** — per
+the explicit instruction ("Do not merge or start the next milestone
+until the current one is reviewed and approved"), for independent
+review.
+
+## 32. Two-age Roth Conversion — independent review fixes (2026-09-08, on `codex/two-age-roth-conversion`)
+
+Independent review of `codex/two-age-roth-conversion`'s prior commit
+found three issues, all now fixed. The first two are corrections to
+section 30's own working-income tax contract, not just the code —
+section 30.1-30.3 above are revised in place (marked CORRECTED) rather
+than left asserting a wrong rule.
+
+**P1 — working income must consume conversion bracket capacity.**
+`base_taxable` never included gross wages at all — reproduced: a
+$500,000 working salary, no other income, ample assets, recommended a
+$243,600 conversion inside the 22% bracket, when that salary alone
+(500000-32200=467800 > 211400) already leaves $0 room under the repo's
+own deductions/bracket table. Fixed by deriving a GROSS wage figure
+(`still_working_income_this_year / SECOND_EARNER_NET_OF_TAX_FACTOR` —
+exact, since the factor is a flat multiplier with no other
+nonlinearity) and adding it to `base_taxable` in full, alongside
+pension/SS/pretax draws. The existing 65% net-of-tax figure is
+UNCHANGED and still funds the spending-need offset only — the two
+figures serve different purposes (cash available to spend vs. ordinary
+taxable income) and using both is not a double-count, since neither
+one is itself a tax charge.
+
+**P2 — conversion tax must be progressive/incremental, not flat.**
+`simulate_conversion` charged a flat 22% x amount — reproduced: $0
+other taxable income, a $243,600 conversion cost $35,932 under the
+real progressive table, not the $53,592 flat 22% charged. Added two
+new module-level helpers: `_progressive_federal_tax(taxable_income,
+brackets)` (total tax owed on an amount under a bracket table, 0 for
+non-positive income) and `_incremental_conversion_tax(pre_conversion_
+taxable, conversion_amount, state_tax_rate, brackets)` (tax(base +
+conversion) − tax(base), both floored at 0 before subtracting — a
+negative `base_taxable`, this file's own convention for unused
+standard-deduction room, is absorbed tax-free by the conversion before
+progressive rates apply, exactly like a real return). The
+affordability cap (`_max_conversion_for_tax_budget`) walks the same
+bracket table greedily from the pre-conversion taxable-income point,
+replacing the old flat `budget / 0.22` cap, so the amount a household
+can actually AFFORD to convert and the tax it's actually CHARGED now
+agree with each other by construction — they didn't before (the old
+affordability cap priced every dollar at the top bracket's rate,
+underselling what a real progressive tax bill would actually cost for
+the same cash). `room_in_22` itself (the bracket-EDGE policy target)
+is unchanged in form — it's a "how far to fill" ceiling, not a tax-
+liability calculation, and stays meaningful under progressive taxation
+exactly as under flat. The future-RMD-tax-avoided ESTIMATE
+(`roth_fv_at_73`/`tax_avoided_at_73`, still a flat 24% marginal-rate
+assumption, matching single-axis's own documented convention and the
+frontend's own "Estimate assumes a 24% marginal rate" disclosure) is
+unchanged — this fix is scoped to the conversion's OWN tax cost, not
+that separate, deliberately-simplified future estimate.
+
+Both fixes are scoped to the two-age function only — single-axis
+`run_roth_conversion_analysis` is untouched (same boundary every prior
+milestone in this series has kept: single-axis behavior is preserved
+exactly, only two-age gets new behavior). Single-axis has the
+analogous gap (no gross-wage inclusion, flat-rate conversion tax) —
+documented here as a known, unresolved discrepancy between the two
+paths, not silently ignored, and out of scope for this milestone to
+fix (per the same "preserve existing single-axis meaning" precedent
+SWR's own review rounds established).
+
+9 of the 12 existing tests were rewritten with newly hand-computed
+progressive-tax numbers (all four bracket boundaries recomputed by
+hand from the real 2026 MFJ table, not inferred from the code under
+test); 3 were unaffected (no wages, and their own assertions didn't
+reference tax_cost). All 12 passed after the fix, matching the newly
+hand-computed values exactly. `TestWorkingIncomeNeverAffectsBracketCapacity`
+(the class whose own premise was the bug) is replaced by
+`TestWorkingIncomeConsumesBracketCapacitySymmetrically`, proving the
+CORRECT property instead: a $50,000 gross salary reduces room by
+exactly $50,000 (211400-(0+50000-32200)=193600, down from the no-wage
+baseline's 243600), identically regardless of which spouse earns it,
+and a $500,000 salary alone can exhaust the bracket entirely (the
+review's own reproduction, now correctly returning $0 room instead of
+$243,600).
+
+**P2 (frontend) — a staleness/generation guard was missing.**
+`RothConversion.jsx`'s fetch effect had no cancellation or generation
+check at all — an older, slower response could land after a newer one
+and overwrite it, or clear `loading` incorrectly after a mode switch
+had already superseded it. Fixed with the same `genRef` counter
+pattern `Simulation.jsx`'s own Monte Carlo/Stress sections already
+established: bumped on every effect firing, each `.then`/`.catch`/
+`.finally` checks the counter before touching state. New test
+simulates two out-of-order responses directly (the second, newer
+request's promise resolved before the first, older one) and asserts
+the final rendered state reflects the newer result, not the stale one
+that happened to resolve last.
+
+**Verified:** full backend suite 1223 passed, 97.62% coverage (12
+tests, 9 rewritten). Frontend suite 39 passed (was 38, +1 staleness
+test), build succeeds, sensitive-data check passed.
+
+Branch: `codex/two-age-roth-conversion`, pushed, **still not merged** —
+second review round, awaiting approval before Milestone 3 begins.
+
+## 33. Two-age Roth Conversion — second independent review round (2026-09-08, on `codex/two-age-roth-conversion`)
+
+Second review confirmed the salary and flat-rate-tax reproductions
+fixed, and found three further inconsistencies in the same tax
+treatment, all now fixed.
+
+**P1 — the affordability cap dropped unused deduction room.**
+`_max_conversion_for_tax_budget` floored `pre_conversion_taxable` at 0
+before walking the bracket table, silently discarding the SAME
+unused-standard-deduction free zone `_incremental_conversion_tax`'s
+own formula already accounts for (both sides of its subtraction
+floored at 0, so a conversion "fills" leftover deduction room
+tax-free first). This understated what a low-taxable-income household
+could actually afford, inconsistent with the very tax formula the cap
+is supposed to match — a household with $0 other income, $1,000,000
+pretax, and only $40,000 taxable cash had its affordable conversion
+capped at $228,350 (the bracket-walk alone), when the true figure
+(bracket-walk plus the $32,200 free zone) is $260,550 — which exceeds
+`room_in_22` ($243,600), so `room_in_22` should have been the binding
+constraint all along, not the artificially-low affordability cap.
+Fixed: `free_room = max(0, -pre_conversion_taxable)` is added
+unconditionally (it costs nothing, so even a $0 budget can still
+afford it) before the budget-constrained bracket walk begins.
+
+**P1 — bonus/RSU compensation was still absent from the gross-income
+figure.** The first fix derived the gross-wage figure by dividing the
+net spending-offset figure back out by the 65% factor — exact for
+salary, but structurally incapable of recovering bonus/RSU, since the
+net figure's own source (`two_age_still_working_income_inputs`) never
+reads `annual_bonus_pct`/`annual_rsu_value` (or the `justin_` versions)
+at all. Fixed by computing the gross figure directly from
+salary+bonus+RSU (the same fields `run_two_dimensional_retirement_
+projection`'s own accumulation-phase math already reads for this
+spouse), run through the same `justin_gap_income_for_year` per-year
+lookup every other two-age gap-income figure uses, just with a
+different "at_start" base. Verified: $100,000 RSU alone (no salary)
+now reduces room by exactly the same amount a $100,000 salary alone
+would; a $100,000 salary + 20% bonus + $30,000 RSU ($150,000 gross)
+shows real, additional room reduction beyond the salary-only figure.
+
+**P2 — spending withdrawals still used a tax rate that ignored the
+working salary.** `_pretax_marginal_tax_rate` (which prices the year's
+own ordinary pretax SPENDING draw, not the conversion) never included
+gross wages, even after the first fix added them to `base_taxable` for
+conversion-bracket-capacity purposes — the same household's same tax
+year would show an elevated bracket for its conversion decision but an
+artificially low rate for its own spending withdrawal, an internally
+inconsistent picture. Fixed by adding an optional `gross_income`
+parameter (default 0, so every other existing call site — single-axis
+and every other two-age consumer — is completely unaffected) and
+passing the same gross-wage figure computed above at both call sites
+in the two-age Roth Conversion function (the with-conversions loop and
+the no-conversion baseline, keeping their own spending-draw taxation
+apples-to-apples). Verified directly against the function itself: $0
+gross income prices at the bottom bracket (10%); $500,000 gross income
+(after the standard deduction, landing in the 32% bracket) prices at
+32% — isolated from the full per-year loop's own cash-flow effects,
+which would otherwise confound a same-scenario comparison (gross wages
+affect both the tax rate AND the cash available to spend
+simultaneously, by design).
+
+CALCULATION_CONTRACT.md section 30 corrected again in place (marked
+"CORRECTED AGAIN," not silently rewritten) — the first correction's
+own description of the gross-income derivation is now itself
+corrected to describe the direct salary+bonus+RSU computation, and
+30.2's table/30.1's text now also cover the spending-withdrawal-rate
+consistency fix.
+
+4 new tests (RSU-alone parity with salary, bonus+RSU stacking, a
+direct unit-level rate comparison for the withdrawal-tax fix, and the
+affordability-cap fix reaching the full bracket room instead of an
+artificially low cap) — all passed on first attempt, no adjustment to
+any hand-computed number. The 16 existing tests were unaffected (none
+of them exercised the affordability cap as the binding constraint, so
+that fix changes no prior test's outcome).
+
+**Verified:** full backend suite 1227 passed (1223 + 4 new), 97.62%
+coverage. Sensitive-data check passed. Frontend unaffected (no
+frontend change this round).
+
+Branch: `codex/two-age-roth-conversion`, pushed, **still not merged** —
+third review round, awaiting approval before Milestone 3 begins.
+
+## 34. Two-age Tax Efficiency — design notes, written before implementation (2026-09-08, on `codex/two-age-tax-efficiency`)
+
+Milestone 3 of 4. Branched from `codex/two-age-roth-conversion` (not
+`main`) since this milestone's own instruction requires reusing that
+branch's reviewed working-income tax treatment, which isn't on `main`
+yet (Milestone 2 is pushed but not merged — Jason's explicit
+instruction: keep going without waiting for that review to land,
+circle back to merge both once the auditor is available again).
+
+**Scope confirmed before writing any code:** `run_tax_efficiency_
+simulation` is exposed at `GET /api/simulation/tax-efficiency`
+(`main.py`) but **nothing in the frontend calls that endpoint at
+all** — grepped the entire `frontend/src/` tree for any reference to
+`tax-efficiency`/`TaxEfficiency`/`tax_efficiency`; there are none. This
+tool has no existing UI surface. Per the milestone's own instruction
+("Confirm where this tool is actually exposed. Do not create an
+unrelated new page without approval"), this branch adds two-age
+support to the calculation engine and its API endpoint only — no new
+frontend page. Building one would be new, unapproved UI surface, not
+"extending existing two-age support."
+
+**How "reuse the reviewed working-income tax treatment from the Roth
+milestone" applies here:** read directly from the existing single-axis
+`run_tax_efficiency_simulation` — this tool has never had bracket-
+aware or marginal-rate-aware taxation at all. Every pretax withdrawal
+(RMD or ordered draw) is taxed at a single **flat** `TAX_PRETAX = 0.22`
+constant, taxable draws at a flat `TAX_TAXABLE = 0.15` (LTCG
+approximation), Roth at 0% — regardless of the household's actual
+income level, guaranteed income, or (for two-age) a working spouse's
+salary. There is no `base_taxable`/`room_in_22` concept here, and
+consequently no place where Roth Conversion's actual bug (gross wages
+omitted from a bracket-capacity/marginal-rate calculation) could
+recur — the flat rate doesn't depend on total income in either the
+single-axis or two-age version. The relevant part of the Roth
+milestone's reviewed treatment that DOES apply: the still-working
+spouse's income is modeled via the SAME net-of-tax
+(`SECOND_EARNER_NET_OF_TAX_FACTOR`) figure, folded ONLY into the
+spending-need offset (`justin_gap_income_for_year`, added to the
+existing `life_event_monthly` channel via `_cash_available_offsets_
+need`, exactly matching single-axis's own established pattern) — never
+into any tax-rate calculation, because none exists here to feed. This
+is not a gap being silently carried forward; it's confirmed, by
+reading the code, that there is nothing analogous to fix.
+
+**Shared engine reuse (no second, independent formula set):**
+`build_two_person_timeline`, `two_age_spending_need_fn` (bridge/kids/
+healthcare-aware — richer than single-axis's own healthcare-only
+formula here too, same intentional, documented difference Roth
+Conversion's section 30.6 already established), `two_age_pension_for_
+year`, per-spouse SS claim-date formulas (the same inline pattern six
+other call sites in this file already use), `two_age_still_working_
+income_inputs` + `justin_gap_income_for_year`,
+`run_two_dimensional_retirement_projection` for starting balances
+(unrounded buckets). The three draw-order strategies themselves reuse
+`_ordered_draw`/`_optimal_draw` completely unmodified — both already
+take `tax_pretax_rate`/`tax_taxable_rate` as plain parameters, so
+two-age needs no changes to either. `_cash_available_offsets_need` is
+reused directly (already a module-level, shared, tested function — not
+duplicated a second time for two-age, unlike the single-axis version's
+own older inline copy this function was originally extracted from).
+
+**Preserving the milestone's explicit requirements:** all three
+strategies run against ONE shared `all_returns` array (built once,
+same reproducible-seed pattern every other consumer uses) and
+identical timeline/income/spending/life-events/starting-balances per
+trial — "only the intended strategy should differ" holds by
+construction, matching single-axis's own existing structure exactly.
+Signed cash flows are preserved via `_cash_available_offsets_need`'s
+existing surplus/shortfall handling (unchanged). Unfunded spending is
+reported via `any_unmet_need`/`success_rate`'s existing "funded AND
+positive ending balance" definition (unchanged from single-axis; not
+in scope to revisit here, matching the same boundary SWR's own
+`survived` field kept in section 23).
+
+**Performance:** this loop runs N=1000 trials × `retire_yrs` years ×
+3 strategies per call — the same order of magnitude as Monte Carlo's
+own loop. Will be benchmarked against single-axis after implementation
+(same methodology every prior milestone's report used) and reported
+plainly.
+
+Both retirement ages required together via the existing
+`_require_both_two_age_or_neither` gate, unchanged pattern.
+
+## 35. Two-age Tax Efficiency — implementation report (2026-09-08, on `codex/two-age-tax-efficiency`)
+
+Milestone 3 of 4. Design notes in section 34, written before any code.
+This section is the required accuracy/performance report.
+
+**What was built:** `jason_ret_age`/`justin_ret_age` on
+`run_tax_efficiency_simulation`, both required together, delegating to
+`_run_tax_efficiency_simulation_two_age`. Reuses the exact shared
+helpers section 25-34 already established, and the completely
+UNMODIFIED `_ordered_draw`/`_optimal_draw`/`_cash_available_offsets_
+need` — no second, independent formula set, only fed two-age inputs.
+All three strategies (`taxable_first`/`roth_first`/`optimal`) run
+against one shared `all_returns` array and identical per-trial
+timeline/income/starting balances, matching single-axis's own
+structure and the milestone's explicit "only the intended strategy
+should differ" requirement.
+
+**Scope confirmed before writing any code:** this tool has no frontend
+UI at all (section 34) — no page was added, per the milestone's own
+"confirm where this tool is exposed" instruction.
+
+**Accuracy — test-first, per instruction:** 12 tests, all hand-computed
+by replaying `_ordered_draw`/`_optimal_draw`'s own documented gross-up
+contracts, written and committed RED before any implementation code.
+One real error was found and fixed against this RED suite during
+implementation (not a review finding): the initial hand-computed
+expected numbers assumed taxable draws were tax-free, matching Roth
+Conversion's own `simulate_withdrawal_year` convention
+(`taxable_rate=0.0` there) — but Tax Efficiency's `_ordered_draw` is
+called with `tax_taxable_rate=TAX_TAXABLE=0.15` (the LTCG
+approximation this file's own docstring documents), a genuine
+difference between the two tools. All affected numbers were recomputed
+by hand against the correct rate; all 12 tests passed unchanged after
+the fix, no adjustment to any implementation code needed. Covers: a
+full 2-year `taxable_first` schedule and a `roth_first` counterpart on
+the same household (both hand-verified against `_ordered_draw`'s own
+arithmetic); either retirement order (byte-identical results in both
+directions — this tool's flat tax rate has no bracket-capacity concept
+for working income to ever affect, unlike Roth Conversion, so
+"symmetric" here means literally identical, not just proportionally
+so); a past retirement selection and unequal ages; nonzero inflation/
+growth; RMD forced regardless of spending need (added for coverage —
+none of the other cases reached RMD age); a full shortfall case (0%
+success, not a false 100%); a zero-spending sanity check proving all
+three strategies share identical starting conditions; and the
+both-ages-required gate.
+
+**Performance:** benchmarked (5-run average, matched household/
+inputs) at ~0.196s single-axis vs ~0.208s two-age — no material
+difference (~6%), well within call-to-call variance; no performance
+exception needed.
+
+**Verified:** full backend suite 1241 passed (1238 + 3 API tests),
+97.68% coverage. Sensitive-data check passed. No frontend changes
+this milestone (see scope note above).
+
+**Explicitly out of scope for this milestone**, unchanged from the
+overall plan: Survivor Scenario + account ownership (Milestone 4,
+design-gated), real payroll-tax modeling, heatmaps, unrelated cleanup.
+
+Branch: `codex/two-age-tax-efficiency`, pushed, **not merged** — per
+Jason's explicit instruction (auditor unavailable; proceed through
+remaining milestones, circle back to review/merge SWR-forward once
+it's back), for independent review whenever that resumes.
+
+## 36. Milestone 4 — Survivor Scenario + account ownership: DESIGN PROPOSAL, gated on approval before implementation (2026-09-08, on `codex/two-age-survivor-design`)
+
+Milestone 4 of 4. Per the milestone's own explicit instruction, this
+section is design-only — no application code changes on this branch.
+Implementation does not start until this design is approved.
+
+### 36.1 Key discovery: ownership is already tracked, not missing
+
+`accounts.owner` is a required (`NOT NULL`), already-populated column —
+confirmed by reading `db.py`'s schema and `Accounts.jsx`'s own fixed
+domain: `jason` / `justin` / `joint` / `abby` / `cooper` / `trust`.
+Every real account in this app already has an owner. The retirement-
+phase engines (SWR, Monte Carlo, Roth Conversion, Tax Efficiency,
+Projection) already read this field today — but only to EXCLUDE kids'
+accounts (`owner not in ("abby","cooper")`); every remaining owner
+(`jason`/`justin`/`joint`/`trust`) is then summed into one pooled
+total per bucket type (pretax/roth/taxable/hsa), discarding the
+attribution that was already there. **There is no "unknown ownership"
+case to invent a policy for** — every account is already attributed,
+by the household, at entry time. The milestone's own phrase
+"including treatment of unknown ownership" is addressed by this
+finding: v1 needs no fallback/default-ownership policy, because the
+data already has none missing. (`trust`-owned accounts get an explicit
+policy below since a trust isn't a person.)
+
+Similarly, contribution inputs are already per-spouse:
+`w2_salary`/`employee_401k_pct`/`annual_bonus_pct`/`annual_rsu_value`
+(Jason's own) vs. `justin_w2_salary`/`justin_employee_401k_pct`/
+`justin_annual_bonus_pct`/`justin_annual_rsu_value` (Justin's own) —
+and `run_two_dimensional_retirement_projection`'s own accumulation
+math ALREADY computes each spouse's contribution growth as a separate
+intermediate value before summing them
+(`_contrib_fv(annual_401k_pretax, jason_contrib_years, ...) +
+_contrib_fv(justin_annual_401k_pretax, justin_contrib_years, ...)`).
+Splitting by owner is not inventing new information; it's preserving
+information the code already computes and then discards at the final
+`+`.
+
+### 36.2 Proposed v1 ownership model
+
+- `jason`-owned accounts → Jason's own bucket.
+- `justin`-owned accounts → Justin's own bucket.
+- `joint`-owned accounts → a separate JOINT bucket, not merged into
+  either spouse's own bucket and not split 50/50 (explicit instruction:
+  "do not silently split pooled accounts 50/50"). For survivor
+  purposes, a jointly-titled account is fully accessible to the
+  survivor by construction (the real-world legal reality of joint
+  titling) — no transfer logic needed, it simply continues being
+  available.
+- `trust`-owned accounts → treated as part of the JOINT bucket for v1,
+  flagged explicitly as a simplification (this app has never modeled
+  trust succession terms, and still doesn't after this milestone).
+- `abby`/`cooper` (kids' accounts) → excluded, unchanged from today.
+
+Every currently-pooled consumer (SWR, Monte Carlo, Roth Conversion,
+Tax Efficiency, single-axis and two-age Projection) is **completely
+unaffected** — this is new, additive scope: `run_two_dimensional_
+retirement_projection` would gain optional owner-split output fields
+(`pretax_at_phase2_start_jason`/`_justin`/`_joint`, etc.) ALONGSIDE its
+existing pooled totals, not replacing them. The invariant `jason +
+justin + joint == the existing pooled total, exactly` is the core
+correctness property, directly parity-testable against the already-
+reviewed pooled figure — "without changing household totals" is
+enforced by construction, not by inspection.
+
+### 36.3 Death timing: before, during, and after the middle phase
+
+Two-age's own `phase2_start`/`phase3_start` structure already
+distinguishes "before both retired" (phase2, one spouse still working)
+from "after both retired" (phase3) — death can fall in either, and
+the existing single-axis Survivor Scenario's own death-year-indexing
+logic (snap to the nearest modeled year, no double-counted death-year
+spending) carries over unchanged, just re-anchored to `phase2_start`
+instead of the single-axis `effective_start_age`.
+
+- **Income:** the deceased spouse's own W2/gap income stops entirely,
+  the survivor's own continues (net-of-tax, unchanged) if the survivor
+  is the one still working. This generalizes the existing single-axis
+  rule (`gap_income_this_year = 0 if deceased == "justin" else
+  ...`, since only Justin could ever be the still-working spouse in
+  the single-axis model) to whichever spouse is `later_retiree` — the
+  gate becomes `0 if deceased == later_retiree else (normal gap income)`.
+- **Contributions:** NOT modeled during any withdrawal-phase consumer
+  in this app, single-axis or two-age, before or after this milestone
+  — an existing, unchanged limitation (confirmed by reading every
+  other consumer's own withdrawal loop). Survivor's v1 does not
+  introduce ongoing contributions during a mid-phase death either,
+  for the same reason every other consumer doesn't: explicitly
+  deferred, not silently assumed.
+- **Pension:** already a single, Jason-attributed benefit
+  (`pension_for_age`'s own documented "one employer pension (Jason's,
+  in the default data)" assumption, section 13) with 100% Joint &
+  Survivor already modeled. Unchanged — if Jason dies, Justin (the
+  survivor) continues receiving it; if Justin dies, Jason (its actual
+  owner) simply keeps receiving what he was always entitled to. No new
+  ownership logic needed here; the existing single-pension-source
+  design decision already resolves this correctly by construction.
+- **Social Security:** already a genuinely per-individual benefit
+  (`jason_social_security`/`justin_social_security`, each spouse's own
+  claim age), already correctly modeled as switching to the higher
+  (survivor) benefit. Two-age's own per-spouse claim-date formulas
+  (established in sections 25-35) apply directly — no ownership-model
+  change needed.
+- **Insurance:** already per-spouse (`jason_life_*` vs `justin_life_*`
+  input fields) — the deceased's own policies pay out. Unchanged.
+- **Account treatment at death:** the deceased's individually-owned
+  accounts merge into the survivor's own buckets (v1 assumes the
+  common spousal-rollover/inheritance treatment — the simplest real
+  case, not modeling non-spouse-beneficiary or 10-year-rule inherited-
+  IRA timing, which genuinely differ and are explicitly deferred).
+  Joint accounts require no transfer at all (already fully accessible).
+  The household TOTAL portfolio (ignoring the insurance payout itself)
+  is unchanged by death — pure relabeling from "jason + justin + joint"
+  to "survivor + joint," not a value change — verified via reconciliation
+  against the pre-death owner-split totals from section 36.2.
+
+### 36.4 Owner-specific withdrawal/RMD rules: v1 scope
+
+**Required for v1:**
+- Post-death RMDs computed on the SURVIVOR's own age (not always
+  Jason's, which is what every current consumer does even in two-age
+  mode) against the merged pretax total (survivor's own + inherited).
+  This is a real, new capability — RMD is already a simple age+balance
+  lookup (`_rmd(balance, age, rmd_start_age(age))`), so this just means
+  calling it with the survivor's own age instead of always Jason's.
+- Household-total reconciliation (36.2's invariant) verified by
+  independent test cases, both spouses' death paths, unequal ages,
+  and retirement-boundary timing (death exactly at a phase boundary).
+- Insurance recommendation figures re-verified by injecting the
+  recommended funding back into the simulation and confirming
+  `survives` flips to `True` — the same "does the number actually
+  work when replayed" standard section 33's Roth Conversion review
+  established for a different tool, applied here.
+
+**Explicit approximations, deferred (not silently assumed):**
+- Per-spouse RMDs during NORMAL (both-alive, non-Survivor) two-age
+  operation — every current two-age consumer (SWR/Monte Carlo/Roth
+  Conversion/Tax Efficiency/Projection) still computes ONE household
+  pretax RMD keyed to Jason's age only. Fixing this for the living-
+  couple case would mean touching all 5 of those consumers' own
+  accumulation/withdrawal math — a substantially larger undertaking
+  than "Survivor + an ownership foundation," explicitly out of scope
+  for this milestone.
+- Inherited-IRA-specific RMD timing (10-year rule, non-spouse
+  beneficiary rules) — v1 assumes simple spousal rollover.
+- Trust succession terms — trusts folded into the joint bucket, no
+  trust-specific logic.
+- The MFJ→Single tax-bracket jump after death — already an explicitly
+  documented, unaddressed limitation in the EXISTING single-axis
+  Survivor Scenario (its own docstring says so); unchanged, still
+  deferred, not newly introduced by this milestone.
+
+### 36.5 What this milestone does NOT do without further approval
+
+Per the explicit instruction, this section is a proposal, not a plan
+already underway. **No account-ownership ledger, ledger migration, or
+Survivor calculation change has been implemented on this branch.**
+Awaiting approval of sections 36.1-36.4 before writing any code.
+
+Branch: `codex/two-age-survivor-design` (branched from
+`codex/two-age-tax-efficiency`, not `main`, matching the same
+sequencing note section 35/`CONSOLIDATION_HANDOFF.md` already record).
+
+## 37. Milestone 4 — Survivor Scenario + account ownership: REVISED DESIGN PROPOSAL (2026-09-08, on `codex/two-age-survivor-design`)
+
+Revises section 36 per explicit review feedback (five points, all
+addressed below). Still design-only — no application code changed on
+this branch. Section 36 is left in place for history rather than
+edited in place; this section supersedes it on every point where they
+disagree.
+
+### 37.1 Trust assets stay a distinct bucket, with an explicit availability assumption
+
+Section 36 folded `trust`-owned accounts into the joint bucket. **Wrong
+— reverted.** A trust is a separate legal entity with its own
+succession terms; whether its assets are actually available to a
+surviving spouse depends on the trust's own provisions (revocable vs.
+irrevocable, the spouse's status as trustee/beneficiary, distribution
+terms this app has no way to know), not on how the household happened
+to label the account.
+
+**Revised model:** `trust` becomes its own bucket (`jason`/`justin`/
+`joint`/`trust`), tracked and reported separately, never auto-included
+in the survivor's spendable resources. A new explicit input,
+`trust_available_to_survivor` (boolean, default `False`), controls
+whether Survivor Scenario's own calculation includes it — the default
+being "not available" is the conservative choice (never overstates
+survivor resources), and choosing `True` is a deliberate, visible
+household assumption, not an inferred one. The trust balance and
+whichever assumption was used are both surfaced in the result payload
+so the number is never presented without its own caveat attached.
+
+### 37.2 "Joint" ownership does not imply automatic survivorship
+
+Section 36 treated `joint`-owned accounts as automatically passing to
+the survivor in full, inferred from the `joint` label. **Wrong** — as
+the review notes, joint ownership isn't a single legal arrangement.
+Joint tenants with right of survivorship (JTWROS, the common case for
+a married couple's shared brokerage/bank accounts) transfers to the
+survivor automatically; tenants in common does not — the deceased's
+share passes through their estate instead, which this app has no model
+of at all (no will/probate/beneficiary-designation data).
+
+**Revised model:** a new explicit input, `joint_accounts_survivorship`
+(boolean, default `True` — JTWROS is materially more common for a
+married couple's shared accounts in practice, so this is a reasonable
+default, but it is a STATED default, not an inference from the word
+"joint"). When `True`, the joint bucket passes to the survivor in
+full, as section 36 proposed. When `False`, only half of the joint
+bucket is treated as the survivor's own (the deceased's share is
+modeled as lost to the survivor's household resources — NOT split
+50/50 as a calculation choice invented here, but as the literal legal
+default for tenants-in-common ownership when no other split was
+specified — this is the one place a 50% figure appears in this design,
+and it's a named legal default being modeled, not an ownership-
+attribution guess). Both the assumption used and its effect are
+surfaced in the result payload, same as 37.1.
+
+### 37.3 Survivor RMDs: a named, narrow spousal-rollover election — not applied automatically to every deceased-owned pretax account
+
+Section 36 proposed merging every deceased-owned pretax account into
+the survivor's own bucket and computing RMDs on the survivor's own age
+against the merged total, unconditionally. **Too broad** — a surviving
+spouse has multiple real options for an inherited IRA (treat as their
+own via rollover; keep as a separately-titled inherited IRA with its
+own RMD schedule; for an inherited 401(k) specifically, options differ
+again), and automatically assuming rollover for every account
+overstates what this app can actually claim to model.
+
+**Revised model, v1 scope:** model exactly ONE named election —
+**"spouse treats the inherited pretax account(s) as their own"** (the
+IRS-permitted spousal rollover / treat-as-own treatment) — and label
+it as exactly that in the UI/API output, not as a generic "inheritance"
+behavior. This is opt-in per scenario via a new explicit input,
+`spousal_rollover_election` (boolean, default `True` for v1, since
+it's the single most common real choice and the only one this
+narrow v1 supports) — when `False`, v1 does NOT attempt to model the
+alternative (a separately-scheduled inherited IRA with its own RMD
+timeline); it flags the result as "not modeled, assumes rollover was
+declined" rather than silently defaulting to rollover behavior anyway.
+This keeps the claim narrow and honest: v1 supports one clearly-named
+path, not "inheritance in general."
+
+### 37.4 Ownership is tracked through the whole projection, year by year — not just at initialization
+
+Section 36 proposed only splitting the STARTING balance by owner (at
+`phase2_start`) and verifying the household TOTAL matched the existing
+pooled figure. **Insufficient**, per the review: a household total
+match at time zero says nothing about whether contributions, growth,
+withdrawals, conversions, and transfers are attributed to the correct
+owner in EVERY subsequent year — two owner-split ledgers could
+disagree in every single interior year and still coincidentally sum to
+the same total at the end.
+
+**Revised model:** three parallel bucket sets (`jason`, `justin`,
+`joint` — each with its own pretax/roth/taxable/hsa sub-buckets) are
+carried through the ENTIRE per-year loop, not just derived once at the
+start:
+
+- **Contributions** (pre-retirement accumulation phase only, matching
+  every existing consumer's boundary — no withdrawal-phase consumer in
+  this app models ongoing contributions, unchanged): each spouse's own
+  401k/RSU/bonus contributions land in THEIR OWN bucket, using the
+  same per-spouse input fields (`w2_salary` vs `justin_w2_salary`,
+  etc.) `run_two_dimensional_retirement_projection`'s accumulation math
+  already keys off — this part is unchanged from section 36, just
+  explicitly stated as applying every accumulation year, not once.
+- **Growth**: each owner's own sub-bucket compounds independently at
+  the same assumed rate every other consumer already uses — no new
+  rate concept, just applied three times (jason/justin/joint) instead
+  of once.
+- **Withdrawals**: the existing account-TYPE draw order (taxable →
+  pretax → hsa → roth, or whichever strategy a given tool uses)
+  determines WHICH BUCKET TYPE funds a shortfall; a NEW, explicit
+  owner-order policy determines WHICH OWNER's bucket of that type is
+  drawn first. Proposed v1 owner-order: **joint first, then the
+  currently-withdrawing "reference" spouse's own bucket (Jason's, by
+  this app's existing single-pension/RMD-anchoring convention), then
+  the other spouse's own bucket** — i.e., joint funds shared spending
+  before either spouse's individually-titled accounts are touched, a
+  reasonable default a real household's own draw preference could
+  override, but stated explicitly as a policy choice here, not
+  incidental. Each draw event only reduces the SPECIFIC owner-bucket it
+  was drawn from.
+- **Conversions** (Roth Conversion specifically): a conversion moves
+  money from a specific owner's PRETAX bucket to that SAME owner's ROTH
+  bucket — never across owners (a spouse cannot convert their own
+  pretax IRA into the OTHER spouse's Roth IRA; that's not how
+  conversions work). Two-age Roth Conversion's own `jason_ret_age`/
+  `justin_ret_age`/`later_retiree` already identify whose pretax
+  account the conversion window's own math is modeling — v1 continues
+  converting the household's POOLED pretax figure (matching the
+  existing, reviewed Milestone 2 behavior, section 30-33) for that
+  tool; the owner-split ledger this milestone adds is a NEW, parallel
+  view for Survivor Scenario specifically, not a retrofit of Roth
+  Conversion's own already-reviewed math. (Reconciling Roth
+  Conversion's pooled figure against a hypothetical owner-split version
+  is explicitly out of scope for this milestone — flagged, not
+  silently skipped.)
+- **Transfers/surplus sweeps**: land in the SAME owner-bucket the
+  income source they came from belongs to (e.g., Jason's own pension
+  surplus sweeps into Jason's own taxable bucket, not joint) — pension
+  is Jason-attributed (section 13, unchanged), so its surplus is too.
+  Guaranteed income with no single natural owner (a joint life-event
+  windfall, for instance) sweeps into the joint bucket.
+
+**Reconciliation, per the review's own instruction:** verified per
+account TYPE (pretax/roth/taxable/hsa) and per YEAR, not just a single
+starting-total check — `jason[type][year] + justin[type][year] +
+joint[type][year] == the existing pooled consumer's own [type][year]
+balance`, for every year of the projection, both pre- and post-death.
+This is the actual test surface or Milestone 4's implementation phase,
+replacing section 36's weaker "totals match at time zero" property.
+
+### 37.5 Death-year cash-flow ordering, stated explicitly
+
+Section 36 didn't state the death year's own internal ordering.
+**Revised, explicit sequence, in the order these events are modeled as
+occurring within the death year:**
+
+1. **The death year itself runs as a normal, both-alive year** in the
+   underlying deterministic Projection baseline this whole family of
+   tools already uses for its starting figures — i.e., the deceased's
+   own wages (if still working pre-retirement) are earned in FULL for
+   that year, guaranteed income (pension/SS) accrues normally, and any
+   RMD obligation the deceased already had that year (age at or past
+   their own `rmd_start_age`) is taken and taxed exactly as it would be
+   in a normal year — **the death-year RMD is therefore already
+   satisfied by construction**, inherited from the baseline
+   projection's own per-year math, not a separately-modeled "final
+   RMD" event. This is the existing single-axis convention
+   (`portfolio_at_death` already reflects a full year of normal
+   activity) — stated explicitly here rather than left implicit, per
+   the review.
+2. **Wages stop** for the deceased spouse effective the END of the
+   death year (i.e., the FOLLOWING year is the first year with no
+   contribution/income from them) — no sub-year proration, matching
+   this app's existing annual-only granularity everywhere else.
+3. **The insurance payout arrives** and **ownership transfers**
+   (deceased's own buckets merging into the survivor's, per 37.1-37.3's
+   now-explicit assumptions) both take effect **at the START of the
+   first post-death year** — i.e., `starting_balance` for the survivor
+   schedule (already `portfolio_at_death + payout` in the existing
+   code) is the point where the payout and the ownership transfer both
+   land, together, not gradually or mid-year.
+4. **Survivor income begins** (reduced-need spending pattern, survivor
+   SS benefit switch, gap income gating) in that SAME first post-death
+   year — matching the existing single-axis behavior (the survivor's
+   own distinct spending pattern starts the year AFTER death, never the
+   death year itself, to avoid double-counting that year's spending —
+   unchanged from the existing, reviewed fix in section 18).
+5. **Pension commencement when Jason dies BEFORE his own retirement**
+   (a genuinely NEW case two-age introduces — single-axis could never
+   reach it, since its own `ret_age` anchor always assumed Jason had
+   already retired by the time Survivor Scenario runs; two-age's
+   `phase2_start` can fall before Jason's own retirement when Justin
+   retires first). This app's existing pension model already assumes
+   100% Joint & Survivor continuation for a death occurring AFTER
+   retirement — whether that SAME continuation applies to a
+   pre-retirement death depends on the real plan's own pre-retirement
+   death-benefit terms, which are typically DIFFERENT from (often less
+   generous than) the post-retirement J&S election, and this app has
+   no data to distinguish them. **This needs your decision, not an
+   assumption made on your behalf:**
+   - **Option A (simpler, more optimistic):** treat a pre-retirement
+     death exactly like a post-retirement one — the survivor still
+     receives the same 100% J&S pension figure, as if Jason had
+     retired at the moment of death. Extends the existing
+     simplification rather than introducing a new one.
+     - **Option B (conservative):** the pension pays $0 if Jason dies
+     before his own actual retirement, on the reasoning that
+     pre-retirement death benefits are a materially different (and
+     often absent or reduced) provision this app doesn't model, and
+     assuming full continuation could overstate the survivor's real
+     resources.
+   - **Decided (Jason, 2026-09-08): Option A.** The survivor pension
+     pays the full 100% Joint & Survivor benefit even when Jason dies
+     before his own actual retirement — a pre-retirement death is
+     treated exactly like a post-retirement one for this purpose,
+     extending the existing J&S simplification rather than introducing
+     a new, harsher rule for this one timing case. Still surfaced
+     explicitly in the result payload (which case applied — pre- or
+     post-retirement death — and that the same 100% J&S figure was
+     used either way), matching 37.1/37.2's pattern of never presenting
+     a number without its own caveat, even though the number itself is
+     now settled rather than pending.
+
+### 37.6 Status
+
+Sections 37.1-37.5 replace the corresponding parts of section 36.
+Section 36.4's v1-required/deferred RMD scope and 36.2's "no invented
+ownership, read from the existing `owner` field" foundation both still
+stand, now with 37.1-37.3's explicit-assumption inputs layered on top
+rather than inferred defaults. 37.5's pension-commencement question is
+now decided (Option A). **Still no application code changed on this
+branch — implementation begins once Jason confirms the design overall
+(not just the one pension question) is ready to build.**
+
+## 38. Milestone 4 — Survivor Scenario + account ownership: implementation report (2026-09-08, on `codex/two-age-survivor-design`)
+
+Milestone 4 of 4 (final milestone). Design in sections 36-37, approved
+by Jason 2026-09-08 (including the 37.5 pension-commencement decision,
+Option A) before any of this existed. This section is the required
+accuracy/performance report for the completed implementation.
+
+**What was built, in dependency order:**
+
+1. `owner_split_starting_balances_two_age` (projection_engine.py) —
+   the pooled accumulation-phase formulas `run_two_dimensional_
+   retirement_projection` already uses, partitioned into `jason`/
+   `justin`/`joint`/`trust` buckets by reading each account's own
+   `owner` field (no invented ownership). Verified to sum EXACTLY to
+   the pooled function's own `*_at_phase2_start` figures across
+   multiple households, ages, and retirement orders.
+2. `run_owner_split_two_dimensional_projection` (projection_engine.py)
+   — carries those buckets through the ENTIRE per-year walk (section
+   37.4's "not just at initialization" requirement), reusing the exact
+   same `simulate_withdrawal_year` call the pooled function's own loop
+   makes each year, then allocating the single pooled result's per-type
+   balance change across owner buckets via a stated withdrawal-order
+   policy (`joint`, `jason`, `justin`, `trust`) rather than recomputing
+   the tax/RMD/draw math independently. Reconciliation is by
+   construction, verified exactly (to the dollar) across long horizons,
+   RMD years, both retirement orders, past selections, large age gaps,
+   depletion, and a trust-only household.
+3. `_run_survivor_scenario_two_age` (simulation_engine.py) — the actual
+   two-age Survivor calculation, built on (2)'s reconciled pre-death
+   walk. Implements all of section 37's explicit-assumption inputs
+   (`trust_available_to_survivor`, `joint_accounts_survivorship`,
+   `spousal_rollover_election`), real post-death RMDs on the survivor's
+   own age against a merged pretax sub-balance tracked separately
+   through a two-bucket withdrawal walk, Option A pension continuation,
+   and gap income generalized from single-axis's Justin-only gate to
+   `deceased != later_retiree`.
+
+**A real bug was found and fixed during development** (not a review
+finding, caught by the reconciliation tests written before the fix):
+`WITHDRAWAL_OWNER_ORDER` originally excluded `trust`, conflating
+section 37.1's "trust never auto-included" rule (about the SURVIVOR's
+post-death access) with ordinary PRE-death spending, where the existing
+pooled engine already spends trust-owned balances as part of its one
+pooled total. Excluding trust from the pre-death draw order let trust
+money grow unchecked while the pooled reference correctly drew it
+down — diverging by over $1.2M by year 24 of a test projection before
+the fix. Caught immediately by the reconciliation test (which failed
+loudly, exactly as intended), fixed by including trust last in the
+pre-death order, re-verified exact to the dollar afterward.
+
+**Accuracy — test-first, per instruction:** 31 new tests total across
+three files (15 for the owner-split projection layer, 16 for Survivor
+itself), all written before or alongside implementation and verified
+either by exact reconciliation against the already-reviewed pooled
+engine (sections 19-24) or by hand-computed arithmetic (the ownership-
+transfer math is simple sums/halves of already-reconciled figures).
+One hand-calculation error was caught and fixed during test-writing
+(not a code bug): an initial docstring miscounted how many pre-death
+years elapse by a given death age, producing a wrong expected number —
+caught by comparing against the actual function's output (which had
+already passed the independent reconciliation tests), corrected by
+redoing the year-by-year trace rather than adjusting the implementation
+to match the wrong number.
+
+Covers: ownership transfer at death (all three explicit-assumption
+flags, both directions), pension commencement before Jason's own
+retirement (both the Option A case and the unaffected-survivor case),
+real post-death RMDs on the survivor's own age (both before and after
+the survivor's own `rmd_start_age`), gap income generalized to
+whichever spouse is `later_retiree` (both directions — the still-
+working spouse dying vs. surviving), the both-ages-required gate, and
+single-axis-mode-unaffected.
+
+**Performance:** this milestone adds two NEW per-household-year
+computations (the owner-split walk, then the post-death survivor walk)
+on top of what single-axis Survivor already does — a single
+deterministic pass each, not a randomized-trial loop like SWR/Monte
+Carlo, so the added cost is small and linear in years, not
+multiplicative. Not separately benchmarked against single-axis Survivor
+given the structural difference (a genuinely new capability — owner
+attribution — not a faster/slower path to the same single-axis
+answer); the existing single-axis `run_survivor_scenario` is completely
+unmodified and unaffected.
+
+**Frontend:** no page changes this milestone. Survivor Scenario already
+has a real UI presence inside `StressTestWhatIf.jsx`'s "Survivor
+Scenario" tab (single-axis only, using the page's own `retAge`) —
+wiring two-age support into that tab (the same toggle pattern
+established for Monte Carlo/Historical Stress) is deferred to a
+follow-up pass, since it wasn't part of the approved design's own
+scope (sections 36-37 covered the calculation-engine and ownership
+model only) and this session's remaining budget was directed at
+getting the calculation layer correct and reviewed first.
+
+**Explicitly deferred, matching section 37's own scope (not silently
+dropped):** per-spouse RMDs during NORMAL (non-Survivor, both-alive)
+two-age operation — every other two-age consumer still uses one
+household RMD keyed to Jason's age; inherited-IRA-specific RMD timing
+rules beyond the single named spousal-rollover election; trust
+succession terms beyond the binary available/not-available assumption;
+the MFJ→Single tax-bracket jump (already an explicitly documented,
+unaddressed limitation in single-axis Survivor, unchanged).
+
+**Verified:** full backend suite 1270 passed, 97.52% coverage.
+Frontend suite unaffected, still 39 passed (no frontend changes this
+milestone). Sensitive-data check passed.
+
+Branch: `codex/two-age-survivor-design`, pushed, **not merged** — per
+Jason's explicit instruction (auditor unavailable; get all four
+milestones built, review everything together once it's back).
+
+## 39. Two-age Roth Conversion + Survivor Scenario — fourth independent review round, fixes (2026-09-08, on `codex/two-age-roth-conversion` merged forward through `codex/two-age-tax-efficiency` into `codex/two-age-survivor-design`)
+
+Independent review of Roth Conversion (`d4ad975`), Tax Efficiency
+(`587c9a7`), and Survivor Scenario (`5ce8981`) found 8 numbered issues
+(6 P1, 2 P2) plus two scope notes explicitly flagged as retained
+limitations, not regressions (Tax Efficiency's flat-rate tax model and
+0%-success-on-exact-funding quirk; two-age Survivor remaining API-only)
+— no changes made for those two, matching the review's own framing.
+
+**Finding 1 (P1, Roth Conversion)** — `_max_conversion_for_tax_budget`
+treated the unused-federal-deduction "free zone" as costing $0 in
+TOTAL, but `_incremental_conversion_tax`'s own formula charges state
+tax on the ENTIRE conversion regardless of that federal offset. Fixed:
+the free zone's own state-tax cost is now greedily filled against the
+budget first, same pattern as the bracket walk. Reproduced: $0 cash,
+5% state tax, $1M pretax → now correctly returns $0 affordable (was
+$32,200, which previously drained Roth via `simulate_conversion`'s own
+`conversion_shortfall` fallback to pay the real $1,610 state-tax bill
+the affordability cap never budgeted for).
+
+**Findings 2–8 (all Survivor Scenario, `_run_survivor_scenario_two_age`
+in simulation_engine.py unless noted):**
+
+- **2 (P1)** — pension was frozen at the death row's own snapshot.
+  Fixed: computed PER YEAR in the post-death loop against the
+  survivor's own advancing age (`two_age_pension_for_year`) when Justin
+  is deceased; unconditional every year (Option A, unchanged) when
+  Jason is deceased.
+- **3 (P1)** — survivor Social Security was a flat
+  `max(raw jason_social_security, raw justin_social_security)` input,
+  ignoring `ss_timing` and COLA entirely. Fixed: computed PER YEAR the
+  same way the pre-death walk computes it (each spouse's own
+  `ss_timing`-selected, COLA-compounding benefit from their own claim
+  age), taking the higher of the two.
+- **4 (P1, projection_engine.py)** — `_allocate_type_delta_across_owners`
+  credited every positive delta (surplus/RMD-reinvestment) to `joint`
+  unconditionally, violating section 37.4's own "transfers land in the
+  same owner-bucket the income source belongs to" rule. Fixed: the
+  caller (`run_owner_split_two_dimensional_projection`) now computes
+  `surplus_source_shares` from that year's own income breakdown
+  (pension + Jason's SS → jason, Justin's SS + gap income → justin,
+  unattributed life-event cash → joint) and the allocator prorates by
+  it, falling back to all-joint only when there's no positive income
+  basis to attribute against (a pure RMD-reinvestment year).
+- **5 (P1)** — `life_event_cash=0.0` was hardcoded in the post-death
+  loop, dropping every post-death expense/windfall from both the
+  schedule and `_minimum_survivor_funding`'s insurance-shortfall calc.
+  Fixed: `post_events` built the same way the pre-death walk builds its
+  own `post_life_events`, applied via `_post_retirement_year_effects`
+  each year, netted into both `need`/`simulate_withdrawal_year`'s
+  `life_event_cash` AND `net_needs`.
+- **6 (P2)** — a death requested before either spouse retired silently
+  snapped forward to the first available (post-retirement) row while
+  still reporting the original requested `death_age`. Fixed: explicitly
+  rejected (`has_data: False`, `error: "death_before_first_retirement_unsupported"`)
+  when `death_jason_age < phase2_start_age`.
+- **7 (P2)** — joint/trust contributions were folded entirely into
+  `starting_other`, losing pretax/RMD status on transfer. Fixed: split
+  into `joint_pretax_contribution`/`joint_other_contribution` and
+  `trust_pretax_contribution`/`trust_other_contribution`, added
+  respectively into `starting_pretax`/`starting_other`.
+- **8 (P2)** — the pre-death walk's RMD is always Jason-anchored, so an
+  older Justin's own independent RMD obligation in his final year could
+  go unenforced. Fixed: when Justin is deceased, his own final-year RMD
+  (against his own age and his own individually-owned pretax balance)
+  is forced from pretax into taxable before the ownership transfer.
+  Reproduced exactly per the review: Jason 61, Justin 75, Justin's own
+  $1,000,000 IRA — `_rmd(1000000, 75, 75)` = $40,650.41 (was $0).
+
+New diagnostic return fields (additive, no existing field removed):
+`starting_pretax_after_payout`/`starting_other_after_payout` (so
+findings 7/8 are independently verifiable — the total
+`starting_balance_after_payout` is unchanged by money moving between
+buckets within the same owner). `survivor_ss_annual`/`pension_annual`
+now report the first post-death year's own computed value (previously
+a single frozen scalar for the whole schedule).
+
+New tests: `test_state_tax_still_applies_to_the_free_zone`
+(Roth Conversion); 7 new classes in `test_two_age_survivor_scenario.py`
+covering findings 2, 3, 5, 6, 7, 8, each reproducing the review's own
+numbers where given; 2 new tests in `test_owner_split_projection.py`
+covering finding 4 (pension surplus credits Jason, SS surplus credits
+Justin, neither credits joint).
+
+**Verified:** full backend suite passed, coverage back at/above the
+95% floor. Sensitive-data check passed.
+
+Branches: fix committed on `codex/two-age-roth-conversion`
+(finding 1), merged forward through `codex/two-age-tax-efficiency`
+into `codex/two-age-survivor-design` (findings 2–8), all pushed —
+**none merged to `main`** beyond Milestone 1, per Jason's standing
+instruction (auditor unavailable; get everything built and reviewed as
+a set).
+
+## 40. Survivor Scenario — fifth independent review round, fixes (2026-09-08, on `codex/two-age-survivor-design`)
+
+Independent review of section 39's own fixes found 3 more issues (1
+P1 double-withdrawal, 1 P1 ownership-attribution gap, 1 P2 ownership-
+attribution gap) — all in code section 39 had just introduced or
+touched.
+
+**Finding 1 (P1)** — the finding-8 catch-up (deceased's own final-year
+RMD) computed Justin's full obligation against his END-of-death-year
+pretax balance (already net of whatever the normal death-year draw/RMD
+had already taken), then forced that WHOLE amount out again. Reproduced
+exactly: both spouses 75, Justin's $1,000,000 sole pretax IRA — the
+normal year already withdraws $40,650 (pooled RMD, Jason also 75); the
+bug then pulled ANOTHER $38,998 from the remaining ~$959,350. With
+rollover declined and a subsequent $100,000 expense, this overstated
+insurance needed at $63,415 instead of the correct $24,417. Fixed:
+Justin's own full obligation is now computed against his STARTING-of-
+year pretax balance (from the prior walk row, or `starting_buckets` if
+the death year is the walk's first row), and only the shortfall (if
+any) beyond what his own pretax was already reduced by that year
+(growth-adjusted, so a nonzero `post_ret` doesn't mask the real draw
+amount) is forced.
+
+**Finding 2 (P1, `run_owner_split_two_dimensional_projection`)** — two
+related ownership-attribution gaps in the finding-4 surplus-source-
+shares fix:
+- Reinvested RMD proceeds (a positive delta with no cash-INCOME basis
+  to prorate against — $0 need, $0 guaranteed income, so the forced
+  RMD has nothing to fund and gets swept back to savings) still fell
+  back to the all-joint default, even though the money came directly
+  out of a specific owner's own pretax account. Reproduced: Jason 75
+  (his own $1,000,000 IRA), Justin 61, joint survivorship disabled —
+  survivor resources understated at $977,642 instead of $995,935.
+  Fixed: pretax is now allocated FIRST each year (its own reduction/
+  increase, via the existing `_allocate_type_delta_across_owners` call
+  moved ahead of the type loop), and any pretax reduction attributed to
+  an owner is folded into that owner's share of the basis alongside
+  cash income — a delta with no income basis but a real pretax
+  reduction now correctly attributes by whoever's pretax was drawn
+  from, instead of defaulting to joint.
+- Recurring monthly life-event income (`life_event_monthly_this_year`)
+  was missing from the basis entirely — only the one-time component
+  was counted — so it silently vanished into whichever OTHER source
+  happened to be in the basis, over-crediting that source. Reproduced:
+  $30,000 pension + $12,000/yr recurring household income, $0 spending,
+  disabled joint survivorship — $42,000 (all credited to Jason, since
+  the $12,000 wasn't in the basis at all) instead of the correct
+  $36,000 ($30,000 Jason's own pension, unaffected, + $6,000 = half of
+  joint's correctly-attributed $12,000). Fixed: `joint_income_this_year`
+  now includes `max(0.0, life_event_monthly_this_year)` alongside the
+  one-time component.
+
+**Finding 3 (P2, same function)** — the still-working spouse's own
+gap-income surplus was hardcoded to credit `justin_income_this_year`,
+even though the gap-income mechanism itself (`justin_gap_income_for_year`)
+is already generalized to whichever spouse is `timeline.later_retiree`.
+Reproduced: Jason retires at 65, Justin at 61, Jason earns $100,000, $0
+spending — the $65,000 net surplus went into Justin's bucket even
+though JASON is the one still working. Fixed: `still_working_income_this_year`
+now credits `jason_income_this_year` or `justin_income_this_year`
+based on `timeline.later_retiree`, not a hardcoded assumption.
+
+New tests: 1 in `test_two_age_survivor_scenario.py` (finding 1) plus 1
+new class (finding 2, recurring-income scope note above); 2 new
+classes in `test_owner_split_projection.py` (findings 2 part 1 and 3).
+
+**Verified:** full backend suite passed, coverage at/above the 95%
+floor. Sensitive-data check passed.
+
+Branch: `codex/two-age-survivor-design`, pushed — **not merged to
+`main`** beyond Milestone 1, same standing instruction as section 39.
+
+## 41. Survivor Scenario — sixth independent review round, fixes (2026-09-08, on `codex/two-age-survivor-design`)
+
+Independent review of commit `08198b2` found the three previous
+reproductions now pass, but 2 more calculation issues still blocked
+approval — both in code section 39/40 had just introduced or touched.
+
+**Finding 1 (P1, `run_owner_split_two_dimensional_projection`)** —
+the finding-4/2 surplus-source-shares fix attributed a positive delta
+by each income source's GROSS amount, which let money already fully
+consumed by spending still dilute an unrelated same-year RMD-
+reinvestment surplus. Reproduced: $30,000 Jason pension exactly funds
+$30,000 spending (Jason's net contribution to any surplus is $0); a
+trust-owned $1,000,000 IRA's forced RMD is reinvested the same year —
+the old gross-proportion split still credited $15,190 of that trust
+RMD to Jason, making it available to the survivor even with trust
+availability disabled. Fixed: the basis now uses each source's NET
+leftover after funding need, not its gross amount — the true
+underlying need (`year_need_baseline`, adding back what life-event/
+gap income already reduced `year_need` by) is subtracted from total
+gross cash available to get `income_surplus_this_year`, and ONLY that
+actual leftover is split proportionally by gross share. When gross
+income exactly equals need (as here), the leftover is $0, so nothing
+dilutes the trust-owned RMD reinvestment, which is then attributed
+entirely via the existing pretax-reduction shares.
+
+**Finding 2 (P1, `_run_survivor_scenario_two_age`)** — the finding-8/1
+deceased final-RMD catch-up bypassed both the death year's own tax
+treatment and its growth:
+- It moved the shortfall into taxable UNTAXED, when a real RMD is
+  taxed like any other pretax distribution. Reproduced: Jason 61,
+  Justin 75, Justin's $1,000,000 IRA, $0 spending/growth — the
+  catch-up reported $1,000,000 total (untaxed), not the correctly-
+  taxed $995,935 ($40,650.41 shortfall taxed at that year's own 10%
+  rate, $0 other income here).
+- It applied the adjustment AFTER that year's growth had already run,
+  instead of "inside" the death year alongside everything else.
+  Reproduced with 10% growth: reported $1.1M instead of the correctly
+  taxed-then-grown $1,095,528.
+- It also only ever checked Justin, never Jason — but the pooled RMD
+  draws from JOINT's pretax FIRST (`WITHDRAWAL_OWNER_ORDER`), so when
+  Jason is deceased and the year's RMD came entirely out of a joint
+  account, his own individually-owned account's RMD obligation went
+  completely unenforced.
+
+Fixed: generalized to whichever spouse is `deceased` (reads
+`death_row[f"{deceased}_age"]`/`inputs[f"{deceased}_age"]` instead of
+hardcoding `"justin"`), taxed at the SAME `pretax_tax_rate` the death
+row's own normal draw used (now exposed in `yearly_detail` alongside
+every other per-year field, so this doesn't recompute the marginal-
+rate formula a second, independent way), and applied PRE-growth
+(reversing/reapplying `(1 + post_ret)` around the pretax reduction AND
+the taxable addition) so the shortfall grows symmetrically with the
+rest of that year, matching the main per-year loop's own convention.
+
+New tests: 1 class in `test_owner_split_projection.py` (finding 1); 2
+new tests plus 1 existing test's assertions updated to the now-correct
+(taxed) numbers in `test_two_age_survivor_scenario.py` (finding 2,
+including a growth case and a Jason-deceased case).
+
+**Verified:** full backend suite passed, coverage at/above the 95%
+floor. Sensitive-data check passed.
+
+Branch: `codex/two-age-survivor-design`, pushed — **not merged to
+`main`** beyond Milestone 1, same standing instruction as sections
+39-40.
+
+## 42. Survivor Scenario — seventh independent review round: owner cash-flow waterfall replaces proportional reweighting (2026-09-08, on `codex/two-age-survivor-design`)
+
+Independent review of commit `ca898fb` confirmed the death-year tax/
+growth fix (section 41, finding 2) works, but found one more ownership-
+allocation issue with three reproducible cases, all in the same
+`run_owner_split_two_dimensional_projection` surplus-attribution code
+sections 39/40/41 had each iterated on without changing the underlying
+approach: **reweighting a pooled ending-balance change by proportional
+income shares fundamentally cannot preserve exact ownership**, because
+it mixes untaxed income with gross (pre-tax) pretax distributions, and
+because clamping negative life-event costs to $0 drops real signed
+cash flows from the calculation entirely.
+
+Reproduced exactly per the review (spouses 75, $0 growth/inflation,
+trust availability disabled):
+- $60,000 Jason pension / $30,000 spending / $1,000,000 trust IRA:
+  pension alone funds need with a real $30,000 leftover entirely
+  Jason's own; the trust's forced RMD is separate, entirely the
+  trust's own. Old: $27,929 survivor resources (diluted Jason's real
+  leftover against the trust's gross RMD). Correct: $30,000.
+- Same, plus a $40,000 one-time expense: clamped to $0 and dropped,
+  inventing a phantom $30,000 pension surplus. Old: $10,944. Correct:
+  $0 (the expense consumes the pension entirely; only the trust's own
+  excluded RMD proceeds remain).
+- No pension, $9,000 spending, $10,000 joint IRA + $990,000 trust IRA:
+  the joint IRA's own $9,000 after-tax RMD proceeds already exactly
+  fund spending. Old: $6,786 (still credited some of trust's own
+  proceeds despite joint's distribution being fully consumed).
+  Correct: $0.
+
+**Fixed with a structurally different approach**, per the review's own
+explicit guidance ("allocate actual cash transactions: preserve signed
+costs, track each owner's distribution and tax, apply the funding
+order, then credit only that owner's remaining proceeds — reweighting
+the pooled ending-balance change keeps losing this information"):
+1. Each owner's own AFTER-TAX pretax distribution this year is
+   computed from `pretax_allocation` (their own share of the pretax
+   reduction, already correctly per-owner from the finding-2/part-1
+   fix) taxed at that year's own `pretax_tax_rate`.
+2. Each owner's own cash this year is built SIGNED, never clamped:
+   jason/justin get their own guaranteed income (+ gap income for
+   whichever is `later_retiree`) plus their own after-tax pretax
+   proceeds; joint gets SIGNED life-event cash (one-time and
+   recurring, a real expense now stays negative) plus its own after-
+   tax pretax proceeds; trust gets only its own after-tax pretax
+   proceeds (no natural income).
+3. The TRUE underlying need (`year_need_baseline`) is funded from
+   those owner-cash amounts via a waterfall in `WITHDRAWAL_OWNER_ORDER`
+   — the SAME funding-order convention every account draw already
+   uses — and whatever's left over per owner becomes the attribution
+   weight for the actual pooled surplus delta. This never re-derives
+   the pooled total a second, independent way (preserving exact
+   reconciliation), it only changes how that total's ownership is
+   attributed.
+
+New test class in `test_two_age_survivor_scenario.py` reproducing all
+three cases exactly (`starting_balance_after_payout` == $30,000 / $0 /
+$0).
+
+**Verified:** full backend suite passed, coverage at/above the 95%
+floor. Sensitive-data check passed. All prior review-round tests
+(sections 39-41) still pass unchanged against the new approach.
+
+Branch: `codex/two-age-survivor-design`, pushed — **not merged to
+`main`** beyond Milestone 1, same standing instruction as sections
+39-41.
+
+## 43. Survivor Scenario — eighth independent review round: death year becomes one integrated calculation (2026-09-08, on `codex/two-age-survivor-design`)
+
+Independent review of commit `889fb5b` confirmed the waterfall fix
+passes its three reproductions plus 72 additional mixed-cash-flow
+cases, but found one P1 remaining in the deceased's final-RMD catch-up
+-- the SAME root cause every round from section 39 onward kept
+resurfacing in a new form: the catch-up modified `death_row`'s balances
+*after* that year's spending, tax, and growth calculations had already
+finished, rather than being part of the year's own single calculation.
+
+Reproduced exactly:
+- Jason 61, Justin 75, Justin's $1,000,000 IRA, $100,000 joint taxable,
+  $50,000 spending, $0 growth, joint survivorship disabled: reported
+  $1,020,935 instead of $1,002,642. The Jason-anchored aggregate RMD at
+  Jason's age 61 is $0, so the normal year funded the full $50,000
+  spending entirely from joint taxable; the RMD catch-up was then
+  bolted on AFTER, never getting the chance to fund spending itself --
+  leaving too much Justin-owned cash and draining joint further than
+  necessary.
+- $100,000 pension exactly funding $100,000 spending, same IRA: the
+  additional RMD should push the marginal-rate estimate from 12% to
+  22%, but the catch-up reused the rate already computed BEFORE its own
+  addition -- $995,122 instead of the correctly-taxed $991,057.
+
+**Fixed by restructuring the death year as one calculation**, per the
+review's own explicit guidance ("incorporate the deceased's required
+distribution before determining taxes, funding spending, allocating
+ownership, and applying growth — avoid adjusting completed balances
+afterward"):
+- `run_owner_split_two_dimensional_projection` gained two optional
+  parameters, `death_jason_age`/`deceased` (every other two-age
+  consumer leaves them at their `None` default, completely unaffected).
+  When set, the FIRST year reaching `death_jason_age` computes the
+  deceased's own individual RMD obligation (their own age, their own
+  STARTING-of-year pretax balance) and folds `rmd = max(rmd, deceased_
+  individual_rmd)` in **before** `taxable_income_est`/`pretax_tax_rate`
+  are derived — so a bigger forced distribution correctly moves the
+  bracket in the SAME calculation that uses it, not a stale one.
+  `simulate_withdrawal_year` then funds that year's spending against
+  this already-correct combined RMD, exactly like any other year.
+- The pretax allocation step forces the deceased's own account to
+  contribute AT LEAST its own individual RMD first (capped at what's
+  actually there), then allocates whatever's left of the total pretax
+  change normally (`WITHDRAWAL_OWNER_ORDER`) across the remaining
+  balances — so the aggregate RMD is satisfied WITHOUT double-counting
+  a separate obligation on top of it.
+- `_run_survivor_scenario_two_age` now computes `phase2_start_age`/
+  `later_retiree` directly from its own already-built `timeline`
+  (identical formulas the walk uses internally) so `death_jason_age`
+  can be determined and passed into the walk from the start, calling
+  it exactly once. The entire ~60-line post-hoc catch-up block
+  (findings 8, fifth-follow-up-1, sixth-follow-up-2) is deleted —
+  `death_row["owner_balances"]` is read as-is.
+
+New test class in `test_two_age_survivor_scenario.py` reproducing both
+cases exactly ($1,002,642 and $991,057). One existing test (Jason-
+deceased catch-up, section 41) had its scenario adjusted: since the
+deceased's own minimum now draws as part of the SAME aggregate RMD
+rather than layered on top, a mixed jason+joint-pretax scenario needed
+`spousal_rollover_election=False` to isolate whether Jason's own
+account was actually touched (the aggregate total alone can't
+distinguish the two allocations when both owners' shares roll into the
+survivor by default).
+
+**Verified:** full backend suite passed, coverage at/above the 95%
+floor. Sensitive-data check passed. All prior review-round tests
+(sections 39-42) still pass against the restructured approach.
+
+Branch: `codex/two-age-survivor-design`, pushed — **not merged to
+`main`** beyond Milestone 1, same standing instruction as sections
+39-42.

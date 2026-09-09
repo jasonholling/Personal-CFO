@@ -609,10 +609,49 @@ class TestSimulationEndpoints:
         r = client.get("/api/simulation/roth-conversion?ret_age=60&ss_timing=early")
         assert r.status_code == 200
 
+    def test_roth_conversion_two_age_mode_get(self, client, sample_inputs, sample_accounts):
+        self._seed(client, sample_inputs, sample_accounts)
+        r = client.get("/api/simulation/roth-conversion", params={"jason_ret_age": 61, "justin_ret_age": 63})
+        assert r.status_code == 200
+        body = r.json()
+        assert body["mode"] == "two_age"
+        assert body["jason_ret_age"] == 61
+        assert body["justin_ret_age"] == 63
+
+    def test_roth_conversion_two_age_mode_post_with_whatif_overrides(self, client, sample_inputs, sample_accounts):
+        self._seed(client, sample_inputs, sample_accounts)
+        r = client.post("/api/simulation/roth-conversion", json={
+            "jason_ret_age": 61, "justin_ret_age": 63, "ss_timing": "delayed",
+        })
+        assert r.status_code == 200
+        body = r.json()
+        assert body["mode"] == "two_age"
+        assert body["ss_timing"] == "delayed"
+
+    def test_roth_conversion_two_age_mode_requires_both_ages(self, client, sample_inputs, sample_accounts):
+        self._seed(client, sample_inputs, sample_accounts)
+        r = client.get("/api/simulation/roth-conversion", params={"jason_ret_age": 61})
+        assert r.status_code == 400
+
     def test_tax_efficiency(self, client, sample_inputs, sample_accounts):
         self._seed(client, sample_inputs, sample_accounts)
         r = client.get("/api/simulation/tax-efficiency?ret_age=60&ss_timing=early")
         assert r.status_code == 200
+
+    def test_tax_efficiency_two_age_mode(self, client, sample_inputs, sample_accounts):
+        self._seed(client, sample_inputs, sample_accounts)
+        r = client.get("/api/simulation/tax-efficiency",
+                        params={"jason_ret_age": 61, "justin_ret_age": 63})
+        assert r.status_code == 200
+        body = r.json()
+        assert body["mode"] == "two_age"
+        assert body["jason_ret_age"] == 61
+        assert body["justin_ret_age"] == 63
+
+    def test_tax_efficiency_two_age_mode_requires_both_ages(self, client, sample_inputs, sample_accounts):
+        self._seed(client, sample_inputs, sample_accounts)
+        r = client.get("/api/simulation/tax-efficiency", params={"jason_ret_age": 61})
+        assert r.status_code == 400
 
     def test_contribution_sensitivity(self, client, sample_inputs, sample_accounts):
         self._seed(client, sample_inputs, sample_accounts)
@@ -1257,6 +1296,24 @@ class TestSurvivorScenarioEndpoint:
         # default-row path rather than expecting a 400.
         r = client.get("/api/simulation/survivor-scenario")
         assert r.status_code == 200
+
+    def test_survivor_scenario_two_age_mode(self, client, sample_inputs, sample_accounts):
+        _seed_planning_inputs(client, sample_inputs)
+        _seed_accounts(client, sample_accounts)
+        r = client.get("/api/simulation/survivor-scenario",
+                        params={"deceased": "jason", "death_age": 65,
+                                "jason_ret_age": 61, "justin_ret_age": 63})
+        assert r.status_code == 200
+        data = r.json()
+        assert data["mode"] == "two_age"
+        assert data["jason_ret_age"] == 61
+        assert data["justin_ret_age"] == 63
+
+    def test_survivor_scenario_two_age_mode_requires_both_ages(self, client, sample_inputs, sample_accounts):
+        _seed_planning_inputs(client, sample_inputs)
+        _seed_accounts(client, sample_accounts)
+        r = client.get("/api/simulation/survivor-scenario", params={"jason_ret_age": 61})
+        assert r.status_code == 400
 
 
 class TestRentalAnalysisEndpoint:

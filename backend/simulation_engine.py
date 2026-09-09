@@ -86,7 +86,7 @@ SCENARIOS = {
 }
 
 
-def _pretax_marginal_tax_rate(year_pen, year_jss, year_uss, rmd, state_tax_rate=0.0):
+def _pretax_marginal_tax_rate(year_pen, year_jss, year_uss, rmd, state_tax_rate=0.0, gross_income=0.0):
     """Same estimate run_retirement_projection's own withdrawal waterfall
     already uses for a year's pretax withdrawal — the current MFJ bracket
     table plus the household's state rate, applied to guaranteed income
@@ -95,8 +95,21 @@ def _pretax_marginal_tax_rate(year_pen, year_jss, year_uss, rmd, state_tax_rate=
     run_retirement_projection does, instead of each one either inventing
     its own flat approximation or (until this fix) treating pretax
     withdrawals as tax-free entirely (external audit 2026-09-07 — Monte
-    Carlo/Stress Tests/SWR did the latter)."""
-    taxable_income_est = max(0, year_pen + (year_jss + year_uss) * 0.85 + rmd - _STD_DEDUCTION)
+    Carlo/Stress Tests/SWR did the latter).
+
+    gross_income (2026-09-08, Roth Conversion two-age follow-up, second
+    pass): optional additional ordinary taxable income -- a still-
+    working spouse's gross wages/bonus/RSU -- to fold into the marginal-
+    rate estimate. Defaults to 0, so every existing call site (single-
+    axis and every other two-age consumer, none of which model working
+    income as taxable) is completely unaffected. A household's real
+    marginal bracket for a given year's own pretax draw must reflect
+    ALL of that year's ordinary income, not just guaranteed income/RMD —
+    otherwise a household with substantial working income would price
+    its own withdrawal at an artificially low rate the same year its
+    Roth Conversion bracket-capacity math already correctly counts that
+    income."""
+    taxable_income_est = max(0, year_pen + (year_jss + year_uss) * 0.85 + rmd + gross_income - _STD_DEDUCTION)
     return min(0.90, _marginal_rate(taxable_income_est) + max(0, state_tax_rate or 0))
 
 
@@ -2074,16 +2087,471 @@ def run_stress_tests(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_t
         "second_earner_net_of_tax_factor": SECOND_EARNER_NET_OF_TAX_FACTOR,
     }
 
+
+def _progressive_federal_tax(taxable_income: float, brackets) -> float:
+    """Total federal ordinary-income tax owed on `taxable_income` under a
+    progressive bracket table (a list of (rate, cap) tuples, cumulative
+    caps, same shape as retirement_tools_engine.ORDINARY_BRACKETS_MFJ_2026)
+    -- independent review, 2026-09-08, Roth Conversion follow-up, P1/P2:
+    no consumer in this codebase had a real progressive-tax calculator
+    before this (every existing withdrawal-phase consumer, single-axis
+    and two-age, only ever prices a MARGINAL rate via
+    _pretax_marginal_tax_rate, appropriate for "what rate applies to the
+    NEXT dollar," not "what's owed on this whole amount"). `taxable_income`
+    is assumed already net of any standard deduction, matching this
+    file's own base_taxable convention. Returns 0 for taxable_income<=0
+    (a standard deduction that more than offsets income means no tax, not
+    a negative one)."""
+    if taxable_income <= 0:
+        return 0.0
+    tax = 0.0
+    prev_cap = 0.0
+    for rate, cap in brackets:
+        if taxable_income > cap:
+            tax += (cap - prev_cap) * rate
+            prev_cap = cap
+        else:
+            tax += (taxable_income - prev_cap) * rate
+            break
+    return tax
+
+
+def _incremental_conversion_tax(pre_conversion_taxable: float, conversion_amount: float,
+                                 state_tax_rate: float, brackets) -> float:
+    """The conversion's OWN tax cost -- tax(base + conversion) -
+    tax(base), not a flat rate x amount (independent review, 2026-09-08,
+    Roth Conversion follow-up, P2: reproduced, $0 other taxable income,
+    a $243,600 conversion costs $35,932 under the real progressive table,
+    not the $53,592 a flat 22% charged -- a materially wrong price for
+    every conversion this tool ever recommends, distorting both
+    affordability and the reported benefit). `pre_conversion_taxable` may
+    be negative (unused standard-deduction room from a low-income year,
+    this file's own base_taxable convention) -- floored at 0 on both
+    sides of the subtraction, so a conversion first "fills" any leftover
+    deduction room tax-free before progressive rates apply, exactly the
+    way a real tax return works. State tax is a flat additional rate on
+    the conversion amount itself (the same flat-rate-on-top convention
+    _pretax_marginal_tax_rate already uses elsewhere in this file --
+    no state bracket table exists to make this progressive too)."""
+    pre  = max(0.0, pre_conversion_taxable)
+    post = max(0.0, pre_conversion_taxable + conversion_amount)
+    federal = _progressive_federal_tax(post, brackets) - _progressive_federal_tax(pre, brackets)
+    return federal + conversion_amount * max(0.0, state_tax_rate)
+
+
+def _max_conversion_for_tax_budget(pre_conversion_taxable: float, budget: float,
+                                    state_tax_rate: float, brackets) -> float:
+    """The largest conversion whose OWN incremental tax (see
+    _incremental_conversion_tax) fits within `budget` (available taxable
+    cash) -- replaces the old flat `budget / TAX_BRACKET_22` affordability
+    cap, which priced every dollar at the top bracket's own rate
+    regardless of how much of the conversion actually lands in cheaper,
+    lower brackets. Walks the bracket table from `pre_conversion_taxable`
+    (floored at 0) upward, greedily filling each bracket's remaining room
+    until the budget runs out, mirroring the same greedy-fill logic
+    room_in_22 already expresses as a policy choice, but applied to a
+    dollar budget instead of a bracket-top target.
+
+    free_room (independent review, 2026-09-08, Roth Conversion
+    follow-up, second pass): when `pre_conversion_taxable` is negative
+    (this file's own convention for unused standard-deduction room —
+    _incremental_conversion_tax already floors both sides of its own
+    subtraction at 0, so a conversion "fills" that leftover deduction
+    tax-free before any bracket rate applies), this cap used to floor
+    `pre` at 0 and start walking brackets from $0 immediately, silently
+    dropping that free zone — understating how much a low-taxable-
+    income household could actually afford to convert on a given
+    budget, inconsistent with _incremental_conversion_tax's own
+    formula.
+
+    free_room is only free of FEDERAL tax, not state (independent
+    review, 2026-09-08, third follow-up, P1): _incremental_conversion_tax
+    charges state_tax_rate on the ENTIRE conversion amount, including
+    whatever portion falls in this free zone -- state tax was never
+    netted against the federal standard deduction to begin with. The
+    first fix above treated the whole free zone as costing nothing
+    REGARDLESS of budget, so with $0 taxable cash and a nonzero state
+    rate this cap still returned the full free_room as "affordable"
+    even though the actual state-tax bill on that amount had nowhere to
+    be paid from -- reproduced: $0 cash, 5% state tax, $32,200 unused
+    deduction -- this used to say $32,200 was affordable (state tax
+    ignored), but the real state-tax cost ($1,610) then had nowhere to
+    come from and silently ate into Roth via simulate_conversion's own
+    conversion_shortfall fallback, contradicting the stated
+    taxable-cash-only funding policy. Fixed: the free zone's own state-
+    tax cost is now checked against the budget exactly like every taxed
+    bracket below it, using the same greedy-fill logic."""
+    state_tax_rate = max(0.0, state_tax_rate)
+    budget = max(0.0, budget)
+    free_room = max(0.0, -pre_conversion_taxable)
+    if state_tax_rate > 0:
+        affordable_free = min(free_room, budget / state_tax_rate)
+        remaining_budget = budget - affordable_free * state_tax_rate
+    else:
+        affordable_free = free_room
+        remaining_budget = budget
+    pre = max(0.0, pre_conversion_taxable)
+    total_convertible = affordable_free
+    prev_cap = 0.0
+    for rate, cap in brackets:
+        if cap <= pre:
+            prev_cap = cap
+            continue
+        bracket_start = max(prev_cap, pre)
+        bracket_room  = cap - bracket_start
+        effective_rate = rate + max(0.0, state_tax_rate)
+        if effective_rate <= 0:
+            total_convertible += bracket_room if bracket_room != float("inf") else 0.0
+            prev_cap = cap
+            continue
+        cost_of_full_bracket = bracket_room * effective_rate if bracket_room != float("inf") else float("inf")
+        if cost_of_full_bracket <= remaining_budget:
+            total_convertible += bracket_room
+            remaining_budget -= cost_of_full_bracket
+            prev_cap = cap
+        else:
+            total_convertible += remaining_budget / effective_rate
+            remaining_budget = 0.0
+            break
+    return total_convertible
+
+
+def _run_roth_conversion_analysis_two_age(inputs: Dict, accounts: List[Dict], jason_ret_age: int, justin_ret_age: int,
+                                           ss_timing: str, life_events: List[Dict],
+                                           surplus_allocations: List[Dict]) -> Dict:
+    """Two-age Roth Conversion -- explicit, independent retirement ages
+    for both spouses instead of run_roth_conversion_analysis's single
+    ret_age (CALCULATION_CONTRACT.md section 30, written and committed
+    before any of this existed). Reuses the exact shared timeline/
+    income/spending/withdrawal helpers section 25-29's SWR work already
+    established -- two_age_pension_for_year, two_age_spending_need_fn,
+    two_age_still_working_income_inputs, justin_gap_income_for_year,
+    build_two_person_timeline, run_two_dimensional_retirement_projection
+    for starting balances -- no second, independent set of formulas.
+
+    Per section 30's contract: gross wages/bonus/RSU income (either
+    spouse) is folded ONLY into the spending-need offset
+    (still_working_income_this_year), never into base_taxable/
+    room_in_22, in either direction -- exactly the existing single-axis
+    behavior. The conversion window runs from phase2_start_age (the
+    earlier retiree's own retirement, same anchor every other two-age
+    withdrawal-phase consumer uses) through RMD_START_AGE (still
+    Jason-anchored -- RMDs and the pretax account being converted are
+    Jason-anchored throughout this entire app, unchanged). Per-year
+    order (income offsets need, simulate_withdrawal_year runs the
+    waterfall with growth applied last, simulate_conversion layers on
+    the already-grown closing state) is identical to single-axis,
+    unmodified."""
+    inflation    = inputs["inflation_rate"]
+    post_ret     = inputs["expected_return_post_retirement"]
+    income_today = inputs["retirement_income_today_dollars"]
+    jason_age    = inputs["jason_age"]
+    justin_age   = inputs["justin_age"]
+    _salary_growth_pct = inputs.get("_salary_growth_pct", 0.0)
+    state_tax_rate = inputs.get("state_income_tax_rate", 0) or 0
+
+    pension_annual = pension_for_age(inputs, jason_ret_age)
+    jason_ss_early   = inputs.get("jason_social_security", JASON_SS_EARLY)
+    jason_ss_delayed = inputs.get("jason_ss_delayed", JASON_SS_DELAYED)
+    jason_ss_annual  = jason_ss_early if ss_timing == "early" else jason_ss_delayed
+    jason_ss_age     = 62 if ss_timing == "early" else 67
+    justin_ss_annual = inputs.get("justin_social_security", JUSTIN_SPOUSAL_ANNUAL)
+    justin_ss_age    = inputs.get("justin_ss_age", JUSTIN_SPOUSAL_AGE)
+
+    from retirement_tools_engine import ORDINARY_BRACKETS_MFJ_2026, STD_DEDUCTION_MFJ_2026
+    BRACKET_TOP_22  = next(cap for rate, cap in ORDINARY_BRACKETS_MFJ_2026 if rate == 0.22)
+    STD_DEDUCTION   = STD_DEDUCTION_MFJ_2026
+    # TAX_BRACKET_22 (a flat 22% conversion-tax rate) is gone -- the
+    # conversion's own tax is now computed progressively via
+    # _incremental_conversion_tax/_max_conversion_for_tax_budget below
+    # (independent review, 2026-09-08, Roth Conversion follow-up, P2).
+    # TAX_BRACKET_24 remains -- the future-RMD-tax-avoided ESTIMATE is a
+    # deliberately simplified flat-rate figure, unchanged, matching
+    # single-axis's own documented convention (and the frontend's own
+    # "Estimate assumes a 24% marginal rate" disclosure).
+    TAX_BRACKET_24  = 0.24
+    RMD_START_AGE   = rmd_start_age(jason_age)
+
+    from projection_engine import run_two_dimensional_retirement_projection
+    _proj = run_two_dimensional_retirement_projection(inputs, accounts, jason_ret_age=jason_ret_age,
+                                                        justin_ret_age=justin_ret_age, ss_timing=ss_timing,
+                                                        life_events=life_events,
+                                                        surplus_allocations=surplus_allocations)
+    pretax_at_start  = _proj["pretax_at_phase2_start"]
+    roth_at_start    = _proj["roth_at_phase2_start"]
+    taxable_at_start = _proj["taxable_at_phase2_start"]
+
+    # No retirement_end_age passed here -- build_two_person_timeline's
+    # own end_age is floored at `phase2_start_age + 1` (every OTHER
+    # two-age consumer needs at least one withdrawal-loop year, since
+    # "already retired" never means "zero years of retirement"), which
+    # would silently force this window to at least 1 year even for a
+    # household already AT or PAST RMD age, where zero is the correct
+    # answer. conversion_years is computed directly instead, using only
+    # phase2_start_years (unaffected by end_age/retire_yrs) -- the same
+    # `age()`/`justin_age_at()`/`jason_effective_start_age` helpers below
+    # don't depend on end_age either, so this is still the one shared
+    # timeline object, just not relying on its retire_yrs field for a
+    # horizon it was never designed to express.
+    timeline = build_two_person_timeline(jason_age, justin_age, jason_ret_age, justin_ret_age)
+    phase2_start_age = jason_age + timeline.phase2_start_years
+    phase3_start_age = jason_age + timeline.phase3_start_years
+    jason_effective_start_age = timeline.jason_effective_start_age
+    conversion_years = max(0, RMD_START_AGE - phase2_start_age)
+
+    retirement_year_for_events = timeline.retirement_year
+    _, post_events = _split_life_events(life_events, retirement_year_for_events)
+    post_events = post_events + _post_retirement_asset_sale_events(inputs, jason_age, phase2_start_age)
+
+    need_for_year = two_age_spending_need_fn(inputs, income_today, inflation, timeline)
+    phase2_duration_years, still_working_income_at_start = two_age_still_working_income_inputs(
+        inputs, timeline, _salary_growth_pct)
+
+    # The still-working spouse's GROSS income (salary + bonus + RSU),
+    # for taxable-income/bracket-capacity purposes -- independent
+    # review, 2026-09-08, Roth Conversion follow-up, second pass:
+    # dividing the net spending-offset figure back out by
+    # SECOND_EARNER_NET_OF_TAX_FACTOR (the first pass's approach) only
+    # ever recovered the SALARY component, since
+    # two_age_still_working_income_inputs itself only reads w2_salary/
+    # justin_w2_salary -- bonus and RSU compensation (annual_bonus_pct/
+    # annual_rsu_value, justin_annual_bonus_pct/justin_annual_rsu_value
+    # -- the same fields run_two_dimensional_retirement_projection's own
+    # accumulation-phase math already reads for this exact spouse) never
+    # entered base_taxable at all. Computed independently here (same
+    # later_retiree branching two_age_still_working_income_inputs uses,
+    # since that helper has no gross-including variant), then run
+    # through the same justin_gap_income_for_year per-year lookup every
+    # other two-age gap-income figure already uses -- one shared
+    # per-year formula, just fed a different "at_start" base.
+    if timeline.later_retiree == "justin":
+        _still_working_salary = inputs.get("justin_w2_salary", 0)
+        _still_working_bonus  = _still_working_salary * inputs.get("justin_annual_bonus_pct", 0)
+        _still_working_rsu    = inputs.get("justin_annual_rsu_value", 0)
+    elif timeline.later_retiree == "jason":
+        _still_working_salary = inputs.get("w2_salary", 0)
+        _still_working_bonus  = _still_working_salary * inputs.get("annual_bonus_pct", 0)
+        _still_working_rsu    = inputs.get("annual_rsu_value", 0)
+    else:
+        _still_working_salary = _still_working_bonus = _still_working_rsu = 0.0
+    still_working_gross_income_at_start = (
+        (_still_working_salary + _still_working_bonus + _still_working_rsu)
+        * ((1 + _salary_growth_pct) ** timeline.phase2_start_years)
+        if phase2_duration_years > 0 else 0.0
+    )
+
+    schedule = []
+    pretax, roth, taxable = pretax_at_start, roth_at_start, taxable_at_start
+    for yr in range(conversion_years):
+        age = timeline.age(yr)
+        justin_age_this_year = timeline.justin_age_at(age)
+
+        year_need, _healthcare_inflated, _bridge_income = need_for_year(age, yr)
+        year_pen = two_age_pension_for_year(pension_annual, age, jason_effective_start_age)
+        year_jss = jason_ss_annual * ((1 + inflation) ** max(0, age - jason_ss_age)) if age >= jason_ss_age else 0.0
+        year_uss = (justin_ss_annual * ((1 + inflation) ** max(0, justin_age_this_year - justin_ss_age))
+                    if justin_age_this_year >= justin_ss_age else 0.0)
+        guaranteed = year_pen + year_jss + year_uss
+
+        life_event_cash, life_event_monthly = _post_retirement_year_effects(post_events, retirement_year_for_events + yr)
+        still_working_income_this_year = justin_gap_income_for_year(
+            yr, phase2_duration_years, still_working_income_at_start, _salary_growth_pct)
+        # The GROSS wage/bonus/RSU figure, for taxable-income/bracket-
+        # capacity purposes only -- section 32/33's contract. NET
+        # spending-need offset above is unchanged. Reused per-year
+        # lookup, different "at_start" base -- see
+        # still_working_gross_income_at_start's own comment above.
+        gross_wages_this_year = justin_gap_income_for_year(
+            yr, phase2_duration_years, still_working_gross_income_at_start, _salary_growth_pct)
+
+        # The year's own pretax SPENDING draw is priced at the
+        # household's REAL marginal rate, including gross wages --
+        # independent review, 2026-09-08, Roth Conversion follow-up,
+        # second pass: this used to omit gross_wages_this_year entirely,
+        # so a household with substantial working income priced its own
+        # spending withdrawal at an artificially low rate the same year
+        # its conversion bracket-capacity math (base_taxable, below)
+        # already correctly counted that income -- an internally
+        # inconsistent picture of the same household's same tax year.
+        pretax_tax_rate = _pretax_marginal_tax_rate(year_pen, year_jss, year_uss, 0.0, state_tax_rate,
+                                                      gross_income=gross_wages_this_year)
+        base_result = simulate_withdrawal_year(
+            opening=AccountState(pretax=pretax, roth=roth, taxable=taxable, hsa=0.0),
+            spending_need=year_need - life_event_monthly - still_working_income_this_year,
+            guaranteed_income=guaranteed,
+            life_event_cash=life_event_cash,
+            rmd_amount=0.0,
+            tax_model=marginal_bracket_tax_model(pretax_rate=pretax_tax_rate, taxable_rate=0.0),
+            growth_rate=post_ret,
+            order=("taxable", "pretax", "roth"),
+        )
+        pretax_draw = base_result.draws.get("pretax", 0.0)
+
+        # base_taxable/room_in_22: section 32's corrected contract --
+        # gross wages now count in full, same as pension/SS/pretax
+        # draws. room_in_22 itself is still a bracket-EDGE policy target
+        # ("fill up through the 22% bracket"), unaffected in form -- it
+        # just reads a base_taxable that now reflects reality.
+        ss_taxable   = (year_jss + year_uss) * 0.85
+        base_taxable = year_pen + ss_taxable + pretax_draw + gross_wages_this_year - STD_DEDUCTION
+        room_in_22   = max(0, BRACKET_TOP_22 - base_taxable)
+
+        # Conversion tax is now PROGRESSIVE/incremental -- tax(base +
+        # conversion) - tax(base) -- not a flat 22% x amount (independent
+        # review, 2026-09-08, Roth Conversion follow-up, P2: reproduced,
+        # $0 other taxable income, a $243,600 conversion costs $35,932
+        # under the real table, not the $53,592 flat 22% charged). Both
+        # the affordability cap and the tax actually charged use the
+        # same incremental formula, so they agree with each other by
+        # construction.
+        max_conversion_affordable = _max_conversion_for_tax_budget(
+            base_taxable, base_result.closing.taxable, state_tax_rate, ORDINARY_BRACKETS_MFJ_2026)
+        optimal_conversion = min(room_in_22, base_result.closing.pretax, max_conversion_affordable)
+
+        conv_result = simulate_conversion(
+            base_result, optimal_conversion,
+            tax_model=lambda bucket, gross, _base=base_taxable, _state=state_tax_rate: (
+                _incremental_conversion_tax(_base, gross, _state, ORDINARY_BRACKETS_MFJ_2026)
+                if bucket == "pretax" else 0.0
+            ),
+            tax_funding_order=("taxable",),
+        )
+        tax_cost = conv_result.taxes_paid.get("conversion", 0.0) + conv_result.taxes_paid.get("conversion_shortfall", 0.0)
+
+        pretax_after  = conv_result.closing.pretax
+        roth_after    = conv_result.closing.roth
+        taxable_after = conv_result.closing.taxable
+
+        # simulate_conversion is layered on the already-grown closing
+        # state (section 30.4) -- one fewer year of compounding than the
+        # naive age difference, same as single-axis.
+        yrs_to_rmd  = max(0, RMD_START_AGE - age - 1)
+        roth_fv_73  = optimal_conversion * ((1 + post_ret) ** yrs_to_rmd)
+        tax_avoided = roth_fv_73 * TAX_BRACKET_24
+        net_benefit = tax_avoided - tax_cost
+
+        schedule.append({
+            "age":                 age,
+            "justin_age":          justin_age_this_year,
+            "year":                retirement_year_for_events + yr,
+            "pretax_balance":      round(pretax),
+            "roth_balance":        round(roth),
+            "taxable_balance":     round(taxable),
+            "base_taxable_income": round(base_taxable),
+            "room_in_22_bracket":  round(room_in_22),
+            "optimal_conversion":  round(optimal_conversion),
+            "tax_cost":            round(tax_cost),
+            "roth_fv_at_73":       round(roth_fv_73),
+            "tax_avoided_at_73":   round(tax_avoided),
+            "net_benefit":         round(net_benefit),
+            "pretax_after":        round(pretax_after),
+            "roth_after":          round(roth_after),
+            "taxable_after":       round(taxable_after),
+            "unmet_need":          round(base_result.unmet_need),
+            "still_working_spouse_income": round(still_working_income_this_year),
+        })
+
+        pretax, roth, taxable = pretax_after, roth_after, taxable_after
+
+    total_conversions = sum(s["optimal_conversion"] for s in schedule)
+    total_tax_cost    = sum(s["tax_cost"] for s in schedule)
+
+    # "Without conversions" baseline -- re-runs the IDENTICAL spending
+    # pattern (same income/guaranteed income/gap income/life events),
+    # conversions forced to zero, so only the conversion policy differs
+    # between the two paths (same methodology as single-axis).
+    no_conv_pretax  = pretax_at_start
+    no_conv_taxable = taxable_at_start
+    no_conv_roth    = roth_at_start
+    for yr in range(conversion_years):
+        age = timeline.age(yr)
+        justin_age_this_year = timeline.justin_age_at(age)
+        year_need, _hc, _bridge = need_for_year(age, yr)
+        year_pen = two_age_pension_for_year(pension_annual, age, jason_effective_start_age)
+        year_jss = jason_ss_annual * ((1 + inflation) ** max(0, age - jason_ss_age)) if age >= jason_ss_age else 0.0
+        year_uss = (justin_ss_annual * ((1 + inflation) ** max(0, justin_age_this_year - justin_ss_age))
+                    if justin_age_this_year >= justin_ss_age else 0.0)
+        guaranteed = year_pen + year_jss + year_uss
+        life_event_cash, life_event_monthly = _post_retirement_year_effects(post_events, retirement_year_for_events + yr)
+        still_working_income_this_year = justin_gap_income_for_year(
+            yr, phase2_duration_years, still_working_income_at_start, _salary_growth_pct)
+        # Same gross-income-aware rate as the with-conversions loop
+        # above, for the same reason -- keeps the two paths' own
+        # spending-draw taxation apples-to-apples, isolating the
+        # conversion policy as the only real difference between them.
+        no_conv_gross_wages_this_year = justin_gap_income_for_year(
+            yr, phase2_duration_years, still_working_gross_income_at_start, _salary_growth_pct)
+        no_conv_pretax_rate = _pretax_marginal_tax_rate(year_pen, year_jss, year_uss, 0.0, state_tax_rate,
+                                                          gross_income=no_conv_gross_wages_this_year)
+        no_conv_result = simulate_withdrawal_year(
+            opening=AccountState(pretax=no_conv_pretax, roth=no_conv_roth, taxable=no_conv_taxable, hsa=0.0),
+            spending_need=year_need - life_event_monthly - still_working_income_this_year,
+            guaranteed_income=guaranteed,
+            life_event_cash=life_event_cash,
+            rmd_amount=0.0,
+            tax_model=marginal_bracket_tax_model(pretax_rate=no_conv_pretax_rate, taxable_rate=0.0),
+            growth_rate=post_ret,
+            order=("taxable", "pretax", "roth"),
+        )
+        no_conv_pretax  = no_conv_result.closing.pretax
+        no_conv_taxable = no_conv_result.closing.taxable
+        no_conv_roth    = no_conv_result.closing.roth
+    estimated_rmd_base = _rmd(no_conv_pretax, RMD_START_AGE, RMD_START_AGE)
+
+    total_tax_avoided    = sum(s["tax_avoided_at_73"] for s in schedule)
+    net_lifetime_benefit = total_tax_avoided - total_tax_cost
+
+    return {
+        "schedule":               schedule,
+        "total_conversions":      round(total_conversions),
+        "total_tax_cost":         round(total_tax_cost),
+        "total_tax_avoided":      round(total_tax_avoided),
+        "net_lifetime_benefit":   round(net_lifetime_benefit),
+        "estimated_rmd_without_conversions": round(estimated_rmd_base),
+        "estimated_rmd_with_conversions":    round(_rmd(pretax, RMD_START_AGE, RMD_START_AGE)),
+        "pretax_at_rmd_age_no_conversion":   round(no_conv_pretax),
+        "pretax_at_rmd_age_with_conversion": round(pretax),
+        "roth_at_rmd_age_with_conversion":   round(roth),
+        "conversion_years":       conversion_years,
+        "rmd_start_age":          RMD_START_AGE,
+        "total_unmet_need":       round(sum(s["unmet_need"] for s in schedule)),
+        "any_unmet_need":         any(s["unmet_need"] > 0 for s in schedule),
+        "second_earner_net_of_tax_factor": SECOND_EARNER_NET_OF_TAX_FACTOR,
+        "mode": "two_age",
+        "jason_ret_age": jason_ret_age,
+        "justin_ret_age": justin_ret_age,
+        "phase2_start_age": phase2_start_age,
+        "phase3_start_age": phase3_start_age,
+        "later_retiree": timeline.later_retiree,
+        "ss_timing": ss_timing,
+        "still_working_spouse_income_first_year": round(still_working_income_at_start),
+        "account_ownership_limitation": _proj["account_ownership_limitation"],
+    }
+
+
 def run_roth_conversion_analysis(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_timing: str = "early",
                                   life_events: List[Dict] = None,
-                                  surplus_allocations: List[Dict] = None) -> Dict:
+                                  surplus_allocations: List[Dict] = None,
+                                  jason_ret_age: int = None, justin_ret_age: int = None) -> Dict:
     """
     Find optimal annual Roth conversion amount between retirement and RMD age.
     Goal: fill the 22% bracket each year to minimize lifetime taxes.
 
     life_events/surplus_allocations: threaded through to
     run_retirement_projection below for the starting pretax/roth balances
-    only; both default to None/no-op."""
+    only; both default to None/no-op.
+
+    jason_ret_age/justin_ret_age (2026-09-08, CALCULATION_CONTRACT.md
+    section 30, Milestone 2 of 4): explicit, independent retirement ages
+    for both spouses instead of the single ret_age above -- BOTH
+    required together (a ValueError if only one is given), delegating
+    entirely to _run_roth_conversion_analysis_two_age. ret_age/ss_timing's
+    own single-axis behavior below is completely unaffected when these
+    are left at their None default."""
+    if _require_both_two_age_or_neither(jason_ret_age, justin_ret_age):
+        return _run_roth_conversion_analysis_two_age(inputs, accounts, jason_ret_age, justin_ret_age, ss_timing,
+                                                       life_events, surplus_allocations)
+
     inflation    = inputs["inflation_rate"]
     post_ret     = inputs["expected_return_post_retirement"]
     income_today = inputs["retirement_income_today_dollars"]
@@ -2595,16 +3063,219 @@ def _optimal_draw(pretax, roth, taxable, hsa, remaining, cap_gains_limit, tax_pr
     return pretax, roth, taxable, hsa, remaining, total_tax
 
 
+def _run_tax_efficiency_simulation_two_age(inputs: Dict, accounts: List[Dict], jason_ret_age: int, justin_ret_age: int,
+                                            ss_timing: str, life_events: List[Dict],
+                                            surplus_allocations: List[Dict]) -> Dict:
+    """Two-age Tax Efficiency -- explicit, independent retirement ages
+    for both spouses instead of run_tax_efficiency_simulation's single
+    ret_age (CALCULATION_CONTRACT.md section 34, written and committed
+    before any of this existed). Reuses the shared timeline/income/
+    spending helpers section 25-33's SWR/Roth Conversion work already
+    established -- two_age_pension_for_year, two_age_spending_need_fn,
+    two_age_still_working_income_inputs, justin_gap_income_for_year,
+    build_two_person_timeline, run_two_dimensional_retirement_projection
+    for starting balances -- and the completely UNMODIFIED
+    _ordered_draw/_optimal_draw/_cash_available_offsets_need every
+    other consumer of this file's own draw-order strategies already
+    uses. Per section 34's contract: this tool has never had bracket-
+    aware or marginal-rate-aware taxation (a single flat TAX_PRETAX/
+    TAX_TAXABLE/TAX_ROTH rate set, regardless of income), so there is no
+    base_taxable/room_in_22 concept for the Roth milestone's actual bug
+    (gross wages omitted from bracket capacity) to recur in -- working
+    income here is modeled exactly as every other two-age consumer's
+    gap income already is, net-of-tax, folded only into the spending-
+    need offset."""
+    random.seed(42)
+
+    jason_age    = inputs["jason_age"]
+    justin_age   = inputs["justin_age"]
+    inflation    = inputs["inflation_rate"]
+    post_ret     = inputs["expected_return_post_retirement"]
+    income_today = inputs["retirement_income_today_dollars"]
+    _salary_growth_pct = inputs.get("_salary_growth_pct", 0.0)
+
+    pension_annual = pension_for_age(inputs, jason_ret_age)
+    jason_ss_early   = inputs.get("jason_social_security", JASON_SS_EARLY)
+    jason_ss_delayed = inputs.get("jason_ss_delayed", JASON_SS_DELAYED)
+    jason_ss_annual  = jason_ss_early if ss_timing == "early" else jason_ss_delayed
+    jason_ss_age     = 62 if ss_timing == "early" else 67
+    justin_ss_annual = inputs.get("justin_social_security", JUSTIN_SPOUSAL_ANNUAL)
+    justin_ss_age    = inputs.get("justin_ss_age", JUSTIN_SPOUSAL_AGE)
+
+    from projection_engine import run_two_dimensional_retirement_projection
+    _proj = run_two_dimensional_retirement_projection(inputs, accounts, jason_ret_age=jason_ret_age,
+                                                        justin_ret_age=justin_ret_age, ss_timing=ss_timing,
+                                                        life_events=life_events,
+                                                        surplus_allocations=surplus_allocations)
+    pretax_start  = _proj["pretax_at_phase2_start"]
+    roth_start    = _proj["roth_at_phase2_start"]
+    taxable_start = _proj["taxable_at_phase2_start"]
+    hsa_start     = _proj["hsa_at_phase2_start"]
+
+    timeline = build_two_person_timeline(jason_age, justin_age, jason_ret_age, justin_ret_age,
+                                          inputs.get("retirement_end_age"))
+    phase2_start_age = jason_age + timeline.phase2_start_years
+    phase3_start_age = jason_age + timeline.phase3_start_years
+    jason_effective_start_age = timeline.jason_effective_start_age
+    end_age = timeline.end_age
+    retire_yrs = timeline.retire_yrs
+    N = 1000
+    TAX_PRETAX  = 0.22
+    TAX_TAXABLE = 0.15
+
+    all_returns = [[random.gauss(post_ret, PORT_STD) for _ in range(retire_yrs)] for _ in range(N)]
+    _rmd_start = rmd_start_age(jason_age)
+
+    retirement_year_te = timeline.retirement_year
+    _, post_events_te = _split_life_events(life_events, retirement_year_te)
+    post_events_te = post_events_te + _post_retirement_asset_sale_events(inputs, jason_age, phase2_start_age)
+
+    need_for_year = two_age_spending_need_fn(inputs, income_today, inflation, timeline)
+    phase2_duration_years, still_working_income_at_start = two_age_still_working_income_inputs(
+        inputs, timeline, _salary_growth_pct)
+
+    def run_strategy(strategy):
+        """strategy: 'taxable_first', 'roth_first', 'optimal' -- same
+        three policies, same shared all_returns/timeline/income/
+        starting balances as every other strategy call, so only the
+        draw POLICY differs between them (section 34's explicit
+        requirement)."""
+        total_taxes = []
+        final_balances = []
+        unmet_flags = []
+
+        for returns in all_returns:
+            pretax  = pretax_start
+            roth    = roth_start
+            taxable = taxable_start
+            hsa     = hsa_start
+            lifetime_tax = 0
+            any_unmet_need = False
+
+            for yr in range(retire_yrs):
+                age = timeline.age(yr)
+                ret = returns[yr]
+                justin_age_this_year = timeline.justin_age_at(age)
+
+                year_need, _healthcare_inflated, _bridge_income = need_for_year(age, yr)
+                year_pen = two_age_pension_for_year(pension_annual, age, jason_effective_start_age)
+                year_jss = jason_ss_annual * ((1 + inflation) ** max(0, age - jason_ss_age)) if age >= jason_ss_age else 0.0
+                year_uss = (justin_ss_annual * ((1 + inflation) ** max(0, justin_age_this_year - justin_ss_age))
+                            if justin_age_this_year >= justin_ss_age else 0.0)
+                guaranteed = year_pen + year_jss + year_uss
+
+                calendar_year_te = retirement_year_te + yr
+                life_event_cash, life_event_monthly = _post_retirement_year_effects(post_events_te, calendar_year_te)
+                still_working_income_this_year = justin_gap_income_for_year(
+                    yr, phase2_duration_years, still_working_income_at_start, _salary_growth_pct)
+                net_need, surplus_credit = _cash_available_offsets_need(
+                    year_need, guaranteed, life_event_cash, life_event_monthly + still_working_income_this_year)
+                taxable += surplus_credit
+
+                rmd = _rmd(pretax, age, _rmd_start)
+                tax_this_year = 0
+                remaining = net_need
+
+                if rmd > 0:
+                    actual_rmd = min(rmd, pretax)
+                    pretax -= actual_rmd
+                    rmd_tax = actual_rmd * TAX_PRETAX
+                    tax_this_year += rmd_tax
+                    after_tax_rmd = actual_rmd - rmd_tax
+                    if after_tax_rmd <= remaining:
+                        remaining -= after_tax_rmd
+                    else:
+                        taxable += after_tax_rmd - remaining
+                        remaining = 0
+
+                if strategy in ('taxable_first', 'roth_first'):
+                    _order = DEFAULT_ORDER if strategy == 'taxable_first' else ROTH_FIRST_ORDER
+                    pretax, roth, taxable, hsa, remaining, _tax = _ordered_draw(
+                        pretax, roth, taxable, hsa, remaining, _order, TAX_PRETAX, TAX_TAXABLE)
+                    tax_this_year += _tax
+                else:  # optimal
+                    cap_gains_limit = 98900
+                    pretax, roth, taxable, hsa, remaining, _tax = _optimal_draw(
+                        pretax, roth, taxable, hsa, remaining, cap_gains_limit, TAX_PRETAX, TAX_TAXABLE)
+                    tax_this_year += _tax
+
+                if remaining > 0:
+                    any_unmet_need = True
+
+                lifetime_tax += tax_this_year
+                pretax  = max(0, pretax  * (1 + ret))
+                roth    = max(0, roth    * (1 + ret))
+                taxable = max(0, taxable * (1 + ret))
+                hsa     = max(0, hsa     * (1 + ret))
+
+            total_taxes.append(round(lifetime_tax))
+            final_balances.append(round(pretax + roth + taxable + hsa))
+            unmet_flags.append(any_unmet_need)
+
+        taxes_sorted = sorted(total_taxes)
+        bals_sorted  = sorted(final_balances)
+        return {
+            "median_lifetime_tax":  taxes_sorted[N // 2],
+            "p10_lifetime_tax":     taxes_sorted[int(N * 0.10)],
+            "p90_lifetime_tax":     taxes_sorted[int(N * 0.90)],
+            "median_final_balance": bals_sorted[N // 2],
+            "success_rate": round(sum(1 for b, unmet in zip(final_balances, unmet_flags) if b > 0 and not unmet) / N * 100, 1),
+        }
+
+    taxable_first = run_strategy('taxable_first')
+    roth_first    = run_strategy('roth_first')
+    optimal       = run_strategy('optimal')
+
+    best_tax = min(taxable_first["median_lifetime_tax"],
+                   roth_first["median_lifetime_tax"],
+                   optimal["median_lifetime_tax"])
+
+    return {
+        "retirement_age": jason_ret_age,
+        "retirement_end_age": end_age,
+        "ss_timing": ss_timing,
+        "strategies": {
+            "taxable_first": {**taxable_first, "label": "Taxable First", "description": "Draw taxable → pretax → Roth last"},
+            "roth_first":    {**roth_first,    "label": "Roth First",    "description": "Draw Roth → taxable → pretax last"},
+            "optimal":       {**optimal,        "label": "Optimal",       "description": "Fill 0% cap gains bracket, then pretax, Roth as buffer"},
+        },
+        "best_strategy_tax": best_tax,
+        "simulations": N,
+        "mode": "two_age",
+        "jason_ret_age": jason_ret_age,
+        "justin_ret_age": justin_ret_age,
+        "phase2_start_age": phase2_start_age,
+        "phase3_start_age": phase3_start_age,
+        "later_retiree": timeline.later_retiree,
+        "still_working_spouse_income_first_year": round(still_working_income_at_start),
+        "second_earner_net_of_tax_factor": SECOND_EARNER_NET_OF_TAX_FACTOR,
+        "account_ownership_limitation": _proj["account_ownership_limitation"],
+    }
+
+
 def run_tax_efficiency_simulation(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_timing: str = "early",
                                    life_events: List[Dict] = None,
-                                   surplus_allocations: List[Dict] = None) -> Dict:
+                                   surplus_allocations: List[Dict] = None,
+                                   jason_ret_age: int = None, justin_ret_age: int = None) -> Dict:
     """
     Run 1000 market scenarios for 3 draw order strategies.
     Simplified tax: flat 22% on pretax withdrawals, 0% on Roth, 15% on taxable gains.
 
     life_events/surplus_allocations: threaded through to
     run_retirement_projection below for the starting bucket balances only;
-    both default to None/no-op."""
+    both default to None/no-op.
+
+    jason_ret_age/justin_ret_age (2026-09-08, CALCULATION_CONTRACT.md
+    section 34, Milestone 3 of 4): explicit, independent retirement ages
+    for both spouses instead of the single ret_age above -- BOTH
+    required together (a ValueError if only one is given), delegating
+    entirely to _run_tax_efficiency_simulation_two_age. ret_age/
+    ss_timing's own single-axis behavior below is completely unaffected
+    when these are left at their None default."""
+    if _require_both_two_age_or_neither(jason_ret_age, justin_ret_age):
+        return _run_tax_efficiency_simulation_two_age(inputs, accounts, jason_ret_age, justin_ret_age, ss_timing,
+                                                        life_events, surplus_allocations)
+
     random.seed(42)
 
     jason_age    = inputs["jason_age"]
@@ -3047,12 +3718,464 @@ def _minimum_survivor_funding(net_needs: List[float], post_ret: float) -> float:
     return required
 
 
+def _run_survivor_scenario_two_age(inputs: Dict, accounts: List[Dict], jason_ret_age: int, justin_ret_age: int,
+                                    ss_timing: str, deceased: str, death_age: int,
+                                    survivor_need_factor: float,
+                                    life_events: List[Dict], surplus_allocations: List[Dict],
+                                    trust_available_to_survivor: bool = False,
+                                    joint_accounts_survivorship: bool = True,
+                                    spousal_rollover_election: bool = True) -> Dict:
+    """Two-age Survivor Scenario -- explicit, independent retirement ages
+    for both spouses, and an owner-attributed account ledger, instead of
+    run_survivor_scenario's single ret_age and single pooled portfolio
+    (CALCULATION_CONTRACT.md sections 36-37, Milestone 4 of 4, design
+    approved before any of this existed).
+
+    trust_available_to_survivor/joint_accounts_survivorship/
+    spousal_rollover_election (section 37.1-37.3): explicit scenario
+    assumptions, never inferred from an account's owner label alone --
+    - trust_available_to_survivor (default False, conservative): trust-
+      owned balances are excluded from the survivor's resources unless
+      explicitly confirmed available (this app has no way to know a
+      trust's own succession terms).
+    - joint_accounts_survivorship (default True, JTWROS being the
+      common case for a married couple, but a STATED default, not an
+      inference from the word "joint"): True passes the joint bucket to
+      the survivor in full; False applies the tenants-in-common legal
+      default (only half is the survivor's own, the other half is
+      modeled as lost to the household).
+    - spousal_rollover_election (default True, the single most common
+      real choice and the only one this narrow v1 supports): True
+      merges the deceased's own pretax balance into the survivor's own
+      for spending AND for computing the survivor's own post-death RMDs
+      against the merged total; False excludes the deceased's own
+      pretax entirely (v1 does not attempt to model a separately-
+      scheduled inherited IRA with its own RMD timeline -- flagged in
+      the result, not silently defaulted to rollover behavior anyway).
+      Roth/taxable/HSA balances are NOT gated by this election -- unlike
+      pretax, they carry no election-dependent RMD mechanics in this
+      app's model, so they always merge into the survivor's own
+      resources regardless.
+
+    Death-year ordering (section 37.5): the pre-death walk
+    (run_owner_split_two_dimensional_projection) runs the death year
+    itself as a normal both-alive year, so that year's own RMD (if any)
+    is already satisfied by construction, not a separate event. Wages
+    stop for the deceased at year-end; the insurance payout, ownership
+    transfer, and the survivor's own distinct (reduced) spending pattern
+    all begin together in the FIRST post-death year -- unchanged from
+    single-axis's own reviewed timing (section 18).
+
+    Post-death RMDs (section 37.4, v1-required) are REAL, not just
+    reported: the survivor's own merged pretax sub-balance is tracked
+    separately from every other bucket type through the post-death
+    walk, and _rmd is computed against it using the SURVIVOR's own age
+    (not Jason's, unlike every other two-age consumer's still-out-of-
+    scope aggregate/Jason-anchored RMD) -- a real, forced draw each year
+    once the survivor reaches their own rmd_start_age. Tax modeling on
+    ongoing withdrawals otherwise stays exactly as unmodeled as
+    single-axis Survivor's own documented limitation (no MFJ->single
+    bracket jump) -- this milestone adds real RMD mechanics on top of
+    that same simplification, it does not remove it.
+
+    Pension commencement before Jason's own retirement (section 37.5,
+    decided by Jason 2026-09-08: Option A) -- if Jason is the deceased
+    and dies before his own actual retirement, the survivor still
+    receives the full 100% Joint & Survivor pension figure, exactly as
+    if Jason had retired at the moment of death.
+
+    Independent review, 2026-09-08, fourth follow-up: findings 2, 3, 5,
+    6, 7, 8 (all reproduced against this function specifically) --
+    2. (P1) Pension is now re-evaluated PER YEAR in the post-death loop
+       against the survivor's own advancing age (two_age_pension_for_year),
+       not frozen at the death row's single snapshot -- previously, if
+       Justin died before Jason's own retirement, Jason's pension stayed
+       frozen at the death-year's $0 forever, even after Jason himself
+       later reached his actual retirement age.
+    3. (P1) Social Security is now computed PER YEAR the same way the
+       pre-death walk computes it (each spouse's own ss_timing-selected
+       annual benefit, COLA-compounded from their own claim age), taking
+       the higher of the two for the survivor -- previously a single flat
+       max(raw jason_social_security, raw justin_social_security) input
+       ignored ss_timing entirely and never carried forward the already-
+       selected benefit's own accumulated COLA.
+    5. (P1) Post-death life events (post_events, built the same way
+       run_owner_split_two_dimensional_projection builds its own
+       post_life_events) are now applied both to the withdrawal schedule
+       (life_event_cash passed into simulate_withdrawal_year, event_monthly
+       netted against need) and to net_needs, so _minimum_survivor_funding's
+       insurance-shortfall calc reflects them too -- previously
+       life_event_cash=0.0 was hardcoded, silently dropping any expense or
+       windfall dated after the death year from both.
+    6. (P2) A death requested before either spouse has retired (i.e.
+       death_jason_age < phase2_start_age, before the owner-split walk has
+       any accumulation-phase row to model against) is now explicitly
+       rejected (has_data: False, an error/message explaining why) instead
+       of silently snapping forward to the first available row while still
+       reporting the originally-requested death_age unchanged.
+    7. (P2) Joint/trust contributions are now split into their own
+       pretax/other components (joint_pretax_contribution/
+       joint_other_contribution, trust_pretax_contribution/
+       trust_other_contribution) and added respectively into
+       starting_pretax/starting_other -- previously the whole joint/trust
+       balance (every type summed together) was folded entirely into
+       starting_other, so any pretax portion lost its RMD-triggering
+       status the moment it transferred to the survivor.
+    8. (P2) When Justin is deceased, his own final-year RMD obligation
+       (computed against HIS OWN age and HIS OWN individually-owned pretax
+       balance, since the pre-death walk's RMD is always Jason-anchored
+       and never independently checks Justin's own age) is now forced out
+       of his pretax bucket into taxable before the ownership transfer --
+       previously an older Justin's own RMD obligation in his final year
+       could go completely unenforced (reproduced: Jason 61/Justin 75,
+       Justin's own $1,000,000 IRA produced $0 death-year RMD versus the
+       $40,650 this repository's own RMD table produces for that balance
+       and age)."""
+    from projection_engine import (run_owner_split_two_dimensional_projection, OWNER_BUCKETS,
+                                    two_age_still_working_income_inputs)
+
+    jason_age  = inputs["jason_age"]
+    justin_age = inputs["justin_age"]
+    post_ret   = inputs["expected_return_post_retirement"]
+    inflation  = inputs["inflation_rate"]
+    age_gap    = jason_age - justin_age
+    _salary_growth_pct = inputs.get("_salary_growth_pct", 0.0)
+
+    # timeline built once, up front -- used for the pension-gate age
+    # (jason_effective_start_age), post-death life events, gap income
+    # below, AND (independent review, 2026-09-08, eighth follow-up) to
+    # compute phase2_start_age/later_retiree directly -- the IDENTICAL
+    # formulas run_owner_split_two_dimensional_projection uses
+    # internally (phase2_start_age = jason_age + timeline.phase2_start_years,
+    # later_retiree = timeline.later_retiree), needed here BEFORE the
+    # walk itself runs so death_jason_age can be threaded into that
+    # single walk call from the start (see below).
+    timeline = build_two_person_timeline(jason_age, justin_age, jason_ret_age, justin_ret_age,
+                                          inputs.get("retirement_end_age"))
+    jason_effective_start_age = timeline.jason_effective_start_age
+    phase2_start_age = jason_age + timeline.phase2_start_years
+    later_retiree = timeline.later_retiree
+
+    if death_age is None:
+        deceased_effective_start_age = (phase2_start_age if deceased == "jason"
+                                         else phase2_start_age - age_gap)
+        death_age = deceased_effective_start_age + 10
+
+    death_jason_age = death_age if deceased == "jason" else death_age + age_gap
+
+    # Finding 6 fix: a death before EITHER spouse has retired has no
+    # accumulation-phase row in `yearly` (the owner-split walk only
+    # starts at phase2_start_age) -- reject explicitly rather than
+    # silently snapping forward to the first available row while still
+    # reporting the originally-requested death_age.
+    if death_jason_age < phase2_start_age:
+        return {
+            "has_data": False,
+            "mode": "two_age",
+            "error": "death_before_first_retirement_unsupported",
+            "message": (
+                f"A death at age {death_age} is before age {phase2_start_age}, when either spouse "
+                f"first retires in this scenario -- the owner-split projection has no pre-retirement "
+                f"accumulation-phase data to model a death against. Choose a death age on or after "
+                f"the first retirement, or adjust the retirement ages."
+            ),
+        }
+
+    # Independent review, 2026-09-08, eighth follow-up, P1: death_jason_age
+    # and deceased are now passed INTO the walk itself, so the deceased's
+    # own final-year RMD is incorporated as part of THAT year's own
+    # single calculation (tax rate, spending funding, ownership
+    # allocation, growth all computed together) -- not as a downstream
+    # patch applied after the year's own numbers were already final.
+    # Every earlier round of this fix (findings 8, fifth-follow-up-1,
+    # sixth-follow-up-2) patched death_row's already-finished balances
+    # afterward and kept finding new ways that went wrong: double-
+    # withdrawing, bypassing tax, bypassing growth, and now (eighth
+    # follow-up) funding spending from the wrong money and using a
+    # stale tax rate. Reproduced: Jason 61, Justin 75, Justin's
+    # $1,000,000 IRA, $100,000 joint taxable, $50,000 spending, joint
+    # survivorship disabled -- the old patch-after-the-fact approach
+    # reported $1,020,935 (the RMD never got the chance to fund spending
+    # before joint taxable was drawn down); integrated, it's $1,002,642.
+    # With a $100,000 pension funding $100,000 spending, folding the
+    # extra RMD into `rmd` BEFORE the tax-rate estimate correctly moves
+    # the marginal rate from 12% to 22% (was stuck at the stale
+    # pre-addition rate) -- $991,057, not $995,122.
+    walk = run_owner_split_two_dimensional_projection(inputs, accounts, jason_ret_age, justin_ret_age,
+                                                        ss_timing=ss_timing, salary_growth_pct=_salary_growth_pct,
+                                                        life_events=life_events, surplus_allocations=surplus_allocations,
+                                                        death_jason_age=death_jason_age, deceased=deceased)
+    yearly = walk["yearly_detail"]
+
+    death_row_index = next((i for i, y in enumerate(yearly) if y["jason_age"] >= death_jason_age), None)
+    if death_row_index is None:
+        return {"has_data": False}
+    death_row = yearly[death_row_index]
+    death_jason_age = death_row["jason_age"]
+
+    end_age = max(death_jason_age + 1, min(110, int(inputs.get("retirement_end_age") or 99)))
+
+    if deceased == "jason":
+        payout = (inputs.get("jason_life_basic", 0) + inputs.get("jason_life_supplemental", 0)
+                  + inputs.get("jason_life_term", 0))
+        survivor_owner, deceased_owner = "justin", "jason"
+    else:
+        payout = (inputs.get("justin_life_ul", 0) + inputs.get("justin_life_whole", 0)
+                  + inputs.get("person2_life_employer", 0) + inputs.get("justin_life_term", 0)
+                  + inputs.get("justin_life_kids", 0))
+        survivor_owner, deceased_owner = "jason", "justin"
+
+    # The deceased's own final-year RMD (findings 8, fifth-follow-up-1,
+    # sixth-follow-up-2, eighth-follow-up-1) is now fully incorporated
+    # INSIDE death_row itself -- run_owner_split_two_dimensional_projection
+    # folded it into that year's own tax rate, spending funding, ownership
+    # allocation, and growth as a single calculation (death_jason_age/
+    # deceased passed into the walk above). death_row["owner_balances"]
+    # is simply read as-is, no downstream patch needed or applied.
+    ob = death_row["owner_balances"]
+
+    # Ownership transfer at death (section 37.1-37.3, explicit scenario
+    # assumptions, never inferred).
+    survivor_pretax_start = ob[survivor_owner]["pretax"] + (ob[deceased_owner]["pretax"] if spousal_rollover_election else 0.0)
+    survivor_other_start = (
+        ob[survivor_owner]["roth"] + ob[survivor_owner]["taxable"] + ob[survivor_owner]["hsa"]
+        + ob[deceased_owner]["roth"] + ob[deceased_owner]["taxable"] + ob[deceased_owner]["hsa"]
+    )
+    # Finding 7 fix: joint/trust contributions split into their own
+    # pretax/other components so a transferred pretax dollar keeps its
+    # RMD-triggering status in the survivor's own pretax bucket, instead
+    # of every type getting blended into "other" money.
+    joint_pretax = ob["joint"]["pretax"]
+    joint_other  = ob["joint"]["roth"] + ob["joint"]["taxable"] + ob["joint"]["hsa"]
+    joint_total  = joint_pretax + joint_other
+    joint_pretax_contribution = joint_pretax if joint_accounts_survivorship else joint_pretax * 0.5
+    joint_other_contribution  = joint_other  if joint_accounts_survivorship else joint_other  * 0.5
+    trust_pretax = ob["trust"]["pretax"]
+    trust_other  = ob["trust"]["roth"] + ob["trust"]["taxable"] + ob["trust"]["hsa"]
+    trust_total  = trust_pretax + trust_other
+    trust_pretax_contribution = trust_pretax if trust_available_to_survivor else 0.0
+    trust_other_contribution  = trust_other  if trust_available_to_survivor else 0.0
+
+    portfolio_at_death = sum(ob[o][t] for o in OWNER_BUCKETS for t in ("pretax", "roth", "taxable", "hsa"))
+    starting_pretax = survivor_pretax_start + joint_pretax_contribution + trust_pretax_contribution
+    starting_other  = survivor_other_start + joint_other_contribution + trust_other_contribution + payout
+    starting_balance = starting_pretax + starting_other
+
+    # Social Security selection (finding 3 fix): the SAME per-spouse,
+    # ss_timing-selected, own-claim-age convention every other two-age
+    # consumer in this file already uses -- computed per year in the
+    # post-death loop below, not as a single flat scalar here.
+    jason_ss_early   = inputs.get("jason_social_security", JASON_SS_EARLY)
+    jason_ss_delayed = inputs.get("jason_ss_delayed", JASON_SS_DELAYED)
+    jason_ss_annual  = jason_ss_early if ss_timing == "early" else jason_ss_delayed
+    jason_ss_age     = 62 if ss_timing == "early" else 67
+    justin_ss_annual = inputs.get("justin_social_security", JUSTIN_SPOUSAL_ANNUAL)
+    justin_ss_age    = inputs.get("justin_ss_age", JUSTIN_SPOUSAL_AGE)
+
+    # Pension (finding 2 fix): section 37.5, Option A (decided) -- if
+    # Jason (its owner) is the deceased, the survivor gets the full
+    # pension figure unconditionally, every post-death year, regardless
+    # of whether Jason had actually retired yet. If Justin is deceased,
+    # Jason (the survivor) continues toward his own actual retirement and
+    # the pension is gated per year against his own advancing age in the
+    # loop below (two_age_pension_for_year), not frozen at the death
+    # row's own (possibly still-gated-to-$0) snapshot.
+    pension_annual = pension_for_age(inputs, jason_ret_age)
+
+    years_since_today = death_row["year"] - CURRENT_YEAR
+    income_today = inputs["retirement_income_today_dollars"]
+    income_need_at_death = income_today * ((1 + inflation) ** years_since_today) * survivor_need_factor
+
+    # Gap income (section 37.3): generalizes single-axis's own
+    # `deceased != "justin"` gate to whichever spouse is actually
+    # later_retiree -- the still-working spouse's income doesn't exist
+    # if THEY are the one who died, regardless of which spouse that is.
+    phase2_duration_years, still_working_income_at_start = two_age_still_working_income_inputs(
+        inputs, timeline, _salary_growth_pct)
+    gap_income_still_applies = deceased != later_retiree
+
+    # Post-death life events (finding 5 fix): built the identical way
+    # run_owner_split_two_dimensional_projection builds its own
+    # post_life_events, so the post-death schedule sees the same events
+    # the pre-death walk would have, instead of none at all.
+    retirement_year_for_events = timeline.retirement_year
+    _, post_events = _split_life_events(life_events, retirement_year_for_events)
+    post_events = post_events + _post_retirement_asset_sale_events(inputs, jason_age, phase2_start_age)
+
+    survivor_rmd_start_age = rmd_start_age(inputs["justin_age"] if survivor_owner == "justin" else inputs["jason_age"])
+
+    schedule = []
+    net_needs = []
+    pretax_bal = max(0.0, starting_pretax)
+    other_bal  = max(0.0, starting_other)
+    depleted_age = None
+    first_year_pension = None
+    first_year_ss = None
+    for i, age in enumerate(range(death_jason_age + 1, end_age)):
+        calendar_year = death_row["year"] + (i + 1)
+        need = income_need_at_death * ((1 + inflation) ** (i + 1))
+
+        # Pension, finding 2 fix -- see the pension_annual comment above.
+        year_pen = pension_annual if deceased == "jason" else two_age_pension_for_year(
+            pension_annual, age, jason_effective_start_age)
+
+        # Social Security, finding 3 fix -- each spouse's own selected-
+        # timing, age-adjusted, COLA-compounding benefit, the survivor
+        # receiving the higher of the two (their own continuing benefit,
+        # or a widow(er)'s survivor benefit on the deceased's record).
+        justin_age_this_year = age - age_gap
+        year_jss = jason_ss_annual * ((1 + inflation) ** max(0, age - jason_ss_age)) if age >= jason_ss_age else 0.0
+        year_uss = (justin_ss_annual * ((1 + inflation) ** max(0, justin_age_this_year - justin_ss_age))
+                    if justin_age_this_year >= justin_ss_age else 0.0)
+        survivor_ss_this_year = max(year_jss, year_uss)
+
+        guaranteed = year_pen + survivor_ss_this_year
+        if first_year_pension is None:
+            first_year_pension, first_year_ss = year_pen, survivor_ss_this_year
+
+        # Post-death life events, finding 5 fix.
+        event_cash, event_monthly = _post_retirement_year_effects(post_events, calendar_year)
+        need -= event_monthly
+
+        # yr (relative to phase2_start, TwoPersonTimeline's own anchor,
+        # not single-axis Timeline's effective_start_age) -- age is
+        # always in Jason-age terms in this loop.
+        gap_income_this_year = (
+            justin_gap_income_for_year(age - phase2_start_age, phase2_duration_years,
+                                        still_working_income_at_start, _salary_growth_pct)
+            if gap_income_still_applies else 0.0
+        )
+        need -= gap_income_this_year
+
+        survivor_age_this_year = age if survivor_owner == "jason" else age - age_gap
+        rmd = _rmd(pretax_bal, survivor_age_this_year, survivor_rmd_start_age)
+
+        draw = max(0, need - guaranteed - event_cash)
+        net_needs.append(need - guaranteed - event_cash)
+        total_bal = pretax_bal + other_bal
+        if depleted_age is None and total_bal <= 0 and draw > 0:
+            depleted_age = age
+
+        result = simulate_withdrawal_year(
+            opening=AccountState(pretax=pretax_bal, taxable=other_bal),
+            spending_need=need,
+            guaranteed_income=guaranteed,
+            life_event_cash=event_cash,
+            rmd_amount=rmd,
+            tax_model=no_tax_model(),
+            growth_rate=post_ret,
+            order=("taxable", "pretax"),
+        )
+        pretax_bal, other_bal = result.closing.pretax, result.closing.taxable
+        bal_after = pretax_bal + other_bal
+
+        schedule.append({"age": age, "starting_balance": round(total_bal), "draw": round(draw),
+                          "required_minimum_distribution": round(rmd),
+                          "ending_balance": round(bal_after)})
+        if bal_after <= 0 and depleted_age is None and total_bal > 0:
+            depleted_age = age
+
+    if first_year_pension is None:
+        # No post-death years at all (end_age == death_jason_age + 1) --
+        # report what the very first (only) year would have been, same
+        # formulas as inside the loop, so the headline figures are never
+        # left as None.
+        first_year_pension = (pension_annual if deceased == "jason"
+                               else two_age_pension_for_year(pension_annual, death_jason_age + 1, jason_effective_start_age))
+        _justin_age_next = (death_jason_age + 1) - age_gap
+        _year_jss = (jason_ss_annual * ((1 + inflation) ** max(0, (death_jason_age + 1) - jason_ss_age))
+                     if (death_jason_age + 1) >= jason_ss_age else 0.0)
+        _year_uss = (justin_ss_annual * ((1 + inflation) ** max(0, _justin_age_next - justin_ss_age))
+                     if _justin_age_next >= justin_ss_age else 0.0)
+        first_year_ss = max(_year_jss, _year_uss)
+
+    survives = depleted_age is None
+    additional_insurance_needed = 0
+    if not survives:
+        cap_need = _minimum_survivor_funding(net_needs, post_ret)
+        additional_insurance_needed = max(0, round(cap_need - starting_balance))
+
+    if survives:
+        recommendation = (
+            f"If {deceased} dies at {death_age}, the ${payout:,.0f} life insurance payout plus the portfolio "
+            f"(${portfolio_at_death:,.0f} at that point) covers the survivor's needs through age {end_age}, assuming "
+            f"living costs drop to {survivor_need_factor*100:.0f}% of the couple's target and Social Security "
+            f"switches to the higher of the two benefits. This doesn't account for the tax-bracket jump from "
+            f"filing jointly to filing single, which would add real drag on top of this."
+        )
+    else:
+        recommendation = (
+            f"If {deceased} dies at {death_age}, the plan runs out around age {depleted_age} for the survivor — "
+            f"about ${additional_insurance_needed:,.0f} more life insurance on {deceased} would close that gap "
+            f"(today's dollars, before accounting for the MFJ-to-single tax-bracket jump, which would push the "
+            f"real number higher)."
+        )
+
+    return {
+        "has_data": True,
+        "mode": "two_age",
+        "jason_ret_age": jason_ret_age,
+        "justin_ret_age": justin_ret_age,
+        "deceased": deceased,
+        "death_age": death_age,
+        "survivor_end_age": end_age,
+        "portfolio_at_death": round(portfolio_at_death),
+        "life_insurance_payout": round(payout),
+        "starting_balance_after_payout": round(starting_balance),
+        # Finding 7/8 fix diagnostics: the pretax/other split of the
+        # survivor's own starting balance, same purpose as
+        # trust_balance_at_death/joint_balance_at_death below -- lets a
+        # caller see that a transferred pretax dollar (finding 7) and a
+        # deceased spouse's own final-year RMD catch-up (finding 8)
+        # actually moved money between buckets, not just that the total
+        # is unchanged.
+        "starting_pretax_after_payout": round(starting_pretax),
+        "starting_other_after_payout": round(starting_other),
+        # Finding 2/3 fix: pension/SS are now computed PER YEAR in the
+        # post-death loop (see the docstring), not a single frozen
+        # scalar -- report the first post-death year's own values as the
+        # headline figures, same key names as before.
+        "survivor_ss_annual": round(first_year_ss),
+        "pension_annual": round(first_year_pension),
+        "income_need_at_death": round(income_need_at_death),
+        "survivor_need_factor": survivor_need_factor,
+        "survives": survives,
+        "depleted_age": depleted_age,
+        "additional_insurance_needed": additional_insurance_needed,
+        "recommendation": recommendation,
+        "schedule": schedule[::2],
+        "trust_available_to_survivor": trust_available_to_survivor,
+        "joint_accounts_survivorship": joint_accounts_survivorship,
+        "spousal_rollover_election": spousal_rollover_election,
+        "trust_balance_at_death": round(trust_total),
+        "joint_balance_at_death": round(joint_total),
+        "second_earner_net_of_tax_factor": SECOND_EARNER_NET_OF_TAX_FACTOR,
+        "account_ownership_limitation": walk["account_ownership_limitation"],
+    }
+
+
 def run_survivor_scenario(inputs: Dict, accounts: List[Dict], ret_age: int = 60,
                            deceased: str = "jason", death_age: int = None,
                            survivor_need_factor: float = 0.75,
                            life_events: List[Dict] = None,
-                           surplus_allocations: List[Dict] = None) -> Dict:
-    """Stress-tests the plan assuming one spouse dies during retirement:
+                           surplus_allocations: List[Dict] = None,
+                           jason_ret_age: int = None, justin_ret_age: int = None,
+                           ss_timing: str = "early",
+                           trust_available_to_survivor: bool = False,
+                           joint_accounts_survivorship: bool = True,
+                           spousal_rollover_election: bool = True) -> Dict:
+    """jason_ret_age/justin_ret_age (2026-09-08, CALCULATION_CONTRACT.md
+    sections 36-37, Milestone 4 of 4): two-age mode with an owner-
+    attributed account ledger, both ages required together, delegating
+    entirely to _run_survivor_scenario_two_age. ret_age's own single-axis
+    behavior below is completely unaffected when these are left at their
+    None default. trust_available_to_survivor/joint_accounts_
+    survivorship/spousal_rollover_election are two-age-only explicit
+    scenario assumptions (section 37.1-37.3) with no single-axis
+    equivalent (single-axis has never distinguished account ownership at
+    all).
+
+    Stress-tests the plan assuming one spouse dies during retirement:
     the deceased's life insurance payout is added to the portfolio, Social
     Security switches to the survivor benefit (the higher of the two, not
     both — that's how SS survivor benefits actually work), pension is
@@ -3102,6 +4225,13 @@ def run_survivor_scenario(inputs: Dict, accounts: List[Dict], ret_age: int = 60,
     cases covering Justin dying before/during/after his own gap window,
     and a past-selected-ret_age scenario.
     """
+    if _require_both_two_age_or_neither(jason_ret_age, justin_ret_age):
+        return _run_survivor_scenario_two_age(inputs, accounts, jason_ret_age, justin_ret_age, ss_timing,
+                                               deceased, death_age, survivor_need_factor,
+                                               life_events, surplus_allocations,
+                                               trust_available_to_survivor, joint_accounts_survivorship,
+                                               spousal_rollover_election)
+
     from projection_engine import run_retirement_projection
 
     jason_age  = inputs["jason_age"]

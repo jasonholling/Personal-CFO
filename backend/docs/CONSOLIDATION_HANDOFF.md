@@ -56,14 +56,89 @@ than copying them — **has since merged to `main`** (commit `32b7f65`).
 **2026-09-08, further addendum — extending two-age support to the
 remaining 4 consumers, run as 4 separate reviewed milestones (not one
 large branch), each starting from current `main` after the preceding
-milestone merges:** Milestone 1, two-age SWR (section 25 design + 26
-implementation report), is built on `codex/two-age-swr` — pushed, **not
-yet merged**, per the explicit instruction it was scoped under (review
-before merging, and do not start Milestone 2 until this one is
-approved). Milestones 2-4 (Roth Conversion, Tax Efficiency, then a
-design-only gate for Survivor Scenario + account ownership) remain
-entirely unstarted. Real payroll tax and a heatmap UI stay out of scope
-per the same instruction.
+milestone merges:** Milestone 1, two-age SWR (sections 25-29 — design,
+implementation, and three independent-review fix rounds), **has since
+merged to `main`** (commit `5ed38b0`), branch deleted. Milestone 2,
+two-age Roth Conversion (section 30 working-income tax contract + 31
+implementation report + 32-33 two independent-review fix rounds), is
+built on `codex/two-age-roth-conversion` — pushed, **not yet merged**.
+Milestone 3, two-age Tax Efficiency (section 34 design notes + 35
+implementation report), is built on `codex/two-age-tax-efficiency` —
+branched from the Roth Conversion branch (not `main`), since it needs
+that branch's reviewed working-income tax treatment and `main` doesn't
+have it yet — pushed, **not yet merged**. Milestone 4, Survivor
+Scenario + account ownership (section 36 initial design, section 37
+revised design approved by Jason including the pension-commencement
+decision, section 38 implementation report), is built on
+`codex/two-age-survivor-design` — branched from the Tax Efficiency
+branch — pushed, **not yet merged**. All four milestones are now
+implemented.
+
+**Sequencing note, superseding the "review before merging, don't start
+the next milestone" instruction above:** Jason's own auditor was
+temporarily unavailable, so per his explicit instruction (2026-09-08)
+work continued through all four milestones without waiting for
+Milestones 2-4's own review to land — "get all the work done and I'll
+have the auditor review." Nothing has been pushed to `main` beyond
+Milestone 1. Once the auditor reviews everything together, the
+expected merge order (each branch stacked on the previous, so each
+must land before the next can cleanly merge to `main`) is Roth
+Conversion → Tax Efficiency → Survivor Scenario. Real payroll tax and
+a heatmap UI stay out of scope per the original instruction. Milestone
+4's own approved design (section 37) deferred two-age frontend wiring
+for Survivor Scenario's existing `StressTestWhatIf.jsx` tab to a
+follow-up pass — not part of the approved design's own scope.
+
+**2026-09-08, fourth review round addendum (section 39):** the
+auditor's fourth-follow-up review of all three unmerged branches found
+8 fixable issues (1 in Roth Conversion, 7 in Survivor Scenario) plus
+two scope notes explicitly confirmed as retained limitations, not
+regressions (Tax Efficiency's flat-rate tax model; Survivor remaining
+API-only). All 8 are fixed, tested, and pushed — see section 39 for
+the full list. Still nothing merged to `main` beyond Milestone 1; the
+expected merge order is unchanged (Roth Conversion → Tax Efficiency →
+Survivor Scenario), pending the auditor's review of this round's fixes.
+
+**2026-09-08, fifth review round addendum (section 40):** the
+auditor's review of section 39's own fixes found 3 more issues (a
+double-RMD-withdrawal regression and two ownership-attribution gaps,
+all introduced or touched by section 39). All 3 are fixed, tested, and
+pushed — see section 40. Still nothing merged to `main` beyond
+Milestone 1.
+
+**2026-09-08, sixth review round addendum (section 41):** the
+auditor's review of commit `08198b2` confirmed the three prior
+reproductions now pass, and found 2 more issues (a gross-vs-net
+income-attribution gap and a death-year tax/growth gap in the
+deceased's final-RMD catch-up, both in code section 39/40 had just
+introduced or touched). Both are fixed, tested, and pushed — see
+section 41. Still nothing merged to `main` beyond Milestone 1.
+
+**2026-09-08, seventh review round addendum (section 42):** the
+auditor's review of commit `ca898fb` confirmed the death-year tax/
+growth fix works, and found one more ownership-allocation issue with
+three reproducible cases — the whole proportional-reweighting approach
+used since section 39 was structurally unable to preserve exact
+ownership. Replaced with an owner cash-flow waterfall (track each
+owner's own actual signed cash and after-tax pretax proceeds, fund
+need in the existing withdrawal owner-order, credit only genuine
+leftovers) per the review's own explicit architectural guidance — see
+section 42. All three reproductions now match exactly. Still nothing
+merged to `main` beyond Milestone 1.
+
+**2026-09-08, eighth review round addendum (section 43):** the
+auditor's review of commit `889fb5b` confirmed the waterfall fix
+passes its three reproductions plus 72 additional mixed-cash-flow
+cases, and found one more P1 in the deceased's final-RMD catch-up —
+the same root cause every round since section 39 kept resurfacing in a
+new form: patching completed balances after the fact instead of
+folding the deceased's obligation into the death year's own single
+calculation. Restructured per the review's own explicit guidance
+(`run_owner_split_two_dimensional_projection` now accepts optional
+`death_jason_age`/`deceased`, integrating the catch-up before tax,
+spending, ownership, and growth are determined for that year) — see
+section 43. Both reproductions now match exactly. Still nothing merged
+to `main` beyond Milestone 1.
 
 ## Final status against Jason's 9-item follow-on task list
 
