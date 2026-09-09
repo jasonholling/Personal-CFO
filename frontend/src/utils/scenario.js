@@ -10,10 +10,29 @@
  */
 const STORAGE_KEY_RET_AGE   = 'cfo_scenario_ret_age'
 const STORAGE_KEY_SS_TIMING = 'cfo_scenario_ss_timing'
+// CALCULATION_CONTRACT.md section 54 (2026-09-09): a page-local, ad hoc
+// claim age -- NOT the same as the value saved in Settings. Shared here
+// (not per-page useState) so picking "Jason at 68" on one page carries
+// over to the next, same as retAge/ssTiming already do, letting a
+// household try one claim age across Monte Carlo, Stress Tests, Roth
+// Conversion, Survivor Scenario, etc. without re-entering it each time.
+// Stays null by default -- every backend endpoint's own 3-tier
+// resolution (explicit override > saved Settings > legacy ss_timing)
+// means a null override here still correctly falls through to whatever
+// IS saved in Settings; this is purely an additional, temporary
+// override on top, never a replacement for the Settings value.
+const STORAGE_KEY_JASON_SS_CLAIM_AGE  = 'cfo_scenario_jason_ss_claim_age'
+const STORAGE_KEY_JUSTIN_SS_CLAIM_AGE = 'cfo_scenario_justin_ss_claim_age'
 
 let _retAge   = 60
 let _ssTiming = 'early'
+let _jasonSsClaimAge  = null
+let _justinSsClaimAge = null
 const listeners = new Set()
+
+function _snapshot() {
+  return { retAge: _retAge, ssTiming: _ssTiming, jasonSsClaimAge: _jasonSsClaimAge, justinSsClaimAge: _justinSsClaimAge }
+}
 
 export function initScenarioFromStorage() {
   try {
@@ -26,23 +45,49 @@ export function initScenarioFromStorage() {
     // saved "delayed" selection silently failed validation and reverted to
     // the "early" default on every restart (external audit 2026-09-06).
     if (storedTiming === 'early' || storedTiming === 'delayed') _ssTiming = storedTiming
-  } catch { /* localStorage unavailable — default 60/early */ }
-  return { retAge: _retAge, ssTiming: _ssTiming }
+    const storedJason = parseInt(localStorage.getItem(STORAGE_KEY_JASON_SS_CLAIM_AGE))
+    if (!isNaN(storedJason)) _jasonSsClaimAge = storedJason
+    const storedJustin = parseInt(localStorage.getItem(STORAGE_KEY_JUSTIN_SS_CLAIM_AGE))
+    if (!isNaN(storedJustin)) _justinSsClaimAge = storedJustin
+  } catch { /* localStorage unavailable — default 60/early/null/null */ }
+  return _snapshot()
 }
 
 export function getRetAge()   { return _retAge }
 export function getSsTiming() { return _ssTiming }
+export function getJasonSsClaimAge()  { return _jasonSsClaimAge }
+export function getJustinSsClaimAge() { return _justinSsClaimAge }
 
 export function setRetAge(value) {
   _retAge = value
   try { localStorage.setItem(STORAGE_KEY_RET_AGE, String(value)) } catch { /* ignore */ }
-  listeners.forEach(fn => fn({ retAge: _retAge, ssTiming: _ssTiming }))
+  listeners.forEach(fn => fn(_snapshot()))
 }
 
 export function setSsTiming(value) {
   _ssTiming = value
   try { localStorage.setItem(STORAGE_KEY_SS_TIMING, value) } catch { /* ignore */ }
-  listeners.forEach(fn => fn({ retAge: _retAge, ssTiming: _ssTiming }))
+  listeners.forEach(fn => fn(_snapshot()))
+}
+
+// value=null clears the override (back to "no page-local override,
+// defer to Settings/legacy toggle").
+export function setJasonSsClaimAge(value) {
+  _jasonSsClaimAge = value
+  try {
+    if (value == null) localStorage.removeItem(STORAGE_KEY_JASON_SS_CLAIM_AGE)
+    else localStorage.setItem(STORAGE_KEY_JASON_SS_CLAIM_AGE, String(value))
+  } catch { /* ignore */ }
+  listeners.forEach(fn => fn(_snapshot()))
+}
+
+export function setJustinSsClaimAge(value) {
+  _justinSsClaimAge = value
+  try {
+    if (value == null) localStorage.removeItem(STORAGE_KEY_JUSTIN_SS_CLAIM_AGE)
+    else localStorage.setItem(STORAGE_KEY_JUSTIN_SS_CLAIM_AGE, String(value))
+  } catch { /* ignore */ }
+  listeners.forEach(fn => fn(_snapshot()))
 }
 
 export function subscribeScenario(fn) {

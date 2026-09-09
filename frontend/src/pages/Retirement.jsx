@@ -4,9 +4,11 @@ import TaskPanel from '../components/TaskPanel'
 import { BarChart, Bar, AreaChart, Area, XAxis, YAxis, Tooltip, Legend, ResponsiveContainer } from 'recharts'
 import { usePersonNames } from '../hooks/usePersonNames'
 import { useScenario } from '../hooks/useScenario'
+import { useSsAnchors } from '../hooks/useSsAnchors'
 import { nearestOf } from '../utils/scenario'
 import { isPrivacyMode, MASK_CURRENCY } from '../utils/privacy'
 import SecondEarnerNote from '../components/SecondEarnerNote'
+import ClaimAgeSlider from '../components/ClaimAgeSlider'
 
 const NAVY = '#5C7CE0' // was #1B3A6B — nearly the same luminance as the dark card background, effectively invisible
 
@@ -40,24 +42,34 @@ export default function Retirement({ onNavigate }) {
   const [data, setData]         = useState(null)
   const [loading, setLoading]   = useState(true)
   const [error, setError]       = useState(null)
-  const [hasCustomClaimAge, setHasCustomClaimAge] = useState(false)
-  const { retAge: sharedRetAge, ssTiming, setRetAge, setSsTiming } = useScenario()
+  const {
+    retAge: sharedRetAge, ssTiming, setRetAge, setSsTiming,
+    jasonSsClaimAge, justinSsClaimAge, setJasonSsClaimAge, setJustinSsClaimAge,
+  } = useScenario()
+  const ssAnchors = useSsAnchors()
   const retAge = nearestOf(sharedRetAge, RET_AGES)
+  // External audit follow-up, 2026-09-09 (CALCULATION_CONTRACT.md
+  // section 54): this page previously had NO claim-age control at all
+  // and just showed a banner pointing elsewhere -- the user's own
+  // request was "I want [claim age] on all the pages where I can pick
+  // what age I am taking it... so I should be able to vary that and
+  // run tests against it." get_retirement_projections deliberately
+  // does NOT fall back to the saved Settings value on its own (see its
+  // own docstring) to protect WhatIf.jsx's early/delayed-pair
+  // dependency, so this page's own slider below is the only way to
+  // see a custom claim age reflected here -- it's a genuine, explicit
+  // per-request override, not a read of the Settings value.
+  const hasOverride = jasonSsClaimAge != null || justinSsClaimAge != null
 
   useEffect(() => {
-    axios.get('/api/projections/retirement')
+    const params = {}
+    if (jasonSsClaimAge  != null) params.jason_ss_claim_age  = jasonSsClaimAge
+    if (justinSsClaimAge != null) params.justin_ss_claim_age = justinSsClaimAge
+    setLoading(true)
+    axios.get('/api/projections/retirement', { params })
       .then(r => { setData(r.data); setLoading(false) })
       .catch(e => { setError(e.response?.data?.detail || 'Could not load projections'); setLoading(false) })
-    // This page's own Early/Delayed toggle always shows those two
-    // scenarios (see main.py's get_retirement_projections comment,
-    // CALCULATION_CONTRACT.md section 50) — a saved claim age from
-    // Settings doesn't change this page, only Monte Carlo/Stress/SWR/
-    // Roth/Tax Efficiency/Survivor/Sequence Risk. Surface that split
-    // explicitly rather than let the toggle silently look ignored.
-    axios.get('/api/planning-inputs')
-      .then(r => setHasCustomClaimAge(r.data?.jason_ss_claim_age != null || r.data?.justin_ss_claim_age != null))
-      .catch(() => {})
-  }, [])
+  }, [jasonSsClaimAge, justinSsClaimAge])
 
   if (loading) return <div className="loading">Running projections...</div>
   if (error)   return (
@@ -69,7 +81,14 @@ export default function Retirement({ onNavigate }) {
     </div>
   )
 
-  const label = `age_${retAge}_${ssTiming}`
+  // With the override on, run_retirement_projection replaces the
+  // early/delayed pair with a single "custom" scenario per spouse
+  // resolution (CALCULATION_CONTRACT.md section 44) -- the label is
+  // still driven by Jason's own claim age specifically (section 52,
+  // finding 2), so "custom" only appears when Jason's slider is on;
+  // with only Justin's slider on, the label stays early/delayed as
+  // usual and Justin's own benefit is reflected within it.
+  const label = jasonSsClaimAge != null ? `age_${retAge}_custom` : `age_${retAge}_${ssTiming}`
   const s = data?.scenarios?.find(sc => sc.label === label)
   if (!s) return <div className="loading">No data for this scenario</div>
 
@@ -101,16 +120,8 @@ export default function Retirement({ onNavigate }) {
         <p className="section-sub" style={{ margin:0 }}>Three scenarios · Toggle SS timing · Modeled to age {s.retirement_end_age}</p>
       </div>
 
-      {hasCustomClaimAge && (
-        <div style={{ padding:'10px 14px', background:'var(--bg3)', borderRadius:8, marginBottom:20, fontSize:12, color:'var(--text2)' }}>
-          ℹ You've saved a specific Social Security claim age in Settings. It's used on Monte Carlo, Stress Tests,
-          SWR, Roth Conversion, Tax Efficiency, and Survivor Scenario — this page still uses the Take at 62 /
-          Wait until 67 toggle below.
-        </div>
-      )}
-
       {/* Scenario selector */}
-      <div style={{ display:'flex', gap:24, marginBottom:24, alignItems:'center', flexWrap:'wrap' }}>
+      <div style={{ display:'flex', gap:24, marginBottom:24, alignItems:'flex-start', flexWrap:'wrap' }}>
         <div>
           <div className="label" style={{ marginBottom:8 }}>Retirement Age</div>
           <div style={{ display:'flex', gap:6, flexWrap:'wrap' }}>
@@ -125,22 +136,70 @@ export default function Retirement({ onNavigate }) {
           </div>
         </div>
         <div>
-          <div className="label" style={{ marginBottom:8 }}>Social Security</div>
-          <div style={{ display:'flex', gap:6 }}>
+          <div className="label" style={{ marginBottom:8 }}>
+            Social Security{jasonSsClaimAge != null ? ' (using custom claim age below)' : ''}
+          </div>
+          <div style={{ display:'flex', gap:6, opacity: jasonSsClaimAge != null ? 0.5 : 1 }}>
             <button
               className={ssTiming === 'early' ? 'btn-primary' : 'btn-secondary'}
               onClick={() => setSsTiming('early')}
+              disabled={jasonSsClaimAge != null}
             >
               Take at 62{earlyScenario?.jason_ss_annual ? ` · ${fmt(earlyScenario.jason_ss_annual / 12)}/mo` : ''}
             </button>
             <button
               className={ssTiming === 'delayed' ? 'btn-primary' : 'btn-secondary'}
               onClick={() => setSsTiming('delayed')}
+              disabled={jasonSsClaimAge != null}
             >
               Wait until 67{delayedScenario?.jason_ss_annual ? ` · ${fmt(delayedScenario.jason_ss_annual / 12)}/mo` : ''}
             </button>
           </div>
         </div>
+      </div>
+
+      {/* Custom claim age (2026-09-09, CALCULATION_CONTRACT.md section
+          54): a page-local, ad hoc override that also carries to Monte
+          Carlo/Stress Tests/Roth Conversion/Survivor Scenario (shared
+          scenario state, same as retAge/ssTiming above). Unlike those
+          pages, this one's own claim age does NOT read from Settings
+          automatically -- it's only reflected here once this slider is
+          turned on. */}
+      <div className="card" style={{ marginBottom:24, padding:'16px 20px' }}>
+        <div className="label" style={{ marginBottom:8 }}>Custom Social Security Claim Age (62-70)</div>
+        <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:24 }}>
+          <ClaimAgeSlider
+            label={`${person1Name}'s claim age`}
+            claimAge={jasonSsClaimAge}
+            onChange={setJasonSsClaimAge}
+            benefit62={ssAnchors.jason.b62}
+            benefit67={ssAnchors.jason.b67}
+            benefit70={ssAnchors.jason.b70}
+            benefitType="worker"
+            offHint="off = use the Take at 62 / Wait until 67 toggle above"
+            compact
+          />
+          <ClaimAgeSlider
+            label={`${person2Name}'s claim age`}
+            claimAge={justinSsClaimAge}
+            onChange={setJustinSsClaimAge}
+            benefit62={ssAnchors.justin.b62}
+            benefit67={ssAnchors.justin.b67}
+            benefit70={ssAnchors.justin.b70}
+            benefitType="spousal"
+            checkEarlyAnchor
+            offHint="off = 50% of the toggle's own selected age above"
+            compact
+          />
+        </div>
+        {(ssAnchors.savedJasonClaimAge != null || ssAnchors.savedJustinClaimAge != null) && jasonSsClaimAge == null && justinSsClaimAge == null && (
+          <div style={{ marginTop:10, fontSize:11, color:'var(--text3)' }}>
+            ℹ You have a claim age saved in Settings ({person1Name}: {ssAnchors.savedJasonClaimAge ?? '—'},
+            {' '}{person2Name}: {ssAnchors.savedJustinClaimAge ?? '—'}) — it's used automatically on Monte Carlo,
+            Stress Tests, Roth Conversion, and Survivor Scenario, but not on this page unless you turn a slider
+            on above.
+          </div>
+        )}
       </div>
 
       {/* KPI row */}
@@ -197,7 +256,7 @@ export default function Retirement({ onNavigate }) {
           <div />
 
           <div style={{ color:'var(--text2)', fontSize:13 }}>
-            {person1Name} SS · starts at {s.jason_ss_start_age} ({ssTiming === 'early' ? 'early' : 'delayed'})
+            {person1Name} SS · starts at {s.jason_ss_start_age} ({jasonSsClaimAge != null ? `claimed at ${jasonSsClaimAge}` : ssTiming === 'early' ? 'early' : 'delayed'})
           </div>
           <div style={{ textAlign:'right', fontWeight:500 }}>{fmt(s.jason_ss_annual)}/yr</div>
           <div />

@@ -112,7 +112,18 @@ describe('Two-Age Roth Conversion', () => {
     let resolveFirst, resolveSecond
     const first  = new Promise(res => { resolveFirst = res })
     const second = new Promise(res => { resolveSecond = res })
-    axios.get.mockImplementationOnce(() => first).mockImplementationOnce(() => second)
+    // Filtered by URL, not raw call order (2026-09-09, CALCULATION_CONTRACT.md
+    // section 54): RothConversion.jsx now also fetches /api/planning-inputs
+    // once on mount for its own claim-age slider's anchor preview -- that
+    // call must resolve immediately and NOT consume one of the two
+    // sequenced roth-conversion slots below, or it silently reshapes which
+    // request "first"/"second" actually refer to depending on hook order.
+    let rothCallCount = 0
+    axios.get.mockImplementation(url => {
+      if (typeof url === 'string' && url.startsWith('/api/planning-inputs')) return Promise.resolve({ data: {} })
+      rothCallCount += 1
+      return rothCallCount === 1 ? first : second
+    })
 
     await act(async () => root.render(<RothConversion />))
     await flush()

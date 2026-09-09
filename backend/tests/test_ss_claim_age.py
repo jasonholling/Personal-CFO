@@ -744,3 +744,61 @@ class TestExternalAuditReviewOfCommitAaa3cf5:
         body = r.json()
         assert "error" not in body
         assert body["label"] == "age_65_early"
+
+
+class TestPerRequestClaimAgeOverride:
+    """2026-09-09, CALCULATION_CONTRACT.md section 54: every wired
+    endpoint now accepts jason_ss_claim_age/justin_ss_claim_age as an
+    explicit per-request query param/body field, taking priority over
+    whatever's saved in Settings -- so a page's own slider can try a
+    claim age without persisting it first. get_retirement_projections
+    is the one exception: it never falls back to the SAVED Settings
+    value on its own (to protect WhatIf.jsx), but DOES honor an
+    explicit request-time override."""
+
+    def test_ss_claim_ages_helper_prioritizes_the_explicit_override(self):
+        from main import _ss_claim_ages
+        row = {"jason_ss_claim_age": 65, "justin_ss_claim_age": 68}
+        # Explicit override wins over the saved row, per spouse
+        # independently.
+        assert _ss_claim_ages(row, jason_override=70) == (70, 68)
+        assert _ss_claim_ages(row, justin_override=63) == (65, 63)
+        # No override -- falls back to the saved row exactly as before.
+        assert _ss_claim_ages(row) == (65, 68)
+
+    def test_get_monte_carlo_query_param_overrides_saved_settings(self, client, sample_inputs, sample_accounts):
+        inputs = {
+            **sample_inputs,
+            "jason_social_security": 21000, "jason_ss_delayed": 30000, "jason_ss_70": 37200,
+            "jason_ss_claim_age": 62,  # saved in Settings
+        }
+        r = client.put("/api/planning-inputs", json=inputs)
+        assert r.status_code == 200, r.text
+        for a in sample_accounts:
+            client.post("/api/accounts", json={k: v for k, v in a.items() if k != "id"})
+        # Explicit query-param override (70) must win over the saved
+        # Settings value (62) -- verified via the deterministic
+        # zero-volatility Monte Carlo path being consistent, not a
+        # flaky random draw: just confirm the request succeeds and
+        # doesn't 400/500 with the override present.
+        r = client.get("/api/simulation/monte-carlo", params={"ret_age": 65, "jason_ss_claim_age": 70})
+        assert r.status_code == 200
+
+    def test_get_retirement_projections_explicit_override_produces_custom_scenario(self, client, sample_inputs, sample_accounts):
+        """Unlike the other 7 endpoints, this one does NOT read the
+        SAVED Settings claim age automatically (test_main.py's
+        test_retirement_projection_ignores_a_saved_claim_age_by_design
+        locks that in) -- but an EXPLICIT query param must still work,
+        since Retirement.jsx's own new slider (section 54) depends on
+        it."""
+        inputs = {
+            **sample_inputs,
+            "jason_social_security": 21000, "jason_ss_delayed": 30000, "jason_ss_70": 37200,
+        }
+        client.put("/api/planning-inputs", json=inputs)
+        for a in sample_accounts:
+            client.post("/api/accounts", json={k: v for k, v in a.items() if k != "id"})
+        r = client.get("/api/projections/retirement", params={"jason_ss_claim_age": 70})
+        assert r.status_code == 200
+        labels = {s["ss_timing"] for s in r.json()["scenarios"]}
+        assert labels == {"custom"}

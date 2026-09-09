@@ -2,10 +2,12 @@ import { useEffect, useState } from 'react'
 import axios from 'axios'
 import { useScenario } from '../hooks/useScenario'
 import { usePersonNames } from '../hooks/usePersonNames'
+import { SS_ANCHORS_DEFAULTS, ssAnchorsFromPlanningInputs } from '../hooks/useSsAnchors'
 import { isPrivacyMode, MASK_CURRENCY } from '../utils/privacy'
 import WhatIf from './WhatIf'
 import { MonteCarloSection, StressTestSection, RET_AGES, SS_OPTS } from './Simulation'
 import SecondEarnerNote from '../components/SecondEarnerNote'
+import ClaimAgeSlider from '../components/ClaimAgeSlider'
 
 const fmt = (n) => isPrivacyMode() ? MASK_CURRENCY : (n == null ? '—' : new Intl.NumberFormat('en-US', { style:'currency', currency:'USD', maximumFractionDigits:0 }).format(n))
 const GREEN = '#34d399'
@@ -26,7 +28,7 @@ const TABS = [
   { id:'survivor',    label:'Survivor Scenario' },
 ]
 
-function SurvivorScenarioSection({ retAge }) {
+function SurvivorScenarioSection({ retAge, jasonSsClaimAge, justinSsClaimAge, setJasonSsClaimAge, setJustinSsClaimAge, ssAnchors }) {
   const { person1Name, person2Name } = usePersonNames()
   const [deceased, setDeceased] = useState('jason')
   const [ages, setAges] = useState(null)
@@ -69,7 +71,15 @@ function SurvivorScenarioSection({ retAge }) {
   const run = () => {
     setLoading(true)
     axios.get('/api/simulation/survivor-scenario', {
-      params: { ret_age: retAge, deceased, death_age: deathAge, survivor_need_factor: needFactor / 100 },
+      params: {
+        ret_age: retAge, deceased, death_age: deathAge, survivor_need_factor: needFactor / 100,
+        // External audit follow-up, 2026-09-09 (CALCULATION_CONTRACT.md
+        // section 54): explicit per-request claim age, same as Monte
+        // Carlo/Historical Stress above -- omitted entirely when unset
+        // so the backend's own fallback to saved Settings still applies.
+        ...(jasonSsClaimAge  != null ? { jason_ss_claim_age: jasonSsClaimAge } : {}),
+        ...(justinSsClaimAge != null ? { justin_ss_claim_age: justinSsClaimAge } : {}),
+      },
     }).then(r => setResult(r.data)).finally(() => setLoading(false))
   }
 
@@ -81,6 +91,35 @@ function SurvivorScenarioSection({ retAge }) {
         Social Security switches to the higher of the two benefits (not both), and living costs scale down.
         It doesn't model the tax-bracket jump from filing jointly to filing single — a real added drag not
         captured here.
+      </div>
+
+      <div className="card" style={{ marginBottom:24 }}>
+        <div className="label" style={{ marginBottom:8 }}>Custom Social Security Claim Age (62-70)</div>
+        <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:24, marginBottom:16 }}>
+          <ClaimAgeSlider
+            label={`${person1Name}'s claim age`}
+            claimAge={jasonSsClaimAge}
+            onChange={setJasonSsClaimAge}
+            benefit62={ssAnchors.jason.b62}
+            benefit67={ssAnchors.jason.b67}
+            benefit70={ssAnchors.jason.b70}
+            benefitType="worker"
+            offHint="off = use whatever's saved in Settings, if anything"
+            compact
+          />
+          <ClaimAgeSlider
+            label={`${person2Name}'s claim age`}
+            claimAge={justinSsClaimAge}
+            onChange={setJustinSsClaimAge}
+            benefit62={ssAnchors.justin.b62}
+            benefit67={ssAnchors.justin.b67}
+            benefit70={ssAnchors.justin.b70}
+            benefitType="spousal"
+            checkEarlyAnchor
+            offHint="off = use whatever's saved in Settings, if anything"
+            compact
+          />
+        </div>
       </div>
 
       <div className="card" style={{ marginBottom:24 }}>
@@ -185,7 +224,11 @@ function SurvivorScenarioSection({ retAge }) {
 
 export default function StressTestWhatIf({ onNavigate }) {
   const { person1Name, person2Name } = usePersonNames()
-  const { retAge, ssTiming, setRetAge, setSsTiming } = useScenario()
+  const {
+    retAge, ssTiming, setRetAge, setSsTiming,
+    jasonSsClaimAge, justinSsClaimAge, setJasonSsClaimAge, setJustinSsClaimAge,
+  } = useScenario()
+  const [ssAnchors, setSsAnchors] = useState(SS_ANCHORS_DEFAULTS)
   const [tab, setTab] = useState('whatif')
   // The What-If Builder reports its current slider state up here as it
   // changes, so switching to Monte Carlo/Historical Stress can pass the
@@ -248,12 +291,23 @@ export default function StressTestWhatIf({ onNavigate }) {
   // info note rather than an "overridden" warning, since nothing about
   // these buttons' behavior actually changed in that case.
   const [savedClaimAges, setSavedClaimAges] = useState({ jason: null, justin: null })
-  const jasonOverridden  = savedClaimAges.jason  != null
-  const justinOverridden = savedClaimAges.justin != null
+  // External audit follow-up, 2026-09-09 (CALCULATION_CONTRACT.md
+  // section 54): this page now also has its OWN claim-age sliders
+  // (jasonSsClaimAge/justinSsClaimAge, shared scenario state) -- an
+  // "effective" claim age is whichever one actually reaches the
+  // backend: this page's own slider if set, else whatever's saved in
+  // Settings. The override note below needs to say WHICH source is
+  // driving it, not just that Jason/Justin is overridden.
+  const effectiveJason  = jasonSsClaimAge  ?? savedClaimAges.jason
+  const effectiveJustin = justinSsClaimAge ?? savedClaimAges.justin
+  const jasonOverridden  = effectiveJason  != null
+  const justinOverridden = effectiveJustin != null
   const anyOverridden = jasonOverridden || justinOverridden
+  const jasonSource  = jasonSsClaimAge  != null ? 'set on this page' : 'saved in Settings'
+  const justinSource = justinSsClaimAge != null ? 'set on this page' : 'saved in Settings'
   const overrideNote = jasonOverridden
-    ? `These buttons have no effect right now — ${person1Name}'s Social Security claim age (${savedClaimAges.jason}) is saved in Settings and controls ${person1Name}'s benefit regardless of this toggle. (This toggle only ever affects ${person1Name}'s SS, not ${person2Name}'s.)`
-    : `${person2Name}'s Social Security claim age (${savedClaimAges.justin}) is saved in Settings, fixing ${person2Name}'s benefit at that age. These buttons still work normally for ${person1Name}'s SS as usual — they were never connected to ${person2Name}'s.`
+    ? `These buttons have no effect right now — ${person1Name}'s Social Security claim age (${effectiveJason}, ${jasonSource}) controls ${person1Name}'s benefit regardless of this toggle. (This toggle only ever affects ${person1Name}'s SS, not ${person2Name}'s.)`
+    : `${person2Name}'s Social Security claim age (${effectiveJustin}, ${justinSource}) fixes ${person2Name}'s benefit at that age. These buttons still work normally for ${person1Name}'s SS as usual — they were never connected to ${person2Name}'s.`
 
   return (
     <div>
@@ -298,6 +352,43 @@ export default function StressTestWhatIf({ onNavigate }) {
         </div>
       )}
 
+      {/* Custom claim age (2026-09-09, CALCULATION_CONTRACT.md section
+          54): shared jasonSsClaimAge/justinSsClaimAge scenario state,
+          same in single-axis and two-age mode -- resolve_ss_claim_ages
+          applies identically either way (section 48). Carries over to
+          Retirement.jsx and RothConversion.jsx too, since all three
+          read the same shared state. */}
+      {(tab === 'monte_carlo' || tab === 'stress') && (
+        <div className="card" style={{ marginBottom:20, padding:'16px 20px' }}>
+          <div className="label" style={{ marginBottom:8 }}>Custom Social Security Claim Age (62-70)</div>
+          <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:24 }}>
+            <ClaimAgeSlider
+              label={`${person1Name}'s claim age`}
+              claimAge={jasonSsClaimAge}
+              onChange={setJasonSsClaimAge}
+              benefit62={ssAnchors.jason.b62}
+              benefit67={ssAnchors.jason.b67}
+              benefit70={ssAnchors.jason.b70}
+              benefitType="worker"
+              offHint="off = use whatever's saved in Settings, if anything"
+              compact
+            />
+            <ClaimAgeSlider
+              label={`${person2Name}'s claim age`}
+              claimAge={justinSsClaimAge}
+              onChange={setJustinSsClaimAge}
+              benefit62={ssAnchors.justin.b62}
+              benefit67={ssAnchors.justin.b67}
+              benefit70={ssAnchors.justin.b70}
+              benefitType="spousal"
+              checkEarlyAnchor
+              offHint="off = use whatever's saved in Settings, if anything"
+              compact
+            />
+          </div>
+        </div>
+      )}
+
       {/* What-If Builder has its own full 55-67 retirement-age slider, and
           Survivor Scenario has its own controls, so the coarse retAge/
           ssTiming selector below is only shown for Monte Carlo/Historical
@@ -321,7 +412,7 @@ export default function StressTestWhatIf({ onNavigate }) {
           </div>
           <div>
             <div className="label" style={{ marginBottom:8 }}>
-              Social Security{jasonOverridden ? ' (overridden by Settings)' : ''}
+              Social Security{jasonOverridden ? (jasonSsClaimAge != null ? ' (overridden below)' : ' (overridden by Settings)') : ''}
             </div>
             <div style={{ display:'flex', gap:6 }}>
               {SS_OPTS.map(o => (
@@ -336,7 +427,7 @@ export default function StressTestWhatIf({ onNavigate }) {
       )}
       {tab !== 'whatif' && tab !== 'survivor' && !twoAgeMode && anyOverridden && (
         <div style={{ padding:'8px 14px', background:'var(--bg3)', borderRadius:8, marginBottom:20, fontSize:12, color:'var(--text2)' }}>
-          ℹ {overrideNote}{jasonOverridden ? ' Change or clear it on the Settings page instead.' : ''}
+          ℹ {overrideNote}{jasonOverridden ? (jasonSsClaimAge != null ? ' Change or clear it in the slider below instead.' : ' Change or clear it on the Settings page instead.') : ''}
         </div>
       )}
       {tab !== 'whatif' && tab !== 'survivor' && twoAgeMode && (
@@ -358,7 +449,7 @@ export default function StressTestWhatIf({ onNavigate }) {
               persists AND stays user-editable across the mode switch. */}
           <div>
             <div className="label" style={{ marginBottom:8 }}>
-              Social Security{jasonOverridden ? ' (overridden by Settings)' : ''}
+              Social Security{jasonOverridden ? (jasonSsClaimAge != null ? ' (overridden below)' : ' (overridden by Settings)') : ''}
             </div>
             <div style={{ display:'flex', gap:6 }}>
               {SS_OPTS.map(o => (
@@ -378,21 +469,29 @@ export default function StressTestWhatIf({ onNavigate }) {
           way as single-axis). */}
       {tab !== 'whatif' && tab !== 'survivor' && twoAgeMode && anyOverridden && (
         <div style={{ padding:'8px 14px', background:'var(--bg3)', borderRadius:8, marginBottom:20, fontSize:12, color:'var(--text2)' }}>
-          ℹ {overrideNote}{jasonOverridden ? ' Change or clear it on the Settings page instead.' : ''}
+          ℹ {overrideNote}{jasonOverridden ? (jasonSsClaimAge != null ? ' Change or clear it in the slider below instead.' : ' Change or clear it on the Settings page instead.') : ''}
         </div>
       )}
 
       <div hidden={tab !== 'whatif'}>
         <WhatIf onNavigate={onNavigate} onAssumptionsChange={setWhatIfAssumptions}
-                onSettingsLoaded={d => setSavedClaimAges({ jason: d?.jason_ss_claim_age ?? null, justin: d?.justin_ss_claim_age ?? null })} />
+                onSettingsLoaded={d => {
+                  setSavedClaimAges({ jason: d?.jason_ss_claim_age ?? null, justin: d?.justin_ss_claim_age ?? null })
+                  setSsAnchors(ssAnchorsFromPlanningInputs(d))
+                }} />
       </div>
       {tab === 'monte_carlo' && <MonteCarloSection retAge={retAge} ssTiming={ssTiming} overrides={whatIfAssumptions}
                                                      jasonRetAge={twoAgeMode ? jasonRetAge : null}
-                                                     justinRetAge={twoAgeMode ? justinRetAge : null} />}
+                                                     justinRetAge={twoAgeMode ? justinRetAge : null}
+                                                     jasonSsClaimAge={jasonSsClaimAge} justinSsClaimAge={justinSsClaimAge} />}
       {tab === 'stress'      && <StressTestSection retAge={retAge} ssTiming={ssTiming} overrides={whatIfAssumptions}
                                                      jasonRetAge={twoAgeMode ? jasonRetAge : null}
-                                                     justinRetAge={twoAgeMode ? justinRetAge : null} />}
-      {tab === 'survivor'    && <SurvivorScenarioSection retAge={retAge} />}
+                                                     justinRetAge={twoAgeMode ? justinRetAge : null}
+                                                     jasonSsClaimAge={jasonSsClaimAge} justinSsClaimAge={justinSsClaimAge} />}
+      {tab === 'survivor'    && <SurvivorScenarioSection retAge={retAge}
+                                                     jasonSsClaimAge={jasonSsClaimAge} justinSsClaimAge={justinSsClaimAge}
+                                                     setJasonSsClaimAge={setJasonSsClaimAge} setJustinSsClaimAge={setJustinSsClaimAge}
+                                                     ssAnchors={ssAnchors} />}
     </div>
   )
 }

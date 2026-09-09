@@ -75,7 +75,7 @@ const CustomTooltip = ({ active, payload, label, person1Name }) => {
 // previously switching to this tab always discarded whatever the What-If
 // Builder had just been changed to (external audit 2026-09-06). The
 // Companion results receive the same overrides, age, and claiming timing.
-export function MonteCarloSection({ retAge, ssTiming, overrides, jasonRetAge, justinRetAge }) {
+export function MonteCarloSection({ retAge, ssTiming, overrides, jasonRetAge, justinRetAge, jasonSsClaimAge, justinSsClaimAge }) {
   const { person1Name, person2Name } = usePersonNames()
   const [data, setData]         = useState(null)
   const [swr, setSwr]           = useState(null)
@@ -102,7 +102,19 @@ export function MonteCarloSection({ retAge, ssTiming, overrides, jasonRetAge, ju
   useEffect(() => {
     genRef.current++
     setData(null); setSwr(null); setIncSrc(null); setError(null); setLoading(false)
-  }, [retAge, ssTiming, overrides, jasonRetAge, justinRetAge])
+  }, [retAge, ssTiming, overrides, jasonRetAge, justinRetAge, jasonSsClaimAge, justinSsClaimAge])
+
+  // External audit follow-up, 2026-09-09 (CALCULATION_CONTRACT.md
+  // section 54): jasonSsClaimAge/justinSsClaimAge are an explicit
+  // per-request claim age -- when unset (null), every backend call
+  // below already falls back to whatever's saved in Settings via its
+  // own 3-tier resolution, so omitting these keys entirely (not
+  // sending `null`) preserves that exact fallback rather than
+  // overriding it with an explicit null.
+  const ssClaimAgeParams = {
+    ...(jasonSsClaimAge  != null ? { jason_ss_claim_age: jasonSsClaimAge } : {}),
+    ...(justinSsClaimAge != null ? { justin_ss_claim_age: justinSsClaimAge } : {}),
+  }
 
   const run = () => {
     const gen = ++genRef.current
@@ -122,8 +134,8 @@ export function MonteCarloSection({ retAge, ssTiming, overrides, jasonRetAge, ju
       // two-age mode) is actually populated instead of permanently
       // showing "Run simulation to calculate".
       Promise.all([
-        axios.post('/api/simulation/monte-carlo', { ...overrides, ss_timing: ssTiming, jason_ret_age: jasonRetAge, justin_ret_age: justinRetAge }),
-        axios.post('/api/simulation/swr', { ...overrides, ss_timing: ssTiming, jason_ret_age: jasonRetAge, justin_ret_age: justinRetAge }),
+        axios.post('/api/simulation/monte-carlo', { ...overrides, ...ssClaimAgeParams, ss_timing: ssTiming, jason_ret_age: jasonRetAge, justin_ret_age: justinRetAge }),
+        axios.post('/api/simulation/swr', { ...overrides, ...ssClaimAgeParams, ss_timing: ssTiming, jason_ret_age: jasonRetAge, justin_ret_age: justinRetAge }),
       ]).then(([mc, sw]) => {
           if (gen !== genRef.current) return
           setData(mc.data)
@@ -137,12 +149,12 @@ export function MonteCarloSection({ retAge, ssTiming, overrides, jasonRetAge, ju
       return
     }
     const mcCall = overrides
-      ? axios.post('/api/simulation/monte-carlo', { ...overrides, ret_age: retAge, ss_timing: ssTiming })
-      : axios.get(`/api/simulation/monte-carlo?ret_age=${retAge}&ss_timing=${ssTiming}`)
+      ? axios.post('/api/simulation/monte-carlo', { ...overrides, ...ssClaimAgeParams, ret_age: retAge, ss_timing: ssTiming })
+      : axios.get('/api/simulation/monte-carlo', { params: { ret_age: retAge, ss_timing: ssTiming, ...ssClaimAgeParams } })
     Promise.all([
       mcCall,
-      axios.post('/api/simulation/swr', { ...overrides, ret_age: retAge, ss_timing: ssTiming }),
-      axios.post('/api/retirement/income-sources', { ...overrides, ret_age: retAge, ss_timing: ssTiming })
+      axios.post('/api/simulation/swr', { ...overrides, ...ssClaimAgeParams, ret_age: retAge, ss_timing: ssTiming }),
+      axios.post('/api/retirement/income-sources', { ...overrides, ...ssClaimAgeParams, ret_age: retAge, ss_timing: ssTiming })
     ]).then(([mc, sw, inc]) => {
       if (gen !== genRef.current) return // stale — selection changed or a newer run superseded this one
       setData(mc.data)
@@ -357,7 +369,7 @@ export function MonteCarloSection({ retAge, ssTiming, overrides, jasonRetAge, ju
 // ── Stress tests section ──────────────────────────────────────────────────────
 // `overrides`: see MonteCarloSection's comment above — same What-If
 // Builder wiring, including Roth and contribution comparisons.
-export function StressTestSection({ retAge, ssTiming, overrides, jasonRetAge, justinRetAge }) {
+export function StressTestSection({ retAge, ssTiming, overrides, jasonRetAge, justinRetAge, jasonSsClaimAge, justinSsClaimAge }) {
   const { person1Name, person2Name } = usePersonNames()
   const [data, setData]       = useState(null)
   const [roth, setRoth]       = useState(null)
@@ -373,8 +385,14 @@ export function StressTestSection({ retAge, ssTiming, overrides, jasonRetAge, ju
   useEffect(() => {
     genRef.current++
     setData(null); setRoth(null); setContrib(null); setError(null); setLoading(false)
-  }, [retAge, ssTiming, overrides, jasonRetAge, justinRetAge])
+  }, [retAge, ssTiming, overrides, jasonRetAge, justinRetAge, jasonSsClaimAge, justinSsClaimAge])
   const [active, setActive]   = useState('crash_2008')
+
+  // See MonteCarloSection's identical comment (2026-09-09, section 54).
+  const ssClaimAgeParams = {
+    ...(jasonSsClaimAge  != null ? { jason_ss_claim_age: jasonSsClaimAge } : {}),
+    ...(justinSsClaimAge != null ? { justin_ss_claim_age: justinSsClaimAge } : {}),
+  }
 
   const run = () => {
     const gen = ++genRef.current
@@ -384,7 +402,7 @@ export function StressTestSection({ retAge, ssTiming, overrides, jasonRetAge, ju
     if (twoAge) {
       // See MonteCarloSection's identical comment above -- POST with
       // ss_timing/overrides threaded through instead of the plain GET.
-      axios.post('/api/simulation/stress-tests', { ...overrides, ss_timing: ssTiming, jason_ret_age: jasonRetAge, justin_ret_age: justinRetAge })
+      axios.post('/api/simulation/stress-tests', { ...overrides, ...ssClaimAgeParams, ss_timing: ssTiming, jason_ret_age: jasonRetAge, justin_ret_age: justinRetAge })
         .then(st => {
           if (gen !== genRef.current) return
           setData(st.data)
@@ -397,11 +415,11 @@ export function StressTestSection({ retAge, ssTiming, overrides, jasonRetAge, ju
       return
     }
     const stCall = overrides
-      ? axios.post('/api/simulation/stress-tests', { ...overrides, ret_age: retAge, ss_timing: ssTiming })
-      : axios.get(`/api/simulation/stress-tests?ret_age=${retAge}&ss_timing=${ssTiming}`)
+      ? axios.post('/api/simulation/stress-tests', { ...overrides, ...ssClaimAgeParams, ret_age: retAge, ss_timing: ssTiming })
+      : axios.get('/api/simulation/stress-tests', { params: { ret_age: retAge, ss_timing: ssTiming, ...ssClaimAgeParams } })
     Promise.all([
       stCall,
-      axios.post('/api/simulation/roth-conversion', { ...overrides, ret_age: retAge, ss_timing: ssTiming }),
+      axios.post('/api/simulation/roth-conversion', { ...overrides, ...ssClaimAgeParams, ret_age: retAge, ss_timing: ssTiming }),
       axios.post('/api/simulation/contribution-sensitivity', { ...overrides, ret_age: retAge, ss_timing: ssTiming })
     ]).then(([st, rc, cs]) => {
       if (gen !== genRef.current) return // stale — selection changed or a newer run superseded this one

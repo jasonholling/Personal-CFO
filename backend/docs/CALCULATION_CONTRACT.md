@@ -4763,3 +4763,99 @@ changed — full backend suite not re-run for this frontend-only wording
 fix.
 
 Branch: `codex/ss-claim-age`, pushed — **not merged to `main`**.
+
+## 54. Social Security claiming age 62-70 — per-page interactive sliders (2026-09-09, on `main`)
+
+Follow-up to the merged feature (sections 44-53): the claim-age slider
+previously lived ONLY in Settings, applying automatically wherever the
+7 wired endpoints already read the saved value. Per the user's own
+request ("I want on all the pages where I can pick what age I am
+taking it... so I should be able to vary that and run tests against
+it"), every page that already has an Early/Delayed SS-timing toggle
+now also has its own interactive claim-age slider(s), letting a
+household try a claim age ad hoc without saving it to Settings first.
+
+**Backend — explicit per-request override, layered on top of the
+existing 3-tier resolution.** `main.py`'s `_ss_claim_ages(inputs_row)`
+helper gained `jason_override`/`justin_override` parameters:
+`jason_override if jason_override is not None else inputs_row.get(...)`
+— an explicit per-request value wins, falling back to the saved
+Settings value exactly as before when omitted. All 10 call sites (the
+7 already-wired endpoints' GET/POST variants: Monte Carlo, Stress
+Tests, SWR, Roth Conversion, Tax Efficiency, Survivor Scenario,
+Sequence Risk, plus the income-sources chart) now accept
+`jason_ss_claim_age`/`justin_ss_claim_age` as query params (GET) or
+body fields (POST/GET-with-body), threading them through to
+`_ss_claim_ages`. Omitting them (as every existing caller still does)
+is byte-for-byte the same as before this change.
+
+**`get_retirement_projections` is the one deliberate exception**: it
+does NOT fall back to the saved Settings value on its own (see its own
+docstring, section 50) — WhatIf.jsx's hardcoded `age_X_early` label
+lookups have no claim-age awareness and would silently break the
+moment this endpoint auto-applied a saved claim age. It DOES now
+accept an explicit `jason_ss_claim_age`/`justin_ss_claim_age` query
+param, which Retirement.jsx's own new slider passes when turned on;
+WhatIf.jsx never sends these params, so it's completely unaffected.
+
+**Frontend — shared scenario state + a shared, reusable slider
+component.**
+- `utils/scenario.js`/`hooks/useScenario.js`: gained
+  `jasonSsClaimAge`/`justinSsClaimAge` (nullable) alongside the
+  existing `retAge`/`ssTiming`, persisted to localStorage the same
+  way — picking "Jason at 68" on Monte Carlo carries over to
+  Historical Stress, Roth Conversion, Survivor Scenario, and
+  Retirement.jsx without re-entering it. `null` means "no page-local
+  override," which still correctly falls through to the saved
+  Settings value via the backend's own resolution — this state is
+  purely an ADDITIONAL, temporary override on top, never a replacement
+  for what's saved in Settings.
+- `components/ClaimAgeSlider.jsx`: the checkbox+slider+live-preview
+  control, extracted from Settings.jsx's own local copy (which now
+  imports this instead) so it can render inline on any page. Same
+  finding-2/finding-6 protections as the Settings original (missing-
+  anchor estimate warning, spousal-benefit scope note).
+- `hooks/useSsAnchors.js`: shared fetch of the anchor fields
+  (`jason_social_security`/`jason_ss_delayed`/`jason_ss_70`/etc.) for
+  the slider's live "benefit at this age" preview. Exports
+  `ssAnchorsFromPlanningInputs(d)` separately so a page that already
+  fetches `/api/planning-inputs` for another reason can derive the
+  same shape WITHOUT a second fetch — StressTestWhatIf.jsx reuses
+  WhatIf.jsx's own single fetch this way. A second, independent fetch
+  broke `ScenarioFlow.test.jsx`'s "exactly one `/api/planning-inputs`
+  call across a tab-switch flow" invariant on the first attempt here
+  (the same failure mode section 51's finding 5 fix had already hit
+  once before it was caught) — caught immediately by `npm test` and
+  fixed by reusing the existing fetch instead.
+
+**Pages wired**: Retirement.jsx (two sliders, replacing the old
+"doesn't apply here" banner with a real control; the Early/Delayed
+toggle disables itself while Jason's slider is on, since it has no
+effect once the response is the single "custom" scenario);
+StressTestWhatIf.jsx's Monte Carlo, Historical Stress, and Survivor
+Scenario tabs (one shared slider pair for Monte Carlo/Stress, since
+they share the same `ssTiming`/retAge selector already; Survivor gets
+its own since it has independent controls); RothConversion.jsx (one
+slider pair). The override-banner logic on StressTestWhatIf.jsx
+(section 53) was extended to track an "effective" claim age (this
+page's own slider if set, else Settings) and name which source is
+driving it, rather than only knowing about Settings.
+
+**Deliberately NOT wired**: SideBySide.jsx (hardcodes `ss_timing=early`
+with no existing toggle to extend — out of scope per the user's own
+framing, "pages where I can pick what age I am taking it") and
+SavedScenarios.jsx (bound to `save_scenario`'s binary early/delayed
+contract for a NAMED, persisted scenario, not a live simulation to
+"run tests against" — extending that contract to a continuous claim
+age is a separate, larger redesign, not just adding a slider).
+
+New tests: 3 in `tests/test_ss_claim_age.py`
+(`TestPerRequestClaimAgeOverride`) covering `_ss_claim_ages`'s
+override-priority unit behavior, an explicit query-param override on
+Monte Carlo, and `get_retirement_projections`'s explicit-override-only
+contract. Full backend suite: 1351 passed, coverage 97.45% (95%
+floor). Sensitive-data check passed. Frontend: `npm test` 39/39 (one
+existing RothConversion.test.jsx test updated to filter its
+call-order assertions by URL instead of raw call order, since this
+page now also fetches `/api/planning-inputs` once on mount for its own
+slider's anchor preview), `npm run build` clean.

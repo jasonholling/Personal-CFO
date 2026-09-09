@@ -6,7 +6,9 @@ import {
 import { isPrivacyMode, MASK_CURRENCY } from '../utils/privacy'
 import { useScenario } from '../hooks/useScenario'
 import { usePersonNames } from '../hooks/usePersonNames'
+import { useSsAnchors } from '../hooks/useSsAnchors'
 import SecondEarnerNote from '../components/SecondEarnerNote'
+import ClaimAgeSlider from '../components/ClaimAgeSlider'
 
 const fmt  = (n) => isPrivacyMode() ? MASK_CURRENCY : (n == null ? '—' : new Intl.NumberFormat('en-US',{style:'currency',currency:'USD',maximumFractionDigits:0}).format(n))
 const fmtK = (n) => isPrivacyMode() ? MASK_CURRENCY : (n == null ? '—' : Math.abs(n)>=1000000?`$${(n/1000000).toFixed(2)}M`:`$${(n/1000).toFixed(0)}K`)
@@ -53,8 +55,12 @@ const ChartTip = ({ active, payload, label }) => {
 // keeps this page on its existing single-age ret_age/ssTiming behavior,
 // completely unaffected.
 export default function RothConversion() {
-  const { retAge, ssTiming, setRetAge, setSsTiming } = useScenario()
+  const {
+    retAge, ssTiming, setRetAge, setSsTiming,
+    jasonSsClaimAge, justinSsClaimAge, setJasonSsClaimAge, setJustinSsClaimAge,
+  } = useScenario()
   const { person1Name, person2Name } = usePersonNames()
+  const ssAnchors = useSsAnchors()
   const [data, setData]         = useState(null)
   const [loading, setLoading]   = useState(true)
   const [twoAgeMode, setTwoAgeMode]   = useState(false)
@@ -72,19 +78,28 @@ export default function RothConversion() {
   // incorrectly after a mode switch had already superseded it).
   const genRef = useRef(0)
 
+  // External audit follow-up, 2026-09-09 (CALCULATION_CONTRACT.md
+  // section 54): see MonteCarloSection's identical comment in
+  // Simulation.jsx -- omit the key entirely when unset so the
+  // backend's own fallback to the saved Settings value still applies.
+  const ssClaimAgeParams = {
+    ...(jasonSsClaimAge  != null ? { jason_ss_claim_age: jasonSsClaimAge } : {}),
+    ...(justinSsClaimAge != null ? { justin_ss_claim_age: justinSsClaimAge } : {}),
+  }
+
   useEffect(() => {
     const gen = ++genRef.current
     setLoading(true)
     const request = twoAgeMode
       ? axios.post('/api/simulation/roth-conversion', {
-          ss_timing: ssTiming, jason_ret_age: jasonRetAge, justin_ret_age: justinRetAge,
+          ...ssClaimAgeParams, ss_timing: ssTiming, jason_ret_age: jasonRetAge, justin_ret_age: justinRetAge,
         })
-      : axios.get(`/api/simulation/roth-conversion?ret_age=${retAge}&ss_timing=${ssTiming}`)
+      : axios.get('/api/simulation/roth-conversion', { params: { ret_age: retAge, ss_timing: ssTiming, ...ssClaimAgeParams } })
     request
       .then(r => { if (gen === genRef.current) setData(r.data) })
       .catch(() => { if (gen === genRef.current) setData(null) })
       .finally(() => { if (gen === genRef.current) setLoading(false) })
-  }, [retAge, ssTiming, twoAgeMode, jasonRetAge, justinRetAge])
+  }, [retAge, ssTiming, twoAgeMode, jasonRetAge, justinRetAge, jasonSsClaimAge, justinSsClaimAge])
 
   // SecondEarnerNote's amount/years/personLabel differ by mode, same
   // convention Simulation.jsx's own secondEarnerNoteProps already uses
@@ -124,6 +139,39 @@ export default function RothConversion() {
           onClick={() => setTwoAgeMode(m => !m)}
           style={{ fontSize:12 }}
         >{twoAgeMode ? '✓ Two-Age Mode' : 'Use Two Independent Retirement Ages'}</button>
+      </div>
+
+      {/* Custom claim age (2026-09-09, CALCULATION_CONTRACT.md section
+          54): shared jasonSsClaimAge/justinSsClaimAge scenario state --
+          same values carry over from/to Retirement.jsx, Monte Carlo,
+          Historical Stress, and Survivor Scenario. */}
+      <div className="card" style={{ marginBottom:20, padding:'16px 20px' }}>
+        <div className="label" style={{ marginBottom:8 }}>Custom Social Security Claim Age (62-70)</div>
+        <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:24 }}>
+          <ClaimAgeSlider
+            label={`${person1Name}'s claim age`}
+            claimAge={jasonSsClaimAge}
+            onChange={setJasonSsClaimAge}
+            benefit62={ssAnchors.jason.b62}
+            benefit67={ssAnchors.jason.b67}
+            benefit70={ssAnchors.jason.b70}
+            benefitType="worker"
+            offHint="off = use whatever's saved in Settings, if anything"
+            compact
+          />
+          <ClaimAgeSlider
+            label={`${person2Name}'s claim age`}
+            claimAge={justinSsClaimAge}
+            onChange={setJustinSsClaimAge}
+            benefit62={ssAnchors.justin.b62}
+            benefit67={ssAnchors.justin.b67}
+            benefit70={ssAnchors.justin.b70}
+            benefitType="spousal"
+            checkEarlyAnchor
+            offHint="off = use whatever's saved in Settings, if anything"
+            compact
+          />
+        </div>
       </div>
 
       {/* Scenario controls */}

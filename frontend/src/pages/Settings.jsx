@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react'
 import axios from 'axios'
 import { usePrivacyMode } from '../hooks/usePrivacyMode'
-import { ssBenefitForClaimAge, SS_CLAIM_AGE_MIN, SS_CLAIM_AGE_MAX, SS_FRA_AGE } from '../utils/ssBenefit'
+import ClaimAgeSlider from '../components/ClaimAgeSlider'
 
 const Section = ({ title, children }) => (
   <div className="card" style={{ marginBottom:20 }}>
@@ -37,79 +37,6 @@ const NumInput = ({ value, onChange, prefix='', suffix='', pct=false, style={} }
 const TextInput = ({ value, onChange, style={} }) => (
   <input type="text" value={value ?? ''} onChange={e => onChange(e.target.value)} style={{ width:160, textAlign:'right', ...style }} />
 )
-
-// CALCULATION_CONTRACT.md section 44/49 (SS claiming age 62-70, sixth
-// milestone): a household can leave this off entirely (claimAge stays
-// null/undefined) and keep the existing app-wide early(62)/delayed(67)
-// toggle everywhere else — resolve_ss_claim_ages on the backend treats
-// an unset claim age as "use the legacy ss_timing default", so this
-// control is purely additive. Once set, the saved claim age here wins
-// over that toggle on every page (CALCULATION_CONTRACT.md section 49,
-// finding 1's 3-tier resolution: explicit override > saved claim age >
-// legacy ss_timing default), since no page currently sends a per-
-// request override of its own.
-const ClaimAgeSlider = ({ label, claimAge, onChange, benefit62, benefit67, benefit70, benefitType, checkEarlyAnchor=false, scopeNote }) => {
-  const enabled = claimAge != null
-  const age = claimAge ?? SS_FRA_AGE
-  // External audit review of commit 0c1a569, finding 2 (P1): the new
-  // anchor fields default to $0 in the database, which used to get
-  // read as a REAL $0 anchor and interpolated straight down to nothing
-  // by age 70 (or, for Justin's age-62 field, straight up from
-  // nothing). A blank/0 anchor here means "not entered," not "$0
-  // benefit," so fall back to the FRA figure (same fallback the
-  // backend's resolve_ss_benefits now applies) and say so explicitly,
-  // instead of silently erasing the household's real FRA benefit.
-  // checkEarlyAnchor also flags the 62 field -- only Justin's spousal
-  // fields fall back this way; Jason's worker benefit62
-  // (jason_social_security) has always been required, no fallback.
-  const anchorMissingLate  = !benefit70
-  const anchorMissingEarly = checkEarlyAnchor && !benefit62
-  const anchorMissing = anchorMissingLate || anchorMissingEarly
-  const resolvedBenefit70 = benefit70 || benefit67
-  const resolvedBenefit62 = anchorMissingEarly ? benefit67 : benefit62
-  const computed = ssBenefitForClaimAge(resolvedBenefit62 ?? 0, benefit67 ?? 0, resolvedBenefit70 ?? 0, age, benefitType)
-  return (
-    <div style={{ padding:'10px 0', borderBottom:'1px solid var(--border)' }}>
-      <label style={{ display:'flex', alignItems:'center', gap:8, fontSize:13, cursor:'pointer' }}>
-        <input type="checkbox" checked={enabled} onChange={e => onChange(e.target.checked ? SS_FRA_AGE : null)} />
-        {label}
-        <span style={{ fontSize:11, color:'var(--text3)' }}>
-          (off = use the Early/Delayed toggle on Retirement/Simulation pages instead)
-        </span>
-      </label>
-      {enabled && (
-        <div style={{ marginTop:10, paddingLeft:24 }}>
-          {scopeNote && (
-            <div style={{ fontSize:11, color:'var(--text3)', marginBottom:8 }}>ℹ {scopeNote}</div>
-          )}
-          {anchorMissing && (
-            <div style={{ padding:'8px 10px', background:'rgba(251,191,36,0.08)', borderRadius:6, marginBottom:8, fontSize:11, color:'var(--amber)' }}>
-              ⚠ {anchorMissingEarly && anchorMissingLate ? 'The age-62 and age-70 fields above are $0' :
-                 anchorMissingEarly ? 'The age-62 field above is $0' : 'The age-70 field above is $0'} — the slider
-              below is an ESTIMATE using your FRA benefit flat (no real anchor entered), not your real
-              SSA-statement figure. Fill in the field(s) above for an accurate number.
-            </div>
-          )}
-          <div style={{ display:'flex', alignItems:'center', gap:12 }}>
-            <input
-              type="range"
-              min={SS_CLAIM_AGE_MIN}
-              max={SS_CLAIM_AGE_MAX}
-              step={1}
-              value={age}
-              onChange={e => onChange(parseInt(e.target.value))}
-              style={{ flex:1 }}
-            />
-            <span style={{ fontSize:13, fontWeight:700, width:28, textAlign:'right' }}>{age}</span>
-          </div>
-          <div style={{ fontSize:12, color:'var(--text2)', marginTop:4 }}>
-            Benefit at {age}: <strong>${Math.round(computed).toLocaleString('en-US')}/yr</strong> {anchorMissing ? '(estimated)' : '(computed)'}
-          </div>
-        </div>
-      )}
-    </div>
-  )
-}
 
 export default function Settings() {
   const { privacyMode } = usePrivacyMode()

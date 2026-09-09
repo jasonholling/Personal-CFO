@@ -637,7 +637,7 @@ def _get_relevant_surplus_allocations(conn) -> List[dict]:
     ).fetchall()]
 
 
-def _ss_claim_ages(inputs_row: dict):
+def _ss_claim_ages(inputs_row: dict, jason_override: int = None, justin_override: int = None):
     """CALCULATION_CONTRACT.md section 44, milestone 6: reads the
     persisted continuous SS claiming-age Settings fields
     (jason_ss_claim_age/justin_ss_claim_age), if the household has set
@@ -645,8 +645,20 @@ def _ss_claim_ages(inputs_row: dict):
     simulation-engine consumer's own resolve_ss_benefits treats None as
     "not set, use this call's own ss_timing early/delayed toggle
     unchanged," so an existing household sees no behavior change until
-    it explicitly picks a claim age in Settings."""
-    return inputs_row.get("jason_ss_claim_age"), inputs_row.get("justin_ss_claim_age")
+    it explicitly picks a claim age in Settings.
+
+    jason_override/justin_override (2026-09-09, CALCULATION_CONTRACT.md
+    section 54): an explicit PER-REQUEST claim age -- e.g. a page's own
+    slider, not yet saved to Settings -- takes priority over the saved
+    row, per spouse independently. This is the same explicit-override >
+    saved-Settings > legacy-default layering resolve_ss_claim_ages
+    already applies inside the engine layer (section 49, finding 1);
+    this helper now does the identical thing one layer up, at the HTTP
+    request itself, so a caller can try out a claim age without
+    persisting it first."""
+    jason  = jason_override  if jason_override  is not None else inputs_row.get("jason_ss_claim_age")
+    justin = justin_override if justin_override is not None else inputs_row.get("justin_ss_claim_age")
+    return jason, justin
 
 
 def _get_kids_surplus_529_monthly(conn) -> Dict[str, float]:
@@ -1189,7 +1201,20 @@ def get_rental_analysis():
 
 # Projections
 @app.get("/api/projections/retirement")
-def get_retirement_projections():
+def get_retirement_projections(jason_ss_claim_age: int = None, justin_ss_claim_age: int = None):
+    """jason_ss_claim_age/justin_ss_claim_age (2026-09-09,
+    CALCULATION_CONTRACT.md section 54): unlike every other wired
+    endpoint, this one does NOT fall back to the SAVED Settings claim
+    age -- only an EXPLICIT query param switches this response to the
+    single "custom" scenario. This endpoint's early/delayed PAIR is a
+    hard dependency of both Retirement.jsx's own toggle and WhatIf.jsx's
+    `age_X_early` label lookups (WhatIf.jsx never sends these params),
+    so falling back to a saved Settings value the way the other 7
+    endpoints do would silently break WhatIf.jsx the moment a household
+    saves ANY claim age, even on a page that never touches this one.
+    Retirement.jsx's own new slider passes these explicitly when the
+    user turns it on; left unset (as WhatIf.jsx always does), behavior
+    is 100% unchanged regardless of what's saved in Settings."""
     conn = get_db()
     inputs_row = conn.execute("SELECT * FROM planning_inputs WHERE id=1").fetchone()
     accounts   = [dict(r) for r in conn.execute("SELECT * FROM accounts").fetchall()]
@@ -1204,18 +1229,8 @@ def get_retirement_projections():
     # WhatIf.jsx's baseline for its full 55-67 slider, where a narrower
     # range here silently broke the "Impact on Retire at X" comparison
     # for any age outside the original [55,56,57,58,59,60,65] set.
-    # Deliberately NOT wired to jason_ss_claim_age/justin_ss_claim_age
-    # (2026-09-09, CALCULATION_CONTRACT.md section 50): this endpoint's
-    # early/delayed PAIR is a hard dependency of both Retirement.jsx's
-    # own toggle and WhatIf.jsx's `age_X_early` label lookups — passing
-    # a saved claim age would collapse the pair into a single "custom"
-    # scenario and silently break WhatIf.jsx. The Settings claim-age
-    # slider is scoped to the 7 endpoints that already read it
-    # (Monte Carlo, Stress Tests, SWR, Roth Conversion, Tax Efficiency,
-    # Survivor Scenario, Sequence Risk); Retirement.jsx surfaces a note
-    # explaining the split rather than this endpoint silently changing
-    # shape under WhatIf.jsx's feet.
-    return run_retirement_projection(dict(inputs_row), accounts, ret_ages=list(range(55, 68)), life_events=life_events, surplus_allocations=surplus_allocations)
+    return run_retirement_projection(dict(inputs_row), accounts, ret_ages=list(range(55, 68)), life_events=life_events, surplus_allocations=surplus_allocations,
+                                      jason_ss_claim_age=jason_ss_claim_age, justin_ss_claim_age=justin_ss_claim_age)
 
 @app.get("/api/projections/two-dimensional-retirement")
 def get_two_dimensional_retirement_projection(jason_ret_age: int, justin_ret_age: int, ss_timing: str = "early"):
@@ -1534,12 +1549,21 @@ def _apply_whatif_overrides(inputs: dict, body: dict) -> dict:
 
 @app.get("/api/simulation/monte-carlo")
 def get_monte_carlo(ret_age: int = 60, ss_timing: str = "early",
-                     jason_ret_age: int = None, justin_ret_age: int = None):
+                     jason_ret_age: int = None, justin_ret_age: int = None,
+                     jason_ss_claim_age: int = None, justin_ss_claim_age: int = None):
     """jason_ret_age/justin_ret_age (2026-09-08, CALCULATION_CONTRACT.md
     section 22): explicit two-age mode, both required together (a
     ValueError from run_monte_carlo becomes a 400, not a silent
     single-axis fallback) -- ret_age/ss_timing's existing single-axis
-    behavior is unaffected when these are left unset."""
+    behavior is unaffected when these are left unset.
+
+    jason_ss_claim_age/justin_ss_claim_age (2026-09-09,
+    CALCULATION_CONTRACT.md section 54): an explicit PER-REQUEST claim
+    age -- e.g. a page's own slider -- takes priority over whatever's
+    saved in Settings, per spouse independently, so a page can try out
+    a claim age without persisting it first. Left unset, behavior is
+    unchanged (falls back to the saved Settings value, then the legacy
+    ss_timing toggle, exactly as before)."""
     conn = get_db()
     inputs_row = conn.execute("SELECT * FROM planning_inputs WHERE id=1").fetchone()
     accounts   = [dict(r) for r in conn.execute("SELECT * FROM accounts").fetchall()]
@@ -1550,7 +1574,7 @@ def get_monte_carlo(ret_age: int = 60, ss_timing: str = "early",
         raise HTTPException(status_code=400, detail="Planning inputs not set yet")
     from simulation_engine import run_monte_carlo
     _inputs = dict(inputs_row)
-    _jason_ss_claim_age, _justin_ss_claim_age = _ss_claim_ages(_inputs)
+    _jason_ss_claim_age, _justin_ss_claim_age = _ss_claim_ages(_inputs, jason_ss_claim_age, justin_ss_claim_age)
     try:
         return run_monte_carlo(_inputs, accounts, ret_age, ss_timing, life_events=life_events,
                                 surplus_allocations=surplus_allocations,
@@ -1702,10 +1726,13 @@ def get_retirement_sensitivity():
 
 @app.post("/api/retirement/income-sources")
 @app.get("/api/retirement/income-sources")
-def get_income_sources(ret_age: int = 60, ss_timing: str = "early", body: dict = None):
+def get_income_sources(ret_age: int = 60, ss_timing: str = "early", body: dict = None,
+                        jason_ss_claim_age: int = None, justin_ss_claim_age: int = None):
     if body is not None:
         ret_age = body.get("ret_age", ret_age)
         ss_timing = body.get("ss_timing", ss_timing)
+        jason_ss_claim_age = body.get("jason_ss_claim_age", jason_ss_claim_age)
+        justin_ss_claim_age = body.get("justin_ss_claim_age", justin_ss_claim_age)
     conn = get_db()
     inputs_row = conn.execute("SELECT * FROM planning_inputs ORDER BY id DESC LIMIT 1").fetchone()
     accounts   = [dict(r) for r in conn.execute("SELECT * FROM accounts").fetchall()]
@@ -1746,7 +1773,7 @@ def get_income_sources(ret_age: int = 60, ss_timing: str = "early", body: dict =
     # Fixed to match the label jason_ss_claim_age alone actually
     # produces.
     _proj_inputs = _apply_whatif_overrides(dict(inputs_row), body or {})
-    _jason_ss_claim_age, _justin_ss_claim_age = _ss_claim_ages(_proj_inputs)
+    _jason_ss_claim_age, _justin_ss_claim_age = _ss_claim_ages(_proj_inputs, jason_ss_claim_age, justin_ss_claim_age)
     result = run_retirement_projection(_proj_inputs, accounts, ret_ages=[ret_age], life_events=life_events, surplus_allocations=surplus_allocations,
                                         jason_ss_claim_age=_jason_ss_claim_age, justin_ss_claim_age=_justin_ss_claim_age)
     _label = f"age_{ret_age}_custom" if _jason_ss_claim_age is not None else f"age_{ret_age}_{ss_timing}"
@@ -1767,12 +1794,18 @@ def get_income_sources(ret_age: int = 60, ss_timing: str = "early", body: dict =
 
 @app.get("/api/simulation/tax-efficiency")
 def get_tax_efficiency(ret_age: int = 60, ss_timing: str = "early",
-                        jason_ret_age: int = None, justin_ret_age: int = None):
+                        jason_ret_age: int = None, justin_ret_age: int = None,
+                        jason_ss_claim_age: int = None, justin_ss_claim_age: int = None):
     """jason_ret_age/justin_ret_age (2026-09-08, CALCULATION_CONTRACT.md
     section 34/35, Milestone 3 of 4): two-age mode, both required
     together -- read from the query string, matching this endpoint's
     existing GET-only shape (no What-If overrides/POST body support
-    exists here for single-axis either, so none is added for two-age)."""
+    exists here for single-axis either, so none is added for two-age).
+
+    jason_ss_claim_age/justin_ss_claim_age (2026-09-09,
+    CALCULATION_CONTRACT.md section 54): explicit per-request claim
+    age, takes priority over saved Settings -- see get_monte_carlo's
+    identical param."""
     conn = get_db()
     inputs_row = conn.execute("SELECT * FROM planning_inputs ORDER BY id DESC LIMIT 1").fetchone()
     accounts   = [dict(r) for r in conn.execute("SELECT * FROM accounts").fetchall()]
@@ -1782,7 +1815,7 @@ def get_tax_efficiency(ret_age: int = 60, ss_timing: str = "early",
     if not inputs_row: return {"error": "No planning inputs found"}
     from simulation_engine import run_tax_efficiency_simulation
     _inputs = dict(inputs_row)
-    _jason_ss_claim_age, _justin_ss_claim_age = _ss_claim_ages(_inputs)
+    _jason_ss_claim_age, _justin_ss_claim_age = _ss_claim_ages(_inputs, jason_ss_claim_age, justin_ss_claim_age)
     try:
         return run_tax_efficiency_simulation(_inputs, accounts, ret_age, ss_timing,
                                               life_events=life_events, surplus_allocations=surplus_allocations,
@@ -1813,14 +1846,20 @@ def get_survivor_scenario(ret_age: int = 60, deceased: str = "jason", death_age:
                            ss_timing: str = "early",
                            trust_available_to_survivor: bool = False,
                            joint_accounts_survivorship: bool = True,
-                           spousal_rollover_election: bool = True):
+                           spousal_rollover_election: bool = True,
+                           jason_ss_claim_age: int = None, justin_ss_claim_age: int = None):
     """jason_ret_age/justin_ret_age (2026-09-08, CALCULATION_CONTRACT.md
     sections 36-37, Milestone 4 of 4): two-age mode with an owner-
     attributed account ledger, both ages required together. The three
     trailing booleans are two-age-only explicit scenario assumptions
     (section 37.1-37.3) with no single-axis equivalent -- ignored
     entirely when jason_ret_age/justin_ret_age are left at their None
-    default."""
+    default.
+
+    jason_ss_claim_age/justin_ss_claim_age (2026-09-09,
+    CALCULATION_CONTRACT.md section 54): explicit per-request claim
+    age, takes priority over saved Settings -- see get_monte_carlo's
+    identical param."""
     conn = get_db()
     inputs_row = conn.execute("SELECT * FROM planning_inputs WHERE id=1").fetchone()
     accounts   = [dict(r) for r in conn.execute("SELECT * FROM accounts").fetchall()]
@@ -1831,7 +1870,7 @@ def get_survivor_scenario(ret_age: int = 60, deceased: str = "jason", death_age:
         raise HTTPException(status_code=400, detail="Planning inputs not set yet")
     from simulation_engine import run_survivor_scenario
     _inputs = dict(inputs_row)
-    _jason_ss_claim_age, _justin_ss_claim_age = _ss_claim_ages(_inputs)
+    _jason_ss_claim_age, _justin_ss_claim_age = _ss_claim_ages(_inputs, jason_ss_claim_age, justin_ss_claim_age)
     try:
         return run_survivor_scenario(_inputs, accounts, ret_age, deceased, death_age, survivor_need_factor,
                                       life_events=life_events, surplus_allocations=surplus_allocations,
@@ -1844,7 +1883,8 @@ def get_survivor_scenario(ret_age: int = 60, deceased: str = "jason", death_age:
         raise HTTPException(status_code=400, detail=str(e))
 
 @app.get("/api/simulation/sequence-risk")
-def get_sequence_risk(ret_age: int = 55, ss_timing: str = "early"):
+def get_sequence_risk(ret_age: int = 55, ss_timing: str = "early",
+                       jason_ss_claim_age: int = None, justin_ss_claim_age: int = None):
     conn = get_db()
     inputs_row = conn.execute("SELECT * FROM planning_inputs ORDER BY id DESC LIMIT 1").fetchone()
     accounts   = [dict(r) for r in conn.execute("SELECT * FROM accounts").fetchall()]
@@ -1854,7 +1894,7 @@ def get_sequence_risk(ret_age: int = 55, ss_timing: str = "early"):
     if not inputs_row: return {"error": "No planning inputs found"}
     from simulation_engine import run_stress_tests
     _inputs = dict(inputs_row)
-    _jason_ss_claim_age, _justin_ss_claim_age = _ss_claim_ages(_inputs)
+    _jason_ss_claim_age, _justin_ss_claim_age = _ss_claim_ages(_inputs, jason_ss_claim_age, justin_ss_claim_age)
     result = run_stress_tests(_inputs, accounts, ret_age, ss_timing, life_events=life_events, surplus_allocations=surplus_allocations,
                                jason_ss_claim_age=_jason_ss_claim_age, justin_ss_claim_age=_justin_ss_claim_age)
     # Return only the new scenarios
@@ -1868,16 +1908,24 @@ def get_sequence_risk(ret_age: int = 55, ss_timing: str = "early"):
 @app.post("/api/simulation/roth-conversion")
 @app.get("/api/simulation/roth-conversion")
 def get_roth_conversion(ret_age: int = 60, ss_timing: str = "early", body: dict = None,
-                         jason_ret_age: int = None, justin_ret_age: int = None):
+                         jason_ret_age: int = None, justin_ret_age: int = None,
+                         jason_ss_claim_age: int = None, justin_ss_claim_age: int = None):
     """jason_ret_age/justin_ret_age (2026-09-08, CALCULATION_CONTRACT.md
     section 30/32, Milestone 2 of 4): two-age mode, both required
     together -- read from the query string (GET) or, same as
-    ret_age/ss_timing above, from the POST body if present."""
+    ret_age/ss_timing above, from the POST body if present.
+
+    jason_ss_claim_age/justin_ss_claim_age (2026-09-09,
+    CALCULATION_CONTRACT.md section 54): explicit per-request claim
+    age, takes priority over saved Settings -- see get_monte_carlo's
+    identical param."""
     if body is not None:
         ret_age = body.get("ret_age", ret_age)
         ss_timing = body.get("ss_timing", ss_timing)
         jason_ret_age = body.get("jason_ret_age", jason_ret_age)
         justin_ret_age = body.get("justin_ret_age", justin_ret_age)
+        jason_ss_claim_age = body.get("jason_ss_claim_age", jason_ss_claim_age)
+        justin_ss_claim_age = body.get("justin_ss_claim_age", justin_ss_claim_age)
     conn = get_db()
     inputs_row = conn.execute("SELECT * FROM planning_inputs ORDER BY id DESC LIMIT 1").fetchone()
     accounts   = [dict(r) for r in conn.execute("SELECT * FROM accounts").fetchall()]
@@ -1887,7 +1935,7 @@ def get_roth_conversion(ret_age: int = 60, ss_timing: str = "early", body: dict 
     if not inputs_row: return {"error": "No planning inputs found"}
     from simulation_engine import run_roth_conversion_analysis
     inputs = _apply_whatif_overrides(dict(inputs_row), body or {})
-    _jason_ss_claim_age, _justin_ss_claim_age = _ss_claim_ages(inputs)
+    _jason_ss_claim_age, _justin_ss_claim_age = _ss_claim_ages(inputs, jason_ss_claim_age, justin_ss_claim_age)
     try:
         return run_roth_conversion_analysis(inputs, accounts, ret_age, ss_timing, life_events=life_events,
                                              surplus_allocations=surplus_allocations,
@@ -1899,16 +1947,24 @@ def get_roth_conversion(ret_age: int = 60, ss_timing: str = "early", body: dict 
 @app.post("/api/simulation/swr")
 @app.get("/api/simulation/swr")
 def get_swr(ret_age: int = 60, ss_timing: str = "early", body: dict = None,
-            jason_ret_age: int = None, justin_ret_age: int = None):
+            jason_ret_age: int = None, justin_ret_age: int = None,
+            jason_ss_claim_age: int = None, justin_ss_claim_age: int = None):
     """jason_ret_age/justin_ret_age (2026-09-08, CALCULATION_CONTRACT.md
     section 25/26, Milestone 1 of 4): two-age mode, both required
     together -- read from the query string (GET) or, same as
-    ret_age/ss_timing above, from the POST body if present."""
+    ret_age/ss_timing above, from the POST body if present.
+
+    jason_ss_claim_age/justin_ss_claim_age (2026-09-09,
+    CALCULATION_CONTRACT.md section 54): explicit per-request claim
+    age, takes priority over saved Settings -- see get_monte_carlo's
+    identical param."""
     if body is not None:
         ret_age = body.get("ret_age", ret_age)
         ss_timing = body.get("ss_timing", ss_timing)
         jason_ret_age = body.get("jason_ret_age", jason_ret_age)
         justin_ret_age = body.get("justin_ret_age", justin_ret_age)
+        jason_ss_claim_age = body.get("jason_ss_claim_age", jason_ss_claim_age)
+        justin_ss_claim_age = body.get("justin_ss_claim_age", justin_ss_claim_age)
     conn = get_db()
     inputs_row = conn.execute("SELECT * FROM planning_inputs ORDER BY id DESC LIMIT 1").fetchone()
     accounts   = [dict(r) for r in conn.execute("SELECT * FROM accounts").fetchall()]
@@ -1918,7 +1974,7 @@ def get_swr(ret_age: int = 60, ss_timing: str = "early", body: dict = None,
     if not inputs_row: return {"error": "No planning inputs found"}
     from simulation_engine import run_swr_analysis
     inputs = _apply_whatif_overrides(dict(inputs_row), body or {})
-    _jason_ss_claim_age, _justin_ss_claim_age = _ss_claim_ages(inputs)
+    _jason_ss_claim_age, _justin_ss_claim_age = _ss_claim_ages(inputs, jason_ss_claim_age, justin_ss_claim_age)
     try:
         return run_swr_analysis(inputs, accounts, ret_age, ss_timing, life_events=life_events,
                                  surplus_allocations=surplus_allocations,
@@ -1929,9 +1985,12 @@ def get_swr(ret_age: int = 60, ss_timing: str = "early", body: dict = None,
 
 @app.get("/api/simulation/stress-tests")
 def get_stress_tests(ret_age: int = 60, ss_timing: str = "early",
-                      jason_ret_age: int = None, justin_ret_age: int = None):
+                      jason_ret_age: int = None, justin_ret_age: int = None,
+                      jason_ss_claim_age: int = None, justin_ss_claim_age: int = None):
     """jason_ret_age/justin_ret_age: see get_monte_carlo's identical
-    params (CALCULATION_CONTRACT.md section 22)."""
+    params (CALCULATION_CONTRACT.md section 22). jason_ss_claim_age/
+    justin_ss_claim_age (2026-09-09, section 54): explicit per-request
+    claim age, takes priority over saved Settings."""
     conn = get_db()
     inputs_row = conn.execute("SELECT * FROM planning_inputs WHERE id=1").fetchone()
     accounts   = [dict(r) for r in conn.execute("SELECT * FROM accounts").fetchall()]
@@ -1942,7 +2001,7 @@ def get_stress_tests(ret_age: int = 60, ss_timing: str = "early",
         raise HTTPException(status_code=400, detail="Planning inputs not set yet")
     from simulation_engine import run_stress_tests
     _inputs = dict(inputs_row)
-    _jason_ss_claim_age, _justin_ss_claim_age = _ss_claim_ages(_inputs)
+    _jason_ss_claim_age, _justin_ss_claim_age = _ss_claim_ages(_inputs, jason_ss_claim_age, justin_ss_claim_age)
     try:
         return run_stress_tests(_inputs, accounts, ret_age, ss_timing, life_events=life_events,
                                  surplus_allocations=surplus_allocations,
@@ -1962,6 +2021,8 @@ def post_stress_tests(body: dict):
     ss_timing  = body.get("ss_timing", "early")
     jason_ret_age  = body.get("jason_ret_age")
     justin_ret_age = body.get("justin_ret_age")
+    jason_ss_claim_age  = body.get("jason_ss_claim_age")
+    justin_ss_claim_age = body.get("justin_ss_claim_age")
     conn = get_db()
     inputs_row = conn.execute("SELECT * FROM planning_inputs WHERE id=1").fetchone()
     accounts   = [dict(r) for r in conn.execute("SELECT * FROM accounts").fetchall()]
@@ -1971,7 +2032,7 @@ def post_stress_tests(body: dict):
     if not inputs_row:
         raise HTTPException(status_code=400, detail="Planning inputs not set yet")
     inputs = _apply_whatif_overrides(dict(inputs_row), body)
-    _jason_ss_claim_age, _justin_ss_claim_age = _ss_claim_ages(inputs)
+    _jason_ss_claim_age, _justin_ss_claim_age = _ss_claim_ages(inputs, jason_ss_claim_age, justin_ss_claim_age)
     from simulation_engine import run_stress_tests
     try:
         return run_stress_tests(inputs, accounts, ret_age, ss_timing, life_events=life_events,
