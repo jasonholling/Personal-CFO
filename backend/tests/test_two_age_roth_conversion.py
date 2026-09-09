@@ -408,6 +408,31 @@ class TestAffordabilityCapIncludesUnusedDeductionRoom:
         assert y0["optimal_conversion"] == 243600
         assert y0["tax_cost"] == 35932
 
+    def test_state_tax_still_applies_to_the_free_zone(self):
+        """Independent review, 2026-09-08, third follow-up, P1: the free
+        zone is only free of FEDERAL tax -- state tax applies to the
+        WHOLE conversion, including that zone, matching
+        _incremental_conversion_tax's own formula exactly.
+        Reproduced: $0 taxable cash, 5% state tax, $1,000,000 pretax, no
+        other income (base_taxable=-32200, all of it "free" federally).
+        The old fix treated the entire $32,200 free zone as costing
+        $0 regardless of state tax, so it reported $32,200 as
+        affordable with $0 cash on hand -- the real $1,610 state-tax
+        bill on that conversion then had nowhere to be funded from and
+        silently ate into Roth via simulate_conversion's own
+        conversion_shortfall fallback. With $0 taxable cash, the
+        correctly-fixed affordability is $0 -- nothing is convertible
+        without any cash to pay even the state tax."""
+        inputs = base_inputs(retirement_income_today_dollars=0, state_income_tax_rate=0.05)
+        r = run_roth_conversion_analysis(inputs, PRETAX(1000000) + TAXABLE(0),
+                                          jason_ret_age=71, justin_ret_age=71)
+        y0 = r["schedule"][0]
+        assert y0["base_taxable_income"] == -32200
+        assert y0["optimal_conversion"] == 0
+        assert y0["tax_cost"] == 0
+        assert y0["taxable_after"] == 0
+        assert y0["roth_after"] == 0  # no conversion_shortfall silently draining Roth
+
 
 class TestTwoAgeRothConversionModeRequiresBothAges:
     def test_only_jason_ret_age_raises(self):
