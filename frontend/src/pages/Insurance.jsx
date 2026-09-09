@@ -130,9 +130,13 @@ export default function Insurance({ onNavigate }) {
           </div>
           <div>
             <div style={{ fontSize:12, color:'var(--text2)', marginBottom:4 }}>Rental Property</div>
-            <div style={{ fontWeight:600, color:'var(--amber)' }}>Coverage unknown</div>
+            <div style={{ fontWeight:600 }}>{fmt(property.rental_insured)} insured</div>
             <div style={{ fontSize:12, color:'var(--text2)' }}>Value: {fmt(property.rental_value)}</div>
-            <div style={{ fontSize:12, color:'var(--amber)', marginTop:4 }}>⚠ Verify current policy</div>
+            {property.rental_gap > 0 && (
+              <div style={{ fontSize:12, color:'var(--amber)', marginTop:4 }}>
+                ⚠ {fmt(property.rental_gap)} underinsured
+              </div>
+            )}
           </div>
           <div>
             <div style={{ fontSize:12, color:'var(--text2)', marginBottom:4 }}>Umbrella Policy</div>
@@ -151,19 +155,27 @@ export default function Insurance({ onNavigate }) {
       <div className="grid-2" style={{ marginBottom:24 }}>
         <div className="card">
           <div className="label" style={{ marginBottom:12 }}>Disability Coverage</div>
-          <Row label="Monthly Benefit" value={fmt(disability.monthly_benefit)+'/mo'} highlight="var(--green)" />
+          <Row label="Monthly Benefit" value={fmt(disability.monthly_benefit)+'/mo'} highlight={disability.monthly_benefit > 0 ? 'var(--green)' : 'var(--amber)'} />
           <Row label="Duration" value={`To age ${disability.to_age}`} />
-          <Row label="Premium" value={disability.funded_by} />
-          <div style={{ marginTop:12, fontSize:12, color:'var(--green)' }}>✓ Employer-paid — no action needed</div>
+          <Row label="Funded By" value={disability.funded_by} />
+          {disability.monthly_benefit > 0 ? (
+            <div style={{ marginTop:12, fontSize:12, color:'var(--green)' }}>✓ {disability.funded_by}</div>
+          ) : (
+            <div style={{ marginTop:12, fontSize:12, color:'var(--amber)' }}>⚠ No disability coverage on file — add it in Settings</div>
+          )}
         </div>
 
         <div className="card">
           <div className="label" style={{ marginBottom:12 }}>Long Term Care</div>
           <Row label="Daily Benefit" value={isPrivacyMode() ? MASK_CURRENCY : `$${ltc.daily_benefit}/day`} highlight="var(--green)" />
-          <Row label="Maximum Benefit" value={fmt(ltc.max_benefit)} />
+          <Row label="Maximum Benefit" value={fmt(ltc.max_benefit)} highlight={ltc.max_benefit > 0 ? 'var(--green)' : 'var(--amber)'} />
           <Row label="Annual Premium" value={fmt(ltc.premium_annual)} />
           <Row label="Local Average Cost" value={isPrivacyMode() ? MASK_CURRENCY : `$${ltc.omaha_daily_cost_low}–$${ltc.omaha_daily_cost_high}/day`} />
-          <div style={{ marginTop:12, fontSize:12, color:'var(--green)' }}>✓ Coverage in place · monitor premiums annually</div>
+          {ltc.max_benefit > 0 ? (
+            <div style={{ marginTop:12, fontSize:12, color:'var(--green)' }}>✓ Coverage in place · monitor premiums annually</div>
+          ) : (
+            <div style={{ marginTop:12, fontSize:12, color:'var(--amber)' }}>⚠ No LTC maximum benefit on file — add it in Settings</div>
+          )}
         </div>
       </div>
 

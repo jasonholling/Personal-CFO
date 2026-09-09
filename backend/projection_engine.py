@@ -2972,12 +2972,23 @@ def run_insurance_analysis(inputs: Dict, accounts: List[Dict], kids: List[Dict] 
         "justin": {"total_need": round(justin_total_need), "debt_payoff": round(total_debt),
                    "college_funding": round(total_529_gap), "income_replacement": 0,
                    "current_coverage": justin_current_coverage, "surplus_gap": round(justin_surplus), "on_track": justin_surplus >= -100000},  # within $100k is acceptable since Jason keeps earning
+        # rental_insured/disability_funded_by/disability_to_age/
+        # ltc_premium_annual (2026-09-09) -- these used to be hardcoded
+        # (0, "Employer group policy", 65, 369) regardless of what was
+        # actually true for the household, with nowhere in Settings to
+        # ever change them. Now real editable fields, same pattern as
+        # home_insured/umbrella just above.
         "property": {"primary_home_value": round(home_value), "primary_home_insured": inputs.get("home_insured", 0),
                      "primary_home_gap": round(max(0, home_value - inputs.get("home_insured", 0))),
-                     "rental_value": round(rental_value), "rental_insured": 0, "umbrella": umbrella_coverage,
+                     "rental_value": round(rental_value), "rental_insured": inputs.get("rental_insured", 0),
+                     "rental_gap": round(max(0, rental_value - inputs.get("rental_insured", 0))),
+                     "umbrella": umbrella_coverage,
                      "net_worth": round(net_worth), "recommended_umbrella": recommended_umbrella,
                      "umbrella_gap": round(umbrella_gap), "umbrella_adequate": umbrella_gap <= 0},
-        "disability": {"monthly_benefit": inputs.get("disability_monthly", 0), "to_age": 65, "funded_by": "Employer group policy"},
-        "ltc": {"daily_benefit": inputs.get("ltc_daily", 200), "max_benefit": inputs.get("ltc_max", 0), "premium_annual": 369,
+        "disability": {"monthly_benefit": inputs.get("disability_monthly", 0),
+                       "to_age": inputs.get("disability_to_age", 65),
+                       "funded_by": inputs.get("disability_funded_by") or "Employer group policy"},
+        "ltc": {"daily_benefit": inputs.get("ltc_daily", 200), "max_benefit": inputs.get("ltc_max", 0),
+                "premium_annual": inputs.get("ltc_premium_annual", 369),
                 "omaha_daily_cost_low": 134, "omaha_daily_cost_high": 248},
     }

@@ -2008,6 +2008,54 @@ class TestRunInsuranceAnalysis:
         assert result["property"]["recommended_umbrella"] % 1_000_000 == 0
         assert result["property"]["recommended_umbrella"] >= 1_000_000
 
+    def test_rental_insured_and_gap_reflect_real_settings_field(self, sample_inputs):
+        """Regression test: rental_insured used to be hardcoded to 0 with
+        no planning_inputs field behind it at all -- the Insurance page's
+        Rental Property card always said "Coverage unknown" regardless of
+        what was entered anywhere, because there was nowhere to enter it.
+        Mirrors home_insured/primary_home_gap's existing pattern."""
+        accounts = [
+            {"id": 1, "name": "My Rental Unit", "account_type": "real_estate", "owner": "joint", "balance": 250000, "institution": "", "notes": ""},
+        ]
+        configured = {**sample_inputs, "rental_property_key": "Rental", "rental_insured": 200000}
+        result = run_insurance_analysis(configured, accounts, kids=kids_from_inputs(configured))
+        assert result["property"]["rental_insured"] == 200000
+        assert result["property"]["rental_gap"] == 50000
+
+        fully_insured = {**sample_inputs, "rental_property_key": "Rental", "rental_insured": 250000}
+        result2 = run_insurance_analysis(fully_insured, accounts, kids=kids_from_inputs(fully_insured))
+        assert result2["property"]["rental_gap"] == 0
+
+    def test_disability_to_age_and_funded_by_come_from_settings(self, sample_inputs, sample_accounts):
+        """Regression test: disability.to_age (65) and disability.funded_by
+        ("Employer group policy") were hardcoded regardless of the actual
+        household's coverage -- the Insurance page unconditionally showed
+        a green "Employer-paid - no action needed" checkmark even for a
+        household with a private policy, a different end age, or no
+        disability coverage at all."""
+        configured = {**sample_inputs, "disability_to_age": 67, "disability_funded_by": "Private policy"}
+        result = run_insurance_analysis(configured, sample_accounts, kids=kids_from_inputs(configured))
+        assert result["disability"]["to_age"] == 67
+        assert result["disability"]["funded_by"] == "Private policy"
+
+    def test_disability_funded_by_falls_back_when_unset(self, sample_inputs, sample_accounts):
+        """An existing household that never set disability_funded_by
+        (empty string or None, same as a fresh column default before
+        they've touched Settings) must still see the same default text
+        as before this field existed, not a blank value."""
+        configured = {**sample_inputs, "disability_funded_by": ""}
+        result = run_insurance_analysis(configured, sample_accounts, kids=kids_from_inputs(configured))
+        assert result["disability"]["funded_by"] == "Employer group policy"
+
+    def test_ltc_premium_comes_from_settings(self, sample_inputs, sample_accounts):
+        """Regression test: ltc.premium_annual (369) was hardcoded
+        regardless of the household's real LTC premium, despite
+        ltc_daily/ltc_max already being real editable fields right next
+        to it."""
+        configured = {**sample_inputs, "ltc_premium_annual": 1250}
+        result = run_insurance_analysis(configured, sample_accounts, kids=kids_from_inputs(configured))
+        assert result["ltc"]["premium_annual"] == 1250
+
     def test_umbrella_adequate_when_coverage_meets_recommendation(self, sample_inputs, sample_accounts):
         result = run_insurance_analysis(sample_inputs, sample_accounts, kids=kids_from_inputs(sample_inputs))
         recommended = result["property"]["recommended_umbrella"]

@@ -5267,3 +5267,50 @@ New regression coverage: `test_main.py`'s
 `test_deleting_a_kid_clears_their_orphaned_surplus_allocation_goal`.
 
 Still on `kids-variable-count`, not merged.
+
+## 60. Insurance page — four fields displayed with nowhere to edit them (2026-09-09, on `main`)
+
+User report: "it says that i need to update rental building insurance
+but i do not see a place to modify." Investigation found the Rental
+Property card's "Coverage unknown / Verify current policy" warning was
+permanent and unfixable — `run_insurance_analysis` hardcoded
+`rental_insured` to `0` with no `planning_inputs` field behind it at
+all, unlike `home_insured` (a real editable Settings field feeding the
+identical primary-home gap check right next to it). Asked to check the
+rest of the page for the same pattern turned up two more: the
+Disability card's "✓ Employer-paid — no action needed" and the LTC
+card's "✓ Coverage in place · monitor premiums annually" were both
+unconditional green checkmarks, regardless of whether that was ever
+true for this household — `disability.to_age`/`disability.funded_by`
+were hardcoded to `65`/`"Employer group policy"`, and `ltc.premium_annual`
+hardcoded to `369`, all with no Settings field.
+
+Added four real fields (`rental_insured`, `disability_funded_by`,
+`disability_to_age`, `ltc_premium_annual`), mirroring the existing
+`home_insured`/`umbrella` pattern exactly — new `planning_inputs`
+columns, new Settings.jsx rows in "Disability & Other Insurance", read
+by `run_insurance_analysis` instead of hardcoded. `report_generator.py`
+needed no change — it already reads the `insurance` dict dynamically
+via `.get()`, so it picks up real values automatically.
+
+Insurance.jsx's status lines are now conditional on the real data
+instead of a fixed claim: Rental Property shows an underinsured
+warning only if `rental_gap > 0` (same as Primary Home already did);
+Disability shows the actual `funded_by` value in green only if
+`monthly_benefit > 0`, amber "no disability coverage on file" otherwise;
+LTC shows its green line only if `max_benefit > 0`. The "Premium" row
+that displayed `disability.funded_by` (a policy-source string, not a
+dollar amount) under a "Premium" label was also mislabeled — relabeled
+to "Funded By".
+
+New regression tests in `TestRunInsuranceAnalysis`: rental
+insured/gap reflects the real field (and reaches $0 gap when fully
+insured); disability to_age/funded_by come from Settings; an unset
+`disability_funded_by` (empty string, matching a fresh column default)
+still falls back to "Employer group policy" rather than showing blank;
+LTC premium comes from Settings.
+
+Backend suite 1373/1373 passed, 97.18% coverage. `npm test` 39/39,
+`npm run build` clean. `check_sensitive_data.py` clean.
+
+Branch: `main`.

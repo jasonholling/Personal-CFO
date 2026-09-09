@@ -385,9 +385,13 @@ export default function Settings() {
 
       <Section title="Disability &amp; Other Insurance">
         <Row label="Disability Monthly Benefit"><NumInput value={form.disability_monthly ?? 0} onChange={v => set('disability_monthly', v)} prefix="$" suffix="/mo" /></Row>
+        <Row label="Disability Coverage To Age" hint="When the policy stops paying, not a life expectancy"><NumInput value={form.disability_to_age ?? 65} onChange={v => set('disability_to_age', v)} suffix="age" /></Row>
+        <Row label="Disability Funded By" hint="e.g. Employer group policy, private policy, none"><TextInput value={form.disability_funded_by ?? 'Employer group policy'} onChange={v => set('disability_funded_by', v)} /></Row>
         <Row label="LTC Daily Benefit"><NumInput value={form.ltc_daily ?? 200} onChange={v => set('ltc_daily', v)} prefix="$" suffix="/day" /></Row>
         <Row label="LTC Maximum Benefit"><NumInput value={form.ltc_max ?? 0} onChange={v => set('ltc_max', v)} prefix="$" /></Row>
+        <Row label="LTC Annual Premium"><NumInput value={form.ltc_premium_annual ?? 369} onChange={v => set('ltc_premium_annual', v)} prefix="$" suffix="/yr" /></Row>
         <Row label="Home Insured Value" hint="Primary residence"><NumInput value={form.home_insured ?? 0} onChange={v => set('home_insured', v)} prefix="$" /></Row>
+        <Row label="Rental Property Insured Value"><NumInput value={form.rental_insured ?? 0} onChange={v => set('rental_insured', v)} prefix="$" /></Row>
         <Row label="Umbrella Policy"><NumInput value={form.umbrella ?? 0} onChange={v => set('umbrella', v)} prefix="$" /></Row>
       </Section>
 

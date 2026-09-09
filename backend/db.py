@@ -254,6 +254,21 @@ def init_db():
         # row" alone can't distinguish "never migrated" from "migrated,
         # then deliberately emptied" — this flag can.
         ("kids_migrated",              "INTEGER DEFAULT 0"),
+        # Insurance page follow-up (2026-09-09) — three fields the
+        # Insurance page displayed but had nowhere to edit: rental_insured
+        # was hardcoded to 0 in run_insurance_analysis (the Rental
+        # Property card always said "Coverage unknown / Verify current
+        # policy" no matter what, since there was never a real value
+        # behind it), and disability_funded_by/ltc_premium_annual were
+        # hardcoded strings/numbers ("Employer group policy", 369)
+        # unconditionally rendered with a green checkmark regardless of
+        # whether that was ever true for this household. All three now
+        # mirror the existing home_insured/umbrella pattern -- a real
+        # editable Settings field feeding the actual displayed value.
+        ("rental_insured",             "REAL DEFAULT 0"),
+        ("disability_funded_by",       "TEXT DEFAULT 'Employer group policy'"),
+        ("disability_to_age",          "INTEGER DEFAULT 65"),
+        ("ltc_premium_annual",         "REAL DEFAULT 369"),
     ]
     for col, typedef in migrations:
         if col not in existing_cols:
