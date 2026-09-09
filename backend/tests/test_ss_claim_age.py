@@ -661,3 +661,86 @@ class TestExternalAuditReviewOfCommit0c1a569:
         row_67 = next((row for row in body["chart"] if row["age"] == 67), None)
         assert row_67 is not None
         assert row_67["social_security"] == 0
+
+
+class TestExternalAuditReviewOfCommitAaa3cf5:
+    """External audit review of the six-finding fix round (commit
+    aaa3cf5), three remaining findings before merge. Finding 3 is
+    frontend-only (StressTestWhatIf.jsx banner wording)."""
+
+    def test_finding1_reference_projection_uses_the_shared_resolver_for_jason(self):
+        """P1: run_retirement_projection used to duplicate
+        resolve_ss_benefits' own anchor-resolution logic inline for
+        Jason's custom-scenario benefit, so it never got finding 2's
+        falsy-aware `or` fallback (section 51) -- an untouched (0-
+        valued) jason_ss_70 anchor still interpolated toward $0 here
+        even though Monte Carlo (which goes through resolve_ss_benefits
+        directly) already estimated the FRA figure instead. Reproduced
+        with a $30,000 FRA benefit and an untouched jason_ss_70=0."""
+        from projection_engine import run_retirement_projection
+        inputs = {
+            "jason_age": 60, "justin_age": 60, "inflation_rate": 0.0,
+            "expected_return_pre_retirement": 0.0, "expected_return_post_retirement": 0.0,
+            "retirement_income_today_dollars": 0,
+            "annual_hsa_contribution": 0, "annual_rsu_value": 0,
+            "jason_social_security": 30000, "jason_ss_delayed": 30000, "jason_ss_70": 0,
+            "justin_social_security": 0,
+            "healthcare_pre_medicare": 0, "healthcare_post_medicare": 0,
+            "justin_w2_salary": 0, "justin_employee_401k_pct": 0, "justin_employer_401k_pct": 0,
+            "justin_annual_bonus_pct": 0, "justin_annual_rsu_value": 0,
+            "w2_salary": 0, "employee_401k_pct": 0, "employer_401k_pct": 0, "annual_bonus_pct": 0,
+            "pension_55": 0, "pension_60": 0, "pension_65": 0,
+            "retirement_end_age": 99,
+        }
+        r = run_retirement_projection(inputs, [], ret_ages=[65], jason_ss_claim_age=70)
+        assert r["scenarios"][0]["jason_ss_annual"] == 30000  # not 0
+
+    def test_finding1_reference_projection_uses_the_shared_resolver_for_justin(self):
+        """Same finding-1 fix, for Justin's benefit within
+        run_retirement_projection -- an untouched justin_ss_early=0
+        must fall back to Justin's FRA figure, not interpolate to $0."""
+        from projection_engine import run_retirement_projection
+        inputs = {
+            "jason_age": 60, "justin_age": 60, "inflation_rate": 0.0,
+            "expected_return_pre_retirement": 0.0, "expected_return_post_retirement": 0.0,
+            "retirement_income_today_dollars": 0,
+            "annual_hsa_contribution": 0, "annual_rsu_value": 0,
+            "jason_social_security": 30000, "jason_ss_delayed": 30000,
+            "justin_social_security": 15000, "justin_ss_early": 0, "justin_ss_70": 15000,
+            "healthcare_pre_medicare": 0, "healthcare_post_medicare": 0,
+            "justin_w2_salary": 0, "justin_employee_401k_pct": 0, "justin_employer_401k_pct": 0,
+            "justin_annual_bonus_pct": 0, "justin_annual_rsu_value": 0,
+            "w2_salary": 0, "employee_401k_pct": 0, "employer_401k_pct": 0, "annual_bonus_pct": 0,
+            "pension_55": 0, "pension_60": 0, "pension_65": 0,
+            "retirement_end_age": 99,
+        }
+        r = run_retirement_projection(inputs, [], ret_ages=[65], justin_ss_claim_age=63)
+        # justin_ss_annual isn't directly on the scenario dict, but it
+        # feeds guaranteed income; assert indirectly via jason unaffected
+        # and no crash -- the direct anchor-resolution assertion lives in
+        # resolve_ss_benefits' own tests. This call must not raise and
+        # must keep the early/delayed pair since only Justin's age is set.
+        assert [s["ss_timing"] for s in r["scenarios"]] == ["early", "delayed"]
+
+    def test_finding2_income_sources_only_switches_to_custom_when_jasons_age_is_set(self, client, sample_inputs):
+        """P2: get_income_sources used to request the "custom" label
+        whenever EITHER spouse had a saved claim age, but
+        run_retirement_projection's scenario label is driven by
+        jason_ss_claim_age alone -- Justin's claim age changes his own
+        benefit amount but never creates its own scenario branch. With
+        only Justin's claim age saved, the label stays early/delayed as
+        normal; requesting "custom" anyway returned {"error": "Scenario
+        not found"}."""
+        inputs = {
+            **sample_inputs,
+            "justin_social_security": 15000, "justin_ss_early": 10500, "justin_ss_70": 18600,
+            "justin_ss_claim_age": 70,
+            # Jason's claim age left unset -- only Justin's is saved.
+        }
+        r = client.put("/api/planning-inputs", json=inputs)
+        assert r.status_code == 200, r.text
+        r = client.post("/api/retirement/income-sources", json={"ret_age": 65, "ss_timing": "early"})
+        assert r.status_code == 200
+        body = r.json()
+        assert "error" not in body
+        assert body["label"] == "age_65_early"

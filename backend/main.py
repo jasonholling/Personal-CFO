@@ -1728,15 +1728,28 @@ def get_income_sources(ret_age: int = 60, ss_timing: str = "early", body: dict =
     # claim age of 70, Monte Carlo correctly paid $0 SS at 67 while this
     # chart showed $21,000 (the early/delayed toggle's own age-67
     # figure). Now resolves the same claim age Monte Carlo uses and, if
-    # either spouse has one set, looks up the resulting "custom" label
-    # instead of the ss_timing-derived one -- matching
+    # Jason has one set, looks up the resulting "custom" label instead
+    # of the ss_timing-derived one -- matching
     # run_retirement_projection's own documented "custom" scenario
     # contract (CALCULATION_CONTRACT.md section 44).
+    #
+    # External audit review of commit aaa3cf5, finding 2 (P2): this
+    # used to switch to the "custom" label whenever EITHER spouse had a
+    # saved claim age, but run_retirement_projection's scenario label
+    # is driven by jason_ss_claim_age ONLY -- Justin's claim age
+    # changes his own benefit amount within whichever scenario Jason's
+    # is in, but never creates its own scenario branch (there is no
+    # per-Justin scenario sweep in this single-axis function). With
+    # only Justin's claim age saved (Jason's left unset), the label
+    # stayed "early"/"delayed" as normal, but this endpoint looked up
+    # "custom" anyway and returned {"error": "Scenario not found"}.
+    # Fixed to match the label jason_ss_claim_age alone actually
+    # produces.
     _proj_inputs = _apply_whatif_overrides(dict(inputs_row), body or {})
     _jason_ss_claim_age, _justin_ss_claim_age = _ss_claim_ages(_proj_inputs)
     result = run_retirement_projection(_proj_inputs, accounts, ret_ages=[ret_age], life_events=life_events, surplus_allocations=surplus_allocations,
                                         jason_ss_claim_age=_jason_ss_claim_age, justin_ss_claim_age=_justin_ss_claim_age)
-    _label = f"age_{ret_age}_custom" if (_jason_ss_claim_age is not None or _justin_ss_claim_age is not None) else f"age_{ret_age}_{ss_timing}"
+    _label = f"age_{ret_age}_custom" if _jason_ss_claim_age is not None else f"age_{ret_age}_{ss_timing}"
     scenario = next((s for s in result["scenarios"] if s["label"] == _label), None)
     if not scenario: return {"error": "Scenario not found"}
     # Return simplified chart data

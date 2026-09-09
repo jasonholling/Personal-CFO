@@ -708,24 +708,22 @@ def run_retirement_projection(inputs: Dict, accounts: List[Dict], ret_ages: List
     annual_rsu   = inputs["annual_rsu_value"]
     # Justin takes spousal benefit = 50% of Jason FRA benefit at his FRA 67
     # Cannot claim until Jason has filed, so start age = max(Justin FRA, Jason SS age)
-    justin_ss_annual = inputs.get("justin_social_security", JUSTIN_SPOUSAL_ANNUAL)
-    justin_ss_age    = inputs.get("justin_ss_age", JUSTIN_SPOUSAL_AGE)
-    # Continuous SS claiming age 62-70 (CALCULATION_CONTRACT.md section
-    # 44, milestone 1, 2026-09-08; made an EXPLICIT param rather than
-    # read off `inputs` as of milestone 6, to avoid a persisted Settings
-    # value silently changing behavior for an unrelated caller that just
-    # passes the full inputs dict through -- see milestone 6's own
-    # notes) -- opt-in only: a caller that supplies justin_ss_claim_age
-    # gets Justin's own benefit recomputed via ss_benefit_for_claim_age's
-    # real-anchor formula instead of the binary early(62)/FRA(67) figure
-    # above; every existing caller that doesn't set this param is
-    # completely unaffected.
-    if justin_ss_claim_age is not None:
-        justin_ss_62 = inputs.get("justin_ss_early", justin_ss_annual)
-        justin_ss_70 = inputs.get("justin_ss_70", justin_ss_annual)
-        justin_ss_annual = ss_benefit_for_claim_age(justin_ss_62, justin_ss_annual, justin_ss_70, justin_ss_claim_age,
-                                                      benefit_type="spousal")
-        justin_ss_age = _clamp_claim_age(justin_ss_claim_age)
+    # External audit review of commit aaa3cf5, finding 1 (P1): this used
+    # to duplicate resolve_ss_benefits' own anchor-resolution logic
+    # inline, so it never got finding 2's falsy-aware `or` fallback fix
+    # (section 51) -- an unfilled (0-valued) justin_ss_early/
+    # justin_ss_70 anchor still interpolated straight down/up toward $0
+    # here, even though Settings' own preview and every other consumer
+    # (Monte Carlo, Stress Tests, etc.) already estimated a sensible
+    # FRA-based figure instead. Delegating to resolve_ss_benefits keeps
+    # this the single source of anchor-resolution logic, so a future
+    # fix to that fallback never needs a second, parallel update here
+    # again. ss_timing="early" here only affects Jason's half of the
+    # return value (immediately discarded below, since Jason's own
+    # early/delayed/custom scenarios are still generated per ret_age in
+    # the loop that follows) -- it has no effect on Justin's resolution,
+    # which never depended on ss_timing even before this fix.
+    _, _, justin_ss_annual, justin_ss_age = resolve_ss_benefits(inputs, "early", None, justin_ss_claim_age)
 
     # ── Starting balances by bucket ───────────────────────────────────────────
     # Get 401k total from accounts, apply split % from planning_inputs
@@ -798,12 +796,21 @@ def run_retirement_projection(inputs: Dict, accounts: List[Dict], ret_ages: List
     # gets the unchanged early+delayed pair, same scenarios/labels as
     # before.
     if jason_ss_claim_age is not None:
-        jason_ss_70 = inputs.get("jason_ss_70", jason_ss_delayed)
-        _jason_ss_claim_age_clamped = _clamp_claim_age(jason_ss_claim_age)
+        # External audit review of commit aaa3cf5, finding 1 (P1): same
+        # fix as Justin's block above -- this used to resolve
+        # jason_ss_70 with the old, non-falsy-aware
+        # inputs.get("jason_ss_70", jason_ss_delayed), which never
+        # fired its fallback for an existing household's stored 0
+        # (present key, not a missing one). Reproduced: Monte Carlo
+        # (which goes through resolve_ss_benefits and got finding 2's
+        # fix) estimated the FRA figure at 70 with a $0 anchor and
+        # ended at $1,300,000, while this function's own income-sources
+        # chart still showed $0 SS/yr for the same household. Delegating
+        # to resolve_ss_benefits makes both agree, and any future
+        # anchor-fallback fix only needs to change one place.
+        _jason_ss_annual, _jason_ss_age, _, _ = resolve_ss_benefits(inputs, "early", jason_ss_claim_age, None)
         jason_ss_options = [
-            ("custom", ss_benefit_for_claim_age(jason_ss_early, jason_ss_delayed, jason_ss_70, jason_ss_claim_age,
-                                                  benefit_type="worker"),
-             _jason_ss_claim_age_clamped),
+            ("custom", _jason_ss_annual, _jason_ss_age),
         ]
     else:
         jason_ss_options = [

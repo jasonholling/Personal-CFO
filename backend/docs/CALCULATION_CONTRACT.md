@@ -4668,3 +4668,66 @@ suite: 1345 passed, coverage 97.45% (95% floor). Sensitive-data check
 passed. Frontend: `npm test` 39/39, `npm run build` clean.
 
 Branch: `codex/ss-claim-age`, pushed — **not merged to `main`**.
+
+## 52. Social Security claiming age 62-70 — pre-merge review of commit aaa3cf5, fixes (2026-09-09, on `codex/ss-claim-age`)
+
+Independent review of commit aaa3cf5 (six-finding fix round) found
+three remaining issues before merge. All three are fixed here.
+
+**Finding 1 (P1) — the missing-anchor fallback wasn't propagated to
+the reference projection.** `run_retirement_projection` duplicated
+`resolve_ss_benefits`' own anchor-resolution logic inline for both
+Jason's custom-scenario benefit and Justin's benefit, instead of
+calling the shared resolver -- so section 51's finding-2 fix (the
+falsy-aware `inputs.get(key) or fallback`) never reached this function.
+An untouched (0-valued) `jason_ss_70` anchor still interpolated toward
+$0 here even though Monte Carlo (which goes through `resolve_ss_benefits`
+directly) already estimated the FRA figure instead. Reproduced:
+Monte Carlo ended at $1,300,000 while its own income-sources chart
+(built on `run_retirement_projection`) showed $0 SS/yr for the same
+household. This also affected every other consumer of this function's
+balances, including single-age Survivor. Fixed by replacing both
+duplicated blocks with calls to `resolve_ss_benefits` -- Jason's
+custom-scenario branch and Justin's benefit resolution now go through
+the exact same code path as every other consumer, so a future
+anchor-fallback fix only ever needs to change one place.
+
+**Finding 2 (P2) — saving only Justin's claim age breaks the income
+chart.** `get_income_sources` (main.py) requested the `"custom"`
+scenario label whenever EITHER spouse had a saved claim age, but
+`run_retirement_projection`'s scenario label is driven by
+`jason_ss_claim_age` alone -- Justin's claim age changes his own
+benefit amount within whichever of Jason's two scenarios is being
+computed, but never creates its own scenario branch (there is no
+per-Justin scenario sweep in this single-axis function). With only
+Justin's claim age saved (Jason's left unset), the label stayed
+`"early"`/`"delayed"` as normal, but the endpoint looked up `"custom"`
+anyway and returned `{"error": "Scenario not found"}`. Fixed to match
+the label `jason_ss_claim_age` alone actually produces.
+
+**Finding 3 (P2) — the new override banner can be false.** Each
+spouse's claim age resolves independently (`resolve_ss_claim_ages`,
+section 49 finding 1) -- with only one spouse's age saved, the
+Early/Delayed buttons keep controlling the OTHER spouse's SS normally.
+The single "these buttons have no effect" banner (section 51 finding
+5) was simply false in that case: reproduced with only Justin's claim
+age saved, toggling Early/Delayed still moved the final balance from
+$1,423,000 to $1,540,000 via Jason's own SS. The banner was also
+skipped entirely in two-age mode, where saved claim ages apply the
+same way (section 48). Fixed on the frontend
+(StressTestWhatIf.jsx): tracks each spouse's saved claim age
+separately (`savedClaimAges: {jason, justin}`), and the banner text
+now names which spouse is actually overridden and at what age --
+"only {spouse}'s claim age ... overrides these buttons for {spouse} --
+{other spouse}'s SS still responds normally" when just one is set, or
+names both when both are. The same note now also renders in two-age
+mode.
+
+New tests: 3 in a new `TestExternalAuditReviewOfCommitAaa3cf5` class in
+`tests/test_ss_claim_age.py` (findings 1-2; finding 1 gets two, one per
+spouse), reproducing the review's own exact numbers. Finding 3 is
+frontend-only (banner wording), verified by inspection and
+`npm run build`/`npm test`. Full backend suite and frontend build/test
+re-run; sensitive-data check passed.
+
+Branch: `codex/ss-claim-age`, pushed — **not merged to `main`**.
