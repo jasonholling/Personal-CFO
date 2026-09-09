@@ -98,6 +98,7 @@ def temp_db(tmp_path, monkeypatch):
     db_module.init_saved_scenarios_table()
     db_module.init_life_events_table()
     db_module.init_cfo_operating_tables()
+    db_module.init_kids_table()
     yield db_path
 
 
@@ -161,6 +162,23 @@ def sample_inputs():
         "asset2_label": "", "asset2_sale_age": 0, "asset2_sale_net": 0,
         "primary_residence_key": "", "rental_property_key": "",
     }
+
+
+@pytest.fixture
+def sample_kids():
+    """Kids-variable-count (2026-09-09) — replaces the old fixed
+    kid1_age/kid2_age/abby_529_monthly/cooper_529_monthly fields
+    sample_inputs above still carries (left there harmlessly for tests
+    that don't touch kids at all). id 1/2 deliberately mirror the
+    values sample_inputs used to hardcode for kid1/kid2, so tests
+    written against those numbers don't need their expected values to
+    change, only how they pass them in (kids=sample_kids instead of
+    reading kid1_age/kid1_name off inputs). Account fixtures owned by a
+    kid should use "kid_1"/"kid_2" to match these ids."""
+    return [
+        {"id": 1, "name": "Kid A", "age": 10, "monthly_529": 100, "display_order": 0},
+        {"id": 2, "name": "Kid B", "age": 8,  "monthly_529": 100, "display_order": 1},
+    ]
 
 
 @pytest.fixture

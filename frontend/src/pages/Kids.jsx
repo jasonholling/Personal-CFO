@@ -188,11 +188,17 @@ export default function Kids() {
   if (loading) return <div className="loading">Projecting futures...</div>
 
   const kids = data?.kids || []
+  // Kids-variable-count (2026-09-09): this used to only ever fire for a
+  // data-import gap, since every household had exactly 2 kids by
+  // construction -- 0 kids meant "accounts didn't come through," never
+  // "this household has no kids." Now it can genuinely mean either, so
+  // the message has to distinguish them instead of always pointing at
+  // Quicken import.
   if (!kids.length) return (
     <div>
       <h1 className="section-title">Kids</h1>
       <div style={{ padding:'20px', background:'rgba(251,191,36,0.08)', border:'1px solid rgba(251,191,36,0.2)', borderRadius:8, color:'var(--amber)', fontSize:13 }}>
-        ⚠ No kids account data found. Import your Quicken Net Worth statement to populate accounts.
+        ⚠ No kids added yet — add one in Settings to see 529/Roth/custodial projections here.
       </div>
     </div>
   )

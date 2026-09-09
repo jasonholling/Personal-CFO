@@ -23,7 +23,17 @@ CATEGORIES = {
     "other":      ["other"],
 }
 
-KIDS_OWNERS = {"abby", "cooper"}
+# Kids-variable-count (2026-09-09): a kid's account owner is
+# f"kid_{kid_id}" (that kid's own row id in the `kids` table), not a
+# fixed name-derived string like the old "abby"/"cooper" — a kid can be
+# renamed without orphaning their accounts, and there can be 0-5 of
+# them. is_kid_owner replaces the old KIDS_OWNERS membership check with
+# a prefix test so this file never needs the actual kid list, just
+# "is this account a kid's."
+KID_OWNER_PREFIX = "kid_"
+
+def is_kid_owner(owner) -> bool:
+    return bool(owner) and owner.startswith(KID_OWNER_PREFIX)
 
 # Canonical set of account_type values this app actually knows how to
 # categorize anywhere (net worth, retirement/Monte Carlo projections,
@@ -58,7 +68,7 @@ def compute_net_worth(accounts: List[Dict]) -> Dict:
         owner = acc["owner"]
         if at in DEBT_TYPES:
             result["liabilities"] += acc["balance"]
-        elif owner in KIDS_OWNERS:
+        elif is_kid_owner(owner):
             result["kids_assets"] += acc["balance"]
         else:
             for cat, types in CATEGORIES.items():
@@ -113,7 +123,7 @@ def effective_monthly_expenses(inputs: Dict, cash_flow_summary: Dict = None) -> 
 def emergency_fund_check(accounts, monthly_expenses: float) -> Dict:
     liquid_assets = sum(
         a["balance"] for a in accounts
-        if a.get("account_type") in ("checking", "savings") and a.get("owner") not in ("abby", "cooper")
+        if a.get("account_type") in ("checking", "savings") and not is_kid_owner(a.get("owner"))
     )
     if monthly_expenses <= 0:
         return {"has_data": False}

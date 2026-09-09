@@ -8,7 +8,7 @@ this session (that duplication is exactly what caused bugs before).
 """
 from typing import Dict, List, Optional
 
-from projection_engine import _fv, _pv_annuity, _rmd, rmd_start_age, run_retirement_projection
+from projection_engine import _fv, _pv_annuity, _rmd, rmd_start_age, run_retirement_projection, is_kid_owner
 
 # 2026 MFJ ordinary brackets (IRS Rev. Proc. 2025-32) — keep in sync with
 # frontend/src/pages/TaxPlanning.jsx's ORDINARY_2026. Two copies (one Python,
@@ -73,7 +73,7 @@ def run_rmd_planning(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_t
     pretax_pct = inputs.get("pretax_401k_pct", 0.75)
     pretax_start = total_401k * pretax_pct + sum(
         a["balance"] for a in accounts
-        if a.get("account_type") == "ira" and a.get("owner") not in ("abby", "cooper")
+        if a.get("account_type") == "ira" and not is_kid_owner(a.get("owner"))
     )
 
     if pretax_start <= 0:

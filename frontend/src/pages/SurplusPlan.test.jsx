@@ -37,7 +37,7 @@ beforeEach(() => {
   document.body.appendChild(container)
   root = createRoot(container)
   axios.get.mockImplementation(url => Promise.resolve({
-    data: url === '/api/planning-inputs' ? { kid1_name: 'Abby', kid2_name: 'Cooper' } : allocationsResponse,
+    data: url === '/api/kids' ? [] : allocationsResponse,
   }))
 })
 afterEach(async () => {
@@ -70,8 +70,7 @@ describe('SurplusPlan row saves (external audit 2026-09-07, finding #14)', () =>
   it('still refreshes the assigned/unassigned totals after a save', async () => {
     axios.put.mockResolvedValue({ data: { goal: 'Emergency reserve', monthly_amount: 500, notes: null } })
     axios.get.mockImplementation(url => Promise.resolve({
-      data: url === '/api/planning-inputs' ? { kid1_name: 'Abby', kid2_name: 'Cooper' }
-        : { ...allocationsResponse, assigned: 500, unassigned: 1500 },
+      data: url === '/api/kids' ? [] : { ...allocationsResponse, assigned: 500, unassigned: 1500 },
     }))
     await act(async () => root.render(<SurplusPlan />))
     await flush()

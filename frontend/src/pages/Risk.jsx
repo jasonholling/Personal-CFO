@@ -2,13 +2,15 @@ import { useState, useEffect } from 'react'
 import axios from 'axios'
 import TaskPanel from '../components/TaskPanel'
 import { usePersonNames } from '../hooks/usePersonNames'
+import { useKids } from '../hooks/useKids'
 import { maskDigitsInText } from '../utils/privacy'
 
 const EMPTY_POLICY  = { who: '', policy_type: '', benefit: '', premium: '', notes: '' }
 const EMPTY_PROPERTY = { item: '', coverage: '', renewal: '' }
 
 export default function Risk() {
-  const { person1Name, person2Name, kid1Name, kid2Name } = usePersonNames()
+  const { person1Name, person2Name } = usePersonNames()
+  const { kids } = useKids()
   const [policies, setPolicies]   = useState([])
   const [properties, setProperties] = useState([])
   const [policyForm, setPolicyForm]     = useState(null)
@@ -34,7 +36,7 @@ export default function Risk() {
   }
   const deleteProperty = async (id) => { await axios.delete(`/api/property-policies/${id}`); loadProperties() }
 
-  const whoOptions = [person1Name, person2Name, kid1Name, kid2Name, 'Joint', 'Trust']
+  const whoOptions = [person1Name, person2Name, ...kids.map(k => k.name), 'Joint', 'Trust']
 
   return (
     <div>

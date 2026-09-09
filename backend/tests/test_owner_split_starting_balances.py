@@ -48,7 +48,7 @@ ACCOUNTS = [
     {"name": "Trust",         "account_type": "taxable",  "owner": "trust",  "balance": 50000},
     {"name": "Jason Roth",    "account_type": "roth_ira", "owner": "jason",  "balance": 30000},
     {"name": "HSA",           "account_type": "hsa",      "owner": "jason",  "balance": 20000},
-    {"name": "Kid custodial", "account_type": "custodial", "owner": "abby",  "balance": 5000},
+    {"name": "Kid custodial", "account_type": "custodial", "owner": "kid_1",  "balance": 5000},
 ]
 
 

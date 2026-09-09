@@ -1,13 +1,23 @@
 import TaskPanel from '../components/TaskPanel'
 import { useState, useEffect } from 'react'
 import axios from 'axios'
-import { usePersonNames } from '../hooks/usePersonNames'
 import { isPrivacyMode, MASK_CURRENCY } from '../utils/privacy'
 
 const fmt = (n) => isPrivacyMode() ? MASK_CURRENCY : new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 }).format(n)
 
+// Kids-variable-count (2026-09-09): the subtitle used to hardcode "for
+// {kid1Name} & {kid2Name}" -- doesn't scale to 0-5 kids. Built from the
+// actual goals returned (each already carries its kid's real name), so
+// it reads correctly at every count instead of assuming exactly 2.
+const namesList = (goals) => {
+  const names = goals.map(g => g.child_name)
+  if (names.length === 0) return 'your kids'
+  if (names.length === 1) return names[0]
+  if (names.length === 2) return `${names[0]} & ${names[1]}`
+  return `${names.slice(0, -1).join(', ')} & ${names[names.length - 1]}`
+}
+
 export default function Education({ onNavigate }) {
-  const { kid1Name, kid2Name } = usePersonNames()
   const [data, setData] = useState(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
@@ -38,13 +48,19 @@ export default function Education({ onNavigate }) {
       <div style={{ display:'flex', justifyContent:'space-between', alignItems:'flex-start', marginBottom: 32, flexWrap:'wrap', gap:16 }}>
         <div>
           <h1 className="section-title">Education Planning</h1>
-          <p className="section-sub">529 projections for {kid1Name} & {kid2Name} — assumes 7% growth, 4% college inflation</p>
+          <p className="section-sub">529 projections for {namesList(goals)} — assumes 7% growth, 4% college inflation</p>
         </div>
         <label style={{ display:'flex', alignItems:'center', gap:8, fontSize:12, color:'var(--text2)', cursor:'pointer', whiteSpace:'nowrap' }}>
           <input type="checkbox" checked={continueDuringCollege} onChange={e => setContinueDuringCollege(e.target.checked)} />
           Keep contributing during college years
         </label>
       </div>
+
+      {goals.length === 0 && (
+        <div className="card" style={{ marginBottom: 24, textAlign: 'center', padding: '32px 24px', color: 'var(--text2)', fontSize: 13 }}>
+          No kids added yet — add one in Settings to see a 529 projection here.
+        </div>
+      )}
 
       <div className="grid-2" style={{ marginBottom: 24 }}>
         {goals.map(g => {

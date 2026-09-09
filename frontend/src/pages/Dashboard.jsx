@@ -29,7 +29,7 @@ const CATEGORY_COLORS = {
 }
 
 export default function Dashboard({ onNavigate }) {
-  const { person1Name, person2Name, kid1Name, kid2Name } = usePersonNames()
+  const { person1Name, person2Name } = usePersonNames()
   const [nw, setNw] = useState(null)
   const [snapshots, setSnapshots] = useState([])
   const [snapping, setSnapping] = useState(false)
@@ -235,7 +235,7 @@ export default function Dashboard({ onNavigate }) {
             </div>
             <div className="card" style={{ cursor: 'pointer' }} onClick={() => onNavigate('education')}>
               <div className="label" style={{ marginBottom: 8 }}>529 Education</div>
-              <div style={{ color: 'var(--text2)', fontSize: 13 }}>Track {kid1Name} & {kid2Name} funding →</div>
+              <div style={{ color: 'var(--text2)', fontSize: 13 }}>Track college funding →</div>
             </div>
             <div className="card" style={{ cursor: 'pointer' }} onClick={() => onNavigate('settings')}>
               <div className="label" style={{ marginBottom: 8 }}>Planning Inputs</div>

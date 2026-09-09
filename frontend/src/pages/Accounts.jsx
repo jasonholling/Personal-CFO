@@ -3,6 +3,7 @@ import { useState, useEffect } from 'react'
 import axios from 'axios'
 import QuickenImport from '../components/QuickenImport'
 import { usePersonNames } from '../hooks/usePersonNames'
+import { useKids, kidOwnerKey } from '../hooks/useKids'
 import { isPrivacyMode, MASK_CURRENCY } from '../utils/privacy'
 
 const fmt = (n) => isPrivacyMode() ? MASK_CURRENCY : new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 }).format(n)
@@ -36,14 +37,17 @@ const DEBT_TYPES = new Set(['mortgage', 'credit_card', 'student_loan', 'car_loan
 // INVESTMENT_TYPES) reads a stock/bond split and expense ratio from.
 const INVESTMENT_TYPES = new Set(['401k', 'ira', 'roth_ira', 'taxable', 'hsa', 'custodial'])
 
-// account.owner stays a fixed internal key (jason/justin/abby/cooper) —
-// only the displayed label is personalized, via Settings.
-const ownerOptions = (names) => [
+// account.owner stays a fixed internal key (jason/justin/kid_<id>) —
+// only the displayed label is personalized, via Settings/Kids. Kids-
+// variable-count (2026-09-09): a kid's key is f"kid_${id}" (that kid's
+// own row id in the `kids` table), not a name-derived string, so
+// renaming a kid never orphans their accounts. `kids` is a variable-
+// length list (0-5), unlike the old fixed abby/cooper pair.
+const ownerOptions = (names, kids) => [
   { value: 'jason', label: names.person1Name },
   { value: 'justin', label: names.person2Name },
   { value: 'joint', label: 'Joint' },
-  { value: 'abby', label: names.kid1Name },
-  { value: 'cooper', label: names.kid2Name },
+  ...kids.map(k => ({ value: kidOwnerKey(k.id), label: k.name })),
   { value: 'trust', label: 'Trust' },
 ]
 
@@ -60,7 +64,8 @@ const EMPTY = { name: '', account_type: 'taxable', owner: 'jason', institution: 
 
 export default function Accounts() {
   const personNames = usePersonNames()
-  const OWNERS = ownerOptions(personNames)
+  const { kids } = useKids()
+  const OWNERS = ownerOptions(personNames, kids)
   const [accounts, setAccounts] = useState([])
   const [netWorth, setNetWorth] = useState(null)
   const [freshness, setFreshness] = useState(null)

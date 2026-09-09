@@ -113,6 +113,14 @@ def init_db():
             sort_order INTEGER DEFAULT 0
         );
 
+        CREATE TABLE IF NOT EXISTS kids (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            age INTEGER NOT NULL DEFAULT 0,
+            monthly_529 REAL NOT NULL DEFAULT 0,
+            display_order INTEGER NOT NULL DEFAULT 0
+        );
+
         CREATE TABLE IF NOT EXISTS snapshots (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             snapshot_date TEXT NOT NULL,
@@ -233,6 +241,19 @@ def init_db():
         ("jason_ss_70",                "REAL DEFAULT 0"),
         ("justin_ss_early",            "REAL DEFAULT 0"),
         ("justin_ss_70",               "REAL DEFAULT 0"),
+        # Kids-variable-count (2026-09-09) — set to 1 the first time
+        # migrate_legacy_kids below actually runs its conversion (whether
+        # it finds signal and creates kids, or finds none and creates
+        # zero), so it never runs a second time. Without this, a
+        # household that migrates and then deletes back down to 0 kids
+        # would have those kids resurrected on the NEXT backend restart —
+        # migrate_legacy_kids is invoked from init_kids_table(), which
+        # (like init_tasks_table()/init_cash_flow_table() above) runs
+        # unconditionally at db.py's own import time, i.e. EVERY process
+        # start, not once ever. Checking "does the kids table have any
+        # row" alone can't distinguish "never migrated" from "migrated,
+        # then deliberately emptied" — this flag can.
+        ("kids_migrated",              "INTEGER DEFAULT 0"),
     ]
     for col, typedef in migrations:
         if col not in existing_cols:
@@ -288,6 +309,135 @@ def init_cash_flow_table():
     conn.close()
 
 init_cash_flow_table()
+
+def init_kids_table():
+    conn = get_db()
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS kids (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            age INTEGER NOT NULL DEFAULT 0,
+            monthly_529 REAL NOT NULL DEFAULT 0,
+            display_order INTEGER NOT NULL DEFAULT 0
+        );
+    """)
+    conn.commit()
+    migrate_legacy_kids(conn)
+    conn.close()
+
+def migrate_legacy_kids(conn):
+    """One-time conversion from the old fixed-2-kids model (planning_inputs'
+    kid1_name/kid2_name/kid1_age/kid2_age/abby_529_monthly/cooper_529_monthly
+    columns, plus the literal 'abby'/'cooper' account owner strings) to the
+    variable-count (0-5) `kids` table, where each kid's stable identity is
+    its own row id and account owner becomes f"kid_{id}" instead of a name-
+    derived string -- see CALCULATION_CONTRACT.md's kids-variable-count
+    section for the full design.
+
+    Exposed as its own function (not inlined into init_kids_table below)
+    so a test can call it directly against a fixture it sets up itself --
+    init_kids_table()'s own module-level call at the bottom of this file
+    only ever fires once per process, at db.py's own import time, before
+    any test's planning_inputs/accounts rows exist yet.
+
+    ONE-TIME conversion, not an ongoing sync -- guarded by planning_inputs'
+    own kids_migrated flag (set at the end of this function, whether or
+    not any kid actually got created), NOT by "does the kids table
+    currently have a row." A household that migrates and then deletes
+    back down to 0 kids must STAY at 0 on the next backend restart --
+    checking only "kids table is empty" can't tell that apart from
+    "never migrated," and this function is invoked from
+    init_kids_table() below, which (like init_tasks_table()/
+    init_cash_flow_table() above) runs unconditionally at db.py's own
+    import time -- i.e. EVERY process start, not once ever.
+
+    Also exposed as its own function (not inlined into init_kids_table)
+    so a test can call it directly against a fixture it sets up itself --
+    init_kids_table()'s own module-level call at the bottom of this file
+    only ever fires once per process, before any test's planning_inputs/
+    accounts rows exist yet.
+    """
+    if conn.execute("SELECT 1 FROM kids LIMIT 1").fetchone():
+        return  # the user has already configured kids for real -- never touch this
+
+    tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+    if "planning_inputs" not in tables:
+        return  # fresh DB -- init_db() hasn't created it yet, nothing to migrate yet
+
+    # This function can run BEFORE init_db()'s own column migrations,
+    # on the very first import of this code against an existing real
+    # cfo.db (db.py's module-level init_kids_table() call fires during
+    # `from db import ...`, before main.py's explicit init_db() call a
+    # few lines later) -- so kids_migrated may not exist as a column
+    # yet. Ensured here directly rather than relying on call order.
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(planning_inputs)").fetchall()]
+    if "kids_migrated" not in cols:
+        conn.execute("ALTER TABLE planning_inputs ADD COLUMN kids_migrated INTEGER DEFAULT 0")
+        conn.commit()
+
+    inputs_row = conn.execute("SELECT * FROM planning_inputs WHERE id=1").fetchone()
+    if not inputs_row:
+        return
+    inputs = dict(inputs_row)
+    if inputs.get("kids_migrated"):
+        return  # already ran once (created 0+ kids) -- never re-check legacy signal again
+
+    accounts_owners = set()
+    if "accounts" in tables:
+        accounts_owners = {r[0] for r in conn.execute("SELECT DISTINCT owner FROM accounts").fetchall()}
+
+    # Each legacy slot only becomes a real kid row if there's actual
+    # signal it was used -- a brand-new install also has kid1_name=
+    # 'Child 1'/kid1_age=0/no 'abby' accounts, indistinguishable from
+    # "never configured." Migrating that as a phantom kid would silently
+    # give a fresh install 2 kids by default, defeating the whole point
+    # of "could have zero kids."
+    legacy_slots = [
+        ("kid1_name", "kid1_age", "abby_529_monthly",   "abby",   "Child 1", "Education funding - Abby"),
+        ("kid2_name", "kid2_age", "cooper_529_monthly", "cooper", "Child 2", "Education funding - Cooper"),
+    ]
+    order = 0
+    for name_col, age_col, monthly_col, legacy_owner, default_name, legacy_goal in legacy_slots:
+        name    = inputs.get(name_col) or default_name
+        age     = inputs.get(age_col) or 0
+        monthly = inputs.get(monthly_col) or 0
+        has_signal = (name != default_name) or bool(age) or bool(monthly) or (legacy_owner in accounts_owners)
+        if not has_signal:
+            continue
+        cur = conn.execute(
+            "INSERT INTO kids (name, age, monthly_529, display_order) VALUES (?,?,?,?)",
+            (name, age, monthly, order),
+        )
+        new_owner = f"kid_{cur.lastrowid}"
+        if "accounts" in tables:
+            conn.execute("UPDATE accounts SET owner=? WHERE owner=?", (new_owner, legacy_owner))
+        # External audit follow-up, 2026-09-09: the account-owner remap
+        # above was the whole story for accounts, but a household could
+        # ALSO have an existing surplus_allocations row earmarking money
+        # to this kid's education fund under the OLD fixed goal key
+        # ("Education funding - Abby"/"Cooper" -- see SurplusPlan.jsx's
+        # and main.py's _get_kids_surplus_529_monthly's own history).
+        # That row's goal string was never touched by anything else in
+        # this migration, so a household with e.g. $500/mo already
+        # earmarked would have it silently become invisible: the new
+        # UI/backend only ever look up "Education funding - kid_<id>",
+        # never the old literal name, so that $500/mo would vanish from
+        # every education projection while still sitting in the table
+        # under a goal string nothing reads anymore. Remap it here,
+        # using the exact new id just assigned above, same as accounts.
+        if "surplus_allocations" in tables:
+            conn.execute(
+                "UPDATE surplus_allocations SET goal=? WHERE goal=?",
+                (f"Education funding - {new_owner}", legacy_goal),
+            )
+        order += 1
+    # Set unconditionally, even when neither slot had signal (0 kids is a
+    # valid, real outcome) -- this is what makes the conversion run only
+    # once ever, instead of re-checking legacy signal on every restart.
+    conn.execute("UPDATE planning_inputs SET kids_migrated=1 WHERE id=1")
+    conn.commit()
+
+init_kids_table()
 
 def init_surplus_allocation_table():
     conn = get_db()

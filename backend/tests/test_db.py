@@ -99,3 +99,144 @@ def test_accounts_table_accepts_insert(temp_db):
     row = conn.execute("SELECT * FROM accounts WHERE name='Test Checking'").fetchone()
     conn.close()
     assert row["balance"] == 1234.56
+
+
+class TestMigrateLegacyKids:
+    """Kids-variable-count (2026-09-09): converts the OLD fixed
+    kid1_name/kid2_name/kid1_age/kid2_age/abby_529_monthly/
+    cooper_529_monthly planning_inputs columns + literal "abby"/"cooper"
+    account owners into the new `kids` table, exactly once. The
+    temp_db fixture already calls init_kids_table() (which calls
+    migrate_legacy_kids itself) against a fresh install with no legacy
+    signal, so every test here re-invokes migrate_legacy_kids directly
+    after seeding legacy-shaped data, mirroring what happens the first
+    time an upgraded backend starts against a real pre-existing cfo.db."""
+
+    def test_fresh_install_migrates_to_zero_kids(self, temp_db):
+        # temp_db's own setup already ran this against all-default
+        # planning_inputs with no accounts -- confirms it stayed at zero
+        # rather than materializing two phantom kids.
+        conn = db_module.get_db()
+        count = conn.execute("SELECT COUNT(*) FROM kids").fetchone()[0]
+        conn.close()
+        assert count == 0
+
+    def test_both_legacy_kids_migrate_with_accounts_reowned(self, temp_db):
+        conn = db_module.get_db()
+        # temp_db's own setup already ran migrate_legacy_kids once (against
+        # an all-default install, setting kids_migrated=1) -- reset it to
+        # simulate an existing real cfo.db upgrading for the first time,
+        # which is the actual scenario this test is covering.
+        conn.execute("UPDATE planning_inputs SET kids_migrated=0 WHERE id=1")
+        conn.execute(
+            "UPDATE planning_inputs SET kid1_name=?, kid1_age=?, abby_529_monthly=?, "
+            "kid2_name=?, kid2_age=?, cooper_529_monthly=? WHERE id=1",
+            ("Riley", 12, 150, "Sam", 8, 200),
+        )
+        conn.execute(
+            "INSERT INTO accounts (name, account_type, owner, institution, balance) VALUES (?,?,?,?,?)",
+            ("Riley 529", "529", "abby", "Test Bank", 5000),
+        )
+        conn.execute(
+            "INSERT INTO accounts (name, account_type, owner, institution, balance) VALUES (?,?,?,?,?)",
+            ("Sam Roth", "roth_ira", "cooper", "Test Bank", 1000),
+        )
+        conn.commit()
+
+        db_module.migrate_legacy_kids(conn)
+
+        kids = [dict(r) for r in conn.execute("SELECT * FROM kids ORDER BY display_order").fetchall()]
+        assert len(kids) == 2
+        assert kids[0]["name"] == "Riley" and kids[0]["age"] == 12 and kids[0]["monthly_529"] == 150
+        assert kids[1]["name"] == "Sam"   and kids[1]["age"] == 8  and kids[1]["monthly_529"] == 200
+
+        owners = {r["owner"] for r in conn.execute("SELECT owner FROM accounts").fetchall()}
+        assert owners == {f"kid_{kids[0]['id']}", f"kid_{kids[1]['id']}"}
+        conn.close()
+
+    def test_legacy_education_surplus_goals_remap_to_new_kid_keys(self, temp_db):
+        """Regression (external audit follow-up, 2026-09-09): a household
+        with existing surplus_allocations rows earmarking money to a
+        kid's education fund under the OLD fixed goal key ("Education
+        funding - Abby"/"Cooper") would have that money silently become
+        invisible -- nothing after this migration ever looks up the old
+        literal key again, only "Education funding - kid_<id>". The
+        migration must remap the goal string using the SAME new id it
+        just assigned that kid, not just leave the row behind."""
+        conn = db_module.get_db()
+        conn.execute(
+            "UPDATE planning_inputs SET kids_migrated=0, kid1_name=?, kid1_age=?, "
+            "kid2_name=?, kid2_age=? WHERE id=1",
+            ("Riley", 12, "Sam", 8),
+        )
+        conn.execute(
+            "INSERT INTO surplus_allocations (goal, monthly_amount) VALUES (?,?)",
+            ("Education funding - Abby", 500),
+        )
+        conn.execute(
+            "INSERT INTO surplus_allocations (goal, monthly_amount) VALUES (?,?)",
+            ("Education funding - Cooper", 200),
+        )
+        conn.commit()
+
+        db_module.migrate_legacy_kids(conn)
+
+        kids = {r["name"]: r["id"] for r in conn.execute("SELECT * FROM kids").fetchall()}
+        goals = {r["goal"]: r["monthly_amount"] for r in conn.execute("SELECT * FROM surplus_allocations").fetchall()}
+        assert "Education funding - Abby" not in goals
+        assert "Education funding - Cooper" not in goals
+        assert goals[f"Education funding - kid_{kids['Riley']}"] == 500
+        assert goals[f"Education funding - kid_{kids['Sam']}"] == 200
+        conn.close()
+
+    def test_only_one_legacy_kid_with_signal_migrates_alone(self, temp_db):
+        """kid2 stays at every default (name 'Child 2', age 0, no
+        'cooper' accounts) -- indistinguishable from "never configured,"
+        so only kid1 should become a real row."""
+        conn = db_module.get_db()
+        conn.execute("UPDATE planning_inputs SET kids_migrated=0, kid1_name=?, kid1_age=? WHERE id=1", ("Riley", 12))
+        conn.commit()
+
+        db_module.migrate_legacy_kids(conn)
+
+        kids = [dict(r) for r in conn.execute("SELECT * FROM kids").fetchall()]
+        assert len(kids) == 1
+        assert kids[0]["name"] == "Riley"
+        conn.close()
+
+    def test_is_a_one_time_conversion_not_an_ongoing_sync(self, temp_db):
+        """A household that migrates, then deletes back down to 0 kids,
+        must STAY at 0 on the next backend restart -- migrate_legacy_kids
+        must not resurrect kid1/kid2 from the (now stale) legacy columns
+        just because the kids table happens to be empty again."""
+        conn = db_module.get_db()
+        conn.execute("UPDATE planning_inputs SET kids_migrated=0, kid1_name=?, kid1_age=? WHERE id=1", ("Riley", 12))
+        conn.commit()
+        db_module.migrate_legacy_kids(conn)
+        assert conn.execute("SELECT COUNT(*) FROM kids").fetchone()[0] == 1
+
+        conn.execute("DELETE FROM kids")
+        conn.commit()
+        # Simulates a second backend restart: migrate_legacy_kids runs
+        # again (as it would at the next init_kids_table() call) against
+        # the SAME still-legacy planning_inputs row.
+        db_module.migrate_legacy_kids(conn)
+        assert conn.execute("SELECT COUNT(*) FROM kids").fetchone()[0] == 0
+        conn.close()
+
+    def test_noop_when_kids_table_already_has_a_real_row(self, temp_db):
+        """Guards against re-running the conversion on top of a household
+        that has already configured kids for real through the app (not
+        via legacy migration) -- must never duplicate or overwrite."""
+        conn = db_module.get_db()
+        conn.execute("INSERT INTO kids (name, age, monthly_529, display_order) VALUES (?,?,?,?)",
+                     ("Already Real", 5, 0, 0))
+        conn.execute("UPDATE planning_inputs SET kid1_name=?, kid1_age=? WHERE id=1", ("Riley", 12))
+        conn.commit()
+
+        db_module.migrate_legacy_kids(conn)
+
+        kids = [dict(r) for r in conn.execute("SELECT * FROM kids").fetchall()]
+        assert len(kids) == 1
+        assert kids[0]["name"] == "Already Real"
+        conn.close()

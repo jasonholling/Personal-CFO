@@ -5155,3 +5155,115 @@ Backend suite 1351/1351 passed at 97.42% coverage,
 `check_sensitive_data.py` clean. No frontend changes.
 
 Branch: `main`, pushed.
+
+## 59. Variable kid count (0-5) — replaces the fixed 2-kid abby/cooper model (2026-09-09, on `kids-variable-count`)
+
+The app assumed exactly 2 kids everywhere: two fixed `planning_inputs`
+columns (`kid1_name`/`kid2_name`/`kid1_age`/`kid2_age`/
+`abby_529_monthly`/`cooper_529_monthly`), and `'abby'`/`'cooper'` as
+literal, hardcoded account owner strings baked into ~15 exclusion
+checks across `net_worth_engine.py`, `retirement_tools_engine.py`,
+`allocation_engine.py`, and `projection_engine.py`. User request: "we
+could have zero or 5 kids... but I want to be able to vary it."
+
+**New data model.** A `kids` table (`id`, `name`, `age`, `monthly_529`,
+`display_order`), 0-5 rows. A kid's account-ownership key is now
+`f"kid_{id}"` (that kid's own database id), not a name-derived string —
+renaming a kid never orphans their accounts. Every owner-exclusion
+check across the four backend engines now tests the `"kid_"` prefix
+(`is_kid_owner`) instead of membership in a fixed `{"abby","cooper"}`
+set, so it works identically at 0, 1, or 5 kids without threading the
+kid list into functions that only ever needed to know "is this a
+kid's account."
+
+**Migration** (`db.py`'s `migrate_legacy_kids`, called from
+`init_kids_table()`, same unconditional-at-import pattern as
+`init_tasks_table()`/`init_cash_flow_table()`): converts an existing
+household's real `kid1`/`kid2` data (and their `'abby'`/`'cooper'`-owned
+accounts) into the new table, once. Guarded by a `kids_migrated` flag
+on `planning_inputs` — NOT by "is the kids table empty" — since a
+household that migrates and later deletes back down to 0 kids must
+stay at 0 on the next backend restart (this function runs at every
+process start, not once ever).
+
+**Backend:** new `/api/kids` CRUD (GET/POST/PUT/DELETE), capped at 5.
+`run_education_projection`/`run_kids_projection`/`run_insurance_analysis`
+now take an explicit `kids` list instead of reading `kid1_age`/
+`kid1_name` etc. off `inputs` and looping exactly twice.
+`_get_kids_surplus_529_monthly` generalized from two fixed goal keys
+("Education funding - Abby"/"Cooper") to one per current kid
+(`surplus_goal_key_for_kid`, `f"Education funding - kid_{id}"`).
+
+**Frontend:** new `useKids()` hook, shared by every page needing the
+current kid list. `usePersonNames()` dropped `kid1Name`/`kid2Name`.
+`Kids.jsx`/`Education.jsx` were already written generically (map over
+however many entries come back) and needed no structural changes —
+only their empty-state messaging, which used to assume 0 always meant
+a data-import gap rather than a genuinely kid-less household.
+`Settings.jsx` replaced the fixed "Child 1/2 Name" + "Ages & 529" rows
+with a real add/edit/remove list (0-5).
+
+Backend suite 1366/1366, 97.18% coverage. `npm test` 39/39, `npm run
+build` clean. `check_sensitive_data.py` clean.
+
+**Real `cfo.db` note:** the FIRST import of this code against the real
+database (an accidental `python -c "import main"` sanity check, not a
+deliberate run) already executed the migration for real — confirmed
+correct (2 real kids converted, accounts re-owned to `kid_1`/`kid_2`),
+a safety backup was taken, and the user chose to leave it migrated
+rather than revert.
+
+Committed to the `kids-variable-count` branch, not merged — user
+explicitly wants to test in the browser before merging to `main`.
+
+### Follow-up: user's own synthetic-data testing found two migration gaps (same day)
+
+Testing with synthetic data before release, the user found:
+
+1. **Backup export/restore omitted the new `kids` table entirely** —
+   `main.py`'s `_BACKUP_TABLES` tuple (used by both `/api/backup/export`
+   and `/api/backup/restore`) predated this feature and was never
+   updated. A restore reported success but left a kid's changed name/
+   age/contribution untouched, since the table wasn't in the payload
+   to begin with. Fixed by adding `"kids"` to `_BACKUP_TABLES` — a
+   backup taken before this fix genuinely doesn't have kids data (there
+   was no kids table yet), so restoring one now correctly 400s via the
+   existing "every table must be a present key" check (section 57's
+   own `main.py` fix from finding #14 the prior week) rather than
+   silently leaving kids stale.
+
+2. **Existing `surplus_allocations` rows under the OLD fixed goal keys
+   ("Education funding - Abby"/"Cooper") were never remapped** by
+   `migrate_legacy_kids` — only account owners were. A household with,
+   say, $500/mo already earmarked to a kid's 529 via Assign Surplus
+   would have that money become invisible (a migrated $500/mo showed
+   as $0 in the education projection) — nothing after migration ever
+   looks up the literal old key again, only `f"Education funding -
+   kid_{id}"`. Fixed by remapping the goal string inside
+   `migrate_legacy_kids` itself, using the exact new id just assigned
+   to that kid (same transaction as the account-owner remap).
+
+   Investigating this surfaced a THIRD, related gap the user was
+   specifically testing for: **deleting a funded kid left that same
+   goal orphaned but still counted.** Unlike an account (a real
+   balance, deliberately kept non-destructive on kid delete —
+   `DELETE /api/kids/{id}`'s own existing comment), a
+   `surplus_allocations` row holds no balance, only a monthly
+   earmarking INSTRUCTION. `SurplusPlan.jsx` only ever renders a row
+   per CURRENT kid, so a deleted kid's goal became permanently
+   invisible in the UI while `GET /api/surplus-allocations`'s
+   `assigned` total (a plain unconditional sum over every row) kept
+   counting it forever, silently shrinking `unassigned` with no way to
+   ever reclaim or even see that money again. Fixed by deleting the
+   kid's `surplus_allocations` row in the same `DELETE /api/kids/{id}`
+   call that deletes the kid — returns the money to `unassigned`,
+   where it's visible and re-allocatable, instead of leaving it stuck
+   under a goal key nothing can reach.
+
+New regression coverage: `test_main.py`'s
+`test_backup_export_includes_kids_and_restore_round_trips_them`;
+`test_db.py`'s `test_legacy_education_surplus_goals_remap_to_new_kid_keys`;
+`test_kids_api.py`'s
+`test_deleting_a_kid_clears_their_orphaned_surplus_allocation_goal`.
+
+Still on `kids-variable-count`, not merged.

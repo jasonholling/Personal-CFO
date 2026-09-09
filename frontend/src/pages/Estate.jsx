@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
 import axios from 'axios'
 import { usePersonNames } from '../hooks/usePersonNames'
+import { useKids } from '../hooks/useKids'
 import { isPrivacyMode, MASK_CURRENCY } from '../utils/privacy'
 
 const fmt = (n) => isPrivacyMode() ? MASK_CURRENCY : (n == null ? '—' : new Intl.NumberFormat('en-US',{style:'currency',currency:'USD',maximumFractionDigits:0}).format(n))
@@ -15,16 +16,30 @@ const documentDefaults = (n) => [
   { id:'freeze',   label:'Credit Freeze (all 3 bureaus)',   date:'', status:'verify' },
 ]
 
-const accountDefaults = (n) => [
-  { id:'empower',  label:'401k',                    primary:`${n.person1Name} & ${n.person2Name} Trust`, contingent:`${n.kid1Name} & ${n.kid2Name} equally` },
-  { id:'schwab',   label:'Brokerage',               primary:`${n.person1Name} & ${n.person2Name} Trust`, contingent:`${n.kid1Name} & ${n.kid2Name} equally` },
-  { id:'person1roth',label:`${n.person1Name} Roth IRA`, primary:n.person2Name,           contingent:`${n.kid1Name} & ${n.kid2Name} equally` },
-  { id:'person2ira',label:`${n.person2Name} Traditional IRA`, primary:n.person1Name,     contingent:`${n.kid1Name} & ${n.kid2Name} equally` },
+// Kids-variable-count (2026-09-09): "contingent" used to hardcode
+// "{kid1Name} & {kid2Name} equally" and a fixed kid1roth/kid2roth pair
+// -- generalized to however many kids currently exist (0-5), joined
+// with "&" the same way Education.jsx's namesList does. These are seed
+// TEMPLATES only (see module comment above) -- once a household edits
+// a row, it's persisted to localStorage and this function is never
+// called again for that row, so an existing saved estate plan is
+// unaffected by kids being added/removed/renamed later.
+const kidsEqually = (kids) => {
+  if (kids.length === 0) return ''
+  if (kids.length === 1) return kids[0].name
+  const names = kids.map(k => k.name)
+  return `${names.slice(0, -1).join(', ')} & ${names[names.length - 1]} equally`
+}
+
+const accountDefaults = (n, kids) => [
+  { id:'empower',  label:'401k',                    primary:`${n.person1Name} & ${n.person2Name} Trust`, contingent:kidsEqually(kids) },
+  { id:'schwab',   label:'Brokerage',               primary:`${n.person1Name} & ${n.person2Name} Trust`, contingent:kidsEqually(kids) },
+  { id:'person1roth',label:`${n.person1Name} Roth IRA`, primary:n.person2Name,           contingent:kidsEqually(kids) },
+  { id:'person2ira',label:`${n.person2Name} Traditional IRA`, primary:n.person1Name,     contingent:kidsEqually(kids) },
   { id:'hsa',      label:'HSA',                     primary:n.person2Name,               contingent:'' },
-  { id:'person1life',label:`${n.person1Name} Life Insurance`, primary:`${n.person1Name} & ${n.person2Name} Trust`, contingent:`${n.kid1Name} & ${n.kid2Name} equally` },
-  { id:'person2life',label:`${n.person2Name} Life Insurance`, primary:n.person1Name,     contingent:`${n.kid1Name} & ${n.kid2Name} equally` },
-  { id:'kid1roth', label:`${n.kid1Name} Roth IRA`,  primary:`${n.person1Name} & ${n.person2Name}`, contingent:'' },
-  { id:'kid2roth', label:`${n.kid2Name} Roth IRA`,  primary:`${n.person1Name} & ${n.person2Name}`, contingent:'' },
+  { id:'person1life',label:`${n.person1Name} Life Insurance`, primary:`${n.person1Name} & ${n.person2Name} Trust`, contingent:kidsEqually(kids) },
+  { id:'person2life',label:`${n.person2Name} Life Insurance`, primary:n.person1Name,     contingent:kidsEqually(kids) },
+  ...kids.map(k => ({ id:`kid${k.id}roth`, label:`${k.name} Roth IRA`, primary:`${n.person1Name} & ${n.person2Name}`, contingent:'' })),
 ]
 
 const StatusBadge = ({ status }) => {
@@ -40,12 +55,27 @@ const StatusBadge = ({ status }) => {
 
 export default function Estate() {
   const personNames = usePersonNames()
+  const { kids, loading: kidsLoading } = useKids()
   const [docs,  setDocs]  = useState(() => {
     try { return JSON.parse(localStorage.getItem('estate_docs') || 'null') || documentDefaults(personNames) } catch { return documentDefaults(personNames) }
   })
   const [benes, setBenes] = useState(() => {
-    try { return JSON.parse(localStorage.getItem('estate_benes') || 'null') || accountDefaults(personNames) } catch { return accountDefaults(personNames) }
+    try { return JSON.parse(localStorage.getItem('estate_benes') || 'null') || accountDefaults(personNames, []) } catch { return accountDefaults(personNames, []) }
   })
+
+  // useKids() fetches asynchronously, so on first render (no
+  // localStorage yet) the lazy initializer above ran before `kids`
+  // arrived, producing a template with zero kid-Roth rows even for a
+  // household that has kids. Once kids finishes loading, regenerate the
+  // defaults -- but only if nothing's been saved yet (a household that
+  // already edited/saved their beneficiary list must never have it
+  // silently regenerated out from under them).
+  useEffect(() => {
+    if (kidsLoading) return
+    if (localStorage.getItem('estate_benes')) return
+    setBenes(accountDefaults(personNames, kids))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [kidsLoading])
   const [tasks, setTasks] = useState([
     { id:1, text:'Review and update estate documents', done:false },
     { id:2, text:'Verify beneficiary designations on all accounts', done:false },

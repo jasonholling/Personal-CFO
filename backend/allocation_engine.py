@@ -10,7 +10,15 @@ guess, not something you told it).
 from typing import Dict, List
 
 INVESTMENT_TYPES = {"401k", "ira", "roth_ira", "taxable", "hsa", "custodial"}
-KIDS_OWNERS = {"abby", "cooper"}
+
+# Kids-variable-count (2026-09-09): a kid's account owner is
+# f"kid_{kid_id}", not a fixed name-derived string like the old "abby"/
+# "cooper" — see projection_engine.py's identical is_kid_owner for the
+# full rationale (kept as its own local copy here, matching this
+# codebase's existing per-file KIDS_OWNERS-style duplication rather than
+# introducing a cross-module import for one helper).
+def is_kid_owner(owner) -> bool:
+    return bool(owner) and owner.startswith("kid_")
 
 DEFAULT_STOCK_ALLOCATION_PCT = 80  # assumed split for any account without one set
 REBALANCE_THRESHOLD_PCT = 5        # deviation from target before we recommend action
@@ -27,7 +35,7 @@ def _target_stock_pct(age: int) -> float:
 def analyze_allocation(inputs: Dict, accounts: List[Dict]) -> Dict:
     holdings = [
         a for a in accounts
-        if a.get("account_type") in INVESTMENT_TYPES and a.get("owner") not in KIDS_OWNERS and a.get("balance", 0) > 0
+        if a.get("account_type") in INVESTMENT_TYPES and not is_kid_owner(a.get("owner")) and a.get("balance", 0) > 0
     ]
     total_investable = sum(a["balance"] for a in holdings)
     if total_investable <= 0:
@@ -92,7 +100,7 @@ def analyze_fees(accounts: List[Dict], years: int = 30, expected_return: float =
     # "your investable assets" even means.
     holdings = [
         a for a in accounts
-        if a.get("account_type") in INVESTMENT_TYPES and a.get("owner") not in KIDS_OWNERS and a.get("expense_ratio", 0) > 0
+        if a.get("account_type") in INVESTMENT_TYPES and not is_kid_owner(a.get("owner")) and a.get("expense_ratio", 0) > 0
     ]
     if not holdings:
         return {"has_fee_data": False}
@@ -164,7 +172,7 @@ def concentration_risk(accounts: List[Dict], threshold_pct: float = CONCENTRATIO
     a single-security taxable account is."""
     holdings = [
         a for a in accounts
-        if a.get("account_type") in INVESTMENT_TYPES and a.get("owner") not in KIDS_OWNERS and a.get("balance", 0) > 0
+        if a.get("account_type") in INVESTMENT_TYPES and not is_kid_owner(a.get("owner")) and a.get("balance", 0) > 0
     ]
     total_investable = sum(a["balance"] for a in holdings)
     if total_investable <= 0:
