@@ -1838,9 +1838,22 @@ def _run_stress_tests_two_age(inputs: Dict, accounts: List[Dict], jason_ret_age:
         # income only ever applies at 55), description still said "age
         # 57 instead of 60." Overridden to say so explicitly rather
         # than run a no-op scenario under a misleading label.
+        #
+        # Follow-up (2026-09-09, later same day): the FIRST version of
+        # this fix only checked bridge_years_55 <= 0 -- but the actual
+        # re-projection just below (the only place this scenario has
+        # any numeric effect) is separately gated to jason_ret_age ==
+        # 55. A household WITH bridge years configured, viewed at any
+        # OTHER retirement age, still hit the original bug: description
+        # said "applicable," re-projection was skipped, numbers were a
+        # no-op. Exactly the reproduction case this comment already
+        # described, just missed by the first fix's condition. Now
+        # gated on both.
         scenario_description = scenario["description"]
         if key == "bridge_job_loss" and inputs.get("bridge_years_55", 0) <= 0:
             scenario_description = "Not applicable to this scenario — no bridge job is modeled for this household (Settings has 0 bridge years configured)."
+        elif key == "bridge_job_loss" and jason_ret_age != 55:
+            scenario_description = "Not applicable to this scenario — no bridge period at the selected retirement age (bridge income only applies at age 55)."
 
         scenario_jason_ss  = jason_ss_annual * ss_mult
         scenario_justin_ss = justin_ss_annual * ss_mult
@@ -2087,10 +2100,15 @@ def run_stress_tests(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_t
         # External audit follow-up, 2026-09-09: see the two-age copy's
         # identical comment above -- "bridge_job_loss"'s description
         # was a fixed string regardless of whether this household
-        # actually has a bridge job configured.
+        # actually has a bridge job configured. Later follow-up (same
+        # day): also gate on ret_age == 55, matching the re-projection
+        # gate just below -- bridge_years_55 > 0 alone doesn't make this
+        # scenario applicable at any OTHER retirement age.
         scenario_description = scenario["description"]
         if key == "bridge_job_loss" and inputs.get("bridge_years_55", 0) <= 0:
             scenario_description = "Not applicable to this scenario — no bridge job is modeled for this household (Settings has 0 bridge years configured)."
+        elif key == "bridge_job_loss" and ret_age != 55:
+            scenario_description = "Not applicable to this scenario — no bridge period at the selected retirement age (bridge income only applies at age 55)."
 
         # For SS reduction. Independent review, 2026-09-08, ninth
         # follow-up, finding 2 (P1): scenario_justin_ss used to reduce

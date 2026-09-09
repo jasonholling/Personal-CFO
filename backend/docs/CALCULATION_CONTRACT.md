@@ -5123,3 +5123,35 @@ was already correct; only its text was wrong). `npm test` 39/39,
 coverage, `check_sensitive_data.py` clean.
 
 Branch: `main`, pushed.
+
+## 58. Social Security claiming age 62-70 — section 57's own bridge_job_loss fix was incomplete (2026-09-09, on `main`)
+
+A verification pass against section 57's own six items, run before
+reporting them done, found the "not applicable" fix from item 3 only
+covered half of its own reproduction case.
+
+Section 57 gated the description override on `bridge_years_55 <= 0`
+alone -- but the actual re-projection (the only place `bridge_job_loss`
+has any numeric effect) is separately gated to `jason_ret_age == 55`
+(two-age) / `ret_age == 55` (single-axis), several lines below. A
+household WITH bridge years configured, viewed at any OTHER
+retirement age, hit the exact bug section 57's own comment described
+reproducing ("retirement at 65 ... description still said age 57
+instead of 60") -- the first fix's condition just didn't cover it.
+Confirmed by re-reading the code, not by a fresh live-testing report.
+
+Added a second condition (`jason_ret_age != 55` / `ret_age != 55`) to
+both copies (`run_two_age_stress_tests`/`run_stress_tests` in
+`simulation_engine.py`), with its own message ("no bridge period at
+the selected retirement age -- bridge income only applies at age
+55") distinct from the zero-bridge-years message, since they're
+different reasons for the same "not applicable" outcome.
+
+No test asserted on the scenario description text either way, so this
+shipped without a red test catching it -- worth a regression test if
+this scenario gets touched again.
+
+Backend suite 1351/1351 passed at 97.42% coverage,
+`check_sensitive_data.py` clean. No frontend changes.
+
+Branch: `main`, pushed.
