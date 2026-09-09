@@ -1446,11 +1446,16 @@ def run_two_dimensional_retirement_projection(inputs: Dict, accounts: List[Dict]
     annual_hsa   = inputs.get("annual_hsa_contribution", 0)
     annual_rsu   = inputs.get("annual_rsu_value", 0)
 
-    jason_ss_early   = inputs.get("jason_social_security", JASON_SS_EARLY_DEFAULT)
-    jason_ss_delayed = inputs.get("jason_ss_delayed", jason_ss_early * JASON_SS_DELAYED_RATIO)
-    jason_ss_annual, jason_ss_age = (jason_ss_early, 62) if ss_timing != "delayed" else (jason_ss_delayed, 67)
-    justin_ss_annual = inputs.get("justin_social_security", JUSTIN_SPOUSAL_ANNUAL)
-    justin_ss_age    = inputs.get("justin_ss_age", JUSTIN_SPOUSAL_AGE)
+    # SS resolution (2026-09-08, CALCULATION_CONTRACT.md section 44,
+    # milestone 5): resolve_ss_benefits replaces this function's own
+    # independent ss_timing ternary. jason_ss_claim_age/justin_ss_
+    # claim_age are read directly off `inputs` (not explicit params on
+    # this function) -- every two-age caller already passes `inputs`
+    # straight through, so any caller that sets these two fields on its
+    # own inputs dict gets continuous-claim-age support here for free,
+    # with no signature changes needed on this function itself.
+    jason_ss_annual, jason_ss_age, justin_ss_annual, justin_ss_age = resolve_ss_benefits(
+        inputs, ss_timing, inputs.get("jason_ss_claim_age"), inputs.get("justin_ss_claim_age"))
 
     # ── Starting balances by bucket -- identical to run_retirement_projection ──
     total_401k = sum(a["balance"] for a in accounts if a["account_type"] == "401k")
@@ -2050,11 +2055,12 @@ def run_owner_split_two_dimensional_projection(inputs: Dict, accounts: List[Dict
     post_ret   = inputs["expected_return_post_retirement"]
     income_today = inputs["retirement_income_today_dollars"]
 
-    jason_ss_early   = inputs.get("jason_social_security", JASON_SS_EARLY_DEFAULT)
-    jason_ss_delayed = inputs.get("jason_ss_delayed", jason_ss_early * JASON_SS_DELAYED_RATIO)
-    jason_ss_annual, jason_ss_age = (jason_ss_early, 62) if ss_timing != "delayed" else (jason_ss_delayed, 67)
-    justin_ss_annual = inputs.get("justin_social_security", JUSTIN_SPOUSAL_ANNUAL)
-    justin_ss_age    = inputs.get("justin_ss_age", JUSTIN_SPOUSAL_AGE)
+    # SS resolution (2026-09-08, CALCULATION_CONTRACT.md section 44,
+    # milestone 5) -- see run_two_dimensional_retirement_projection's
+    # identical comment: claim ages read directly off `inputs`, no
+    # signature change needed here.
+    jason_ss_annual, jason_ss_age, justin_ss_annual, justin_ss_age = resolve_ss_benefits(
+        inputs, ss_timing, inputs.get("jason_ss_claim_age"), inputs.get("justin_ss_claim_age"))
     pension_annual = pension_for_age(inputs, jason_ret_age)
 
     timeline = build_two_person_timeline(jason_age, justin_age, jason_ret_age, justin_ret_age,

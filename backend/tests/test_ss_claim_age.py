@@ -299,3 +299,91 @@ class TestSurvivorScenarioOptInClaimAge:
         high = run_survivor_scenario(inputs, sample_accounts, ret_age=60,
                                       deceased="jason", jason_ss_claim_age=70)
         assert low["survivor_ss_annual"] != high["survivor_ss_annual"]
+
+
+class TestTwoAgeConsumersOptInClaimAge:
+    """CALCULATION_CONTRACT.md section 44, milestone 5: every two-age
+    consumer wired to the shared resolver. Unlike the single-axis
+    functions (explicit jason_ss_claim_age/justin_ss_claim_age kwargs),
+    the two underlying walk functions (run_two_dimensional_retirement_
+    projection, run_owner_split_two_dimensional_projection) read claim
+    ages directly off `inputs` -- every two-age caller already passes
+    `inputs` straight through, so this needed no signature change on
+    either walk function itself. The public single-axis dispatchers
+    (run_swr_analysis, run_survivor_scenario, etc.) inject their own
+    jason_ss_claim_age/justin_ss_claim_age kwargs into `inputs` before
+    delegating to their two-age sibling, so the SAME opt-in kwargs work
+    identically in both modes."""
+
+    # Both spouses already at/past every relevant SS age (67 == FRA ==
+    # JUSTIN_SPOUSAL_AGE's own default) so SS is active from the very
+    # first modeled year regardless of ss_timing/claim age -- isolates
+    # the claim-age effect from "hasn't started yet" timing noise.
+    TWO_AGE_INPUTS = {
+        "jason_age": 67, "justin_age": 67,
+        "inflation_rate": 0.0,
+        "expected_return_pre_retirement": 0.0,
+        "expected_return_post_retirement": 0.0,
+        "retirement_income_today_dollars": 80000,
+        "annual_hsa_contribution": 0, "annual_rsu_value": 0,
+        "jason_social_security": 30000, "jason_ss_delayed": 45000,
+        "justin_social_security": 15000,
+        "healthcare_pre_medicare": 0, "healthcare_post_medicare": 0,
+        "justin_w2_salary": 0, "justin_employee_401k_pct": 0, "justin_employer_401k_pct": 0,
+        "justin_annual_bonus_pct": 0, "justin_annual_rsu_value": 0,
+        "w2_salary": 0, "employee_401k_pct": 0, "employer_401k_pct": 0,
+        "annual_bonus_pct": 0,
+        "pension_55": 0, "pension_60": 0, "pension_65": 0,
+        "retirement_end_age": 69,
+    }
+    TAXABLE = [{"name": "Brokerage", "account_type": "taxable", "owner": "joint", "balance": 500000}]
+
+    def test_two_dimensional_projection_backward_compatible_without_claim_age(self):
+        from projection_engine import run_two_dimensional_retirement_projection
+        result = run_two_dimensional_retirement_projection(
+            self.TWO_AGE_INPUTS, self.TAXABLE, jason_ret_age=67, justin_ret_age=67)
+        first_year = result["yearly_detail"][0]
+        # ss_timing defaults to "early" -- 30000, the early-claim figure
+        # (already active at 67, well past the age-62 early threshold).
+        assert first_year["social_security"] == 30000 + round(
+            self.TWO_AGE_INPUTS["justin_social_security"])
+
+    def test_two_dimensional_projection_claim_age_changes_the_figure(self):
+        from projection_engine import run_two_dimensional_retirement_projection
+        inputs = {**self.TWO_AGE_INPUTS, "jason_ss_claim_age": 67, "jason_ss_70": 55800}
+        result = run_two_dimensional_retirement_projection(
+            inputs, self.TAXABLE, jason_ret_age=67, justin_ret_age=67)
+        first_year = result["yearly_detail"][0]
+        # Age 67 is the FRA anchor exactly -- jason_ss_delayed=45000.
+        assert first_year["social_security"] == 45000 + round(inputs["justin_social_security"])
+
+    def test_swr_two_age_backward_compatible_without_claim_age(self):
+        from simulation_engine import run_swr_analysis
+        result = run_swr_analysis(self.TWO_AGE_INPUTS, self.TAXABLE,
+                                   jason_ret_age=67, justin_ret_age=67, target_success=1.0)
+        assert result["mode"] == "two_age"
+
+    def test_swr_two_age_claim_age_changes_the_outcome(self):
+        from simulation_engine import run_swr_analysis
+        inputs = {**self.TWO_AGE_INPUTS, "jason_ss_70": self.TWO_AGE_INPUTS["jason_ss_delayed"] * 1.24}
+        low  = run_swr_analysis(inputs, self.TAXABLE, jason_ret_age=67, justin_ret_age=67,
+                                 target_success=1.0, jason_ss_claim_age=62)
+        high = run_swr_analysis(inputs, self.TAXABLE, jason_ret_age=67, justin_ret_age=67,
+                                 target_success=1.0, jason_ss_claim_age=70)
+        assert low["jason_ss_annual"] != high["jason_ss_annual"]
+
+    def test_survivor_two_age_backward_compatible_without_claim_age(self):
+        from simulation_engine import run_survivor_scenario
+        result = run_survivor_scenario(self.TWO_AGE_INPUTS, self.TAXABLE,
+                                        jason_ret_age=67, justin_ret_age=67,
+                                        deceased="justin", death_age=67)
+        assert result["has_data"] is True
+
+    def test_survivor_two_age_claim_age_changes_the_outcome(self):
+        from simulation_engine import run_survivor_scenario
+        inputs = {**self.TWO_AGE_INPUTS, "jason_ss_70": self.TWO_AGE_INPUTS["jason_ss_delayed"] * 1.24}
+        low  = run_survivor_scenario(inputs, self.TAXABLE, jason_ret_age=67, justin_ret_age=67,
+                                      deceased="justin", death_age=67, jason_ss_claim_age=62)
+        high = run_survivor_scenario(inputs, self.TAXABLE, jason_ret_age=67, justin_ret_age=67,
+                                      deceased="justin", death_age=67, jason_ss_claim_age=70)
+        assert low["survivor_ss_annual"] != high["survivor_ss_annual"]

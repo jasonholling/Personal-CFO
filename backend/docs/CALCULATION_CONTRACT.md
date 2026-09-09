@@ -4302,3 +4302,47 @@ Branch: `codex/ss-claim-age`, pushed — **not merged to `main`**.
 Remaining: two-age consumers (all of them share jason/justin tracking
 already, so this is expected to be the most natural fit of any
 milestone), frontend.
+
+## 48. Social Security claiming age 62-70 — milestone 5: every two-age consumer (2026-09-08, on `codex/ss-claim-age`)
+
+Propagated to all remaining two-age functions: the two core walks
+(`run_two_dimensional_retirement_projection`,
+`run_owner_split_two_dimensional_projection`, both in
+`projection_engine.py`) and all six `_run_X_two_age` siblings in
+`simulation_engine.py` (Monte Carlo, Stress Tests, SWR, Roth
+Conversion, Tax Efficiency, Survivor).
+
+**Different wiring shape than milestones 2-4, by design**: the two
+core walk functions now read `jason_ss_claim_age`/`justin_ss_claim_age`
+directly off `inputs` via `resolve_ss_benefits`, rather than as
+explicit function parameters — every two-age caller already passes
+`inputs` straight through unchanged, so this needed NO signature
+change on either walk function. The six `_run_X_two_age` siblings each
+had their own independent, redundant SS-resolution block (mirroring
+their single-axis counterparts) that also now calls
+`resolve_ss_benefits` the same way, reading claim ages off `inputs`
+too. The six PUBLIC dispatchers (`run_monte_carlo`, `run_stress_tests`,
+`run_swr_analysis`, `run_roth_conversion_analysis`,
+`run_tax_efficiency_simulation`, `run_survivor_scenario`) already had
+explicit `jason_ss_claim_age`/`justin_ss_claim_age` kwargs from
+milestones 2-4 — each now injects them into a shallow-copied `inputs`
+dict immediately before delegating to its two-age sibling, so the SAME
+kwargs work identically in both single-axis and two-age mode from the
+caller's perspective.
+
+The `_run_survivor_scenario_two_age` block (findings 2-8 of the
+eight-round Survivor review, sections 39-43) needed no structural
+change — its own per-year COLA-compounding gate already consumed
+`jason_ss_annual`/`jason_ss_age`/`justin_ss_annual`/`justin_ss_age` as
+base figures; only their SOURCE (now `resolve_ss_benefits` instead of
+the local ternary) changed.
+
+New tests: 6, covering the two core walks and 2 representative
+consumers (SWR, Survivor) in two-age mode — backward compatibility and
+a genuine outcome change with a claim age, mirroring the single-axis
+test pattern from milestones 2-4. Full backend suite: 1332 passed,
+coverage at/above the 95% floor. Sensitive-data check passed.
+
+Branch: `codex/ss-claim-age`, pushed — **not merged to `main`**.
+Remaining: frontend (Settings fields, replacing early/delayed toggles
+with age selectors) — the last milestone in section 44's sequence.
