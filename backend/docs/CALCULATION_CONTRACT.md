@@ -5010,3 +5010,116 @@ No calculation errors found in this round -- purely presentation/UX.
 `npm test` 39/39, `npm run build` clean. No backend changes.
 
 Branch: `main`, pushed.
+
+## 57. Social Security claiming age 62-70 — logical field order + third live UX follow-up, fixes (2026-09-09, on `main`)
+
+Two independent reports: the user noticed Justin's three Settings SS
+anchor fields weren't in age order, then a further live-testing pass
+(no new calculation errors found) turned up six more presentation
+issues on Simulation.jsx/StressTestWhatIf.jsx/ClaimAgeSlider.jsx.
+
+**SS field ordering (Settings.jsx).** Justin's three anchor `<Row>`s
+were ordered 67/62/70 -- the 67 field predates the other two and was
+never moved when they were added alongside it later. Reordered to
+62/67/70, matching Jason's already-correct order.
+
+**User's live-testing findings:**
+
+1. "Assumptions used" didn't resolve saved SS ages -- with the custom
+   sliders off, a completed run said "Jason SS: take at 62 (or
+   Settings, if saved)" and omitted Justin's effective age entirely.
+   `AssumptionsUsed` now takes `savedJasonClaimAge`/`savedJustinClaimAge`
+   (threaded from the planning-inputs fetch already done for the
+   What-If Builder) and states the actual resolved age and its source
+   for both people symmetrically: "Jason: 70, from Settings; Justin:
+   67, from Settings" (or "from this page" when a slider here is on).
+
+2. Switching tabs discarded a completed run -- Monte Carlo and
+   Historical Stress were each conditionally rendered
+   (`{tab === X && <Section/>}`), which unmounts a section entirely on
+   tab-away; switching back remounted from scratch and lost the
+   result. Both are now mounted-but-hidden (`<div hidden={tab !==
+   X}>`), the same pattern already used for the What-If Builder --
+   neither fetches anything on mount, only on its own Run button, so
+   staying mounted costs nothing. Survivor Scenario was deliberately
+   left conditionally-rendered: it fetches `/api/planning-inputs` on
+   mount (for the household's current ages, to default the "years
+   into retirement" field), so mounting it eagerly would fire that
+   request before its tab is ever opened and race with the What-If
+   Builder's own settings fetch for the SAME endpoint -- confirmed by
+   `ScenarioFlow.test.jsx` regressing (extra `/api/planning-inputs`
+   call, and the two mocked promise resolvers colliding) when Survivor
+   was made eager during this fix; reverted to conditional rendering
+   for that one section only. Losing Survivor's run on tab-switch
+   wasn't part of what was reported.
+
+3. Stress descriptions contradicted the selected scenario:
+   Assumptions showed a 7%/yr post-retirement return while the chart
+   legend hardcoded "Base Case (6%/yr)" regardless of the actual
+   assumption -- the backend already computes the correct label
+   (`results["base"]["label"] = f"Base Case ({post_ret*100:g}%
+   every year)"`) but the frontend ignored it. Fixed by using
+   `base?.label` for the chart legend `name` instead of a fixed
+   string. Separately, "Bridge Job Loss" always said "a bridge job
+   ending at age 57 instead of 60" and reported the plan surviving,
+   even for a household with zero bridge years configured (where the
+   scenario's own `bridge_years_55` override was already correctly
+   capped to 0 impact by `min(bridge_override,
+   inputs.get("bridge_years_55", 0))` -- the CALCULATION was right,
+   only the description text was a fixed string that never reflected
+   it). `simulation_engine.py`'s `run_stress_tests` (both the two-age
+   and single-axis implementations) now override the description to
+   "Not applicable to this scenario -- no bridge job is modeled for
+   this household (Settings has 0 bridge years configured)." whenever
+   `bridge_years_55 <= 0`.
+
+4. Change notices showed raw/keystroke/null values instead of a
+   meaningful comparison -- "null to 65", "65 to null", "6 to 65".
+   The underlying bug: `prevSnapshotRef` was overwritten on every
+   render (including mid-keystroke and mid-mode-toggle transitions),
+   so `describeAssumptionChange` was diffing against the PREVIOUS
+   RENDER, not the last completed run. Renamed to
+   `lastRunSnapshotRef` and moved the assignment out of the
+   `useEffect` into `run()`'s own success handlers (both the two-age
+   and single-axis branches, in both `MonteCarloSection` and
+   `StressTestSection`) -- it's now set only when a run actually
+   completes. `describeAssumptionChange` also gained an explicit
+   two-age-mode-toggle check *before* its raw field diffs, so
+   switching between single-age and two-age mode reports "changed to
+   two-age mode" / "changed to single retirement age" instead of
+   diffing the now-null/now-populated per-person age fields directly.
+
+5. The spending cards required too much interpretation, and didn't
+   explain why the simplified SWR check and the full Monte Carlo plan
+   can disagree. "Safe Spending Power" renamed to "Safe Portfolio
+   Withdrawal"; "Total safe spend (day-one)" renamed to "Total
+   spending capacity (day-one)"; the SWR card's target line now reads
+   "...vs $X/yr target (including healthcare, in retirement-year
+   dollars)" instead of leaving "target" ambiguous; and a one-line
+   note ("A simplified single-rate check, separate from the Monte
+   Carlo simulation above -- the two can disagree.") was added under
+   the headline so a lower SWR number next to a healthy Monte Carlo
+   result doesn't read as contradictory.
+
+6. Claim-age slider labels wrapped awkwardly -- "Jason's claim age"
+   plus a long offHint phrase, all packed into one flex row with the
+   checkbox (`gap:8`), wrapped onto three short lines with a large
+   gap between the checkbox and the label text whenever the row
+   wasn't wide enough. `ClaimAgeSlider.jsx`'s header is now two lines:
+   name (+ age, when known) on its own line, a short status line
+   beneath it ("Custom age" when on; "Using Settings (age N)" when
+   off and a saved age is known via the new optional `savedAge` prop;
+   otherwise the existing offHint text). `savedAge` is threaded from
+   StressTestWhatIf.jsx's `savedClaimAges` state for the Monte
+   Carlo/Historical Stress inline sliders; Settings.jsx/Retirement.jsx/
+   RothConversion.jsx/the What-If Builder's own sliders don't have
+   that value in scope and fall back to the offHint-only display,
+   unchanged from before.
+
+No calculation errors found in this round except the pre-existing
+`bridge_job_loss` description bug (the underlying stress-test number
+was already correct; only its text was wrong). `npm test` 39/39,
+`npm run build` clean, backend suite 1351/1351 passed at 97.46%
+coverage, `check_sensitive_data.py` clean.
+
+Branch: `main`, pushed.

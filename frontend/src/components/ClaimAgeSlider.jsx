@@ -17,7 +17,7 @@ import { ssBenefitForClaimAge, SS_CLAIM_AGE_MIN, SS_CLAIM_AGE_MAX, SS_FRA_AGE } 
 // similar), since the same wording doesn't fit everywhere this is used.
 export default function ClaimAgeSlider({
   label, claimAge, onChange, benefit62, benefit67, benefit70, benefitType,
-  checkEarlyAnchor = false, scopeNote, offHint, compact = false, ssMultiplier,
+  checkEarlyAnchor = false, scopeNote, offHint, compact = false, ssMultiplier, savedAge,
 }) {
   const enabled = claimAge != null
   const age = claimAge ?? SS_FRA_AGE
@@ -44,16 +44,34 @@ export default function ClaimAgeSlider({
   // it's next to share the same effective assumption.
   const effectiveMultiplier = ssMultiplier ?? 1
   const computed = ssBenefitForClaimAge(resolvedBenefit62 ?? 0, benefit67 ?? 0, resolvedBenefit70 ?? 0, age, benefitType) * effectiveMultiplier
+  // External audit follow-up, 2026-09-09, finding #6: this header used
+  // to be a single flex row (checkbox + label text + offHint span, all
+  // inline with gap:8) -- "Jason's claim age" plus a long offHint
+  // phrase wrapped onto three short lines with a large visual gap
+  // between the checkbox and its label whenever the row wasn't wide
+  // enough. Name+age now render on their own line; the status ("Using
+  // Settings"/"Custom age"/the toggle fallback) is a shorter line
+  // beneath instead of packed into the same row as the checkbox.
+  // savedAge (optional) lets a caller that already knows the Settings-
+  // saved fallback age show it here while the slider is off, so "off"
+  // doesn't read as "no age" when one is actually in effect.
+  const statusText = enabled
+    ? 'Custom age'
+    : savedAge != null
+      ? `Using Settings (age ${savedAge})`
+      : (offHint || 'Falls back to the Early/Delayed toggle')
   return (
     <div style={compact ? {} : { padding:'10px 0', borderBottom:'1px solid var(--border)' }}>
-      <label style={{ display:'flex', alignItems:'center', gap:8, fontSize:13, cursor:'pointer' }}>
-        <input type="checkbox" checked={enabled} onChange={e => onChange(e.target.checked ? SS_FRA_AGE : null)} />
-        {label}
-        {offHint !== false && (
-          <span style={{ fontSize:11, color:'var(--text3)' }}>
-            ({offHint || 'off = use the Early/Delayed toggle on Retirement/Simulation pages instead'})
+      <label style={{ display:'flex', alignItems:'flex-start', gap:8, cursor:'pointer' }}>
+        <input type="checkbox" checked={enabled} onChange={e => onChange(e.target.checked ? SS_FRA_AGE : null)} style={{ marginTop:3 }} />
+        <span>
+          <span style={{ fontSize:13, fontWeight:600 }}>
+            {label}{enabled ? `: ${age}` : (savedAge != null ? `: ${savedAge}` : '')}
           </span>
-        )}
+          {offHint !== false && (
+            <span style={{ display:'block', fontSize:11, color:'var(--text3)', marginTop:1 }}>{statusText}</span>
+          )}
+        </span>
       </label>
       {enabled && (
         <div style={{ marginTop:10, paddingLeft:24 }}>

@@ -168,22 +168,25 @@ export default function Settings() {
         </Row>
         <Row label={`${p2}'s Annual RSU Value (gross)`} hint="0 if none this year"><NumInput value={form.justin_annual_rsu_value ?? 0} onChange={v => set('justin_annual_rsu_value', v)} prefix="$" /></Row>
         <Row label={`${p2}'s Annual Bonus`} hint="As % of salary"><NumInput value={form.justin_annual_bonus_pct ?? 0} onChange={v => set('justin_annual_bonus_pct', v)} pct suffix="%" /></Row>
-        <Row label={`${p2} Spousal SS at 67`} hint={`50% of ${p1}'s FRA benefit — or ${p2}'s own independent benefit at a flat single figure, if entered directly`}>
-          <NumInput value={form.justin_social_security ?? 0} onChange={v => set('justin_social_security', v)} prefix="$" suffix="/yr" />
-        </Row>
         {/* External audit review of commit 0c1a569, finding 6 (P2): the
             claim-age slider below always applies SSA's SPOUSAL-benefit
             reduction/credit schedule (different rates than a worker's
             own record -- CALCULATION_CONTRACT.md section 49, finding
             4) no matter what kind of figure is entered into these
-            fields. The 67 field above still supports a flat,
+            fields. The 67 field below still supports a flat,
             single-age entry for Justin's own independent worker
             benefit (no formula applied there), but the slider itself
             does not yet support a worker-type benefit -- restricting
             the wording here rather than silently computing the wrong
-            reduction for a worker record. */}
+            reduction for a worker record.
+            2026-09-09: reordered 67/62/70 -> 62/67/70 (age order) --
+            the 67 field predates the other two and was never moved
+            when they were added alongside it. */}
         <Row label={`${p2} Spousal SS at 62`} hint="Real dollar figure from your SSA statement — only meaningful for a spousal benefit (see note below); used as the anchor for the claim-age slider">
           <NumInput value={form.justin_ss_early ?? 0} onChange={v => set('justin_ss_early', v)} prefix="$" suffix="/yr" />
+        </Row>
+        <Row label={`${p2} Spousal SS at 67`} hint={`50% of ${p1}'s FRA benefit — or ${p2}'s own independent benefit at a flat single figure, if entered directly`}>
+          <NumInput value={form.justin_social_security ?? 0} onChange={v => set('justin_social_security', v)} prefix="$" suffix="/yr" />
         </Row>
         <Row label={`${p2} Spousal SS at 70`} hint="Real dollar figure from your SSA statement — only meaningful for a spousal benefit (see note below)">
           <NumInput value={form.justin_ss_70 ?? 0} onChange={v => set('justin_ss_70', v)} prefix="$" suffix="/yr" />

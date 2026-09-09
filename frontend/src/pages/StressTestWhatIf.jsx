@@ -506,6 +506,7 @@ export default function StressTestWhatIf({ onNavigate }) {
               benefit70={ssAnchors.jason.b70}
               benefitType="worker"
               offHint="off = falls back to your saved Settings claim age if you have one, otherwise the Early/Delayed toggle"
+              savedAge={savedClaimAges.jason}
               ssMultiplier={whatIfAssumptions?.ss_mult}
               compact
             />
@@ -519,6 +520,7 @@ export default function StressTestWhatIf({ onNavigate }) {
               benefitType="spousal"
               checkEarlyAnchor
               offHint="off = falls back to your saved Settings claim age if you have one, otherwise the Early/Delayed toggle"
+              savedAge={savedClaimAges.justin}
               ssMultiplier={whatIfAssumptions?.ss_mult}
               compact
             />
@@ -533,18 +535,43 @@ export default function StressTestWhatIf({ onNavigate }) {
                   setSsAnchors(ssAnchorsFromPlanningInputs(d))
                 }} />
       </div>
-      {tab === 'monte_carlo' && <MonteCarloSection retAge={retAge} ssTiming={ssTiming} overrides={whatIfAssumptions}
-                                                     jasonRetAge={twoAgeMode ? jasonRetAge : null}
-                                                     justinRetAge={twoAgeMode ? justinRetAge : null}
-                                                     jasonSsClaimAge={jasonSsClaimAge} justinSsClaimAge={justinSsClaimAge} />}
-      {tab === 'stress'      && <StressTestSection retAge={retAge} ssTiming={ssTiming} overrides={whatIfAssumptions}
-                                                     jasonRetAge={twoAgeMode ? jasonRetAge : null}
-                                                     justinRetAge={twoAgeMode ? justinRetAge : null}
-                                                     jasonSsClaimAge={jasonSsClaimAge} justinSsClaimAge={justinSsClaimAge} />}
-      {tab === 'survivor'    && <SurvivorScenarioSection retAge={retAge}
-                                                     jasonSsClaimAge={jasonSsClaimAge} justinSsClaimAge={justinSsClaimAge}
-                                                     setJasonSsClaimAge={setJasonSsClaimAge} setJustinSsClaimAge={setJustinSsClaimAge}
-                                                     ssAnchors={ssAnchors} />}
+      {/* External audit follow-up, 2026-09-09: Monte Carlo and Historical
+          Stress used to be conditionally rendered ({tab === X && <Section
+          />}), which UNMOUNTS a section entirely when you switch away from
+          its tab -- switching back remounted it from scratch, discarding a
+          completed run for no reason ("I ran Monte Carlo, switched to
+          Historical Stress, and immediately returned... Monte Carlo was
+          back at Ready to simulate"). Kept these two mounted-but-hidden
+          instead, same pattern the What-If Builder above already uses --
+          neither fetches anything on mount (only on their own Run button),
+          so staying mounted costs nothing extra. Survivor Scenario is
+          NOT included here: it fetches /api/planning-inputs on mount
+          (for the household's current ages, to default the "years into
+          retirement" field), so mounting it eagerly would fire that
+          request before its tab is ever opened and double up with What-
+          If Builder's own settings fetch. It stays conditionally
+          rendered; losing its run on tab-switch wasn't part of what was
+          reported. */}
+      <div hidden={tab !== 'monte_carlo'}>
+        <MonteCarloSection retAge={retAge} ssTiming={ssTiming} overrides={whatIfAssumptions}
+                           jasonRetAge={twoAgeMode ? jasonRetAge : null}
+                           justinRetAge={twoAgeMode ? justinRetAge : null}
+                           jasonSsClaimAge={jasonSsClaimAge} justinSsClaimAge={justinSsClaimAge}
+                           savedJasonClaimAge={savedClaimAges.jason} savedJustinClaimAge={savedClaimAges.justin} />
+      </div>
+      <div hidden={tab !== 'stress'}>
+        <StressTestSection retAge={retAge} ssTiming={ssTiming} overrides={whatIfAssumptions}
+                           jasonRetAge={twoAgeMode ? jasonRetAge : null}
+                           justinRetAge={twoAgeMode ? justinRetAge : null}
+                           jasonSsClaimAge={jasonSsClaimAge} justinSsClaimAge={justinSsClaimAge}
+                           savedJasonClaimAge={savedClaimAges.jason} savedJustinClaimAge={savedClaimAges.justin} />
+      </div>
+      {tab === 'survivor' && (
+        <SurvivorScenarioSection retAge={retAge}
+                           jasonSsClaimAge={jasonSsClaimAge} justinSsClaimAge={justinSsClaimAge}
+                           setJasonSsClaimAge={setJasonSsClaimAge} setJustinSsClaimAge={setJustinSsClaimAge}
+                           ssAnchors={ssAnchors} />
+      )}
     </div>
   )
 }

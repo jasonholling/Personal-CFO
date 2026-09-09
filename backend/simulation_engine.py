@@ -1825,6 +1825,23 @@ def _run_stress_tests_two_age(inputs: Dict, accounts: List[Dict], jason_ret_age:
         if bridge_override is not None:
             sim_inputs["bridge_years_55"] = min(bridge_override, inputs.get("bridge_years_55", 0))
 
+        # External audit follow-up, 2026-09-09: "bridge_job_loss"'s
+        # description was a fixed string ("Bridge job ends at age 57
+        # instead of 60") regardless of the household's actual
+        # bridge_years_55/bridge_income_55 config or retirement age --
+        # the CALCULATION already correctly caps to 0 effect when there
+        # is no real bridge job (the fix above, independent review
+        # 2026-09-08 third follow-up), but the DESCRIPTION kept
+        # claiming a scenario that wasn't actually happening, reading
+        # as contradictory next to a "survives" result that just means
+        # "nothing changed." Reproduced: retirement at 65 (bridge
+        # income only ever applies at 55), description still said "age
+        # 57 instead of 60." Overridden to say so explicitly rather
+        # than run a no-op scenario under a misleading label.
+        scenario_description = scenario["description"]
+        if key == "bridge_job_loss" and inputs.get("bridge_years_55", 0) <= 0:
+            scenario_description = "Not applicable to this scenario — no bridge job is modeled for this household (Settings has 0 bridge years configured)."
+
         scenario_jason_ss  = jason_ss_annual * ss_mult
         scenario_justin_ss = justin_ss_annual * ss_mult
 
@@ -1892,7 +1909,7 @@ def _run_stress_tests_two_age(inputs: Dict, accounts: List[Dict], jason_ret_age:
 
         results[key] = {
             "label": scenario["label"],
-            "description": scenario["description"],
+            "description": scenario_description,
             "survived": survived,
             "final_balance": bals[-1],
             "depletion_age": dep_age,
@@ -2067,6 +2084,14 @@ def run_stress_tests(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_t
         if bridge_override is not None:
             sim_inputs["bridge_years_55"] = min(bridge_override, inputs.get("bridge_years_55", 0))
 
+        # External audit follow-up, 2026-09-09: see the two-age copy's
+        # identical comment above -- "bridge_job_loss"'s description
+        # was a fixed string regardless of whether this household
+        # actually has a bridge job configured.
+        scenario_description = scenario["description"]
+        if key == "bridge_job_loss" and inputs.get("bridge_years_55", 0) <= 0:
+            scenario_description = "Not applicable to this scenario — no bridge job is modeled for this household (Settings has 0 bridge years configured)."
+
         # For SS reduction. Independent review, 2026-09-08, ninth
         # follow-up, finding 2 (P1): scenario_justin_ss used to reduce
         # Justin's RAW FRA input (inputs.get("justin_social_security"))
@@ -2155,7 +2180,7 @@ def run_stress_tests(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_t
 
         results[key] = {
             "label": scenario["label"],
-            "description": scenario["description"],
+            "description": scenario_description,
             "survived": scen_survived,
             "final_balance": bals[-1],
             "depletion_age": dep_age,

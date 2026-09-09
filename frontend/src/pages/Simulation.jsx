@@ -58,7 +58,7 @@ function secondEarnerNoteProps(data, person1Name, person2Name) {
 // server-side from saved Settings or the Early/Delayed toggle" -- the
 // UI can't know which without asking the backend, so it's labeled
 // accordingly rather than guessed).
-function AssumptionsUsed({ retAge, ssTiming, jasonRetAge, justinRetAge, jasonSsClaimAge, justinSsClaimAge, overrides, person1Name, person2Name, data }) {
+function AssumptionsUsed({ retAge, ssTiming, jasonRetAge, justinRetAge, jasonSsClaimAge, justinSsClaimAge, savedJasonClaimAge, savedJustinClaimAge, overrides, person1Name, person2Name, data }) {
   const twoAge = jasonRetAge != null && justinRetAge != null
   // Prefer the RESPONSE's own echoed ages over the request props when
   // available -- the authoritative "what was actually computed," not
@@ -68,12 +68,31 @@ function AssumptionsUsed({ retAge, ssTiming, jasonRetAge, justinRetAge, jasonSsC
   const ageLine = twoAge
     ? `${person1Name} retires ${displayJasonAge} · ${person2Name} retires ${displayJustinAge}`
     : `Retire at ${retAge}`
+  // External audit follow-up, 2026-09-09: with the page-local slider
+  // off, this used to say "Jason SS: take at 62 (or Settings, if
+  // saved)" -- a completed result should say exactly what it USED, not
+  // a conditional maybe. resolvedJasonAge/resolvedJustinAge resolve
+  // the same 3-tier chain the backend applies (explicit override >
+  // saved Settings > legacy ss_timing toggle) so the displayed line
+  // states the actual effective age and its source. Justin's own line
+  // used to be omitted entirely when his slider was off -- now always
+  // shown, symmetric with Jason's.
+  const jasonSource  = jasonSsClaimAge  != null ? 'this page'
+                      : savedJasonClaimAge  != null ? 'Settings'
+                      : null
+  const justinSource = justinSsClaimAge != null ? 'this page'
+                      : savedJustinClaimAge != null ? 'Settings'
+                      : null
+  const resolvedJasonAge  = jasonSsClaimAge  ?? savedJasonClaimAge
+  const resolvedJustinAge = justinSsClaimAge ?? savedJustinClaimAge
   const ssLine = [
-    jasonSsClaimAge != null
-      ? `${person1Name} claims SS at ${jasonSsClaimAge}`
-      : `${person1Name} SS: ${ssTiming === 'delayed' ? 'wait until 67' : 'take at 62'}${ssTiming ? ' (or Settings, if saved)' : ''}`,
-    justinSsClaimAge != null ? `${person2Name} claims SS at ${justinSsClaimAge}` : null,
-  ].filter(Boolean).join(' · ')
+    resolvedJasonAge != null
+      ? `${person1Name}: ${resolvedJasonAge}, from ${jasonSource}`
+      : `${person1Name}: ${ssTiming === 'delayed' ? '67 (wait until 67 toggle)' : '62 (take at 62 toggle)'}`,
+    resolvedJustinAge != null
+      ? `${person2Name}: ${resolvedJustinAge}, from ${justinSource}`
+      : `${person2Name}: 50% of ${person1Name}'s toggle age above`,
+  ].join(' · ')
   const pct = (v) => v == null ? null : `${(v * 100).toFixed(1)}%`
   // External audit follow-up, 2026-09-09: the whole list used to sit
   // behind one collapsed <details> -- "the actual result depends on
@@ -131,12 +150,23 @@ function AssumptionsUsed({ retAge, ssTiming, jasonRetAge, justinRetAge, jasonSsC
 // order so only one reason is ever shown even if several changed at
 // once, e.g. a two-age-mode toggle that changes several deps together).
 function describeAssumptionChange(prev, next, person1Name, person2Name) {
+  // External audit follow-up, 2026-09-09: two real bugs here. (1)
+  // `prev` used to be the PREVIOUS RENDER's props, not the last
+  // COMPLETED RUN's -- on first mount (no run has happened yet) that
+  // meant comparing against the mount-time defaults, producing "null
+  // to 65" the instant two-age mode was toggled on (jasonRetAge starts
+  // null when single-axis). Callers now pass the last successful
+  // run's own snapshot (or null if no run has completed), and this
+  // returns null in that case -- "don't say a previous result was
+  // cleared when none exists." (2) toggling two-age mode changes
+  // jasonRetAge/justinRetAge from null to a number (or back) as a
+  // PAIR, which read as a meaningless raw diff ("retirement age
+  // changed from null to 65") -- detected explicitly as its own case
+  // now, worded as a mode change instead of an age change.
   if (!prev) return null
-  // External audit follow-up, 2026-09-09: "changed to X" doesn't tell
-  // you what it changed FROM -- reviewer's suggested wording is "Claim
-  // age changed from 67 to 70." Includes the previous value wherever
-  // one is available (age fields always have one; SS claim age can
-  // move from/to null, i.e. "off", which reads fine as-is).
+  const prevTwoAge = prev.jasonRetAge != null && prev.justinRetAge != null
+  const nextTwoAge = next.jasonRetAge != null && next.justinRetAge != null
+  if (prevTwoAge !== nextTwoAge) return nextTwoAge ? 'changed to two-age mode' : 'changed to single retirement age'
   if (prev.retAge !== next.retAge) return `retirement age changed from ${prev.retAge} to ${next.retAge}`
   if (prev.jasonRetAge !== next.jasonRetAge) return `${person1Name}'s retirement age changed from ${prev.jasonRetAge} to ${next.jasonRetAge}`
   if (prev.justinRetAge !== next.justinRetAge) return `${person2Name}'s retirement age changed from ${prev.justinRetAge} to ${next.justinRetAge}`
@@ -176,7 +206,7 @@ const CustomTooltip = ({ active, payload, label, person1Name }) => {
 // previously switching to this tab always discarded whatever the What-If
 // Builder had just been changed to (external audit 2026-09-06). The
 // Companion results receive the same overrides, age, and claiming timing.
-export function MonteCarloSection({ retAge, ssTiming, overrides, jasonRetAge, justinRetAge, jasonSsClaimAge, justinSsClaimAge }) {
+export function MonteCarloSection({ retAge, ssTiming, overrides, jasonRetAge, justinRetAge, jasonSsClaimAge, justinSsClaimAge, savedJasonClaimAge, savedJustinClaimAge }) {
   const { person1Name, person2Name } = usePersonNames()
   const [data, setData]         = useState(null)
   const [swr, setSwr]           = useState(null)
@@ -199,14 +229,17 @@ export function MonteCarloSection({ retAge, ssTiming, overrides, jasonRetAge, ju
   // input change instead of leaving it stuck true forever, since a stale
   // response now takes the early-return path instead of clearing it.
   const genRef = useRef(0)
-  // See describeAssumptionChange's own comment above.
-  const prevSnapshotRef = useRef(null)
+  // See describeAssumptionChange's own comment above -- the LAST
+  // COMPLETED RUN's own snapshot, set only inside run()'s success
+  // handlers below, not on every render/keystroke. Stays null until a
+  // run actually finishes, so no "cleared" message shows before one
+  // ever existed.
+  const lastRunSnapshotRef = useRef(null)
   const [clearReason, setClearReason] = useState(null)
 
   useEffect(() => {
     const snapshot = { retAge, ssTiming, overrides, jasonRetAge, justinRetAge, jasonSsClaimAge, justinSsClaimAge }
-    setClearReason(describeAssumptionChange(prevSnapshotRef.current, snapshot, person1Name, person2Name))
-    prevSnapshotRef.current = snapshot
+    setClearReason(describeAssumptionChange(lastRunSnapshotRef.current, snapshot, person1Name, person2Name))
     genRef.current++
     setData(null); setSwr(null); setIncSrc(null); setError(null); setLoading(false)
   }, [retAge, ssTiming, overrides, jasonRetAge, justinRetAge, jasonSsClaimAge, justinSsClaimAge])
@@ -245,6 +278,11 @@ export function MonteCarloSection({ retAge, ssTiming, overrides, jasonRetAge, ju
         axios.post('/api/simulation/swr', { ...overrides, ...ssClaimAgeParams, ss_timing: ssTiming, jason_ret_age: jasonRetAge, justin_ret_age: justinRetAge }),
       ]).then(([mc, sw]) => {
           if (gen !== genRef.current) return
+          // See lastRunSnapshotRef's own comment above -- this is the
+          // ONLY place a completed Monte Carlo run's snapshot is
+          // recorded, so the next "cleared" message compares against
+          // what actually produced the numbers on screen a moment ago.
+          lastRunSnapshotRef.current = { retAge, ssTiming, overrides, jasonRetAge, justinRetAge, jasonSsClaimAge, justinSsClaimAge }
           setData(mc.data)
           setSwr(sw.data)
           setLoading(false)
@@ -264,6 +302,7 @@ export function MonteCarloSection({ retAge, ssTiming, overrides, jasonRetAge, ju
       axios.post('/api/retirement/income-sources', { ...overrides, ...ssClaimAgeParams, ret_age: retAge, ss_timing: ssTiming })
     ]).then(([mc, sw, inc]) => {
       if (gen !== genRef.current) return // stale — selection changed or a newer run superseded this one
+      lastRunSnapshotRef.current = { retAge, ssTiming, overrides, jasonRetAge, justinRetAge, jasonSsClaimAge, justinSsClaimAge }
       setData(mc.data)
       setSwr(sw.data)
       setIncSrc(inc.data)
@@ -303,7 +342,8 @@ export function MonteCarloSection({ retAge, ssTiming, overrides, jasonRetAge, ju
   return (
     <div>
       <AssumptionsUsed retAge={retAge} ssTiming={ssTiming} jasonRetAge={jasonRetAge} justinRetAge={justinRetAge}
-                        jasonSsClaimAge={jasonSsClaimAge} justinSsClaimAge={justinSsClaimAge} overrides={overrides}
+                        jasonSsClaimAge={jasonSsClaimAge} justinSsClaimAge={justinSsClaimAge}
+                        savedJasonClaimAge={savedJasonClaimAge} savedJustinClaimAge={savedJustinClaimAge} overrides={overrides}
                         person1Name={person1Name} person2Name={person2Name} data={data} />
       {/* Success rate hero */}
       <div className="grid-4" style={{ marginBottom:24 }}>
@@ -327,19 +367,29 @@ export function MonteCarloSection({ retAge, ssTiming, overrides, jasonRetAge, ju
           <SecondEarnerNote {...secondEarnerNoteProps(data, person1Name, person2Name)} />
         </div>
         <div className="card">
-          <div className="label">Safe Spending Power</div>
+          <div className="label">Safe Portfolio Withdrawal</div>
           {swr ? (<>
             {/* External audit review, 2026-09-09: this headline used to
                 repeat data.success_rate -- the exact same number as the
                 "Probability of Success" card immediately to the left.
                 The actually-useful figure (the safe annual draw) was
                 buried in the detail rows below. Headline is now the
-                dollar amount, with rate + cushion right underneath it. */}
+                dollar amount, with rate + cushion right underneath it.
+                Card title and the "target" line below were also both
+                renamed (external audit follow-up, 2026-09-09, finding
+                #5) to say plainly what each number is: this card is a
+                SIMPLIFIED single-withdrawal-rate check (SWR search),
+                separate from the full Monte Carlo plan above -- the two
+                can disagree, since SWR doesn't model market-return
+                sequencing year by year the way Monte Carlo does. */}
             <div className="number-lg" style={{ color: data.success_rate >= 95 ? GREEN : data.success_rate >= 85 ? AMBER : RED, marginTop:8 }}>
               {fmtK(swr.safe_withdrawal_annual)}/yr
             </div>
             <div style={{ fontSize:12, color:'var(--text2)', marginTop:4 }}>
-              {swr.safe_withdrawal_rate}% draw rate · {swr.cushion_pct > 0 ? '+' : ''}{swr.cushion_pct}% cushion vs {fmtK(swr.income_target)}/yr target
+              {swr.safe_withdrawal_rate}% draw rate · {swr.cushion_pct > 0 ? '+' : ''}{swr.cushion_pct}% cushion vs {fmtK(swr.income_target)}/yr target (including healthcare, in retirement-year dollars)
+            </div>
+            <div style={{ fontSize:11, color:'var(--text3)', marginTop:6, lineHeight:1.5 }}>
+              A simplified single-rate check, separate from the Monte Carlo simulation above — the two can disagree.
             </div>
             {retAge === 55 && data.mode !== 'two_age' ? (
               <div style={{ marginTop:12, fontSize:12, lineHeight:1.7 }}>
@@ -378,7 +428,7 @@ export function MonteCarloSection({ retAge, ssTiming, overrides, jasonRetAge, ju
                     points in time. Labeled explicitly rather than
                     silently sharing an ambiguous "annual" framing. */}
                 <div style={{ display:'flex', justifyContent:'space-between' }}>
-                  <span style={{ color:'var(--text2)' }}>Total safe spend (day-one)</span>
+                  <span style={{ color:'var(--text2)' }}>Total spending capacity (day-one)</span>
                   <span>{fmtK(swr.total_safe_spend)}/yr</span>
                 </div>
                 <SecondEarnerNote {...secondEarnerNoteProps(swr, person1Name, person2Name)} />
@@ -393,7 +443,7 @@ export function MonteCarloSection({ retAge, ssTiming, overrides, jasonRetAge, ju
               {fmtK(swr.guaranteed_income_steadystate)}/yr
             </div>
             <div style={{ fontSize:12, color:'var(--text2)', marginTop:4 }}>
-              Once all sources active at age {swr.ss_start_age} — not directly comparable to "Total safe spend" above, which is a day-one figure
+              Once all sources active at age {swr.ss_start_age} — not directly comparable to "Total spending capacity" above, which is a day-one figure
             </div>
             <div style={{ marginTop:12, fontSize:12, lineHeight:1.7 }}>
               <div style={{ display:'flex', justifyContent:'space-between' }}>
@@ -481,7 +531,7 @@ export function MonteCarloSection({ retAge, ssTiming, overrides, jasonRetAge, ju
 // ── Stress tests section ──────────────────────────────────────────────────────
 // `overrides`: see MonteCarloSection's comment above — same What-If
 // Builder wiring, including Roth and contribution comparisons.
-export function StressTestSection({ retAge, ssTiming, overrides, jasonRetAge, justinRetAge, jasonSsClaimAge, justinSsClaimAge }) {
+export function StressTestSection({ retAge, ssTiming, overrides, jasonRetAge, justinRetAge, jasonSsClaimAge, justinSsClaimAge, savedJasonClaimAge, savedJustinClaimAge }) {
   const { person1Name, person2Name } = usePersonNames()
   const [data, setData]       = useState(null)
   const [roth, setRoth]       = useState(null)
@@ -493,14 +543,14 @@ export function StressTestSection({ retAge, ssTiming, overrides, jasonRetAge, ju
   // See MonteCarloSection's genRef comment above — same stale-response
   // guard and error surfacing (external audit 2026-09-07, finding #13).
   const genRef = useRef(0)
-  // See MonteCarloSection's identical describeAssumptionChange comment.
-  const prevSnapshotRef = useRef(null)
+  // See MonteCarloSection's identical describeAssumptionChange/
+  // lastRunSnapshotRef comment above.
+  const lastRunSnapshotRef = useRef(null)
   const [clearReason, setClearReason] = useState(null)
 
   useEffect(() => {
     const snapshot = { retAge, ssTiming, overrides, jasonRetAge, justinRetAge, jasonSsClaimAge, justinSsClaimAge }
-    setClearReason(describeAssumptionChange(prevSnapshotRef.current, snapshot, person1Name, person2Name))
-    prevSnapshotRef.current = snapshot
+    setClearReason(describeAssumptionChange(lastRunSnapshotRef.current, snapshot, person1Name, person2Name))
     genRef.current++
     setData(null); setRoth(null); setContrib(null); setError(null); setLoading(false)
   }, [retAge, ssTiming, overrides, jasonRetAge, justinRetAge, jasonSsClaimAge, justinSsClaimAge])
@@ -523,6 +573,7 @@ export function StressTestSection({ retAge, ssTiming, overrides, jasonRetAge, ju
       axios.post('/api/simulation/stress-tests', { ...overrides, ...ssClaimAgeParams, ss_timing: ssTiming, jason_ret_age: jasonRetAge, justin_ret_age: justinRetAge })
         .then(st => {
           if (gen !== genRef.current) return
+          lastRunSnapshotRef.current = { retAge, ssTiming, overrides, jasonRetAge, justinRetAge, jasonSsClaimAge, justinSsClaimAge }
           setData(st.data)
           setLoading(false)
         }).catch(() => {
@@ -541,6 +592,7 @@ export function StressTestSection({ retAge, ssTiming, overrides, jasonRetAge, ju
       axios.post('/api/simulation/contribution-sensitivity', { ...overrides, ret_age: retAge, ss_timing: ssTiming })
     ]).then(([st, rc, cs]) => {
       if (gen !== genRef.current) return // stale — selection changed or a newer run superseded this one
+      lastRunSnapshotRef.current = { retAge, ssTiming, overrides, jasonRetAge, justinRetAge, jasonSsClaimAge, justinSsClaimAge }
       setData(st.data)
       setRoth(rc.data)
       setContrib(cs.data)
@@ -588,7 +640,8 @@ export function StressTestSection({ retAge, ssTiming, overrides, jasonRetAge, ju
   return (
     <div>
       <AssumptionsUsed retAge={retAge} ssTiming={ssTiming} jasonRetAge={jasonRetAge} justinRetAge={justinRetAge}
-                        jasonSsClaimAge={jasonSsClaimAge} justinSsClaimAge={justinSsClaimAge} overrides={overrides}
+                        jasonSsClaimAge={jasonSsClaimAge} justinSsClaimAge={justinSsClaimAge}
+                        savedJasonClaimAge={savedJasonClaimAge} savedJustinClaimAge={savedJustinClaimAge} overrides={overrides}
                         person1Name={person1Name} person2Name={person2Name} data={data} />
       <SecondEarnerNote {...secondEarnerNoteProps(data, person1Name, person2Name)} />
       {/* External audit review, 2026-09-09: cards changed border color
@@ -687,7 +740,16 @@ export function StressTestSection({ retAge, ssTiming, overrides, jasonRetAge, ju
               <Tooltip content={<CustomTooltip person1Name={person1Name} />} />
               <Legend wrapperStyle={{ fontSize:11 }} />
               <ReferenceLine y={0} stroke={RED} strokeDasharray="3 3" label={{ value:'$0', fill:RED, fontSize:10 }} />
-              <Line type="monotone" dataKey="base"    name="Base Case (6%/yr)" stroke="var(--text3)" strokeWidth={1.5} strokeDasharray="4 2" dot={false} />
+              {/* External audit follow-up, 2026-09-09: this legend
+                  label was hardcoded "(6%/yr)" regardless of the
+                  actual post-retirement return in effect -- with a
+                  What-If override active (e.g. 7%), the assumptions
+                  panel correctly showed 7% while this legend still
+                  said 6%, reading as contradictory. base.label is the
+                  backend's own dynamically-computed base-case label
+                  (f"Base Case ({post_ret*100:g}% every year)"),
+                  already correct -- just wasn't being used here. */}
+              <Line type="monotone" dataKey="base"    name={base?.label || 'Base Case'} stroke="var(--text3)" strokeWidth={1.5} strokeDasharray="4 2" dot={false} />
               <Line type="monotone" dataKey="balance" name={current.label}     stroke={current.survived ? ACCENT : RED} strokeWidth={2.5} dot={false} />
             </LineChart>
           </ResponsiveContainer>
