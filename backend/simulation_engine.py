@@ -2162,15 +2162,36 @@ def _max_conversion_for_tax_budget(pre_conversion_taxable: float, budget: float,
     dropping that free zone — understating how much a low-taxable-
     income household could actually afford to convert on a given
     budget, inconsistent with _incremental_conversion_tax's own
-    formula. The free zone costs nothing regardless of budget (even a
-    $0 budget can still afford it), so it's added unconditionally
-    before the budget-constrained bracket walk begins."""
+    formula.
+
+    free_room is only free of FEDERAL tax, not state (independent
+    review, 2026-09-08, third follow-up, P1): _incremental_conversion_tax
+    charges state_tax_rate on the ENTIRE conversion amount, including
+    whatever portion falls in this free zone -- state tax was never
+    netted against the federal standard deduction to begin with. The
+    first fix above treated the whole free zone as costing nothing
+    REGARDLESS of budget, so with $0 taxable cash and a nonzero state
+    rate this cap still returned the full free_room as "affordable"
+    even though the actual state-tax bill on that amount had nowhere to
+    be paid from -- reproduced: $0 cash, 5% state tax, $32,200 unused
+    deduction -- this used to say $32,200 was affordable (state tax
+    ignored), but the real state-tax cost ($1,610) then had nowhere to
+    come from and silently ate into Roth via simulate_conversion's own
+    conversion_shortfall fallback, contradicting the stated
+    taxable-cash-only funding policy. Fixed: the free zone's own state-
+    tax cost is now checked against the budget exactly like every taxed
+    bracket below it, using the same greedy-fill logic."""
+    state_tax_rate = max(0.0, state_tax_rate)
+    budget = max(0.0, budget)
     free_room = max(0.0, -pre_conversion_taxable)
-    if budget <= 0:
-        return free_room
+    if state_tax_rate > 0:
+        affordable_free = min(free_room, budget / state_tax_rate)
+        remaining_budget = budget - affordable_free * state_tax_rate
+    else:
+        affordable_free = free_room
+        remaining_budget = budget
     pre = max(0.0, pre_conversion_taxable)
-    remaining_budget = budget
-    total_convertible = free_room
+    total_convertible = affordable_free
     prev_cap = 0.0
     for rate, cap in brackets:
         if cap <= pre:
