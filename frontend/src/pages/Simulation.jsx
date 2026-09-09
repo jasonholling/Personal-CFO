@@ -75,28 +75,49 @@ function AssumptionsUsed({ retAge, ssTiming, jasonRetAge, justinRetAge, jasonSsC
     justinSsClaimAge != null ? `${person2Name} claims SS at ${justinSsClaimAge}` : null,
   ].filter(Boolean).join(' · ')
   const pct = (v) => v == null ? null : `${(v * 100).toFixed(1)}%`
-  const overrideRows = overrides ? [
-    overrides.pre_return  != null && ['Pre-retirement return', pct(overrides.pre_return)],
-    overrides.post_return != null && ['Post-retirement return', pct(overrides.post_return)],
-    overrides.inflation   != null && ['Inflation', pct(overrides.inflation)],
-    overrides.income_target != null && ['Income target', `${fmtK(overrides.income_target)}/yr`],
+  // External audit follow-up, 2026-09-09: the whole list used to sit
+  // behind one collapsed <details> -- "the actual result depends on
+  // those overrides, but the user has to discover and expand the
+  // disclosure." Split into PRIMARY rows (ages, SS, returns, inflation,
+  // income target -- the assumptions that most directly explain the
+  // headline numbers) shown immediately, and SECONDARY rows (bridge
+  // income, pension/SS multipliers -- narrower-impact, opt-in What-If
+  // toggles) still behind a collapsible details for anyone who wants
+  // the full picture without the primary view getting cluttered.
+  const primaryRows = [
+    ['Retirement age(s)', ageLine],
+    ['Social Security', ssLine],
+    overrides?.pre_return  != null && ['Pre-retirement return', pct(overrides.pre_return)],
+    overrides?.post_return != null && ['Post-retirement return', pct(overrides.post_return)],
+    overrides?.inflation   != null && ['Inflation', pct(overrides.inflation)],
+    overrides?.income_target != null && ['Income target', `${fmtK(overrides.income_target)}/yr`],
+  ].filter(Boolean)
+  const secondaryRows = overrides ? [
     overrides.bridge_income  != null && overrides.bridge_income > 0 && ['Bridge income', `${fmtK(overrides.bridge_income)}/yr`],
     overrides.pension_mult != null && overrides.pension_mult !== 1 && ['Pension multiplier', `${Math.round(overrides.pension_mult * 100)}%`],
     overrides.ss_mult != null && overrides.ss_mult !== 1 && ['SS multiplier', `${Math.round(overrides.ss_mult * 100)}% of projected`],
   ].filter(Boolean) : []
   return (
-    <details style={{ marginBottom:16, fontSize:12, color:'var(--text3)' }}>
-      <summary style={{ cursor:'pointer', color:'var(--text2)' }}>
-        Assumptions used: {ageLine} · {ssLine}{overrideRows.length > 0 ? ` · ${overrideRows.length} What-If override${overrideRows.length > 1 ? 's' : ''}` : ''}
-      </summary>
-      <div style={{ marginTop:8, paddingLeft:4, display:'grid', gridTemplateColumns:'auto auto', gap:'4px 16px', maxWidth:400 }}>
-        <span>{ageLine}</span><span />
-        <span>{ssLine}</span><span />
-        {overrideRows.map(([k, v]) => (
+    <div style={{ marginBottom:16, fontSize:12, color:'var(--text3)' }}>
+      <div style={{ color:'var(--text2)', marginBottom:4, fontWeight:600 }}>Assumptions used</div>
+      <div style={{ display:'grid', gridTemplateColumns:'auto auto', gap:'4px 16px', maxWidth:420 }}>
+        {primaryRows.map(([k, v]) => (
           <span key={k} style={{ display:'contents' }}><span>{k}</span><span style={{ color:'var(--text2)' }}>{v}</span></span>
         ))}
       </div>
-    </details>
+      {secondaryRows.length > 0 && (
+        <details style={{ marginTop:6 }}>
+          <summary style={{ cursor:'pointer' }}>
+            {secondaryRows.length} more What-If override{secondaryRows.length > 1 ? 's' : ''}
+          </summary>
+          <div style={{ marginTop:6, display:'grid', gridTemplateColumns:'auto auto', gap:'4px 16px', maxWidth:420 }}>
+            {secondaryRows.map(([k, v]) => (
+              <span key={k} style={{ display:'contents' }}><span>{k}</span><span style={{ color:'var(--text2)' }}>{v}</span></span>
+            ))}
+          </div>
+        </details>
+      )}
+    </div>
   )
 }
 
@@ -111,12 +132,17 @@ function AssumptionsUsed({ retAge, ssTiming, jasonRetAge, justinRetAge, jasonSsC
 // once, e.g. a two-age-mode toggle that changes several deps together).
 function describeAssumptionChange(prev, next, person1Name, person2Name) {
   if (!prev) return null
-  if (prev.retAge !== next.retAge) return `retirement age changed to ${next.retAge}`
-  if (prev.jasonRetAge !== next.jasonRetAge) return `${person1Name}'s retirement age changed to ${next.jasonRetAge}`
-  if (prev.justinRetAge !== next.justinRetAge) return `${person2Name}'s retirement age changed to ${next.justinRetAge}`
-  if (prev.ssTiming !== next.ssTiming) return `Social Security timing changed to "${next.ssTiming === 'delayed' ? 'wait until 67' : 'take at 62'}"`
-  if (prev.jasonSsClaimAge !== next.jasonSsClaimAge) return `${person1Name}'s SS claim age changed`
-  if (prev.justinSsClaimAge !== next.justinSsClaimAge) return `${person2Name}'s SS claim age changed`
+  // External audit follow-up, 2026-09-09: "changed to X" doesn't tell
+  // you what it changed FROM -- reviewer's suggested wording is "Claim
+  // age changed from 67 to 70." Includes the previous value wherever
+  // one is available (age fields always have one; SS claim age can
+  // move from/to null, i.e. "off", which reads fine as-is).
+  if (prev.retAge !== next.retAge) return `retirement age changed from ${prev.retAge} to ${next.retAge}`
+  if (prev.jasonRetAge !== next.jasonRetAge) return `${person1Name}'s retirement age changed from ${prev.jasonRetAge} to ${next.jasonRetAge}`
+  if (prev.justinRetAge !== next.justinRetAge) return `${person2Name}'s retirement age changed from ${prev.justinRetAge} to ${next.justinRetAge}`
+  if (prev.ssTiming !== next.ssTiming) return `Social Security timing changed from "${prev.ssTiming === 'delayed' ? 'wait until 67' : 'take at 62'}" to "${next.ssTiming === 'delayed' ? 'wait until 67' : 'take at 62'}"`
+  if (prev.jasonSsClaimAge !== next.jasonSsClaimAge) return `${person1Name}'s SS claim age changed from ${prev.jasonSsClaimAge ?? 'off'} to ${next.jasonSsClaimAge ?? 'off'}`
+  if (prev.justinSsClaimAge !== next.justinSsClaimAge) return `${person2Name}'s SS claim age changed from ${prev.justinSsClaimAge ?? 'off'} to ${next.justinSsClaimAge ?? 'off'}`
   if (prev.overrides !== next.overrides) return 'What-If Builder assumptions changed'
   return null
 }
@@ -340,8 +366,19 @@ export function MonteCarloSection({ retAge, ssTiming, overrides, jasonRetAge, ju
               </div>
             ) : (
               <div style={{ marginTop:12, fontSize:12, lineHeight:1.7 }}>
+                {/* External audit review, 2026-09-09: this figure and
+                    the "Guaranteed Income Floor" card's headline use
+                    DIFFERENT timing bases -- this one is day-one
+                    (grown only to the retirement start year), the
+                    other is steady-state (grown further, to whenever
+                    all income sources including SS have actually
+                    started). A household could see this "safe spend"
+                    number LOWER than the "floor" and read it as
+                    contradictory, when it's really two different
+                    points in time. Labeled explicitly rather than
+                    silently sharing an ambiguous "annual" framing. */}
                 <div style={{ display:'flex', justifyContent:'space-between' }}>
-                  <span style={{ color:'var(--text2)' }}>Total safe spend</span>
+                  <span style={{ color:'var(--text2)' }}>Total safe spend (day-one)</span>
                   <span>{fmtK(swr.total_safe_spend)}/yr</span>
                 </div>
                 <SecondEarnerNote {...secondEarnerNoteProps(swr, person1Name, person2Name)} />
@@ -350,13 +387,13 @@ export function MonteCarloSection({ retAge, ssTiming, overrides, jasonRetAge, ju
           </>) : <div style={{ fontSize:12, color:'var(--text2)', marginTop:8 }}>Run simulation to calculate</div>}
         </div>
         <div className="card">
-          <div className="label">Guaranteed Income Floor</div>
+          <div className="label">Guaranteed Income Floor (steady-state)</div>
           {swr ? (<>
             <div className="number-lg" style={{ color:NAVY, marginTop:8, fontSize:22 }}>
               {fmtK(swr.guaranteed_income_steadystate)}/yr
             </div>
             <div style={{ fontSize:12, color:'var(--text2)', marginTop:4 }}>
-              Once all sources active at age {swr.ss_start_age}
+              Once all sources active at age {swr.ss_start_age} — not directly comparable to "Total safe spend" above, which is a day-one figure
             </div>
             <div style={{ marginTop:12, fontSize:12, lineHeight:1.7 }}>
               <div style={{ display:'flex', justifyContent:'space-between' }}>
@@ -554,16 +591,27 @@ export function StressTestSection({ retAge, ssTiming, overrides, jasonRetAge, ju
                         jasonSsClaimAge={jasonSsClaimAge} justinSsClaimAge={justinSsClaimAge} overrides={overrides}
                         person1Name={person1Name} person2Name={person2Name} data={data} />
       <SecondEarnerNote {...secondEarnerNoteProps(data, person1Name, person2Name)} />
+      {/* External audit review, 2026-09-09: cards changed border color
+          when selected, but nothing said they were clickable or
+          explained why the chart below moves when you click one --
+          "there's no affordance" and "it isn't obvious why clicking a
+          card changes the chart below." Explicit instruction line, and
+          a "▸ Viewing this scenario" label on whichever card is
+          currently selected, added below. */}
+      <div style={{ fontSize:12, color:'var(--text2)', marginBottom:12 }}>
+        Click a scenario below to see its detail chart.
+      </div>
       {/* Summary cards */}
       <div className="grid-3" style={{ marginBottom:24 }}>
         {stressKeys.map(key => {
           const s = scenarios[key]
           const ok = s.survived
+          const selected = active === key
           return (
             <div key={key}
               className="card"
               onClick={() => setActive(key)}
-              style={{ cursor:'pointer', borderColor: active===key ? 'var(--accent)' : 'var(--border)', transition:'border-color 0.15s' }}
+              style={{ cursor:'pointer', borderColor: selected ? 'var(--accent)' : 'var(--border)', borderWidth: selected ? 2 : 1, transition:'border-color 0.15s' }}
             >
               <div style={{ display:'flex', justifyContent:'space-between', alignItems:'flex-start', marginBottom:8 }}>
                 <div style={{ fontWeight:600, fontSize:13 }}>{s.label}</div>
@@ -576,6 +624,9 @@ export function StressTestSection({ retAge, ssTiming, overrides, jasonRetAge, ju
                 <div>Lowest balance: <b style={{ color:ok?AMBER:RED }}>{fmtK(s.lowest_balance)}</b> at age {s.lowest_balance_age}</div>
                 <div>Final balance: <b style={{ color:ok?GREEN:RED }}>{fmtK(s.final_balance)}</b></div>
               </div>
+              {selected && (
+                <div style={{ marginTop:10, fontSize:11, color:'var(--accent)', fontWeight:600 }}>▸ Viewing this scenario's chart below</div>
+              )}
             </div>
           )
         })}
@@ -589,11 +640,12 @@ export function StressTestSection({ retAge, ssTiming, overrides, jasonRetAge, ju
             const s = scenarios[key]
             if (!s) return null
             const ok = s.survived
+            const selected = active === key
             return (
               <div key={key}
                 className="card"
                 onClick={() => setActive(key)}
-                style={{ cursor:'pointer', borderColor: active===key ? 'var(--accent)' : 'var(--border)', transition:'border-color 0.15s' }}
+                style={{ cursor:'pointer', borderColor: selected ? 'var(--accent)' : 'var(--border)', borderWidth: selected ? 2 : 1, transition:'border-color 0.15s' }}
               >
                 <div style={{ display:'flex', justifyContent:'space-between', alignItems:'flex-start', marginBottom:8 }}>
                   <div style={{ fontWeight:600, fontSize:13 }}>{s.label}</div>
@@ -606,15 +658,63 @@ export function StressTestSection({ retAge, ssTiming, overrides, jasonRetAge, ju
                   <div>Lowest balance: <b style={{ color:ok?AMBER:RED }}>{fmtK(s.lowest_balance)}</b> at age {s.lowest_balance_age}</div>
                   <div>Final balance: <b style={{ color:ok?GREEN:RED }}>{fmtK(s.final_balance)}</b></div>
                 </div>
+                {selected && (
+                  <div style={{ marginTop:10, fontSize:11, color:'var(--accent)', fontWeight:600 }}>▸ Viewing this scenario's chart below</div>
+                )}
               </div>
             )
           })}
         </div>
       </div>
 
+      {/* External audit review, 2026-09-09: this chart is the direct
+          answer to "what does the scenario I just clicked actually do
+          to my portfolio" -- it used to render LAST on the page, after
+          both the Roth Conversion Optimizer and Contribution Rate
+          Sensitivity sections, so clicking a card and scrolling down
+          to see its effect meant passing two unrelated tools first
+          ("the page continues into ... unrelated analysis," "buries
+          its primary answer"). Moved to render immediately after the
+          scenario cards instead. */}
+      {current && (
+        <div className="card" style={{ marginBottom:24 }}>
+          <div className="label" style={{ marginBottom:4 }}>{current.label} — vs Base Case</div>
+          <div style={{ fontSize:12, color:'var(--text2)', marginBottom:16 }}>{current.description}</div>
+          <ResponsiveContainer width="100%" height={260}>
+            <LineChart data={current.chart} margin={{ top:0, right:0, bottom:0, left:10 }}>
+              <XAxis dataKey="age" tick={{ fill:'var(--text3)', fontSize:11 }} axisLine={false} tickLine={false} />
+              <YAxis tickFormatter={fmtK} tick={{ fill:'var(--text3)', fontSize:11 }} axisLine={false} tickLine={false} width={60} />
+              <Tooltip content={<CustomTooltip person1Name={person1Name} />} />
+              <Legend wrapperStyle={{ fontSize:11 }} />
+              <ReferenceLine y={0} stroke={RED} strokeDasharray="3 3" label={{ value:'$0', fill:RED, fontSize:10 }} />
+              <Line type="monotone" dataKey="base"    name="Base Case (6%/yr)" stroke="var(--text3)" strokeWidth={1.5} strokeDasharray="4 2" dot={false} />
+              <Line type="monotone" dataKey="balance" name={current.label}     stroke={current.survived ? ACCENT : RED} strokeWidth={2.5} dot={false} />
+            </LineChart>
+          </ResponsiveContainer>
+          <div style={{ marginTop:12, padding:'10px 14px', background:'var(--bg3)', borderRadius:8, fontSize:12, color:'var(--text2)' }}>
+            {current.survived
+              ? `✓ Portfolio survives to age ${data.retirement_end_age ?? 99} even under this scenario. Final balance of ${fmtK(current.final_balance)} remains.`
+              : `⚠ Portfolio depletes at age ${current.depletion_age}. Consider increasing safe withdrawal buffer or reducing early retirement spend.`
+            }
+          </div>
+        </div>
+      )}
+
+      {/* External audit review, 2026-09-09: Roth Conversion Optimizer
+          and Contribution Rate Sensitivity are useful, related tools,
+          but rendering them inline made the Historical Stress tab
+          "feel endless" and obscured the question the tab actually
+          answers. Collapsed by default behind a single disclosure --
+          still one click away, no longer competing with the stress
+          result for attention. */}
+      {(roth || contrib) && (
+        <details style={{ marginTop:24, marginBottom:24 }}>
+          <summary style={{ cursor:'pointer', fontSize:13, color:'var(--text2)', padding:'4px 0' }}>
+            More tools: Roth Conversion Optimizer &amp; Contribution Rate Sensitivity
+          </summary>
       {/* Roth conversion schedule */}
       {roth && (
-        <div className="card" style={{ marginTop:24, marginBottom:24 }}>
+        <div className="card" style={{ marginTop:16, marginBottom:24 }}>
           <div className="label" style={{ marginBottom:4 }}>Roth Conversion Optimizer</div>
           <div style={{ fontSize:12, color:'var(--text2)', marginBottom:16 }}>
             Fill the 22% bracket each year from retirement to RMD age 73 — reduces forced RMDs and lifetime tax bill
@@ -737,30 +837,7 @@ export function StressTestSection({ retAge, ssTiming, overrides, jasonRetAge, ju
           </div>
         </div>
       )}
-
-      {/* Detail chart */}
-      {current && (
-        <div className="card">
-          <div className="label" style={{ marginBottom:4 }}>{current.label} — vs Base Case</div>
-          <div style={{ fontSize:12, color:'var(--text2)', marginBottom:16 }}>{current.description}</div>
-          <ResponsiveContainer width="100%" height={260}>
-            <LineChart data={current.chart} margin={{ top:0, right:0, bottom:0, left:10 }}>
-              <XAxis dataKey="age" tick={{ fill:'var(--text3)', fontSize:11 }} axisLine={false} tickLine={false} />
-              <YAxis tickFormatter={fmtK} tick={{ fill:'var(--text3)', fontSize:11 }} axisLine={false} tickLine={false} width={60} />
-              <Tooltip content={<CustomTooltip person1Name={person1Name} />} />
-              <Legend wrapperStyle={{ fontSize:11 }} />
-              <ReferenceLine y={0} stroke={RED} strokeDasharray="3 3" label={{ value:'$0', fill:RED, fontSize:10 }} />
-              <Line type="monotone" dataKey="base"    name="Base Case (6%/yr)" stroke="var(--text3)" strokeWidth={1.5} strokeDasharray="4 2" dot={false} />
-              <Line type="monotone" dataKey="balance" name={current.label}     stroke={current.survived ? ACCENT : RED} strokeWidth={2.5} dot={false} />
-            </LineChart>
-          </ResponsiveContainer>
-          <div style={{ marginTop:12, padding:'10px 14px', background:'var(--bg3)', borderRadius:8, fontSize:12, color:'var(--text2)' }}>
-            {current.survived
-              ? `✓ Portfolio survives to age ${data.retirement_end_age ?? 99} even under this scenario. Final balance of ${fmtK(current.final_balance)} remains.`
-              : `⚠ Portfolio depletes at age ${current.depletion_age}. Consider increasing safe withdrawal buffer or reducing early retirement spend.`
-            }
-          </div>
-        </div>
+        </details>
       )}
     </div>
   )

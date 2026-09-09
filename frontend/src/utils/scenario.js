@@ -112,10 +112,22 @@ export function nearestOf(age, options) {
 // whatever generic error the simulation happens to throw. Bounded to
 // the same 50-75 range save_scenario's own validation already uses
 // elsewhere in this app (main.py: "Enter a name and retirement age
-// from 50 to 75"). clampTwoAge is applied on every keystroke, not just
-// checked at submit time.
+// from 50 to 75").
+//
+// Self-caught follow-up (2026-09-09): the first version called
+// clampTwoAge directly from onChange, on every keystroke -- typing a
+// two-digit age character by character clamped the FIRST digit alone
+// (e.g. "6" while typing "65") straight to the 50 floor, making it
+// impossible to type a value like 65 at all. parseTwoAgeInput is the
+// lenient, no-clamp parse for onChange (lets you type freely, same
+// `|| 0` fallback every other number input in this app already uses);
+// clampTwoAge is for onBlur, where snapping an out-of-range or empty
+// value to the valid range is actually wanted.
 export const TWO_AGE_MIN = 50
 export const TWO_AGE_MAX = 75
+export function parseTwoAgeInput(rawValue) {
+  return parseInt(rawValue) || 0
+}
 export function clampTwoAge(rawValue) {
   const n = parseInt(rawValue)
   if (isNaN(n)) return TWO_AGE_MIN

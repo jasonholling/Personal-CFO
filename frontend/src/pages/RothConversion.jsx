@@ -7,7 +7,7 @@ import { isPrivacyMode, MASK_CURRENCY } from '../utils/privacy'
 import { useScenario } from '../hooks/useScenario'
 import { usePersonNames } from '../hooks/usePersonNames'
 import { useSsAnchors } from '../hooks/useSsAnchors'
-import { TWO_AGE_MIN, TWO_AGE_MAX, clampTwoAge } from '../utils/scenario'
+import { TWO_AGE_MIN, TWO_AGE_MAX, clampTwoAge, parseTwoAgeInput } from '../utils/scenario'
 import SecondEarnerNote from '../components/SecondEarnerNote'
 import ClaimAgeSlider from '../components/ClaimAgeSlider'
 
@@ -164,7 +164,7 @@ export default function RothConversion() {
             benefit67={ssAnchors.jason.b67}
             benefit70={ssAnchors.jason.b70}
             benefitType="worker"
-            offHint="off = use whatever's saved in Settings, if anything"
+            offHint="off = falls back to your saved Settings claim age if you have one, otherwise the Early/Delayed toggle"
             compact
           />
           <ClaimAgeSlider
@@ -176,7 +176,7 @@ export default function RothConversion() {
             benefit70={ssAnchors.justin.b70}
             benefitType="spousal"
             checkEarlyAnchor
-            offHint="off = use whatever's saved in Settings, if anything"
+            offHint="off = falls back to your saved Settings claim age if you have one, otherwise the Early/Delayed toggle"
             compact
           />
         </div>
@@ -207,18 +207,21 @@ export default function RothConversion() {
           </div>
         ) : (
           <div style={{ display:'flex', gap:24, flexWrap:'wrap', alignItems:'flex-end' }}>
-            {/* External audit review, 2026-09-09: see clampTwoAge's own
-                comment in utils/scenario.js. */}
+            {/* External audit review, 2026-09-09: see parseTwoAgeInput's
+                own comment in utils/scenario.js -- lenient while
+                typing, clamped only on blur. */}
             <div>
               <div className="label" style={{ marginBottom:8 }}>{person1Name}'s Retirement Age</div>
               <input type="number" min={TWO_AGE_MIN} max={TWO_AGE_MAX} step={1} value={jasonRetAge}
-                     onChange={e => setJasonRetAge(clampTwoAge(e.target.value))} />
+                     onChange={e => setJasonRetAge(parseTwoAgeInput(e.target.value))}
+                     onBlur={e => setJasonRetAge(clampTwoAge(e.target.value))} />
               <div style={{ fontSize:11, color:'var(--text3)', marginTop:4 }}>Ages {TWO_AGE_MIN}-{TWO_AGE_MAX}</div>
             </div>
             <div>
               <div className="label" style={{ marginBottom:8 }}>{person2Name}'s Retirement Age</div>
               <input type="number" min={TWO_AGE_MIN} max={TWO_AGE_MAX} step={1} value={justinRetAge}
-                     onChange={e => setJustinRetAge(clampTwoAge(e.target.value))} />
+                     onChange={e => setJustinRetAge(parseTwoAgeInput(e.target.value))}
+                     onBlur={e => setJustinRetAge(clampTwoAge(e.target.value))} />
               <div style={{ fontSize:11, color:'var(--text3)', marginTop:4 }}>Ages {TWO_AGE_MIN}-{TWO_AGE_MAX}</div>
             </div>
             {!jasonOverridden && (

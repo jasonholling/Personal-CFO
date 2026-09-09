@@ -4936,3 +4936,77 @@ Frontend only. `npm test` 39/39, `npm run build` clean. No backend
 changes.
 
 Branch: `main`, pushed.
+
+## 56. Social Security claiming age 62-70 — self-review + live UX follow-up, fixes (2026-09-09, on `main`)
+
+Two rounds: a self-driven review (clicking through the app after section
+55) caught one bug before the user found it; the user's own live
+testing then found seven more UX issues, none of them calculation bugs.
+
+**Self-caught: two-age retirement inputs couldn't be typed.** Section
+55's finding-4 fix (`clampTwoAge` on every keystroke) clamped the
+FIRST digit of a multi-digit age immediately -- typing "65" character
+by character clamped "6" alone to the 50 floor, making it impossible
+to type 65 at all. Fixed with a new `parseTwoAgeInput` (lenient, no
+clamp, same `|| 0` fallback every other number input in this app
+already uses) for `onChange`; `clampTwoAge` moved to `onBlur`, where
+snapping an out-of-range or empty value is actually wanted. Applied to
+all six retirement-age inputs across StressTestWhatIf.jsx,
+RothConversion.jsx, and TwoAgeScenario.jsx.
+
+**User's live-testing findings (StressTestWhatIf.jsx / Simulation.jsx):**
+
+1. The SS slider's "off" wording didn't say what "off" falls back TO.
+   "off = use whatever's saved in Settings, if anything" didn't
+   explain that turning the slider off returns to the SAVED Settings
+   age (silently), not to the Early/Delayed toggle, when a Settings
+   age exists. Reworded to state the full fallback chain: "off = falls
+   back to your saved Settings claim age if you have one, otherwise
+   the Early/Delayed toggle."
+
+2. "Total safe spend" and "Guaranteed Income Floor" use different
+   timing bases (day-one vs. steady-state-once-SS-starts) but shared
+   an ambiguous "annual" framing, reading as contradictory when one
+   exceeded the other. Labeled explicitly: "Total safe spend
+   (day-one)" and "Guaranteed Income Floor (steady-state)," with a
+   note on the steady-state card that the two aren't directly
+   comparable.
+
+3. The assumptions summary was entirely collapsed behind one
+   `<details>` -- "the user has to discover and expand the
+   disclosure." Split into PRIMARY rows (retirement ages, effective
+   SS, returns, inflation, income target) shown immediately, with only
+   SECONDARY rows (bridge income, pension/SS multipliers) still behind
+   a collapsible disclosure.
+
+4. Historical Stress's detail chart (the direct answer to "what does
+   the scenario I clicked do to my portfolio") rendered LAST on the
+   page, after the unrelated Roth Conversion Optimizer and
+   Contribution Rate Sensitivity sections. Moved the detail chart to
+   render immediately after the scenario cards; Roth/Contribution
+   collapsed behind a single "▶ More tools" disclosure, off by
+   default.
+
+5. Scenario cards had no visible affordance explaining they were
+   clickable or why clicking one changed the chart below. Added an
+   explicit instruction line above the cards and a "▸ Viewing this
+   scenario's chart below" label plus a thicker border on whichever
+   card is currently selected.
+
+6. The single-axis/two-age/SS/What-If controls all appeared in one
+   flow with no mode-specific layout. Noted as a larger, deferred
+   redesign (a true "choose mode first, then show only relevant
+   controls" wizard) -- the section 55 hierarchy reorder (Mode → Ages
+   → SS → What-If → Run) already addresses the ordering complaint;
+   a full mode-specific layout is out of scope for this round.
+
+7. `describeAssumptionChange` said "changed to X" with no reference to
+   the previous value. Now says "changed from X to Y" (e.g. "claim age
+   changed from 67 to 70"), matching the reviewer's own suggested
+   wording, for every comparison (retirement ages, SS timing, SS claim
+   ages).
+
+No calculation errors found in this round -- purely presentation/UX.
+`npm test` 39/39, `npm run build` clean. No backend changes.
+
+Branch: `main`, pushed.

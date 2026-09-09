@@ -3,7 +3,7 @@ import axios from 'axios'
 import { useScenario } from '../hooks/useScenario'
 import { usePersonNames } from '../hooks/usePersonNames'
 import { SS_ANCHORS_DEFAULTS, ssAnchorsFromPlanningInputs } from '../hooks/useSsAnchors'
-import { TWO_AGE_MIN, TWO_AGE_MAX, clampTwoAge } from '../utils/scenario'
+import { TWO_AGE_MIN, TWO_AGE_MAX, clampTwoAge, parseTwoAgeInput } from '../utils/scenario'
 import { isPrivacyMode, MASK_CURRENCY } from '../utils/privacy'
 import WhatIf from './WhatIf'
 import { MonteCarloSection, StressTestSection, RET_AGES, SS_OPTS } from './Simulation'
@@ -105,7 +105,7 @@ function SurvivorScenarioSection({ retAge, jasonSsClaimAge, justinSsClaimAge, se
             benefit67={ssAnchors.jason.b67}
             benefit70={ssAnchors.jason.b70}
             benefitType="worker"
-            offHint="off = use whatever's saved in Settings, if anything"
+            offHint="off = falls back to your saved Settings claim age if you have one, otherwise the Early/Delayed toggle"
             compact
           />
           <ClaimAgeSlider
@@ -117,7 +117,7 @@ function SurvivorScenarioSection({ retAge, jasonSsClaimAge, justinSsClaimAge, se
             benefit70={ssAnchors.justin.b70}
             benefitType="spousal"
             checkEarlyAnchor
-            offHint="off = use whatever's saved in Settings, if anything"
+            offHint="off = falls back to your saved Settings claim age if you have one, otherwise the Early/Delayed toggle"
             compact
           />
         </div>
@@ -410,18 +410,23 @@ export default function StressTestWhatIf({ onNavigate }) {
       )}
       {tab !== 'whatif' && tab !== 'survivor' && twoAgeMode && (
         <div style={{ display:'flex', gap:24, marginBottom:!jasonOverridden && justinOverridden ? 8 : 28, flexWrap:'wrap', alignItems:'flex-end' }}>
-          {/* External audit review, 2026-09-09: see clampTwoAge's own
-              comment in utils/scenario.js. */}
+          {/* External audit review, 2026-09-09: see parseTwoAgeInput's
+              own comment in utils/scenario.js -- lenient while typing,
+              clamped only on blur, so a value like 65 can actually be
+              typed digit by digit without the first keystroke alone
+              (e.g. "6") snapping straight to the 50 floor. */}
           <div>
             <div className="label" style={{ marginBottom:8 }}>{person1Name}'s Retirement Age</div>
             <input type="number" min={TWO_AGE_MIN} max={TWO_AGE_MAX} step={1} value={jasonRetAge}
-                   onChange={e => setJasonRetAge(clampTwoAge(e.target.value))} />
+                   onChange={e => setJasonRetAge(parseTwoAgeInput(e.target.value))}
+                   onBlur={e => setJasonRetAge(clampTwoAge(e.target.value))} />
             <div style={{ fontSize:11, color:'var(--text3)', marginTop:4 }}>Ages {TWO_AGE_MIN}-{TWO_AGE_MAX}</div>
           </div>
           <div>
             <div className="label" style={{ marginBottom:8 }}>{person2Name}'s Retirement Age</div>
             <input type="number" min={TWO_AGE_MIN} max={TWO_AGE_MAX} step={1} value={justinRetAge}
-                   onChange={e => setJustinRetAge(clampTwoAge(e.target.value))} />
+                   onChange={e => setJustinRetAge(parseTwoAgeInput(e.target.value))}
+                   onBlur={e => setJustinRetAge(clampTwoAge(e.target.value))} />
             <div style={{ fontSize:11, color:'var(--text3)', marginTop:4 }}>Ages {TWO_AGE_MIN}-{TWO_AGE_MAX}</div>
           </div>
           {/* Independent review, 2026-09-08 (P1): two-age mode used to
@@ -500,7 +505,7 @@ export default function StressTestWhatIf({ onNavigate }) {
               benefit67={ssAnchors.jason.b67}
               benefit70={ssAnchors.jason.b70}
               benefitType="worker"
-              offHint="off = use whatever's saved in Settings, if anything"
+              offHint="off = falls back to your saved Settings claim age if you have one, otherwise the Early/Delayed toggle"
               ssMultiplier={whatIfAssumptions?.ss_mult}
               compact
             />
@@ -513,7 +518,7 @@ export default function StressTestWhatIf({ onNavigate }) {
               benefit70={ssAnchors.justin.b70}
               benefitType="spousal"
               checkEarlyAnchor
-              offHint="off = use whatever's saved in Settings, if anything"
+              offHint="off = falls back to your saved Settings claim age if you have one, otherwise the Early/Delayed toggle"
               ssMultiplier={whatIfAssumptions?.ss_mult}
               compact
             />
