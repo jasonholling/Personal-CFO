@@ -263,3 +263,39 @@ class TestSwrRothTaxEfficiencyOptInClaimAge:
         inputs = {**sample_inputs, "jason_ss_70": sample_inputs["jason_ss_delayed"] * 1.24}
         result = run_tax_efficiency_simulation(inputs, sample_accounts, ret_age=60, jason_ss_claim_age=68)
         assert result is not None
+
+
+class TestSurvivorScenarioOptInClaimAge:
+    """CALCULATION_CONTRACT.md section 44, milestone 4:
+    run_survivor_scenario (single-axis) wired to the shared resolver.
+    Also fixes a pre-existing gap: survivor_ss_annual previously read
+    the raw early-claim inputs directly, ignoring ss_timing entirely."""
+
+    def test_backward_compatible_without_claim_age(self, sample_inputs, sample_accounts):
+        from simulation_engine import run_survivor_scenario
+        result = run_survivor_scenario(sample_inputs, sample_accounts, ret_age=60,
+                                        deceased="jason", ss_timing="early")
+        assert result["has_data"] is True
+
+    def test_ss_timing_delayed_previously_silently_ignored_now_respected(self, sample_inputs, sample_accounts):
+        """jason_social_security=30000 (early), jason_ss_delayed=45000
+        (delayed) in sample_inputs -- selecting ss_timing="delayed" must
+        now actually change survivor_ss_annual (via the higher-of-the-
+        two rule), where it previously always used the raw early figure
+        regardless of ss_timing."""
+        from simulation_engine import run_survivor_scenario
+        early   = run_survivor_scenario(sample_inputs, sample_accounts, ret_age=60,
+                                         deceased="jason", ss_timing="early")
+        delayed = run_survivor_scenario(sample_inputs, sample_accounts, ret_age=60,
+                                         deceased="jason", ss_timing="delayed")
+        assert early["survivor_ss_annual"] != delayed["survivor_ss_annual"]
+        assert delayed["survivor_ss_annual"] == sample_inputs["jason_ss_delayed"]
+
+    def test_claim_age_changes_the_survivor_benefit(self, sample_inputs, sample_accounts):
+        from simulation_engine import run_survivor_scenario
+        inputs = {**sample_inputs, "jason_ss_70": sample_inputs["jason_ss_delayed"] * 1.24}
+        low  = run_survivor_scenario(inputs, sample_accounts, ret_age=60,
+                                      deceased="jason", jason_ss_claim_age=62)
+        high = run_survivor_scenario(inputs, sample_accounts, ret_age=60,
+                                      deceased="jason", jason_ss_claim_age=70)
+        assert low["survivor_ss_annual"] != high["survivor_ss_annual"]

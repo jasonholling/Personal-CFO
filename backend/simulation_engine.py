@@ -4218,8 +4218,23 @@ def run_survivor_scenario(inputs: Dict, accounts: List[Dict], ret_age: int = 60,
                            ss_timing: str = "early",
                            trust_available_to_survivor: bool = False,
                            joint_accounts_survivorship: bool = True,
-                           spousal_rollover_election: bool = True) -> Dict:
-    """jason_ret_age/justin_ret_age (2026-09-08, CALCULATION_CONTRACT.md
+                           spousal_rollover_election: bool = True,
+                           jason_ss_claim_age: int = None, justin_ss_claim_age: int = None) -> Dict:
+    """jason_ss_claim_age/justin_ss_claim_age (2026-09-08, CALCULATION_
+    CONTRACT.md section 44, milestone 4): opt-in continuous SS claiming
+    age 62-70 per spouse, via the shared resolve_ss_benefits -- also
+    fixes a pre-existing gap this function had versus every other
+    consumer: survivor_ss_annual read the raw jason_social_security/
+    justin_social_security inputs directly, ignoring ss_timing entirely
+    (a household that selected "delayed" still saw the survivor
+    schedule computed off the early-claim figure). Still a single flat
+    figure COLA'd from the death year forward (unchanged simplification
+    -- rebuilding this into a genuinely per-year claim-age-gated
+    schedule, like the two-age Survivor's own finding-3 fix, is a
+    larger scope than adding claim-age input support and not attempted
+    here).
+
+    jason_ret_age/justin_ret_age (2026-09-08, CALCULATION_CONTRACT.md
     sections 36-37, Milestone 4 of 4): two-age mode with an owner-
     attributed account ledger, both ages required together, delegating
     entirely to _run_survivor_scenario_two_age. ret_age's own single-axis
@@ -4339,9 +4354,20 @@ def run_survivor_scenario(inputs: Dict, accounts: List[Dict], ret_age: int = 60,
                                          else timeline.justin_age_at(timeline.effective_start_age))
         death_age = deceased_effective_start_age + 10
 
-    _proj = run_retirement_projection(inputs, accounts, ret_ages=[ret_age], life_events=life_events,
+    _inputs_for_proj = inputs
+    if jason_ss_claim_age is not None or justin_ss_claim_age is not None:
+        _inputs_for_proj = {**inputs, "jason_ss_claim_age": jason_ss_claim_age,
+                             "justin_ss_claim_age": justin_ss_claim_age}
+    _proj = run_retirement_projection(_inputs_for_proj, accounts, ret_ages=[ret_age], life_events=life_events,
                                        surplus_allocations=surplus_allocations)
-    _scenario = next((s for s in _proj["scenarios"] if s["label"] == f"age_{ret_age}_early"), None)
+    # This baseline lookup only ever needs portfolio/pension figures,
+    # neither of which vary by SS choice -- historically hardcoded to
+    # "early" regardless of ss_timing for exactly that reason. Now
+    # adjusted to "custom" when Jason's claim age is set, matching
+    # run_retirement_projection's own label change (section 44
+    # milestone 1), so the lookup doesn't silently miss.
+    _ss_label = "custom" if jason_ss_claim_age is not None else "early"
+    _scenario = next((s for s in _proj["scenarios"] if s["label"] == f"age_{ret_age}_{_ss_label}"), None)
     if not _scenario:
         return {"has_data": False}
 
@@ -4373,7 +4399,9 @@ def run_survivor_scenario(inputs: Dict, accounts: List[Dict], ret_age: int = 60,
 
     portfolio_at_death   = death_row["portfolio_balance"]
     starting_balance     = portfolio_at_death + payout
-    survivor_ss_annual   = max(inputs.get("jason_social_security", 0), inputs.get("justin_social_security", 0))
+    _jason_ss_annual, _, _justin_ss_annual, _ = resolve_ss_benefits(
+        inputs, ss_timing, jason_ss_claim_age, justin_ss_claim_age)
+    survivor_ss_annual   = max(_jason_ss_annual, _justin_ss_annual)
     pension_annual       = death_row["pension"]  # 100% J&S assumption already baked into this figure
     # Total years from TODAY to the death year, not just from retirement
     # to death — the old years_since_ret omitted the years between today

@@ -4269,3 +4269,36 @@ check passed.
 Branch: `codex/ss-claim-age`, pushed — **not merged to `main`**.
 Remaining: Survivor Scenario (single-axis), two-age consumers,
 frontend.
+
+## 47. Social Security claiming age 62-70 — milestone 4: Survivor Scenario, single-axis (2026-09-08, on `codex/ss-claim-age`)
+
+Propagated to `run_survivor_scenario` (single-axis). Same additive
+`jason_ss_claim_age`/`justin_ss_claim_age` params; the internal
+baseline `run_retirement_projection` call and its scenario-label
+lookup (previously hardcoded to `"early"` regardless of `ss_timing`,
+since portfolio/pension don't vary by SS choice) now adjusts to
+`"custom"` when Jason's claim age is set, matching every other
+migrated consumer.
+
+**Incidental fix, not new scope**: `survivor_ss_annual` read the raw
+`jason_social_security`/`justin_social_security` inputs directly
+(`max(inputs.get(...), inputs.get(...))`), ignoring `ss_timing`
+entirely — a household that selected "delayed" still saw the survivor
+schedule computed off the early-claim figure. Migrating onto
+`resolve_ss_benefits` fixes this the same way milestone 3 fixed Roth
+Conversion's analogous gap. Still a single flat figure COLA'd forward
+from the death year (the pre-existing simplification, unchanged) — a
+genuinely per-year, claim-age-gated survivor SS schedule (matching the
+two-age Survivor's own much more involved finding-3 fix from the
+eighth review round, sections 39-43) is a larger scope than adding
+claim-age input support and was not attempted here.
+
+New tests: 3, covering backward compatibility, the ss_timing fix
+(delayed now genuinely differs from early), and a genuine outcome
+change with a claim age. Full backend suite: 1326 passed, coverage
+at/above the 95% floor. Sensitive-data check passed.
+
+Branch: `codex/ss-claim-age`, pushed — **not merged to `main`**.
+Remaining: two-age consumers (all of them share jason/justin tracking
+already, so this is expected to be the most natural fit of any
+milestone), frontend.
