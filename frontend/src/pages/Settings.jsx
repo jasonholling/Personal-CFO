@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
 import axios from 'axios'
 import { usePrivacyMode } from '../hooks/usePrivacyMode'
+import { ssBenefitForClaimAge, SS_CLAIM_AGE_MIN, SS_CLAIM_AGE_MAX, SS_FRA_AGE } from '../utils/ssBenefit'
 
 const Section = ({ title, children }) => (
   <div className="card" style={{ marginBottom:20 }}>
@@ -36,6 +37,52 @@ const NumInput = ({ value, onChange, prefix='', suffix='', pct=false, style={} }
 const TextInput = ({ value, onChange, style={} }) => (
   <input type="text" value={value ?? ''} onChange={e => onChange(e.target.value)} style={{ width:160, textAlign:'right', ...style }} />
 )
+
+// CALCULATION_CONTRACT.md section 44/49 (SS claiming age 62-70, sixth
+// milestone): a household can leave this off entirely (claimAge stays
+// null/undefined) and keep the existing app-wide early(62)/delayed(67)
+// toggle everywhere else — resolve_ss_claim_ages on the backend treats
+// an unset claim age as "use the legacy ss_timing default", so this
+// control is purely additive. Once set, the saved claim age here wins
+// over that toggle on every page (CALCULATION_CONTRACT.md section 49,
+// finding 1's 3-tier resolution: explicit override > saved claim age >
+// legacy ss_timing default), since no page currently sends a per-
+// request override of its own.
+const ClaimAgeSlider = ({ label, claimAge, onChange, benefit62, benefit67, benefit70, benefitType }) => {
+  const enabled = claimAge != null
+  const age = claimAge ?? SS_FRA_AGE
+  const computed = ssBenefitForClaimAge(benefit62 ?? 0, benefit67 ?? 0, benefit70 ?? 0, age, benefitType)
+  return (
+    <div style={{ padding:'10px 0', borderBottom:'1px solid var(--border)' }}>
+      <label style={{ display:'flex', alignItems:'center', gap:8, fontSize:13, cursor:'pointer' }}>
+        <input type="checkbox" checked={enabled} onChange={e => onChange(e.target.checked ? SS_FRA_AGE : null)} />
+        {label}
+        <span style={{ fontSize:11, color:'var(--text3)' }}>
+          (off = use the Early/Delayed toggle on Retirement/Simulation pages instead)
+        </span>
+      </label>
+      {enabled && (
+        <div style={{ marginTop:10, paddingLeft:24 }}>
+          <div style={{ display:'flex', alignItems:'center', gap:12 }}>
+            <input
+              type="range"
+              min={SS_CLAIM_AGE_MIN}
+              max={SS_CLAIM_AGE_MAX}
+              step={1}
+              value={age}
+              onChange={e => onChange(parseInt(e.target.value))}
+              style={{ flex:1 }}
+            />
+            <span style={{ fontSize:13, fontWeight:700, width:28, textAlign:'right' }}>{age}</span>
+          </div>
+          <div style={{ fontSize:12, color:'var(--text2)', marginTop:4 }}>
+            Benefit at {age}: <strong>${Math.round(computed).toLocaleString('en-US')}/yr</strong> (computed)
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
 
 export default function Settings() {
   const { privacyMode } = usePrivacyMode()
@@ -134,6 +181,18 @@ export default function Settings() {
         )}
         <Row label={`${p1} SS at 62 (early)`}><NumInput value={form.jason_social_security} onChange={v => set('jason_social_security', v)} prefix="$" suffix="/yr" /></Row>
         <Row label={`${p1} SS at 67 (delayed)`}><NumInput value={form.jason_ss_delayed ?? 0} onChange={v => set('jason_ss_delayed', v)} prefix="$" suffix="/yr" /></Row>
+        <Row label={`${p1} SS at 70`} hint="Real dollar figure from your SSA statement, not a formula guess — used as the anchor for the claim-age slider below">
+          <NumInput value={form.jason_ss_70 ?? 0} onChange={v => set('jason_ss_70', v)} prefix="$" suffix="/yr" />
+        </Row>
+        <ClaimAgeSlider
+          label={`${p1}'s Social Security claim age`}
+          claimAge={form.jason_ss_claim_age}
+          onChange={v => set('jason_ss_claim_age', v)}
+          benefit62={form.jason_social_security}
+          benefit67={form.jason_ss_delayed}
+          benefit70={form.jason_ss_70}
+          benefitType="worker"
+        />
         <div style={{ padding:'10px 12px', background:'var(--bg3)', borderRadius:8, marginTop:8, fontSize:12, color:'var(--text2)' }}>
           {p1}'s own retirement age is chosen interactively as a scenario (55/60/65/etc.) on the Retirement
           Projection and Stress Test pages, not fixed here as a single planning assumption.
@@ -158,6 +217,21 @@ export default function Settings() {
         <Row label={`${p2} Spousal SS at 67`} hint={`50% of ${p1}'s FRA benefit — or ${p2}'s own independent benefit, if entered directly`}>
           <NumInput value={form.justin_social_security ?? 0} onChange={v => set('justin_social_security', v)} prefix="$" suffix="/yr" />
         </Row>
+        <Row label={`${p2} Spousal SS at 62`} hint="Real dollar figure from your SSA statement — used as the anchor for the claim-age slider below">
+          <NumInput value={form.justin_ss_early ?? 0} onChange={v => set('justin_ss_early', v)} prefix="$" suffix="/yr" />
+        </Row>
+        <Row label={`${p2} Spousal SS at 70`} hint="Real dollar figure from your SSA statement">
+          <NumInput value={form.justin_ss_70 ?? 0} onChange={v => set('justin_ss_70', v)} prefix="$" suffix="/yr" />
+        </Row>
+        <ClaimAgeSlider
+          label={`${p2}'s Social Security claim age`}
+          claimAge={form.justin_ss_claim_age}
+          onChange={v => set('justin_ss_claim_age', v)}
+          benefit62={form.justin_ss_early}
+          benefit67={form.justin_social_security}
+          benefit70={form.justin_ss_70}
+          benefitType="spousal"
+        />
         <Row label={`${p2}'s Retirement Age`} hint={`0 = assume ${p2} retires the same year as ${p1} (the old default). Set a specific age for an independent retirement date — e.g. ${p2} keeps working/contributing past, or stops well before, whichever age you're viewing for ${p1}.`}>
           <NumInput value={form.justin_ret_age ?? 0} onChange={v => set('justin_ret_age', Math.max(0, Math.round(v)))} suffix="age" />
         </Row>

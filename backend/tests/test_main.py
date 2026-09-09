@@ -276,6 +276,21 @@ class TestProjectionsRequirePlanningInputs:
         ages = {s["retirement_age"] for s in r.json()["scenarios"]}
         assert {55, 56, 57, 58, 59, 60, 65}.issubset(ages)
 
+    def test_retirement_projection_ignores_a_saved_claim_age_by_design(self, client, sample_inputs, sample_accounts):
+        """CALCULATION_CONTRACT.md section 50: /api/projections/retirement
+        deliberately does NOT read jason_ss_claim_age/justin_ss_claim_age
+        -- passing one would collapse the early/delayed pair into a single
+        custom scenario and silently break WhatIf.jsx's hardcoded
+        age_X_early label lookups. A household that has saved a claim age
+        in Settings must still get the exact same early+delayed pair
+        here."""
+        _seed_planning_inputs(client, {**sample_inputs, "jason_ss_claim_age": 68, "justin_ss_claim_age": 65})
+        _seed_accounts(client, sample_accounts)
+        r = client.get("/api/projections/retirement")
+        labels = {s["ss_timing"] for s in r.json()["scenarios"]}
+        assert labels == {"early", "delayed"}
+        assert not any(s["ss_timing"] == "custom" for s in r.json()["scenarios"])
+
     def test_education_projection_200_with_inputs(self, client, sample_inputs):
         _seed_planning_inputs(client, sample_inputs)
         r = client.get("/api/projections/education")

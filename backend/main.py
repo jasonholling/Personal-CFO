@@ -1204,6 +1204,17 @@ def get_retirement_projections():
     # WhatIf.jsx's baseline for its full 55-67 slider, where a narrower
     # range here silently broke the "Impact on Retire at X" comparison
     # for any age outside the original [55,56,57,58,59,60,65] set.
+    # Deliberately NOT wired to jason_ss_claim_age/justin_ss_claim_age
+    # (2026-09-09, CALCULATION_CONTRACT.md section 50): this endpoint's
+    # early/delayed PAIR is a hard dependency of both Retirement.jsx's
+    # own toggle and WhatIf.jsx's `age_X_early` label lookups — passing
+    # a saved claim age would collapse the pair into a single "custom"
+    # scenario and silently break WhatIf.jsx. The Settings claim-age
+    # slider is scoped to the 7 endpoints that already read it
+    # (Monte Carlo, Stress Tests, SWR, Roth Conversion, Tax Efficiency,
+    # Survivor Scenario, Sequence Risk); Retirement.jsx surfaces a note
+    # explaining the split rather than this endpoint silently changing
+    # shape under WhatIf.jsx's feet.
     return run_retirement_projection(dict(inputs_row), accounts, ret_ages=list(range(55, 68)), life_events=life_events, surplus_allocations=surplus_allocations)
 
 @app.get("/api/projections/two-dimensional-retirement")

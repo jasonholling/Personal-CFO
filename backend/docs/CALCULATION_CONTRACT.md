@@ -4510,3 +4510,49 @@ and no claim age crashes identically), and left untouched as out of
 scope for this review round.
 
 Branch: `codex/ss-claim-age`, pushed — **not merged to `main`**.
+
+## 50. Social Security claiming age 62-70 — milestone 6: frontend (2026-09-09, on `codex/ss-claim-age`)
+
+Settings.jsx gets the three missing real-dollar anchor fields (Jason
+SS at 70, Justin Spousal SS at 62, Justin Spousal SS at 70 — the app
+already had Jason's 62/67 and Justin's 67), completing the 62/67/70
+anchor triple per spouse the design (section 44) calls for.
+
+A new `ClaimAgeSlider` control sits under each spouse's SS fields: an
+off-by-default checkbox (claim age stays `null`/unset, meaning "use
+the existing early/delayed toggle everywhere else" — purely additive,
+zero behavior change for a household that never touches it) that, once
+checked, reveals a 62-70 slider with a live "Benefit at N: $X/yr
+(computed)" readout. The readout is computed client-side by
+`frontend/src/utils/ssBenefit.js`, a hand-mirrored copy of
+`ss_benefit_for_claim_age` (worker vs. spousal reduction tables,
+delayed-credit table, same clamping) — kept in sync by hand since
+there's no shared Python/JS source of truth; the actual saved
+projection always runs through the backend's own copy.
+
+Saved claim ages are picked up automatically by the 7 endpoints
+already wired in milestones 2-5 (Monte Carlo, Stress Tests, SWR, Roth
+Conversion, Tax Efficiency, Survivor Scenario, Sequence Risk) via each
+endpoint's existing `_ss_claim_ages(inputs_row)` call in main.py — no
+endpoint changes were needed for those.
+
+**Deliberately NOT wired**: `/api/projections/retirement`
+(`get_retirement_projections`), the data source for both Retirement.jsx
+and WhatIf.jsx. This endpoint's early/delayed PAIR is a hard dependency
+of Retirement.jsx's own toggle buttons and WhatIf.jsx's hardcoded
+`age_X_early` label lookups (`WhatIf.jsx` lines ~27-29, ~258, ~337-338)
+— passing a saved claim age would collapse the pair into a single
+"custom" scenario (per milestone 1's `run_retirement_projection`
+contract) and silently break WhatIf.jsx's comparison logic. Rather than
+either breaking WhatIf.jsx or rewriting its label-matching logic as
+part of this milestone, Retirement.jsx now shows an explanatory banner
+when a claim age is saved, listing exactly which pages it does affect,
+so the split is visible instead of the toggle looking silently ignored.
+This is a scoping decision, not a bug — revisit if/when WhatIf.jsx
+itself is generalized to handle a "custom" scenario label.
+
+Verification: `./venv/bin/python -c "import main"` succeeds; `npm run
+build` succeeds (695 modules, no new errors — the one warning is a
+pre-existing chunk-size notice unrelated to this change).
+
+Branch: `codex/ss-claim-age`, pushed — **not merged to `main`**.
