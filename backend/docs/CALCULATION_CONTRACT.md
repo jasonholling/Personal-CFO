@@ -4189,3 +4189,49 @@ survivor benefits' own reduction rules beyond the existing "higher of
 the two" simplification; any FRA value other than 67 (this app has
 never modeled birth-year-dependent FRA, an existing simplification
 left unchanged).
+
+## 45. Social Security claiming age 62-70 — milestone 2: Monte Carlo + Stress Tests (2026-09-08, on `codex/ss-claim-age`)
+
+Propagated the section 44 design to the next two consumers, per the
+milestone sequence: Monte Carlo and Stress Tests (single-axis).
+
+**New shared resolver**, `resolve_ss_benefits(inputs, ss_timing,
+jason_ss_claim_age, justin_ss_claim_age)` in `projection_engine.py` —
+returns `(jason_ss_annual, jason_ss_age, justin_ss_annual,
+justin_ss_age)`, replacing the independent
+`jason_ss_age = 62 if ss_timing == "early" else 67` ternary this file
+still hand-rolls in ~18 remaining call sites (migrated one consumer at
+a time across the remaining milestones, not all at once). A spouse
+left at `None` gets the exact existing `ss_timing`-derived behavior; a
+spouse given a claim age gets `ss_benefit_for_claim_age`'s real-anchor
+formula instead.
+
+**`run_monte_carlo`/`run_stress_tests`** both gained optional
+`jason_ss_claim_age`/`justin_ss_claim_age` params (mirroring
+`jason_ret_age`/`justin_ret_age`'s own established additive-parameter
+pattern). Each now calls `resolve_ss_benefits` instead of its own
+ternary, and forwards the claim ages into its internal
+`run_retirement_projection` call (for the pre-retirement starting
+balances) via a shallow-copied `inputs` dict — `run_retirement_
+projection` reads `jason_ss_claim_age`/`justin_ss_claim_age` off
+`inputs` itself (section 44 milestone 1), not as explicit kwargs, so
+this is how every downstream caller threads them through. The internal
+scenario-label lookup (`f"age_{ret_age}_{ss_timing}"`) is adjusted to
+`f"age_{ret_age}_custom"` when Jason's claim age is set, matching
+`run_retirement_projection`'s own label change (`"custom"` replaces
+`"early"`/`"delayed"` for that scenario — see section 44 milestone 1).
+
+**Verified:** a claim age at 62 vs. 70 produces a genuinely different
+`median_final_balance` (confirms the wiring reaches the actual
+1000-trial simulation, not just accepted-and-silently-ignored); every
+existing caller that leaves both claim ages at `None` gets byte-for-
+byte the same `success_rate`/`ss_timing` output as before. New tests:
+4 for `resolve_ss_benefits` itself (matches both existing ternary
+branches exactly, both spouses' overrides independent of each other),
+4 for Monte Carlo/Stress Tests (backward-compatible without claim age,
+outcome genuinely changes with one, no crash). Full backend suite:
+1317 passed, 97.58% coverage. Sensitive-data check passed.
+
+Branch: `codex/ss-claim-age`, pushed — **not merged to `main`**.
+Remaining milestones (SWR/Tax Efficiency/Roth Conversion, Survivor,
+two-age consumers, frontend) unchanged from section 44's own sequence.

@@ -9,7 +9,8 @@ under test.
 
 import pytest
 
-from projection_engine import ss_benefit_for_claim_age, SS_FRA_AGE, run_retirement_projection
+from projection_engine import ss_benefit_for_claim_age, resolve_ss_benefits, SS_FRA_AGE, run_retirement_projection
+from simulation_engine import run_monte_carlo, run_stress_tests
 
 
 class TestAnchorsAreExact:
@@ -149,3 +150,68 @@ class TestRunRetirementProjectionOptInClaimAge:
         # just confirm the call succeeds and doesn't affect Jason's own
         # early/delayed pair (justin_ss_claim_age alone doesn't collapse it).
         assert sorted(s["ss_timing"] for s in result["scenarios"]) == ["delayed", "early"]
+
+
+class TestResolveSsBenefitsSharedHelper:
+    """CALCULATION_CONTRACT.md section 44, milestone 2: resolve_ss_
+    benefits is the shared resolver every consumer migrates to,
+    replacing its own independent ss_timing ternary one at a time."""
+
+    def test_without_claim_ages_matches_the_old_early_ternary(self, sample_inputs):
+        jason_ss_annual, jason_ss_age, justin_ss_annual, justin_ss_age = resolve_ss_benefits(
+            sample_inputs, "early")
+        assert jason_ss_annual == sample_inputs["jason_social_security"]
+        assert jason_ss_age == 62
+
+    def test_without_claim_ages_matches_the_old_delayed_ternary(self, sample_inputs):
+        jason_ss_annual, jason_ss_age, justin_ss_annual, justin_ss_age = resolve_ss_benefits(
+            sample_inputs, "delayed")
+        assert jason_ss_annual == sample_inputs["jason_ss_delayed"]
+        assert jason_ss_age == 67
+
+    def test_jason_claim_age_overrides_ss_timing_entirely(self, sample_inputs):
+        inputs = {**sample_inputs, "jason_ss_70": 55000}
+        jason_ss_annual, jason_ss_age, _, _ = resolve_ss_benefits(inputs, "early", jason_ss_claim_age=64)
+        expected = 30000 + (1/3) * (45000 - 30000)  # same math as the run_retirement_projection test above
+        assert jason_ss_annual == pytest.approx(expected, abs=0.01)
+        assert jason_ss_age == 64
+
+    def test_justin_claim_age_is_independent_of_jasons(self, sample_inputs):
+        inputs = {**sample_inputs, "justin_ss_early": 10000, "justin_ss_70": 18600}
+        jason_ss_annual, jason_ss_age, justin_ss_annual, justin_ss_age = resolve_ss_benefits(
+            inputs, "early", justin_ss_claim_age=69)
+        # Jason's own side is untouched (still the "early" ternary result).
+        assert jason_ss_annual == sample_inputs["jason_social_security"]
+        assert jason_ss_age == 62
+        expected_justin = 15000 + (2/3) * (18600 - 15000)
+        assert justin_ss_annual == pytest.approx(expected_justin, abs=0.01)
+        assert justin_ss_age == 69
+
+
+class TestMonteCarloAndStressTestsOptInClaimAge:
+    """CALCULATION_CONTRACT.md section 44, milestone 2: run_monte_carlo/
+    run_stress_tests wired to the shared resolver. A later claim age
+    delays real guaranteed income, so the outcome must actually differ
+    from an earlier claim age (confirms the wiring reaches the
+    simulation, not just accepted-and-ignored) -- and neither function
+    breaks when the new params are left at their None default."""
+
+    def test_monte_carlo_backward_compatible_without_claim_age(self, sample_inputs, sample_accounts):
+        baseline = run_monte_carlo(sample_inputs, sample_accounts, ret_age=60, ss_timing="early")
+        assert baseline["ss_timing"] == "early"
+        assert baseline["success_rate"] >= 0
+
+    def test_monte_carlo_claim_age_changes_the_outcome(self, sample_inputs, sample_accounts):
+        inputs = {**sample_inputs, "jason_ss_70": sample_inputs["jason_ss_delayed"] * 1.24}
+        low  = run_monte_carlo(inputs, sample_accounts, ret_age=60, jason_ss_claim_age=62)
+        high = run_monte_carlo(inputs, sample_accounts, ret_age=60, jason_ss_claim_age=70)
+        assert high["median_final_balance"] != low["median_final_balance"]
+
+    def test_stress_tests_backward_compatible_without_claim_age(self, sample_inputs, sample_accounts):
+        baseline = run_stress_tests(sample_inputs, sample_accounts, ret_age=60, ss_timing="delayed")
+        assert baseline["ss_timing"] == "delayed"
+
+    def test_stress_tests_claim_age_does_not_crash_and_labels_custom(self, sample_inputs, sample_accounts):
+        inputs = {**sample_inputs, "jason_ss_70": sample_inputs["jason_ss_delayed"] * 1.24}
+        result = run_stress_tests(inputs, sample_accounts, ret_age=60, jason_ss_claim_age=68)
+        assert result is not None

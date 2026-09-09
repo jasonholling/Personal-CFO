@@ -85,6 +85,44 @@ def ss_benefit_for_claim_age(benefit_62: float, benefit_67: float, benefit_70: f
     progress = _SS_CREDIT_FRACTION_AT_AGE[claim_age] / 0.24  # 0 at 67, 1 at 70
     return benefit_67 + progress * (benefit_70 - benefit_67)
 
+
+def resolve_ss_benefits(inputs: Dict, ss_timing: str = "early",
+                         jason_ss_claim_age: int = None, justin_ss_claim_age: int = None):
+    """Single shared resolver for (jason_ss_annual, jason_ss_age,
+    justin_ss_annual, justin_ss_age) -- CALCULATION_CONTRACT.md section
+    44, milestone 2: replaces the ~20 independent
+    `jason_ss_age = 62 if ss_timing == "early" else 67` call sites,
+    migrated one consumer at a time to call this instead of hand-
+    rolling the ternary. `jason_ss_claim_age`/`justin_ss_claim_age` are
+    opt-in per spouse, independent of each other -- a spouse left at
+    None keeps the exact existing `ss_timing`-derived early(62)/
+    delayed(67) behavior; a spouse given a claim age gets their real
+    benefit at that exact age via `ss_benefit_for_claim_age`, reading
+    `jason_ss_70`/`justin_ss_early`/`justin_ss_70` the same way every
+    other opt-in call site does (falling back to the existing FRA
+    figure when not yet supplied, never crashing on a household that
+    hasn't filled in the new fields)."""
+    jason_ss_early   = inputs.get("jason_social_security", JASON_SS_EARLY_DEFAULT)
+    jason_ss_delayed = inputs.get("jason_ss_delayed", jason_ss_early * JASON_SS_DELAYED_RATIO)
+    if jason_ss_claim_age is not None:
+        jason_ss_70 = inputs.get("jason_ss_70", jason_ss_delayed)
+        jason_ss_annual = ss_benefit_for_claim_age(jason_ss_early, jason_ss_delayed, jason_ss_70, jason_ss_claim_age)
+        jason_ss_age = jason_ss_claim_age
+    else:
+        jason_ss_annual = jason_ss_early if ss_timing != "delayed" else jason_ss_delayed
+        jason_ss_age    = 62 if ss_timing != "delayed" else 67
+
+    justin_ss_annual = inputs.get("justin_social_security", JUSTIN_SPOUSAL_ANNUAL)
+    justin_ss_age    = inputs.get("justin_ss_age", JUSTIN_SPOUSAL_AGE)
+    if justin_ss_claim_age is not None:
+        justin_ss_62 = inputs.get("justin_ss_early", justin_ss_annual)
+        justin_ss_70 = inputs.get("justin_ss_70", justin_ss_annual)
+        justin_ss_annual = ss_benefit_for_claim_age(justin_ss_62, justin_ss_annual, justin_ss_70, justin_ss_claim_age)
+        justin_ss_age = justin_ss_claim_age
+
+    return jason_ss_annual, jason_ss_age, justin_ss_annual, justin_ss_age
+
+
 # Flat net-of-tax approximation applied to income streams that land
 # directly in a taxable-equivalent bucket without going through this
 # engine's own marginal-bracket withdrawal-tax model: RSU/bonus proceeds,
