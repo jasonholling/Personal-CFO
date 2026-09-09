@@ -6,13 +6,16 @@ no hosted version of this app.
 
 ## Requirements
 
-- macOS (uses Apple's bundled Python 3.9 by default — see the note below)
-- Python 3.10+ available as `python3` (or let `start.sh` fall back to
-  `/usr/bin/python3`)
+- macOS or Windows (see below — Linux works too, just run the backend/
+  frontend commands from `start.sh` manually; there's no `start.sh`
+  equivalent for it yet)
+- Python 3.10+ (avoid 3.13+ — see the note below)
 - Node.js 18+
 - npm
 
 ## Getting Started From a Fresh Clone (Fork Setup)
+
+### macOS
 
 ```bash
 git clone <your-fork-url> personal-cfo
@@ -33,6 +36,33 @@ source without a Rust toolchain. `start.sh` prefers `/usr/bin/python3`
 (Apple's bundled Python 3.9) over whatever a newer Homebrew `python3`
 resolves to, for exactly this reason. If setup fails on dependency builds,
 try pointing at an older Python 3.10–3.12 explicitly.
+
+### Windows
+
+```powershell
+git clone <your-fork-url> personal-cfo
+cd personal-cfo
+.\start.ps1
+```
+
+If PowerShell blocks the script with an execution-policy error, run this
+once first (it only relaxes the policy for scripts you run yourself, in
+your own user profile):
+
+```powershell
+Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
+```
+
+`start.ps1` is the Windows equivalent of `start.sh` — same four steps
+(create venv, install backend deps, install frontend deps, start both
+servers and open the browser), translated to Windows conventions
+(`venv\Scripts\` instead of `venv/bin/`, jobs instead of backgrounded
+shell processes). It also checks upfront for Python 3.10+ (via the `py`
+launcher or `python` on PATH) and Node 18+/npm, and prints an install
+link for anything missing instead of failing partway through setup.
+Same Python-version caveat as macOS: avoid 3.13+ for the same
+no-prebuilt-wheel/no-Rust-toolchain reason — install 3.10–3.12 from
+https://python.org/downloads/ if `pip install` fails.
 
 ### First launch: the lock screen
 
