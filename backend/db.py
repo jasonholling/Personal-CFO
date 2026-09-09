@@ -215,6 +215,24 @@ def init_db():
         ("justin_annual_bonus_pct",    "REAL DEFAULT 0"),
         ("justin_annual_rsu_value",    "REAL DEFAULT 0"),
         ("justin_ret_age",             "INTEGER DEFAULT 0"),  # 0 = not independently set; see run_retirement_projection
+        # Social Security claiming age 62-70 (2026-09-08,
+        # CALCULATION_CONTRACT.md section 44) — jason_ss_claim_age/
+        # justin_ss_claim_age default to NULL (not 62), meaning "not set,
+        # use the existing early/delayed ss_timing toggle" — an existing
+        # household with these unset sees NO behavior change (the engine's
+        # own resolve_ss_benefits only switches to continuous-claim-age
+        # mode when a claim age is explicitly provided, never inferred
+        # from a default). jason_ss_70/justin_ss_early/justin_ss_70 are
+        # the real dollar anchors a household's own SSA.gov statement
+        # shows at age 70 (and, for Justin, at 62 — Jason already has
+        # jason_social_security/jason_ss_delayed for 62/67); default 0,
+        # same "no assumption without real inputs" convention as every
+        # other SS dollar field.
+        ("jason_ss_claim_age",         "INTEGER"),
+        ("justin_ss_claim_age",        "INTEGER"),
+        ("jason_ss_70",                "REAL DEFAULT 0"),
+        ("justin_ss_early",            "REAL DEFAULT 0"),
+        ("justin_ss_70",               "REAL DEFAULT 0"),
     ]
     for col, typedef in migrations:
         if col not in existing_cols:

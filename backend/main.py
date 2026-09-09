@@ -335,6 +335,19 @@ class PlanningInputs(BaseModel):
     justin_annual_bonus_pct: float = 0
     justin_annual_rsu_value: float = 0
     justin_ret_age: int = 0
+    # Social Security claiming age 62-70 (2026-09-08, CALCULATION_
+    # CONTRACT.md section 44, milestone 6): jason_ss_claim_age/
+    # justin_ss_claim_age are Optional and default to None -- "not set,
+    # use the existing early(62)/delayed(67) ss_timing toggle" -- an
+    # existing household sees no behavior change until it explicitly
+    # sets one. jason_ss_70/justin_ss_early/justin_ss_70 are the real
+    # dollar anchors from a household's own SSA.gov statement (Jason
+    # already has jason_social_security/jason_ss_delayed for 62/67).
+    jason_ss_claim_age: Optional[int] = None
+    justin_ss_claim_age: Optional[int] = None
+    jason_ss_70: float = 0
+    justin_ss_early: float = 0
+    justin_ss_70: float = 0
 
 class SnapshotNote(BaseModel):
     note: str
@@ -527,6 +540,14 @@ def save_scenario(body: ScenarioSave):
     # scenario saved while "SS at 67" was selected everywhere else in the
     # app was silently projected as if early claiming had been chosen
     # instead (external audit 2026-09-07, finding #15).
+    # This endpoint's own contract requires a binary early/delayed choice
+    # (validated above). run_retirement_projection only applies a
+    # continuous claim age when jason_ss_claim_age/justin_ss_claim_age
+    # are passed as explicit keyword args (CALCULATION_CONTRACT.md
+    # section 44, ninth follow-up review) -- since this call site never
+    # passes them, it always gets the normal early+delayed pair
+    # regardless of what a household has saved in Settings, so no
+    # stripping of the inputs row is needed.
     result=run_retirement_projection(dict(inputs),accounts,ret_ages=[body.retirement_age],life_events=life_events,surplus_allocations=surplus_allocations); scenario=next((s for s in result["scenarios"] if s["ss_timing"]==body.ss_timing),None)
     summary={k:scenario[k] for k in ("retirement_age","percent_funded","portfolio_at_retirement","projected_surplus","on_track")}
     # assumptions_json only snapshots retirement_age + ss_timing — see the
@@ -614,6 +635,18 @@ def _get_relevant_surplus_allocations(conn) -> List[dict]:
     return [dict(r) for r in conn.execute(
         "SELECT * FROM surplus_allocations WHERE goal IN ('Retirement contributions', 'Taxable investing')"
     ).fetchall()]
+
+
+def _ss_claim_ages(inputs_row: dict):
+    """CALCULATION_CONTRACT.md section 44, milestone 6: reads the
+    persisted continuous SS claiming-age Settings fields
+    (jason_ss_claim_age/justin_ss_claim_age), if the household has set
+    them. Returns (None, None) for a household that hasn't -- every
+    simulation-engine consumer's own resolve_ss_benefits treats None as
+    "not set, use this call's own ss_timing early/delayed toggle
+    unchanged," so an existing household sees no behavior change until
+    it explicitly picks a claim age in Settings."""
+    return inputs_row.get("jason_ss_claim_age"), inputs_row.get("justin_ss_claim_age")
 
 
 def _get_kids_surplus_529_monthly(conn) -> Dict[str, float]:
@@ -1492,10 +1525,13 @@ def get_monte_carlo(ret_age: int = 60, ss_timing: str = "early",
     if not inputs_row:
         raise HTTPException(status_code=400, detail="Planning inputs not set yet")
     from simulation_engine import run_monte_carlo
+    _inputs = dict(inputs_row)
+    _jason_ss_claim_age, _justin_ss_claim_age = _ss_claim_ages(_inputs)
     try:
-        return run_monte_carlo(dict(inputs_row), accounts, ret_age, ss_timing, life_events=life_events,
+        return run_monte_carlo(_inputs, accounts, ret_age, ss_timing, life_events=life_events,
                                 surplus_allocations=surplus_allocations,
-                                jason_ret_age=jason_ret_age, justin_ret_age=justin_ret_age)
+                                jason_ret_age=jason_ret_age, justin_ret_age=justin_ret_age,
+                                jason_ss_claim_age=_jason_ss_claim_age, justin_ss_claim_age=_justin_ss_claim_age)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -1529,11 +1565,15 @@ def post_monte_carlo(body: dict):
     if not inputs_row:
         raise HTTPException(status_code=400, detail="Planning inputs not set yet")
     inputs = _apply_whatif_overrides(dict(inputs_row), body)
+    _jason_ss_claim_age, _justin_ss_claim_age = _ss_claim_ages(inputs)
+    _jason_ss_claim_age = body.get("jason_ss_claim_age", _jason_ss_claim_age)
+    _justin_ss_claim_age = body.get("justin_ss_claim_age", _justin_ss_claim_age)
     from simulation_engine import run_monte_carlo
     try:
         return run_monte_carlo(inputs, accounts, ret_age, ss_timing, life_events=life_events,
                                 surplus_allocations=surplus_allocations,
-                                jason_ret_age=jason_ret_age, justin_ret_age=justin_ret_age)
+                                jason_ret_age=jason_ret_age, justin_ret_age=justin_ret_age,
+                                jason_ss_claim_age=_jason_ss_claim_age, justin_ss_claim_age=_justin_ss_claim_age)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -1608,6 +1648,14 @@ def get_retirement_sensitivity():
 
     inputs = dict(inputs_row)
     jason_age = inputs["jason_age"]
+    # This page has no early/delayed/claim-age SS control at all (unlike
+    # Retirement.jsx) and always shows the "early" scenario below.
+    # run_retirement_projection only applies a continuous claim age when
+    # jason_ss_claim_age/justin_ss_claim_age are passed as explicit
+    # keyword args (CALCULATION_CONTRACT.md section 44, ninth follow-up
+    # review) -- this call site never passes them, so it always produces
+    # the normal early+delayed pair regardless of what the household has
+    # set in Settings, and the filter below always finds its scenario.
     proj = run_retirement_projection(inputs, accounts, ret_ages=list(range(55, 68)), life_events=life_events, surplus_allocations=surplus_allocations)
 
     # This page has no early/delayed SS toggle (unlike Retirement.jsx), so we
@@ -1646,7 +1694,15 @@ def get_income_sources(ret_age: int = 60, ss_timing: str = "early", body: dict =
     # explicitly, since the Monte Carlo/Historical Stress tabs now offer
     # the full 55-67 range and any age outside the default 3 would
     # otherwise silently compute nothing, leaving this chart empty.
-    result = run_retirement_projection(_apply_whatif_overrides(dict(inputs_row), body or {}), accounts, ret_ages=[ret_age], life_events=life_events, surplus_allocations=surplus_allocations)
+    # This endpoint's own contract is the ss_timing early/delayed choice
+    # above. run_retirement_projection only applies a continuous claim
+    # age when jason_ss_claim_age/justin_ss_claim_age are passed as
+    # explicit keyword args (CALCULATION_CONTRACT.md section 44, ninth
+    # follow-up review) -- this call site never passes them, so the
+    # label lookup below always finds its early/delayed scenario
+    # regardless of what the household has set in Settings.
+    _proj_inputs = _apply_whatif_overrides(dict(inputs_row), body or {})
+    result = run_retirement_projection(_proj_inputs, accounts, ret_ages=[ret_age], life_events=life_events, surplus_allocations=surplus_allocations)
     scenario = next((s for s in result["scenarios"] if s["label"] == f"age_{ret_age}_{ss_timing}"), None)
     if not scenario: return {"error": "Scenario not found"}
     # Return simplified chart data
@@ -1678,10 +1734,13 @@ def get_tax_efficiency(ret_age: int = 60, ss_timing: str = "early",
     conn.close()
     if not inputs_row: return {"error": "No planning inputs found"}
     from simulation_engine import run_tax_efficiency_simulation
+    _inputs = dict(inputs_row)
+    _jason_ss_claim_age, _justin_ss_claim_age = _ss_claim_ages(_inputs)
     try:
-        return run_tax_efficiency_simulation(dict(inputs_row), accounts, ret_age, ss_timing,
+        return run_tax_efficiency_simulation(_inputs, accounts, ret_age, ss_timing,
                                               life_events=life_events, surplus_allocations=surplus_allocations,
-                                              jason_ret_age=jason_ret_age, justin_ret_age=justin_ret_age)
+                                              jason_ret_age=jason_ret_age, justin_ret_age=justin_ret_age,
+                                              jason_ss_claim_age=_jason_ss_claim_age, justin_ss_claim_age=_justin_ss_claim_age)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -1724,13 +1783,16 @@ def get_survivor_scenario(ret_age: int = 60, deceased: str = "jason", death_age:
     if not inputs_row:
         raise HTTPException(status_code=400, detail="Planning inputs not set yet")
     from simulation_engine import run_survivor_scenario
+    _inputs = dict(inputs_row)
+    _jason_ss_claim_age, _justin_ss_claim_age = _ss_claim_ages(_inputs)
     try:
-        return run_survivor_scenario(dict(inputs_row), accounts, ret_age, deceased, death_age, survivor_need_factor,
+        return run_survivor_scenario(_inputs, accounts, ret_age, deceased, death_age, survivor_need_factor,
                                       life_events=life_events, surplus_allocations=surplus_allocations,
                                       jason_ret_age=jason_ret_age, justin_ret_age=justin_ret_age, ss_timing=ss_timing,
                                       trust_available_to_survivor=trust_available_to_survivor,
                                       joint_accounts_survivorship=joint_accounts_survivorship,
-                                      spousal_rollover_election=spousal_rollover_election)
+                                      spousal_rollover_election=spousal_rollover_election,
+                                      jason_ss_claim_age=_jason_ss_claim_age, justin_ss_claim_age=_justin_ss_claim_age)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -1744,7 +1806,10 @@ def get_sequence_risk(ret_age: int = 55, ss_timing: str = "early"):
     conn.close()
     if not inputs_row: return {"error": "No planning inputs found"}
     from simulation_engine import run_stress_tests
-    result = run_stress_tests(dict(inputs_row), accounts, ret_age, ss_timing, life_events=life_events, surplus_allocations=surplus_allocations)
+    _inputs = dict(inputs_row)
+    _jason_ss_claim_age, _justin_ss_claim_age = _ss_claim_ages(_inputs)
+    result = run_stress_tests(_inputs, accounts, ret_age, ss_timing, life_events=life_events, surplus_allocations=surplus_allocations,
+                               jason_ss_claim_age=_jason_ss_claim_age, justin_ss_claim_age=_justin_ss_claim_age)
     # Return only the new scenarios
     return {
         "early_sequence":  result["scenarios"].get("early_sequence"),
@@ -1775,10 +1840,12 @@ def get_roth_conversion(ret_age: int = 60, ss_timing: str = "early", body: dict 
     if not inputs_row: return {"error": "No planning inputs found"}
     from simulation_engine import run_roth_conversion_analysis
     inputs = _apply_whatif_overrides(dict(inputs_row), body or {})
+    _jason_ss_claim_age, _justin_ss_claim_age = _ss_claim_ages(inputs)
     try:
         return run_roth_conversion_analysis(inputs, accounts, ret_age, ss_timing, life_events=life_events,
                                              surplus_allocations=surplus_allocations,
-                                             jason_ret_age=jason_ret_age, justin_ret_age=justin_ret_age)
+                                             jason_ret_age=jason_ret_age, justin_ret_age=justin_ret_age,
+                                             jason_ss_claim_age=_jason_ss_claim_age, justin_ss_claim_age=_justin_ss_claim_age)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -1804,10 +1871,12 @@ def get_swr(ret_age: int = 60, ss_timing: str = "early", body: dict = None,
     if not inputs_row: return {"error": "No planning inputs found"}
     from simulation_engine import run_swr_analysis
     inputs = _apply_whatif_overrides(dict(inputs_row), body or {})
+    _jason_ss_claim_age, _justin_ss_claim_age = _ss_claim_ages(inputs)
     try:
         return run_swr_analysis(inputs, accounts, ret_age, ss_timing, life_events=life_events,
                                  surplus_allocations=surplus_allocations,
-                                 jason_ret_age=jason_ret_age, justin_ret_age=justin_ret_age)
+                                 jason_ret_age=jason_ret_age, justin_ret_age=justin_ret_age,
+                                 jason_ss_claim_age=_jason_ss_claim_age, justin_ss_claim_age=_justin_ss_claim_age)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -1825,10 +1894,13 @@ def get_stress_tests(ret_age: int = 60, ss_timing: str = "early",
     if not inputs_row:
         raise HTTPException(status_code=400, detail="Planning inputs not set yet")
     from simulation_engine import run_stress_tests
+    _inputs = dict(inputs_row)
+    _jason_ss_claim_age, _justin_ss_claim_age = _ss_claim_ages(_inputs)
     try:
-        return run_stress_tests(dict(inputs_row), accounts, ret_age, ss_timing, life_events=life_events,
+        return run_stress_tests(_inputs, accounts, ret_age, ss_timing, life_events=life_events,
                                  surplus_allocations=surplus_allocations,
-                                 jason_ret_age=jason_ret_age, justin_ret_age=justin_ret_age)
+                                 jason_ret_age=jason_ret_age, justin_ret_age=justin_ret_age,
+                                 jason_ss_claim_age=_jason_ss_claim_age, justin_ss_claim_age=_justin_ss_claim_age)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -1852,10 +1924,12 @@ def post_stress_tests(body: dict):
     if not inputs_row:
         raise HTTPException(status_code=400, detail="Planning inputs not set yet")
     inputs = _apply_whatif_overrides(dict(inputs_row), body)
+    _jason_ss_claim_age, _justin_ss_claim_age = _ss_claim_ages(inputs)
     from simulation_engine import run_stress_tests
     try:
         return run_stress_tests(inputs, accounts, ret_age, ss_timing, life_events=life_events,
                                  surplus_allocations=surplus_allocations,
-                                 jason_ret_age=jason_ret_age, justin_ret_age=justin_ret_age)
+                                 jason_ret_age=jason_ret_age, justin_ret_age=justin_ret_age,
+                                 jason_ss_claim_age=_jason_ss_claim_age, justin_ss_claim_age=_justin_ss_claim_age)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))

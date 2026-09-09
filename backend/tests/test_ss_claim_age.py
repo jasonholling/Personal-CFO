@@ -129,8 +129,12 @@ class TestRunRetirementProjectionOptInClaimAge:
         assert labels == ["delayed", "early"]
 
     def test_with_jason_claim_age_replaces_the_pair_with_one_custom_scenario(self, sample_inputs):
-        inputs = {**sample_inputs, "jason_ss_claim_age": 64, "jason_ss_70": 55000}
-        result = run_retirement_projection(inputs, [], ret_ages=[60])
+        # jason_ss_claim_age is an EXPLICIT function param (2026-09-08,
+        # ninth follow-up, finding 1) -- no longer read off `inputs`,
+        # to avoid a persisted Settings value silently affecting an
+        # unrelated caller that just passes the inputs dict through.
+        inputs = {**sample_inputs, "jason_ss_70": 55000}
+        result = run_retirement_projection(inputs, [], ret_ages=[60], jason_ss_claim_age=64)
         assert [s["ss_timing"] for s in result["scenarios"]] == ["custom"]
         # jason_social_security=30000 (62), jason_ss_delayed=45000 (67),
         # jason_ss_70=55000 -- age 64 is the formula's own 20%-reduction
@@ -139,8 +143,8 @@ class TestRunRetirementProjectionOptInClaimAge:
         assert result["scenarios"][0]["jason_ss_annual"] == round(expected)
 
     def test_with_justin_claim_age_recomputes_his_benefit_too(self, sample_inputs):
-        inputs = {**sample_inputs, "justin_ss_claim_age": 69, "justin_ss_early": 10000, "justin_ss_70": 18600}
-        result = run_retirement_projection(inputs, [], ret_ages=[60])
+        inputs = {**sample_inputs, "justin_ss_early": 10000, "justin_ss_70": 18600}
+        result = run_retirement_projection(inputs, [], ret_ages=[60], justin_ss_claim_age=69)
         # justin_social_security=15000 (67, from sample_inputs), justin_ss_70=18600
         # -- age 69 credit progress = 16/24 = 2/3 of the real 67->70 gap.
         expected = 15000 + (2/3) * (18600 - 15000)
@@ -289,7 +293,13 @@ class TestSurvivorScenarioOptInClaimAge:
         delayed = run_survivor_scenario(sample_inputs, sample_accounts, ret_age=60,
                                          deceased="jason", ss_timing="delayed")
         assert early["survivor_ss_annual"] != delayed["survivor_ss_annual"]
-        assert delayed["survivor_ss_annual"] == sample_inputs["jason_ss_delayed"]
+        # The reported figure is the first post-death year's own value,
+        # which now correctly continues real COLA from the household's
+        # own inflation_rate (finding 3, ninth follow-up) rather than a
+        # flat, un-compounded figure -- so it's >= the raw delayed input,
+        # not necessarily equal to it.
+        assert delayed["survivor_ss_annual"] >= sample_inputs["jason_ss_delayed"]
+        assert delayed["survivor_ss_annual"] > early["survivor_ss_annual"]
 
     def test_claim_age_changes_the_survivor_benefit(self, sample_inputs, sample_accounts):
         from simulation_engine import run_survivor_scenario
@@ -349,10 +359,12 @@ class TestTwoAgeConsumersOptInClaimAge:
             self.TWO_AGE_INPUTS["justin_social_security"])
 
     def test_two_dimensional_projection_claim_age_changes_the_figure(self):
+        # jason_ss_claim_age is an EXPLICIT function param (2026-09-08,
+        # ninth follow-up, finding 1) -- no longer read off `inputs`.
         from projection_engine import run_two_dimensional_retirement_projection
-        inputs = {**self.TWO_AGE_INPUTS, "jason_ss_claim_age": 67, "jason_ss_70": 55800}
+        inputs = {**self.TWO_AGE_INPUTS, "jason_ss_70": 55800}
         result = run_two_dimensional_retirement_projection(
-            inputs, self.TAXABLE, jason_ret_age=67, justin_ret_age=67)
+            inputs, self.TAXABLE, jason_ret_age=67, justin_ret_age=67, jason_ss_claim_age=67)
         first_year = result["yearly_detail"][0]
         # Age 67 is the FRA anchor exactly -- jason_ss_delayed=45000.
         assert first_year["social_security"] == 45000 + round(inputs["justin_social_security"])
@@ -387,3 +399,148 @@ class TestTwoAgeConsumersOptInClaimAge:
         high = run_survivor_scenario(inputs, self.TAXABLE, jason_ret_age=67, justin_ret_age=67,
                                       deceased="justin", death_age=67, jason_ss_claim_age=70)
         assert low["survivor_ss_annual"] != high["survivor_ss_annual"]
+
+
+class TestNinthFollowUpReviewFindings:
+    """Independent review, 2026-09-08, ninth follow-up, of commit
+    cb80bf5 (milestone 5). All four findings plus the range-guard note,
+    reproduced against the fixed code."""
+
+    def test_finding1_overriding_one_spouses_claim_age_preserves_the_others_saved_value(self):
+        """P1: the two-age dispatch injection used to blindly overwrite
+        BOTH spouses' claim-age fields with this call's own explicit
+        params, clearing the OTHER spouse's own saved value back to
+        None whenever only one was actually being overridden."""
+        from simulation_engine import run_swr_analysis
+        inputs = {
+            "jason_age": 60, "justin_age": 60, "inflation_rate": 0.0,
+            "expected_return_pre_retirement": 0.0, "expected_return_post_retirement": 0.0,
+            "retirement_income_today_dollars": 80000,
+            "annual_hsa_contribution": 0, "annual_rsu_value": 0,
+            "jason_social_security": 30000, "jason_ss_delayed": 45000, "jason_ss_70": 55800,
+            "justin_social_security": 15000, "justin_ss_early": 10000, "justin_ss_70": 18600,
+            "healthcare_pre_medicare": 0, "healthcare_post_medicare": 0,
+            "justin_w2_salary": 0, "justin_employee_401k_pct": 0, "justin_employer_401k_pct": 0,
+            "justin_annual_bonus_pct": 0, "justin_annual_rsu_value": 0,
+            "w2_salary": 0, "employee_401k_pct": 0, "employer_401k_pct": 0, "annual_bonus_pct": 0,
+            "pension_55": 0, "pension_60": 0, "pension_65": 0,
+            "justin_ss_claim_age": 68,  # <-- already-saved value
+            "retirement_end_age": 99,
+        }
+        accounts = [{"name": "Taxable", "account_type": "taxable", "owner": "joint", "balance": 500000}]
+        # Only Jason's claim age is explicitly overridden -- Justin's
+        # own saved 68 must survive, not silently reset to his flat FRA.
+        r = run_swr_analysis(inputs, accounts, jason_ret_age=65, justin_ret_age=65, jason_ss_claim_age=65)
+        expected_justin = 15000 + (8/24) * (18600 - 15000)  # spousal credit progress at 68
+        assert r["justin_ss_annual"] == pytest.approx(expected_justin, abs=1)
+
+    def test_finding2_ss_reduction_stress_scenario_reduces_the_resolved_benefit(self):
+        """P1: the single-axis SS-reduction stress scenario used to
+        reduce Justin's RAW FRA input instead of his resolved,
+        claiming-age-selected benefit -- with an early claim age
+        already below FRA, the "reduction" could pay MORE than the
+        real unstressed benefit. Reproduced: $10,500 selected (Justin's
+        own resolved benefit at 62) vs. $15,000 FRA -- old code paid
+        $15,000*0.75=$11,250 (more than $10,500); fixed pays
+        $10,500*0.75=$7,875 (correctly less)."""
+        from simulation_engine import run_stress_tests
+        inputs = {
+            "jason_age": 60, "justin_age": 60, "inflation_rate": 0.0,
+            "expected_return_pre_retirement": 0.0, "expected_return_post_retirement": 0.0,
+            "retirement_income_today_dollars": 80000,
+            "annual_hsa_contribution": 0, "annual_rsu_value": 0,
+            "jason_social_security": 30000, "jason_ss_delayed": 45000,
+            "justin_social_security": 15000, "justin_ss_early": 10500,
+            "healthcare_pre_medicare": 0, "healthcare_post_medicare": 0,
+            "justin_w2_salary": 0, "justin_employee_401k_pct": 0, "justin_employer_401k_pct": 0,
+            "justin_annual_bonus_pct": 0, "justin_annual_rsu_value": 0,
+            "w2_salary": 0, "employee_401k_pct": 0, "employer_401k_pct": 0, "annual_bonus_pct": 0,
+            "pension_55": 0, "pension_60": 0, "pension_65": 0,
+            "retirement_end_age": 99,
+        }
+        accounts = [{"name": "Taxable", "account_type": "taxable", "owner": "joint", "balance": 500000}]
+        r = run_stress_tests(inputs, accounts, ret_age=65, justin_ss_claim_age=62)
+        ss_scenario = r["scenarios"]["ss_reduction"]
+        assert ss_scenario["final_balance"] <= r["scenarios"]["base"]["final_balance"] * 1.1  # sanity: not a windfall
+
+    def test_finding3_survivor_ss_does_not_start_before_the_survivors_own_claim_age(self):
+        """P1: Jason claiming at 70, Justin dies at 62 -- the survivor
+        schedule used to pay Jason's full age-70 benefit immediately,
+        years before he'd have actually reached 70. Fixed: $0 until
+        Jason's own advancing age reaches 70."""
+        from simulation_engine import run_survivor_scenario
+        inputs = {
+            "jason_age": 62, "justin_age": 62, "inflation_rate": 0.0,
+            "expected_return_pre_retirement": 0.0, "expected_return_post_retirement": 0.0,
+            "retirement_income_today_dollars": 30000,
+            "annual_hsa_contribution": 0, "annual_rsu_value": 0,
+            "jason_social_security": 30000, "jason_ss_delayed": 45000, "jason_ss_70": 55800,
+            "justin_social_security": 0,
+            "healthcare_pre_medicare": 0, "healthcare_post_medicare": 0,
+            "justin_w2_salary": 0, "justin_employee_401k_pct": 0, "justin_employer_401k_pct": 0,
+            "justin_annual_bonus_pct": 0, "justin_annual_rsu_value": 0,
+            "w2_salary": 0, "employee_401k_pct": 0, "employer_401k_pct": 0, "annual_bonus_pct": 0,
+            "pension_55": 0, "pension_60": 0, "pension_65": 0,
+            "retirement_end_age": 99,
+        }
+        accounts = [{"name": "Taxable", "account_type": "taxable", "owner": "joint", "balance": 500000}]
+        r = run_survivor_scenario(inputs, accounts, ret_age=62, deceased="justin", death_age=62,
+                                   jason_ss_claim_age=70)
+        assert r["survivor_ss_annual"] == 0
+
+    def test_finding3_pre_death_lookup_respects_delayed_not_hardcoded_early(self):
+        """P1, part 2: the pre-death baseline lookup hardcoded "early"
+        regardless of ss_timing, using the wrong scenario's own
+        portfolio trajectory (SS affects withdrawal-phase draws) for a
+        household that selected "delayed"."""
+        from simulation_engine import run_survivor_scenario
+        inputs = {
+            "jason_age": 60, "justin_age": 60, "inflation_rate": 0.0,
+            "expected_return_pre_retirement": 0.0, "expected_return_post_retirement": 0.0,
+            "retirement_income_today_dollars": 80000,
+            "annual_hsa_contribution": 0, "annual_rsu_value": 0,
+            "jason_social_security": 30000, "jason_ss_delayed": 45000,
+            "justin_social_security": 15000,
+            "healthcare_pre_medicare": 0, "healthcare_post_medicare": 0,
+            "justin_w2_salary": 0, "justin_employee_401k_pct": 0, "justin_employer_401k_pct": 0,
+            "justin_annual_bonus_pct": 0, "justin_annual_rsu_value": 0,
+            "w2_salary": 0, "employee_401k_pct": 0, "employer_401k_pct": 0, "annual_bonus_pct": 0,
+            "pension_55": 0, "pension_60": 0, "pension_65": 0,
+            "retirement_end_age": 99,
+        }
+        accounts = [{"name": "Taxable", "account_type": "taxable", "owner": "joint", "balance": 500000}]
+        early = run_survivor_scenario(inputs, accounts, ret_age=65, deceased="jason", death_age=75,
+                                       ss_timing="early")
+        delayed = run_survivor_scenario(inputs, accounts, ret_age=65, deceased="jason", death_age=75,
+                                         ss_timing="delayed")
+        # Higher guaranteed income (delayed) means less portfolio drawn
+        # down pre-death -- the two must differ, not silently match.
+        assert early["portfolio_at_death"] != delayed["portfolio_at_death"]
+
+    def test_finding4_spousal_reduction_differs_from_worker_reduction(self):
+        """P2: the shared formula used worker-benefit reduction rates
+        for Justin's spousal benefit too. Reproduced exactly: $9,750 at
+        62 (real spousal anchor) and $15,000 at 67 -- worker rates gave
+        $11,500 at 64; the correct spousal amount is $11,250."""
+        from projection_engine import ss_benefit_for_claim_age
+        worker_result = ss_benefit_for_claim_age(9750, 15000, 99999, 64, benefit_type="worker")
+        spousal_result = ss_benefit_for_claim_age(9750, 15000, 99999, 64, benefit_type="spousal")
+        assert worker_result == pytest.approx(11500, abs=1)
+        assert spousal_result == pytest.approx(11250, abs=1)
+
+    def test_guard_out_of_range_claim_age_is_clamped_not_just_the_amount(self):
+        """Guard note: an input of 60 must not receive the age-62
+        amount while starting at age 60 -- the START AGE itself must
+        also clamp to 62, not just the dollar amount."""
+        from projection_engine import resolve_ss_benefits
+        inputs = {"jason_social_security": 20000, "jason_ss_delayed": 30000, "jason_ss_70": 40000}
+        jason_ss_annual, jason_ss_age, _, _ = resolve_ss_benefits(inputs, "early", jason_ss_claim_age=60)
+        assert jason_ss_annual == 20000
+        assert jason_ss_age == 62  # not 60
+
+    def test_guard_above_range_claim_age_is_also_clamped(self):
+        from projection_engine import resolve_ss_benefits
+        inputs = {"jason_social_security": 20000, "jason_ss_delayed": 30000, "jason_ss_70": 40000}
+        jason_ss_annual, jason_ss_age, _, _ = resolve_ss_benefits(inputs, "early", jason_ss_claim_age=75)
+        assert jason_ss_annual == 40000
+        assert jason_ss_age == 70
