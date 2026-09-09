@@ -1059,8 +1059,14 @@ def _run_swr_analysis_two_age(inputs: Dict, accounts: List[Dict], jason_ret_age:
 def run_swr_analysis(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_timing: str = "early",
                       target_success: float = 0.95, life_events: List[Dict] = None,
                       surplus_allocations: List[Dict] = None,
-                      jason_ret_age: int = None, justin_ret_age: int = None) -> Dict:
+                      jason_ret_age: int = None, justin_ret_age: int = None,
+                      jason_ss_claim_age: int = None, justin_ss_claim_age: int = None) -> Dict:
     """Find the safe withdrawal rate at target success rate (default 95%).
+
+    jason_ss_claim_age/justin_ss_claim_age (2026-09-08, CALCULATION_
+    CONTRACT.md section 44, milestone 3): opt-in continuous SS claiming
+    age 62-70 per spouse -- see resolve_ss_benefits's own docstring.
+    None-default leaves the existing ss_timing behavior unchanged.
 
     life_events: threaded through to run_retirement_projection below so
     pre-retirement events affect the starting portfolio; withdrawal-phase
@@ -1106,19 +1112,20 @@ def run_swr_analysis(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_t
     justin_gap_years, justin_gap_income_at_start = justin_gap_income_inputs(
         inputs, _justin_years_to_retire, years_to_ret, _salary_growth_pct)
     pension_annual = pension_for_age(inputs, ret_age)
-    jason_ss_early  = inputs.get("jason_social_security", JASON_SS_EARLY)
-    jason_ss_delayed = inputs.get("jason_ss_delayed", JASON_SS_DELAYED)
-    jason_ss_annual = jason_ss_early if ss_timing == "early" else jason_ss_delayed
-    jason_ss_age    = 62 if ss_timing == "early" else 67
-    justin_ss       = inputs.get("justin_social_security", JUSTIN_SPOUSAL_ANNUAL)
-    justin_ss_age   = inputs.get("justin_ss_age", JUSTIN_SPOUSAL_AGE)
+    jason_ss_annual, jason_ss_age, justin_ss, justin_ss_age = resolve_ss_benefits(
+        inputs, ss_timing, jason_ss_claim_age, justin_ss_claim_age)
 
     # Get portfolio at retirement from projection engine — pass ret_age explicitly
     # so this works for any age, not just the default 55/60/65 anchors.
     from projection_engine import run_retirement_projection
-    _proj     = run_retirement_projection(inputs, accounts, ret_ages=[ret_age], life_events=life_events,
+    _inputs_for_proj = inputs
+    if jason_ss_claim_age is not None or justin_ss_claim_age is not None:
+        _inputs_for_proj = {**inputs, "jason_ss_claim_age": jason_ss_claim_age,
+                             "justin_ss_claim_age": justin_ss_claim_age}
+    _proj     = run_retirement_projection(_inputs_for_proj, accounts, ret_ages=[ret_age], life_events=life_events,
                                            surplus_allocations=surplus_allocations)
-    _scenario = next((s for s in _proj["scenarios"] if s["label"] == f"age_{ret_age}_{ss_timing}"), None)
+    _ss_label = "custom" if jason_ss_claim_age is not None else ss_timing
+    _scenario = next((s for s in _proj["scenarios"] if s["label"] == f"age_{ret_age}_{_ss_label}"), None)
     pretax_at_ret  = _scenario["pretax_at_retirement"]
     roth_at_ret    = _scenario["roth_at_retirement"]
     taxable_at_ret = _scenario["taxable_at_retirement"]
@@ -2560,7 +2567,8 @@ def _run_roth_conversion_analysis_two_age(inputs: Dict, accounts: List[Dict], ja
 def run_roth_conversion_analysis(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_timing: str = "early",
                                   life_events: List[Dict] = None,
                                   surplus_allocations: List[Dict] = None,
-                                  jason_ret_age: int = None, justin_ret_age: int = None) -> Dict:
+                                  jason_ret_age: int = None, justin_ret_age: int = None,
+                                  jason_ss_claim_age: int = None, justin_ss_claim_age: int = None) -> Dict:
     """
     Find optimal annual Roth conversion amount between retirement and RMD age.
     Goal: fill the 22% bracket each year to minimize lifetime taxes.
@@ -2575,7 +2583,20 @@ def run_roth_conversion_analysis(inputs: Dict, accounts: List[Dict], ret_age: in
     required together (a ValueError if only one is given), delegating
     entirely to _run_roth_conversion_analysis_two_age. ret_age/ss_timing's
     own single-axis behavior below is completely unaffected when these
-    are left at their None default."""
+    are left at their None default.
+
+    jason_ss_claim_age/justin_ss_claim_age (2026-09-08, CALCULATION_
+    CONTRACT.md section 44, milestone 3): opt-in continuous SS claiming
+    age 62-70 per spouse, via the shared resolve_ss_benefits -- also
+    fixes a pre-existing inconsistency this function had versus every
+    other consumer: `jason_ss`/`justin_ss` used to default to a bare 0
+    when the corresponding Settings field was unset (`inputs.get(key,
+    0)`), instead of the JASON_SS_DELAYED_RATIO-based fallback every
+    sibling consumer already applies. A household with jason_social_
+    security set but jason_ss_delayed unset, requesting ss_timing=
+    "delayed", now gets the same fallback figure run_swr_analysis/
+    run_monte_carlo/run_stress_tests/run_retirement_projection already
+    give it, instead of a silent $0."""
     if _require_both_two_age_or_neither(jason_ret_age, justin_ret_age):
         return _run_roth_conversion_analysis_two_age(inputs, accounts, jason_ret_age, justin_ret_age, ss_timing,
                                                        life_events, surplus_allocations)
@@ -2597,14 +2618,8 @@ def run_roth_conversion_analysis(inputs: Dict, accounts: List[Dict], ret_age: in
     jason_age    = inputs["jason_age"]
     justin_age   = inputs["justin_age"]
     pension_annual = pension_for_age(inputs, ret_age)
-    jason_ss     = inputs.get("jason_social_security" if ss_timing == "early" else "jason_ss_delayed", 0)
-    justin_ss    = inputs.get("justin_social_security", 0)
-    jason_ss_age = 62 if ss_timing == "early" else 67
-    # Read the spouse's own claiming age instead of hardcoding 67 — and,
-    # below, compare it against the spouse's own current age rather than
-    # Jason's `age` directly (external audit 2026-09-06, same bug as
-    # elsewhere in this file).
-    justin_ss_age = inputs.get("justin_ss_age", JUSTIN_SPOUSAL_AGE)
+    jason_ss, jason_ss_age, justin_ss, justin_ss_age = resolve_ss_benefits(
+        inputs, ss_timing, jason_ss_claim_age, justin_ss_claim_age)
 
     # Derived from the canonical 2026 MFJ bracket table in
     # retirement_tools_engine.py instead of a local hardcoded copy — this
@@ -2620,9 +2635,14 @@ def run_roth_conversion_analysis(inputs: Dict, accounts: List[Dict], ret_age: in
     RMD_START_AGE   = rmd_start_age(jason_age)
 
     from projection_engine import run_retirement_projection
-    _proj = run_retirement_projection(inputs, accounts, ret_ages=[ret_age], life_events=life_events,
+    _inputs_for_proj = inputs
+    if jason_ss_claim_age is not None or justin_ss_claim_age is not None:
+        _inputs_for_proj = {**inputs, "jason_ss_claim_age": jason_ss_claim_age,
+                             "justin_ss_claim_age": justin_ss_claim_age}
+    _proj = run_retirement_projection(_inputs_for_proj, accounts, ret_ages=[ret_age], life_events=life_events,
                                        surplus_allocations=surplus_allocations)
-    _s = next(s for s in _proj["scenarios"] if s["label"] == f"age_{ret_age}_{ss_timing}")
+    _ss_label = "custom" if jason_ss_claim_age is not None else ss_timing
+    _s = next(s for s in _proj["scenarios"] if s["label"] == f"age_{ret_age}_{_ss_label}")
 
     years_to_ret   = max(0, ret_age - jason_age)
     pretax_at_ret  = _s["pretax_at_retirement"]
@@ -3284,7 +3304,8 @@ def _run_tax_efficiency_simulation_two_age(inputs: Dict, accounts: List[Dict], j
 def run_tax_efficiency_simulation(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_timing: str = "early",
                                    life_events: List[Dict] = None,
                                    surplus_allocations: List[Dict] = None,
-                                   jason_ret_age: int = None, justin_ret_age: int = None) -> Dict:
+                                   jason_ret_age: int = None, justin_ret_age: int = None,
+                                   jason_ss_claim_age: int = None, justin_ss_claim_age: int = None) -> Dict:
     """
     Run 1000 market scenarios for 3 draw order strategies.
     Simplified tax: flat 22% on pretax withdrawals, 0% on Roth, 15% on taxable gains.
@@ -3299,7 +3320,12 @@ def run_tax_efficiency_simulation(inputs: Dict, accounts: List[Dict], ret_age: i
     required together (a ValueError if only one is given), delegating
     entirely to _run_tax_efficiency_simulation_two_age. ret_age/
     ss_timing's own single-axis behavior below is completely unaffected
-    when these are left at their None default."""
+    when these are left at their None default.
+
+    jason_ss_claim_age/justin_ss_claim_age (2026-09-08, CALCULATION_
+    CONTRACT.md section 44, milestone 3): opt-in continuous SS claiming
+    age 62-70 per spouse, via the shared resolve_ss_benefits. None-
+    default leaves the existing ss_timing behavior unchanged."""
     if _require_both_two_age_or_neither(jason_ret_age, justin_ret_age):
         return _run_tax_efficiency_simulation_two_age(inputs, accounts, jason_ret_age, justin_ret_age, ss_timing,
                                                         life_events, surplus_allocations)
@@ -3338,17 +3364,18 @@ def run_tax_efficiency_simulation(inputs: Dict, accounts: List[Dict], ret_age: i
         inputs, _justin_years_to_retire_te, years_to_ret_te, _salary_growth_pct)
 
     pension_annual = pension_for_age(inputs, ret_age)
-    jason_ss_early  = inputs.get("jason_social_security", JASON_SS_EARLY)
-    jason_ss_delayed = inputs.get("jason_ss_delayed", JASON_SS_DELAYED)
-    jason_ss_annual = jason_ss_early if ss_timing == "early" else jason_ss_delayed
-    jason_ss_age    = 62 if ss_timing == "early" else 67
-    justin_ss       = inputs.get("justin_social_security", JUSTIN_SPOUSAL_ANNUAL)
-    justin_ss_age   = inputs.get("justin_ss_age", JUSTIN_SPOUSAL_AGE)
+    jason_ss_annual, jason_ss_age, justin_ss, justin_ss_age = resolve_ss_benefits(
+        inputs, ss_timing, jason_ss_claim_age, justin_ss_claim_age)
 
     from projection_engine import run_retirement_projection
-    _proj = run_retirement_projection(inputs, accounts, ret_ages=[ret_age], life_events=life_events,
+    _inputs_for_proj = inputs
+    if jason_ss_claim_age is not None or justin_ss_claim_age is not None:
+        _inputs_for_proj = {**inputs, "jason_ss_claim_age": jason_ss_claim_age,
+                             "justin_ss_claim_age": justin_ss_claim_age}
+    _proj = run_retirement_projection(_inputs_for_proj, accounts, ret_ages=[ret_age], life_events=life_events,
                                        surplus_allocations=surplus_allocations)
-    _s = next(s for s in _proj["scenarios"] if s["label"] == f"age_{ret_age}_{ss_timing}")
+    _ss_label = "custom" if jason_ss_claim_age is not None else ss_timing
+    _s = next(s for s in _proj["scenarios"] if s["label"] == f"age_{ret_age}_{_ss_label}")
     pretax_start  = _s["pretax_at_retirement"]
     roth_start    = _s["roth_at_retirement"]
     taxable_start = _s["taxable_at_retirement"]

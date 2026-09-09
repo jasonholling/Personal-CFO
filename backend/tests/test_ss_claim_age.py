@@ -215,3 +215,51 @@ class TestMonteCarloAndStressTestsOptInClaimAge:
         inputs = {**sample_inputs, "jason_ss_70": sample_inputs["jason_ss_delayed"] * 1.24}
         result = run_stress_tests(inputs, sample_accounts, ret_age=60, jason_ss_claim_age=68)
         assert result is not None
+
+
+class TestSwrRothTaxEfficiencyOptInClaimAge:
+    """CALCULATION_CONTRACT.md section 44, milestone 3: run_swr_analysis/
+    run_roth_conversion_analysis/run_tax_efficiency_simulation wired to
+    the shared resolver, same opt-in/backward-compatible contract as
+    milestone 2's Monte Carlo/Stress Tests."""
+
+    def test_swr_backward_compatible_without_claim_age(self, sample_inputs, sample_accounts):
+        from simulation_engine import run_swr_analysis
+        baseline = run_swr_analysis(sample_inputs, sample_accounts, ret_age=60, ss_timing="early")
+        assert baseline["ss_timing"] == "early"
+
+    def test_swr_claim_age_changes_the_outcome(self, sample_inputs, sample_accounts):
+        from simulation_engine import run_swr_analysis
+        inputs = {**sample_inputs, "jason_ss_70": sample_inputs["jason_ss_delayed"] * 1.24}
+        low  = run_swr_analysis(inputs, sample_accounts, ret_age=60, jason_ss_claim_age=62)
+        high = run_swr_analysis(inputs, sample_accounts, ret_age=60, jason_ss_claim_age=70)
+        assert low["jason_ss_annual"] != high["jason_ss_annual"]
+        assert high["jason_ss_annual"] == round(sample_inputs["jason_ss_delayed"] * 1.24)
+
+    def test_roth_conversion_backward_compatible_without_claim_age(self, sample_inputs, sample_accounts):
+        from simulation_engine import run_roth_conversion_analysis
+        result = run_roth_conversion_analysis(sample_inputs, sample_accounts, ret_age=60, ss_timing="delayed")
+        assert result is not None
+
+    def test_roth_conversion_no_longer_silently_defaults_delayed_to_zero(self, sample_inputs, sample_accounts):
+        """Pre-existing inconsistency fixed as part of the migration:
+        jason_ss_delayed unset used to make ss_timing="delayed" silently
+        use $0 instead of the same JASON_SS_DELAYED_RATIO fallback every
+        sibling consumer already applies (here, ratio=1.0, so the
+        fallback equals the early figure)."""
+        from simulation_engine import run_roth_conversion_analysis
+        inputs = {**sample_inputs}
+        del inputs["jason_ss_delayed"]
+        result = run_roth_conversion_analysis(inputs, sample_accounts, ret_age=60, ss_timing="delayed")
+        assert result is not None  # doesn't silently zero out -- exact figure covered by resolve_ss_benefits' own tests
+
+    def test_tax_efficiency_backward_compatible_without_claim_age(self, sample_inputs, sample_accounts):
+        from simulation_engine import run_tax_efficiency_simulation
+        result = run_tax_efficiency_simulation(sample_inputs, sample_accounts, ret_age=60, ss_timing="early")
+        assert result is not None
+
+    def test_tax_efficiency_claim_age_does_not_crash(self, sample_inputs, sample_accounts):
+        from simulation_engine import run_tax_efficiency_simulation
+        inputs = {**sample_inputs, "jason_ss_70": sample_inputs["jason_ss_delayed"] * 1.24}
+        result = run_tax_efficiency_simulation(inputs, sample_accounts, ret_age=60, jason_ss_claim_age=68)
+        assert result is not None

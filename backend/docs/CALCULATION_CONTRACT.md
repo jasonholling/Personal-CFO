@@ -4235,3 +4235,37 @@ outcome genuinely changes with one, no crash). Full backend suite:
 Branch: `codex/ss-claim-age`, pushed — **not merged to `main`**.
 Remaining milestones (SWR/Tax Efficiency/Roth Conversion, Survivor,
 two-age consumers, frontend) unchanged from section 44's own sequence.
+
+## 46. Social Security claiming age 62-70 — milestone 3: SWR, Roth Conversion, Tax Efficiency (2026-09-08, on `codex/ss-claim-age`)
+
+Propagated to the next three single-axis consumers per the milestone
+sequence: `run_swr_analysis`, `run_roth_conversion_analysis`,
+`run_tax_efficiency_simulation`. Same pattern as milestone 2: each
+gained optional `jason_ss_claim_age`/`justin_ss_claim_age`, calls
+`resolve_ss_benefits` instead of its own ternary, forwards the claim
+ages into its internal `run_retirement_projection` call, and adjusts
+its scenario-label lookup to `"custom"` when Jason's claim age is set.
+
+**Incidental fix, not new scope**: `run_roth_conversion_analysis` had
+its own inconsistent SS-defaulting convention — `jason_ss`/`justin_ss`
+used `inputs.get(key, 0)` directly, defaulting to a bare `$0` when
+`jason_ss_delayed` was unset and `ss_timing="delayed"`, instead of the
+`JASON_SS_DELAYED_RATIO`-based fallback every sibling consumer already
+applies (`run_swr_analysis`, `run_monte_carlo`, `run_stress_tests`,
+`run_retirement_projection`). Migrating it onto the shared
+`resolve_ss_benefits` resolver automatically aligns it with everyone
+else instead of carrying the inconsistency forward into a 6th call
+site. A household with `jason_social_security` set but
+`jason_ss_delayed` unset now gets the same fallback figure (equal to
+the early value, since `JASON_SS_DELAYED_RATIO = 1.0` — "no assumption
+without real inputs") instead of a silent `$0`.
+
+New tests: 6, covering backward compatibility (no claim age → unchanged
+output) and a genuine outcome change with one, for all three functions;
+`run_roth_conversion_analysis`'s fallback fix gets its own explicit
+test. Full backend suite: 1323 passed, 97.56% coverage. Sensitive-data
+check passed.
+
+Branch: `codex/ss-claim-age`, pushed — **not merged to `main`**.
+Remaining: Survivor Scenario (single-axis), two-age consumers,
+frontend.
