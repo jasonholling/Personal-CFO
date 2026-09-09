@@ -65,9 +65,9 @@ class TestComputeNetWorth:
         net_worth could be higher than the live 'Net Worth Today' tile for
         the exact same accounts."""
         accounts = [
-            {"account_type": "custodial", "owner": "abby", "balance": 8000},
-            {"account_type": "roth_ira", "owner": "cooper", "balance": 3000},
-            {"account_type": "529", "owner": "abby", "balance": 12000},
+            {"account_type": "custodial", "owner": "kid_1", "balance": 8000},
+            {"account_type": "roth_ira", "owner": "kid_2", "balance": 3000},
+            {"account_type": "529", "owner": "kid_1", "balance": 12000},
             {"account_type": "checking", "owner": "joint", "balance": 1000},
         ]
         result = compute_net_worth(accounts)
@@ -84,8 +84,8 @@ class TestComputeNetWorth:
         already excludes kid-owned checking/savings. Any account owned by
         a kid should be excluded, not just the three most common types."""
         accounts = [
-            {"account_type": "other", "owner": "abby", "balance": 2000},      # savings bond
-            {"account_type": "savings", "owner": "cooper", "balance": 500},   # kid's own savings account
+            {"account_type": "other", "owner": "kid_1", "balance": 2000},      # savings bond
+            {"account_type": "savings", "owner": "kid_2", "balance": 500},   # kid's own savings account
             {"account_type": "checking", "owner": "joint", "balance": 1000},
         ]
         result = compute_net_worth(accounts)
@@ -96,7 +96,7 @@ class TestComputeNetWorth:
         assert result["net_worth"] == 1000
 
     def test_parent_owned_529_not_treated_as_kids_asset(self):
-        """A 529 owned by a parent (not abby/cooper) is a normal education
+        """A 529 owned by a parent (not a kid) is a normal education
         asset, not a kids_assets exclusion."""
         accounts = [{"account_type": "529", "owner": "jason", "balance": 9000}]
         result = compute_net_worth(accounts)
@@ -146,7 +146,7 @@ class TestEmergencyFundCheck:
 
     def test_kids_accounts_excluded_from_liquid_assets(self):
         accounts = [
-            {"account_type": "savings", "owner": "abby", "balance": 5000},
+            {"account_type": "savings", "owner": "kid_1", "balance": 5000},
             {"account_type": "checking", "owner": "joint", "balance": 1000},
         ]
         result = emergency_fund_check(accounts, monthly_expenses=1000)

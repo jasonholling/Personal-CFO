@@ -1,7 +1,104 @@
 import { useState, useEffect } from 'react'
 import axios from 'axios'
 import { usePrivacyMode } from '../hooks/usePrivacyMode'
+import { useKids } from '../hooks/useKids'
 import ClaimAgeSlider from '../components/ClaimAgeSlider'
+
+const MAX_KIDS = 5
+const EMPTY_KID = { name: '', age: 0, monthly_529: 0 }
+
+// Kids-variable-count (2026-09-09) — replaced the old fixed "Child 1
+// Name"/"Child 2 Name" + "Kids — Ages & 529 Contributions" rows (always
+// exactly 2 kids) with a real add/edit/remove list, 0-5 kids, backed by
+// the new /api/kids CRUD (see db.py's kids table + main.py's Kid model).
+// Deliberately its own small local edit-draft state rather than living
+// inside Settings' single `form` object with the page's one Save button
+// -- kids are a separate table/endpoint now, not a planning_inputs
+// column, and each row commits independently (Save/Cancel per row,
+// mirroring Risk.jsx's insurance-policy list editing pattern) rather
+// than batching into the page-wide save.
+function KidsSection() {
+  const { kids, loading, refetch } = useKids()
+  const [editingId, setEditingId] = useState(null)   // null | 'new' | a kid id
+  const [draft, setDraft] = useState(EMPTY_KID)
+  const [busy, setBusy] = useState(false)
+
+  const startEdit = (kid) => { setEditingId(kid.id); setDraft({ name: kid.name, age: kid.age, monthly_529: kid.monthly_529 }) }
+  const startAdd  = () => { setEditingId('new'); setDraft(EMPTY_KID) }
+  const cancel    = () => { setEditingId(null); setDraft(EMPTY_KID) }
+
+  const save = async () => {
+    if (!draft.name.trim()) return
+    setBusy(true)
+    try {
+      if (editingId === 'new') await axios.post('/api/kids', draft)
+      else await axios.put(`/api/kids/${editingId}`, { ...draft, display_order: kids.find(k => k.id === editingId)?.display_order ?? 0 })
+      await refetch()
+      cancel()
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const remove = async (kid) => {
+    if (!window.confirm(
+      `Remove ${kid.name}? Any accounts already owned by ${kid.name} keep their balance and stay excluded ` +
+      `from your own net worth/retirement totals, but won't show up under Education/Kids projections anymore.`
+    )) return
+    await axios.delete(`/api/kids/${kid.id}`)
+    await refetch()
+  }
+
+  if (loading) return null
+
+  return (
+    <>
+      {kids.map(kid => (
+        <div key={kid.id} style={{ padding:'8px 0', borderBottom:'1px solid var(--border)' }}>
+          {editingId === kid.id ? (
+            <div style={{ display:'flex', gap:8, alignItems:'center', flexWrap:'wrap' }}>
+              <TextInput value={draft.name} onChange={v => setDraft(d => ({ ...d, name: v }))} style={{ width:120, textAlign:'left' }} />
+              <NumInput value={draft.age} onChange={v => setDraft(d => ({ ...d, age: v }))} suffix="yrs old" />
+              <NumInput value={draft.monthly_529} onChange={v => setDraft(d => ({ ...d, monthly_529: v }))} prefix="$" suffix="/mo 529" />
+              <button className="btn-primary" onClick={save} disabled={busy || !draft.name.trim()}>Save</button>
+              <button className="btn-secondary" onClick={cancel} disabled={busy}>Cancel</button>
+            </div>
+          ) : (
+            <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center' }}>
+              <div style={{ fontSize:13 }}>{kid.name} <span style={{ color:'var(--text3)' }}>· age {kid.age} · ${kid.monthly_529}/mo 529</span></div>
+              <div style={{ display:'flex', gap:6 }}>
+                <button className="btn-secondary" onClick={() => startEdit(kid)}>Edit</button>
+                <button className="btn-secondary" onClick={() => remove(kid)}>Remove</button>
+              </div>
+            </div>
+          )}
+        </div>
+      ))}
+
+      {editingId === 'new' && (
+        <div style={{ padding:'8px 0', borderBottom:'1px solid var(--border)', display:'flex', gap:8, alignItems:'center', flexWrap:'wrap' }}>
+          <TextInput value={draft.name} onChange={v => setDraft(d => ({ ...d, name: v }))} style={{ width:120, textAlign:'left' }} />
+          <NumInput value={draft.age} onChange={v => setDraft(d => ({ ...d, age: v }))} suffix="yrs old" />
+          <NumInput value={draft.monthly_529} onChange={v => setDraft(d => ({ ...d, monthly_529: v }))} prefix="$" suffix="/mo 529" />
+          <button className="btn-primary" onClick={save} disabled={busy || !draft.name.trim()}>Add</button>
+          <button className="btn-secondary" onClick={cancel} disabled={busy}>Cancel</button>
+        </div>
+      )}
+
+      {kids.length === 0 && editingId !== 'new' && (
+        <div style={{ fontSize:12, color:'var(--text3)', padding:'8px 0' }}>No kids added — that's fine, everything below (Education, Kids, Insurance college-funding) just shows nothing kid-related until you add one.</div>
+      )}
+
+      <div style={{ paddingTop:10 }}>
+        {kids.length < MAX_KIDS ? (
+          editingId !== 'new' && <button className="btn-secondary" onClick={startAdd}>+ Add Kid</button>
+        ) : (
+          <div style={{ fontSize:11, color:'var(--text3)' }}>Maximum of {MAX_KIDS} kids.</div>
+        )}
+      </div>
+    </>
+  )
+}
 
 const Section = ({ title, children }) => (
   <div className="card" style={{ marginBottom:20 }}>
@@ -40,6 +137,7 @@ const TextInput = ({ value, onChange, style={} }) => (
 
 export default function Settings() {
   const { privacyMode } = usePrivacyMode()
+  const { kids } = useKids()
   const [form, setForm] = useState(null)
   const [saved, setSaved] = useState(false)
 
@@ -76,8 +174,7 @@ export default function Settings() {
   const roth_pct   = 1 - pretax_pct
   const p1 = form.person1_name || 'Person 1'
   const p2 = form.person2_name || 'Person 2'
-  const k1 = form.kid1_name || 'Child 1'
-  const k2 = form.kid2_name || 'Child 2'
+  const kidsLabel = kids.length ? kids.map(k => k.name).join(' + ') : 'kids'
 
   return (
     <div>
@@ -106,8 +203,6 @@ export default function Settings() {
       <Section title="Names">
         <Row label="Person 1 Name" hint="Shown throughout the app instead of a generic label"><TextInput value={form.person1_name} onChange={v => set('person1_name', v)} /></Row>
         <Row label="Person 2 Name"><TextInput value={form.person2_name} onChange={v => set('person2_name', v)} /></Row>
-        <Row label="Child 1 Name"><TextInput value={form.kid1_name} onChange={v => set('kid1_name', v)} /></Row>
-        <Row label="Child 2 Name"><TextInput value={form.kid2_name} onChange={v => set('kid2_name', v)} /></Row>
       </Section>
 
       <Section title={`${p1} — Age, Income & Retirement`}>
@@ -246,11 +341,8 @@ export default function Settings() {
         <Row label="Annual HSA Contribution" hint="Household/family HSA, not split per person"><NumInput value={form.annual_hsa_contribution} onChange={v => set('annual_hsa_contribution', v)} prefix="$" /></Row>
       </Section>
 
-      <Section title="Kids — Ages &amp; 529 Contributions">
-        <Row label={`${k1}'s Current Age`}><NumInput value={form.kid1_age ?? 0} onChange={v => set('kid1_age', v)} /></Row>
-        <Row label={`${k2}'s Current Age`}><NumInput value={form.kid2_age ?? 0} onChange={v => set('kid2_age', v)} /></Row>
-        <Row label={`${k1} 529 Monthly`}><NumInput value={form.abby_529_monthly ?? 0} onChange={v => set('abby_529_monthly', v)} prefix="$" suffix="/mo" /></Row>
-        <Row label={`${k2} 529 Monthly`}><NumInput value={form.cooper_529_monthly ?? 0} onChange={v => set('cooper_529_monthly', v)} prefix="$" suffix="/mo" /></Row>
+      <Section title="Kids (0-5)" >
+        <KidsSection />
         <Row label="Annual Tuition &amp; Fees" hint="Current cost — update each fall · inflates at 5%/yr in projections"><NumInput value={form.unl_annual_cost ?? 0} onChange={v => set('unl_annual_cost', v)} prefix="$" suffix="/yr" /></Row>
       </Section>
 
@@ -288,7 +380,7 @@ export default function Settings() {
       </Section>
 
       <Section title="Kids — Life Insurance">
-        <Row label={`Employer dependent (${k1} + ${k2} combined)`}><NumInput value={form.justin_life_kids ?? 0} onChange={v => set('justin_life_kids', v)} prefix="$" /></Row>
+        <Row label={`Employer dependent (${kidsLabel} combined)`}><NumInput value={form.justin_life_kids ?? 0} onChange={v => set('justin_life_kids', v)} prefix="$" /></Row>
       </Section>
 
       <Section title="Disability &amp; Other Insurance">

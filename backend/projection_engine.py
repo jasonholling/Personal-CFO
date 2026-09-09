@@ -224,11 +224,28 @@ def resolve_ss_benefits(inputs: Dict, ss_timing: str = "early",
 # literals with the same meaning, now one documented, findable policy.
 SECOND_EARNER_NET_OF_TAX_FACTOR = 0.65
 
-# Kids contribution defaults — overridden by planning_inputs at runtime
-ABBY_MONTHLY_529_DEFAULT   = 0
-COOPER_MONTHLY_529_DEFAULT = 0
+# Kids contribution defaults — overridden by planning_inputs at runtime.
+# Per-kid 529 monthly (formerly two fixed ABBY_MONTHLY_529_DEFAULT/
+# COOPER_MONTHLY_529_DEFAULT constants) now lives on each kids-table row's
+# own monthly_529 column instead — the column's own schema default (0)
+# is this same value, so no separate constant is needed there anymore.
 KIDS_ROTH_MONTHLY_DEFAULT  = 0
 KIDS_CUST_MONTHLY_DEFAULT  = 0
+
+# Account owner convention for a kid: f"{KID_OWNER_PREFIX}{kid_id}" (e.g.
+# "kid_7"), keyed to that kid's own stable database id rather than a
+# name-derived string like the old literal "abby"/"cooper" — a kid can be
+# renamed without orphaning their accounts. Every "exclude the kids' own
+# accounts from the parents' totals" check in this file (and in
+# net_worth_engine.py/retirement_tools_engine.py/allocation_engine.py)
+# tests this prefix instead of membership in a fixed 2-element set, which
+# is what makes 0-5 (as opposed to always-exactly-2) kids work everywhere
+# without threading the actual kid list into functions that only ever
+# needed to know "is this a kid's account," not which kid.
+KID_OWNER_PREFIX = "kid_"
+
+def is_kid_owner(owner) -> bool:
+    return bool(owner) and owner.startswith(KID_OWNER_PREFIX)
 
 # IRS Uniform Lifetime Table — age: distribution period
 RMD_TABLE = {
@@ -460,7 +477,7 @@ def _pre_retirement_taxable_add(pre_events: List[Dict], pre_ret: float, retireme
 # toward retirement:
 #   - "Emergency reserve"                 — cash reserve, not invested
 #   - "High-interest debt payoff"         — pays down debt, doesn't grow assets
-#   - "Education funding - Abby"/"Cooper" — modeled by run_education_projection/
+#   - "Education funding - kid_<id>"      — modeled by run_education_projection/
 #                                            run_kids_projection (as an extra
 #                                            monthly 529 contribution for that
 #                                            specific kid — see main.py's
@@ -476,15 +493,17 @@ SURPLUS_GOAL_TAXABLE_INVESTING  = "Taxable investing"
 
 # Per-kid education-funding goals — replaced the single shared "Education
 # funding" goal 2026-09-06 so a household can direct surplus specifically
-# to one kid's 529 ("abby's will go to abby, cooper will go to cooper")
-# rather than a pooled amount split by some formula. The stored `goal`
-# string is this stable key, NOT the kid's configurable display name
-# (kid1_name/kid2_name in planning_inputs) — a rename in Settings must
-# never orphan an existing surplus_allocations row. See
-# main.py._get_kids_surplus_529_monthly for how these feed
-# run_education_projection/run_kids_projection's surplus_529_monthly param.
-SURPLUS_GOAL_EDUCATION_ABBY   = "Education funding - Abby"
-SURPLUS_GOAL_EDUCATION_COOPER = "Education funding - Cooper"
+# to one kid's 529 ("this kid's will go to this kid") rather than a pooled
+# amount split by some formula. Originally two fixed keys ("Education
+# funding - Abby"/"Cooper"); generalized 2026-09-09 (kids-variable-count)
+# to one key per row in the `kids` table, built from that kid's own
+# database id via surplus_goal_key_for_kid below — NOT the kid's
+# configurable display name, so a rename in Settings/Kids never orphans
+# an existing surplus_allocations row, and deleting a kid simply leaves
+# that goal's row unclaimed (harmless — main.py's
+# _get_kids_surplus_529_monthly only looks up keys for CURRENT kids).
+def surplus_goal_key_for_kid(kid_id) -> str:
+    return f"Education funding - kid_{kid_id}"
 
 
 def _surplus_allocations_at_retirement(surplus_allocations: List[Dict], pre_ret: float,
@@ -763,17 +782,17 @@ def run_retirement_projection(inputs: Dict, accounts: List[Dict], ret_ages: List
     # Pre-tax: traditional 401k slice + Justin IRA
     pretax_start = pretax_401k + sum(
         a["balance"] for a in accounts
-        if a["account_type"] == "ira" and a["owner"] not in ("abby","cooper")
+        if a["account_type"] == "ira" and not is_kid_owner(a["owner"])
     )
     # Roth: roth 401k slice + all Roth IRAs (excluding kids)
     roth_start = roth_401k + sum(
         a["balance"] for a in accounts
-        if a["account_type"] == "roth_ira" and a["owner"] not in ("abby","cooper")
+        if a["account_type"] == "roth_ira" and not is_kid_owner(a["owner"])
     )
     # Taxable brokerage
     taxable_start = sum(
         a["balance"] for a in accounts
-        if a["account_type"] == "taxable" and a["owner"] not in ("abby","cooper")
+        if a["account_type"] == "taxable" and not is_kid_owner(a["owner"])
     )  # DAF excluded — charitable money, not investable
     # HSA
     hsa_start = sum(
@@ -1586,11 +1605,11 @@ def run_two_dimensional_retirement_projection(inputs: Dict, accounts: List[Dict]
     justin_annual_rsu   = inputs.get("justin_annual_rsu_value", 0)
 
     pretax_start = pretax_401k + sum(
-        a["balance"] for a in accounts if a["account_type"] == "ira" and a["owner"] not in ("abby", "cooper"))
+        a["balance"] for a in accounts if a["account_type"] == "ira" and not is_kid_owner(a["owner"]))
     roth_start = roth_401k + sum(
-        a["balance"] for a in accounts if a["account_type"] == "roth_ira" and a["owner"] not in ("abby", "cooper"))
+        a["balance"] for a in accounts if a["account_type"] == "roth_ira" and not is_kid_owner(a["owner"]))
     taxable_start = sum(
-        a["balance"] for a in accounts if a["account_type"] == "taxable" and a["owner"] not in ("abby", "cooper"))
+        a["balance"] for a in accounts if a["account_type"] == "taxable" and not is_kid_owner(a["owner"]))
     hsa_start = sum(a["balance"] for a in accounts if a["account_type"] == "hsa")
 
     timeline = build_two_person_timeline(jason_age, justin_age, jason_ret_age, justin_ret_age,
@@ -1826,11 +1845,11 @@ def run_two_dimensional_retirement_projection(inputs: Dict, accounts: List[Dict]
 # Milestone 4 (CALCULATION_CONTRACT.md sections 36-37): the four owner
 # buckets every account-ownership-aware calculation in this file uses.
 # NOT invented -- accounts.owner is already a required, populated
-# column (jason/justin/joint/abby/cooper/trust, confirmed by reading
+# column (jason/justin/joint/kid_<id>/trust, confirmed by reading
 # db.py's schema and Accounts.jsx's own fixed domain); kids' accounts
-# (abby/cooper) are excluded upstream by every caller, exactly as the
-# existing pooled functions already do, before any of these four
-# buckets come into play.
+# (owner prefixed "kid_", see is_kid_owner above) are excluded upstream
+# by every caller, exactly as the existing pooled functions already do,
+# before any of these four buckets come into play.
 OWNER_BUCKETS = ("jason", "justin", "joint", "trust")
 
 
@@ -1965,7 +1984,7 @@ def owner_split_starting_balances_two_age(inputs: Dict, accounts: List[Dict], ja
     buckets = {owner: {"pretax": 0.0, "roth": 0.0, "taxable": 0.0, "hsa": 0.0} for owner in OWNER_BUCKETS}
 
     for owner in OWNER_BUCKETS:
-        owned = [a for a in accounts if _owner_bucket_for_account(a) == owner and a.get("owner") not in ("abby", "cooper")]
+        owned = [a for a in accounts if _owner_bucket_for_account(a) == owner and not is_kid_owner(a.get("owner"))]
         total_401k_owner = sum(a["balance"] for a in owned if a["account_type"] == "401k")
         pretax_401k_owner = total_401k_owner * pretax_401k_pct
         roth_401k_owner   = total_401k_owner * roth_401k_pct
@@ -1973,9 +1992,9 @@ def owner_split_starting_balances_two_age(inputs: Dict, accounts: List[Dict], ja
         roth_ira_owner  = sum(a["balance"] for a in owned if a["account_type"] == "roth_ira")
         taxable_owner   = sum(a["balance"] for a in owned if a["account_type"] == "taxable")
         # hsa_start's own pooled formula never filters by owner at all
-        # (not even abby/cooper) -- matched here via the SAME [a for a
+        # (not even kids' accounts) -- matched here via the SAME [a for a
         # in accounts ...] scan per owner bucket, not the `owned`
-        # abby/cooper-excluded list above, to reconcile exactly.
+        # kids-excluded list above, to reconcile exactly.
         hsa_owner = sum(a["balance"] for a in accounts if a["account_type"] == "hsa"
                          and _owner_bucket_for_account(a) == owner)
 
@@ -2519,23 +2538,23 @@ def _project_college_drawdown(starting_balance, monthly_contribution, edu_return
 
 def run_education_projection(inputs: Dict, accounts: List[Dict],
                               continue_contributions_during_college: bool = False,
-                              surplus_529_monthly: Dict[str, float] = None) -> Dict:
-    """surplus_529_monthly: optional {"abby": amount, "cooper": amount} —
-    extra monthly 529 contributions directed via the "Assign Surplus" page's
-    per-kid education-funding goals (see SURPLUS_GOAL_EDUCATION_ABBY/COOPER
-    above and main.py._get_kids_surplus_529_monthly). Added ON TOP OF the
-    flat abby_529_monthly/cooper_529_monthly planning-input rate, not in
-    place of it. Defaults to None/empty so every existing caller that
-    doesn't pass this is completely unaffected."""
+                              surplus_529_monthly: Dict[str, float] = None,
+                              kids: List[Dict] = None) -> Dict:
+    """kids: the household's kids (0-5, kids-variable-count design) —
+    each dict needs at least id/name/age/monthly_529, as returned by
+    main.py's kids-table query. Defaults to None/empty so every existing
+    caller that doesn't pass this gets zero goals rather than an error
+    (a household truly has no kids until some are added, not two
+    phantom ones).
+
+    surplus_529_monthly: optional {f"kid_{id}": amount, ...} — extra
+    monthly 529 contributions directed via the "Assign Surplus" page's
+    per-kid education-funding goals (see surplus_goal_key_for_kid above
+    and main.py._get_kids_surplus_529_monthly). Added ON TOP OF that
+    kid's own flat monthly_529 rate, not in place of it."""
     edu_return = 0.07
     surplus_529_monthly = surplus_529_monthly or {}
-
-    abby_balance   = sum(a["balance"] for a in accounts if a["account_type"]=="529" and a["owner"]=="abby")
-    cooper_balance = sum(a["balance"] for a in accounts if a["account_type"]=="529" and a["owner"]=="cooper")
-    abby_monthly   = inputs.get("abby_529_monthly",   ABBY_MONTHLY_529_DEFAULT) + float(surplus_529_monthly.get("abby", 0) or 0)
-    cooper_monthly = inputs.get("cooper_529_monthly", COOPER_MONTHLY_529_DEFAULT) + float(surplus_529_monthly.get("cooper", 0) or 0)
-    kid1_age = inputs.get("kid1_age", 0)
-    kid2_age = inputs.get("kid2_age", 0)
+    kids = kids or []
 
     # Contributions can't outlast your earning years — assume they stop once
     # you hit PARENT_RETIREMENT_AGE_ASSUMPTION, regardless of whether a kid
@@ -2545,13 +2564,11 @@ def run_education_projection(inputs: Dict, accounts: List[Dict],
     years_until_parent_retires = max(0, PARENT_RETIREMENT_AGE_ASSUMPTION - jason_age)
 
     goals = []
-    # "child" stays a fixed internal key (abby/cooper) matching account owners;
-    # display name comes from planning_inputs kid1_name/kid2_name at the API layer.
-    child_names = {"Abby": inputs.get("kid1_name", "Child 1"), "Cooper": inputs.get("kid2_name", "Child 2")}
-    for child, balance_529, current_age, monthly_contrib in [
-        ("Abby",   abby_balance,   kid1_age, abby_monthly),
-        ("Cooper", cooper_balance, kid2_age, cooper_monthly),
-    ]:
+    for kid in kids:
+        child = f"{KID_OWNER_PREFIX}{kid['id']}"
+        current_age  = kid.get("age", 0)
+        balance_529   = sum(a["balance"] for a in accounts if a["account_type"]=="529" and a["owner"]==child)
+        monthly_contrib = float(kid.get("monthly_529", 0) or 0) + float(surplus_529_monthly.get(child, 0) or 0)
         years_to_college  = 18 - current_age
         unl_base = inputs.get("unl_annual_cost", UNL_CURRENT_ANNUAL)
         annual_cost_start = unl_base * ((1 + COLLEGE_COST_INFLATION) ** years_to_college)
@@ -2653,7 +2670,7 @@ def run_education_projection(inputs: Dict, accounts: List[Dict],
         lump_sum = gap / ((1+edu_return)**worst_deficit_years_out) if gap>0 else 0
 
         goals.append({
-            "child": child, "child_name": child_names[child], "current_age": current_age,
+            "child": child, "child_name": kid.get("name", "Child"), "current_age": current_age,
             "years_to_college": years_to_college,
             "current_529_balance": round(balance_529),
             "monthly_contribution": round(monthly_contrib),
@@ -2678,30 +2695,29 @@ def run_education_projection(inputs: Dict, accounts: List[Dict],
 
 
 def run_kids_projection(accounts: List[Dict], inputs: Dict = None,
-                         surplus_529_monthly: Dict[str, float] = None) -> Dict:
-    """surplus_529_monthly: optional {"abby": amount, "cooper": amount} —
-    same extra per-kid 529 contribution as run_education_projection's
-    parameter of the same name (see that docstring and
-    SURPLUS_GOAL_EDUCATION_ABBY/COOPER above). Added on top of the flat
-    abby_529_monthly/cooper_529_monthly rate; everything downstream
-    (proj_529_at_18, the age-22 college drawdown, and the existing
-    SECURE 2.0 529-to-Roth-IRA rollover capped at $35,000) operates on the
-    resulting bal_529/proj_529_at_18 unchanged — a bigger 529 balance from
-    added surplus simply produces a correspondingly larger (still capped)
-    rollover, with no changes needed to that math itself."""
+                         surplus_529_monthly: Dict[str, float] = None,
+                         kids: List[Dict] = None) -> Dict:
+    """kids: the household's kids (0-5, kids-variable-count design) —
+    see run_education_projection's docstring for the same parameter.
+
+    surplus_529_monthly: optional {f"kid_{id}": amount, ...} — same extra
+    per-kid 529 contribution as run_education_projection's parameter of
+    the same name (see that docstring and surplus_goal_key_for_kid
+    above). Added on top of that kid's own flat monthly_529 rate;
+    everything downstream (proj_529_at_18, the age-22 college drawdown,
+    and the existing SECURE 2.0 529-to-Roth-IRA rollover capped at
+    $35,000) operates on the resulting bal_529/proj_529_at_18 unchanged —
+    a bigger 529 balance from added surplus simply produces a
+    correspondingly larger (still capped) rollover, with no changes
+    needed to that math itself."""
     edu_return  = 0.07
     roth_return = 0.07
     if inputs is None: inputs = {}
     surplus_529_monthly = surplus_529_monthly or {}
+    kids = kids or []
 
-    abby_529_mo   = inputs.get("abby_529_monthly",       ABBY_MONTHLY_529_DEFAULT) + float(surplus_529_monthly.get("abby", 0) or 0)
-    cooper_529_mo = inputs.get("cooper_529_monthly",     COOPER_MONTHLY_529_DEFAULT) + float(surplus_529_monthly.get("cooper", 0) or 0)
     kids_roth_mo  = inputs.get("kids_roth_monthly",      KIDS_ROTH_MONTHLY_DEFAULT)
     kids_cust_mo  = inputs.get("kids_custodial_monthly", KIDS_CUST_MONTHLY_DEFAULT)
-
-    kid1_age = inputs.get("kid1_age", 0)
-    kid2_age = inputs.get("kid2_age", 0)
-    child_names = {"Abby": inputs.get("kid1_name", "Child 1"), "Cooper": inputs.get("kid2_name", "Child 2")}
 
     # 529 contributions stop at whichever comes first: the child turning 18,
     # or the parent hitting the same PARENT_RETIREMENT_AGE_ASSUMPTION cutoff
@@ -2718,17 +2734,17 @@ def run_kids_projection(accounts: List[Dict], inputs: Dict = None,
     jason_age = inputs.get("jason_age", 45)
     years_until_parent_retires = max(0, PARENT_RETIREMENT_AGE_ASSUMPTION - jason_age)
 
-    kids = []
-    for child, current_age, monthly_529 in [
-        ("Abby",   kid1_age, abby_529_mo),
-        ("Cooper", kid2_age, cooper_529_mo),
-    ]:
+    kids_out = []
+    for kid in kids:
+        child = f"{KID_OWNER_PREFIX}{kid['id']}"
+        current_age = kid.get("age", 0)
+        monthly_529 = float(kid.get("monthly_529", 0) or 0) + float(surplus_529_monthly.get(child, 0) or 0)
         years_to_18 = 18 - current_age
 
-        bal_529  = sum(a["balance"] for a in accounts if a["account_type"]=="529"      and a["owner"]==child.lower())
-        bal_roth = sum(a["balance"] for a in accounts if a["account_type"]=="roth_ira" and a["owner"]==child.lower())
-        bal_cust = sum(a["balance"] for a in accounts if a["account_type"]=="custodial" and a["owner"]==child.lower())
-        bonds    = sum(a["balance"] for a in accounts if a["account_type"]=="other"    and a["owner"]==child.lower() and "bond" in a["name"].lower())
+        bal_529  = sum(a["balance"] for a in accounts if a["account_type"]=="529"      and a["owner"]==child)
+        bal_roth = sum(a["balance"] for a in accounts if a["account_type"]=="roth_ira" and a["owner"]==child)
+        bal_cust = sum(a["balance"] for a in accounts if a["account_type"]=="custodial" and a["owner"]==child)
+        bonds    = sum(a["balance"] for a in accounts if a["account_type"]=="other"    and a["owner"]==child and "bond" in a["name"].lower())
 
         # Shared with run_education_projection's own saving-phase figure —
         # see _project_529_saving_phase's docstring (calculation-engine
@@ -2869,8 +2885,8 @@ def run_kids_projection(accounts: List[Dict], inputs: Dict = None,
                 roth_to_60.append({"age": age, "balance": round(r),
                                    "note": "529 rollover" if age == 22 and roth_rollover > 0 else None})
 
-        kids.append({
-            "child": child, "child_name": child_names[child], "current_age": current_age,
+        kids_out.append({
+            "child": child, "child_name": kid.get("name", "Child"), "current_age": current_age,
             "529":       {"current": round(bal_529), "at_18": round(proj_529_at_18), "at_22": proj_529_at_22, "monthly_contribution": round(monthly_529)},
             "roth":      {"current": round(bal_roth), "at_18": round(proj_roth_at_18), "at_22": round(proj_roth_at_22), "at_60": round(proj_roth_at_60), "monthly_contribution": kids_roth_mo, "529_rollover": round(roth_rollover)},
             "custodial": {"current": round(bal_cust), "at_18": round(proj_cust_at_18), "at_24": round(proj_cust_at_24), "at_60": round(proj_cust_at_60), "monthly_contribution": round(kids_cust_mo)},
@@ -2879,33 +2895,36 @@ def run_kids_projection(accounts: List[Dict], inputs: Dict = None,
             "roth_to_60":roth_to_60,
         })
 
-    return {"kids": kids}
+    return {"kids": kids_out}
 
 
-def run_insurance_analysis(inputs: Dict, accounts: List[Dict]) -> Dict:
+def run_insurance_analysis(inputs: Dict, accounts: List[Dict], kids: List[Dict] = None) -> Dict:
     jason_age  = inputs["jason_age"]
     justin_age = inputs["justin_age"]
     inflation  = inputs["inflation_rate"]
     post_ret   = inputs["expected_return_post_retirement"]
     income_today = inputs["retirement_income_today_dollars"]
+    kids = kids or []
 
     from debt_engine import DEBT_TYPES
     total_debt    = sum(a["balance"] for a in accounts if a["account_type"] in DEBT_TYPES)
-    abby_529      = sum(a["balance"] for a in accounts if a["account_type"]=="529" and a["owner"]=="abby")
-    cooper_529    = sum(a["balance"] for a in accounts if a["account_type"]=="529" and a["owner"]=="cooper")
     # years_to_college mirrors run_education_projection/run_kids_projection
-    # (18 - current age, from the same planning_inputs kid1_age/kid2_age) —
-    # this used to hardcode 7/11 regardless of the actual ages in Planning
-    # Inputs, so the insurance page's college-funding gap would silently
-    # drift out of sync with the Education/Kids pages as the kids got older.
-    abby_years_to_college   = max(0, 18 - inputs.get("kid1_age", 0))
-    cooper_years_to_college = max(0, 18 - inputs.get("kid2_age", 0))
-    abby_proj     = _fv(abby_529, 0.07, abby_years_to_college)   + _fv_annuity_monthly(inputs.get("abby_529_monthly", ABBY_MONTHLY_529_DEFAULT), 0.07, abby_years_to_college)
-    cooper_proj   = _fv(cooper_529, 0.07, cooper_years_to_college) + _fv_annuity_monthly(inputs.get("cooper_529_monthly", COOPER_MONTHLY_529_DEFAULT), 0.07, cooper_years_to_college)
+    # (18 - current age, from that kid's own row) — this used to hardcode
+    # 7/11 regardless of the actual ages in Planning Inputs, so the
+    # insurance page's college-funding gap would silently drift out of
+    # sync with the Education/Kids pages as the kids got older.
+    # Generalized (kids-variable-count) from two fixed abby/cooper
+    # variables to a sum over however many kids currently exist — 0
+    # kids means 0 gap, same as Education/Kids show 0 goals.
     unl_base      = inputs.get("unl_annual_cost", UNL_CURRENT_ANNUAL)
-    abby_cost     = sum(unl_base*((1+COLLEGE_COST_INFLATION)**(abby_years_to_college+yr)) for yr in range(4))
-    cooper_cost   = sum(unl_base*((1+COLLEGE_COST_INFLATION)**(cooper_years_to_college+yr)) for yr in range(4))
-    total_529_gap = max(0, abby_cost - abby_proj) + max(0, cooper_cost - cooper_proj)
+    total_529_gap = 0.0
+    for kid in kids:
+        owner = f"{KID_OWNER_PREFIX}{kid['id']}"
+        balance_529 = sum(a["balance"] for a in accounts if a["account_type"]=="529" and a["owner"]==owner)
+        years_to_college = max(0, 18 - kid.get("age", 0))
+        proj_529 = _fv(balance_529, 0.07, years_to_college) + _fv_annuity_monthly(float(kid.get("monthly_529", 0) or 0), 0.07, years_to_college)
+        cost = sum(unl_base*((1+COLLEGE_COST_INFLATION)**(years_to_college+yr)) for yr in range(4))
+        total_529_gap += max(0, cost - proj_529)
 
     justin_years_to_ret = max(0, (60 - (jason_age - justin_age)) - justin_age)
     income_at_ret       = income_today * ((1+inflation)**justin_years_to_ret)
@@ -2916,7 +2935,7 @@ def run_insurance_analysis(inputs: Dict, accounts: List[Dict]) -> Dict:
     investable = sum(
         a["balance"] for a in accounts
         if a["account_type"] in {"roth_ira","ira","hsa","taxable","401k"}
-        and a["owner"] not in ("abby","cooper")
+        and not is_kid_owner(a["owner"])
     )
     proj_assets  = _fv(investable, post_ret, justin_years_to_ret)
     income_gap   = max(0, cap_income_need - proj_assets)

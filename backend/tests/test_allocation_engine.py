@@ -42,7 +42,7 @@ class TestAnalyzeAllocation:
         assert "assumed" in result["recommendation"]
 
     def test_kids_accounts_excluded(self, sample_inputs):
-        accounts = [{"id": 1, "name": "Kid Roth", "account_type": "roth_ira", "balance": 50000, "owner": "abby", "stock_allocation_pct": 100}]
+        accounts = [{"id": 1, "name": "Kid Roth", "account_type": "roth_ira", "balance": 50000, "owner": "kid_1", "stock_allocation_pct": 100}]
         result = analyze_allocation(sample_inputs, accounts)
         assert result == {"has_data": False}
 
@@ -103,7 +103,7 @@ class TestAnalyzeFees:
         """Regression: fee-drag total used to include kids' accounts while
         analyze_allocation's total_investable excluded them — both render
         on the same page and should agree on what counts as 'yours'."""
-        accounts = [{"id": 1, "name": "Kid Custodial", "account_type": "custodial", "owner": "abby", "balance": 50000, "expense_ratio": 0.01}]
+        accounts = [{"id": 1, "name": "Kid Custodial", "account_type": "custodial", "owner": "kid_1", "balance": 50000, "expense_ratio": 0.01}]
         assert analyze_fees(accounts) == {"has_fee_data": False}
 
 
@@ -163,7 +163,7 @@ class TestConcentrationRisk:
         assert result["flagged_positions"][0]["severity"] == "severe"
 
     def test_kids_accounts_excluded(self):
-        accounts = [{"id": 1, "name": "Kid Custodial", "account_type": "custodial", "owner": "abby", "balance": 100000}]
+        accounts = [{"id": 1, "name": "Kid Custodial", "account_type": "custodial", "owner": "kid_1", "balance": 100000}]
         assert concentration_risk(accounts) == {"has_data": False}
 
     def test_sorted_worst_first(self):

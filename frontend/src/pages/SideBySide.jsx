@@ -5,6 +5,7 @@ import {
   XAxis, YAxis, Tooltip, Legend, ResponsiveContainer, ReferenceLine
 } from 'recharts'
 import { usePersonNames } from '../hooks/usePersonNames'
+import { useKids } from '../hooks/useKids'
 import { isPrivacyMode, MASK_CURRENCY, MASK_PERCENT } from '../utils/privacy'
 
 const fmt  = (n) => isPrivacyMode() ? MASK_CURRENCY : (n == null ? '—' : new Intl.NumberFormat('en-US', { style:'currency', currency:'USD', maximumFractionDigits:0 }).format(n))
@@ -40,6 +41,7 @@ export default function SideBySide({ onNavigate }) {
   const [data, setData]     = useState(null)
   const [swr, setSwr]       = useState({})
   const [inputs, setInputs] = useState(null)
+  const { kids } = useKids()
   const [loading, setLoading] = useState(true)
   const [error, setError]   = useState(null)
 
@@ -169,8 +171,10 @@ export default function SideBySide({ onNavigate }) {
       label: 'Kids Still at Home',
       values: {
         55: (() => {
+          if (!kids.length) return '—'
           const yrs = scenarios[0]?.years_to_retirement ?? 0
-          return inputs ? `Yes — ages ${inputs.kid1_age + yrs} & ${inputs.kid2_age + yrs} at retirement` : '—'
+          const ages = kids.map(k => `${k.name} (${k.age + yrs})`).join(', ')
+          return `Yes — ${ages} at retirement`
         })(),
         60: 'Launched by retirement', 65: 'Launched by retirement',
       },

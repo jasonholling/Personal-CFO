@@ -42,7 +42,7 @@ export default function RetirementTools() {
       if (jasonAge) setQcd(q => ({ ...q, age: jasonAge.toString() }))
 
       const existingIraBalance = accountsRes.data
-        .filter(a => a.account_type === 'ira' && a.owner !== 'abby' && a.owner !== 'cooper')
+        .filter(a => a.account_type === 'ira' && !a.owner?.startsWith('kid_'))
         .reduce((s, a) => s + a.balance, 0)
       if (existingIraBalance > 0) {
         setRoth(r => ({ ...r, existing_traditional_ira_balance: existingIraBalance.toString() }))

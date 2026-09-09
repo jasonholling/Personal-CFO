@@ -368,6 +368,22 @@ class PropertyPolicy(BaseModel):
     renewal: Optional[str] = None
     sort_order: int = 0
 
+# Kids-variable-count (2026-09-09) — replaced the old fixed kid1_name/
+# kid2_name/kid1_age/kid2_age/abby_529_monthly/cooper_529_monthly
+# planning_inputs columns (always exactly 2 kids) with a real table, 0-5
+# rows. See db.py's kids table + migrate_legacy_kids for how an existing
+# household's real data converts over automatically, and
+# projection_engine.py's is_kid_owner for how account ownership works
+# now (f"kid_{id}" instead of a literal name like "abby").
+class Kid(BaseModel):
+    id: Optional[int] = None
+    name: str
+    age: int = 0
+    monthly_529: float = 0
+    display_order: int = 0
+
+MAX_KIDS = 5
+
 # Accounts
 @app.get("/api/accounts")
 def get_accounts():
@@ -661,14 +677,15 @@ def _ss_claim_ages(inputs_row: dict, jason_override: int = None, justin_override
     return jason, justin
 
 
-def _get_kids_surplus_529_monthly(conn) -> Dict[str, float]:
-    """The two per-kid education-funding surplus_allocations goals
-    ("Education funding - Abby" / "Education funding - Cooper") — money
+def _get_kids_surplus_529_monthly(conn, kids: List[dict]) -> Dict[str, float]:
+    """The per-kid education-funding surplus_allocations goals — money
     the household has explicitly earmarked (in Surplus Plan) for one
-    specific kid's 529, on top of whatever flat abby_529_monthly/
-    cooper_529_monthly rate lives in planning_inputs. Returns
-    {"abby": amount, "cooper": amount}, each 0.0 if that goal has no row
-    or a non-positive monthly_amount.
+    specific kid's 529, on top of whatever flat monthly_529 rate lives
+    on that kid's own row. Returns {f"kid_{id}": amount, ...} for each
+    CURRENT kid, 0.0 if that goal has no row or a non-positive
+    monthly_amount. Originally two fixed keys ("Education funding -
+    Abby"/"Cooper"); generalized (kids-variable-count) to one key per
+    row in `kids`, via projection_engine.surplus_goal_key_for_kid.
 
     Deliberately NOT part of _get_relevant_surplus_allocations' filter
     above — this money is invested toward college, not retirement (see
@@ -676,13 +693,18 @@ def _get_kids_surplus_529_monthly(conn) -> Dict[str, float]:
     feed run_education_projection/run_kids_projection's surplus_529_monthly
     param, additively, mirroring how _get_debt_payoff_surplus_monthly feeds
     the debt-payoff routes below."""
+    from projection_engine import surplus_goal_key_for_kid
+    if not kids:
+        return {}
+    goal_keys = {surplus_goal_key_for_kid(k["id"]): f"kid_{k['id']}" for k in kids}
+    placeholders = ",".join("?" * len(goal_keys))
     rows = {r["goal"]: r["monthly_amount"] for r in conn.execute(
-        "SELECT goal, monthly_amount FROM surplus_allocations WHERE goal IN "
-        "('Education funding - Abby', 'Education funding - Cooper')"
+        f"SELECT goal, monthly_amount FROM surplus_allocations WHERE goal IN ({placeholders})",
+        list(goal_keys.keys())
     ).fetchall()}
     return {
-        "abby":   max(0.0, float(rows.get("Education funding - Abby", 0) or 0)),
-        "cooper": max(0.0, float(rows.get("Education funding - Cooper", 0) or 0)),
+        owner_key: max(0.0, float(rows.get(goal, 0) or 0))
+        for goal, owner_key in goal_keys.items()
     }
 
 @app.get("/api/life-events")
@@ -1103,6 +1125,66 @@ def delete_property_policy(policy_id: int):
     conn.close()
     return {"deleted": policy_id}
 
+# Kids (variable count, 0-5 — see the Kid model's own comment above)
+def _get_kids(conn) -> List[dict]:
+    return [dict(r) for r in conn.execute("SELECT * FROM kids ORDER BY display_order, id").fetchall()]
+
+@app.get("/api/kids")
+def get_kids():
+    conn = get_db()
+    kids = _get_kids(conn)
+    conn.close()
+    return kids
+
+@app.post("/api/kids")
+def create_kid(kid: Kid):
+    conn = get_db()
+    count = conn.execute("SELECT COUNT(*) FROM kids").fetchone()[0]
+    if count >= MAX_KIDS:
+        conn.close()
+        raise HTTPException(status_code=400, detail=f"Already at the maximum of {MAX_KIDS} kids")
+    # New kids append after whatever the highest display_order currently
+    # is, rather than always 0 — otherwise a newly added kid would jump
+    # to the front of the tab/card order every time.
+    max_order = conn.execute("SELECT MAX(display_order) FROM kids").fetchone()[0]
+    kid.display_order = (max_order + 1) if max_order is not None else 0
+    cur = conn.execute(
+        "INSERT INTO kids (name, age, monthly_529, display_order) VALUES (?,?,?,?)",
+        (kid.name, kid.age, kid.monthly_529, kid.display_order)
+    )
+    conn.commit()
+    kid.id = cur.lastrowid
+    conn.close()
+    return kid
+
+@app.put("/api/kids/{kid_id}")
+def update_kid(kid_id: int, kid: Kid):
+    conn = get_db()
+    conn.execute(
+        "UPDATE kids SET name=?, age=?, monthly_529=?, display_order=? WHERE id=?",
+        (kid.name, kid.age, kid.monthly_529, kid.display_order, kid_id)
+    )
+    conn.commit()
+    conn.close()
+    return {**kid.dict(), "id": kid_id}
+
+@app.delete("/api/kids/{kid_id}")
+def delete_kid(kid_id: int):
+    # Deliberately does NOT touch any account currently owned by
+    # f"kid_{kid_id}" -- those accounts keep that owner value (so they
+    # stay correctly excluded from the parents' own net worth/retirement
+    # totals via is_kid_owner, which only checks the "kid_" prefix, not
+    # whether a kids row still exists for that id) but simply won't
+    # appear under any kid's projection anymore, since the kid record
+    # that would have surfaced them is gone. No balances are deleted or
+    # reassigned -- reversible by re-adding a kid and manually editing
+    # those accounts' owner back, if that's ever wanted.
+    conn = get_db()
+    conn.execute("DELETE FROM kids WHERE id=?", (kid_id,))
+    conn.commit()
+    conn.close()
+    return {"deleted": kid_id}
+
 # Planning Inputs
 @app.get("/api/planning-inputs")
 def get_planning_inputs():
@@ -1174,12 +1256,13 @@ def get_cfo_briefing():
     cash_flow_items = [dict(r) for r in conn.execute("SELECT * FROM cash_flow_items").fetchall()]
     life_events = _get_active_life_events(conn)
     surplus_allocations = _get_relevant_surplus_allocations(conn)
-    surplus_529 = _get_kids_surplus_529_monthly(conn)
+    kids = _get_kids(conn)
+    surplus_529 = _get_kids_surplus_529_monthly(conn, kids)
     conn.close()
     inputs = dict(inputs_row) if inputs_row else {}
     try:
         retirement = run_retirement_projection(inputs, accounts, ret_ages=[60], life_events=life_events, surplus_allocations=surplus_allocations)
-        education = run_education_projection(inputs, accounts, surplus_529_monthly=surplus_529)
+        education = run_education_projection(inputs, accounts, surplus_529_monthly=surplus_529, kids=kids)
     except (KeyError, ValueError, ZeroDivisionError):
         # Empty or partially completed setup should still receive useful
         # data-quality guidance instead of an unusable dashboard error.
@@ -1258,11 +1341,12 @@ def get_education_projections(continue_contributions_during_college: bool = Fals
     conn = get_db()
     inputs_row = conn.execute("SELECT * FROM planning_inputs WHERE id=1").fetchone()
     accounts   = [dict(r) for r in conn.execute("SELECT * FROM accounts").fetchall()]
-    surplus_529 = _get_kids_surplus_529_monthly(conn)
+    kids = _get_kids(conn)
+    surplus_529 = _get_kids_surplus_529_monthly(conn, kids)
     conn.close()
     if not inputs_row:
         raise HTTPException(status_code=400, detail="Planning inputs not set yet")
-    return run_education_projection(dict(inputs_row), accounts, continue_contributions_during_college, surplus_529_monthly=surplus_529)
+    return run_education_projection(dict(inputs_row), accounts, continue_contributions_during_college, surplus_529_monthly=surplus_529, kids=kids)
 
 # Quicken Import
 @app.post("/api/import/quicken")
@@ -1411,14 +1495,15 @@ def sync_tasks():
     accounts   = [dict(r) for r in conn.execute("SELECT * FROM accounts").fetchall()]
     life_events = _get_active_life_events(conn)
     surplus_allocations = _get_relevant_surplus_allocations(conn)
-    surplus_529 = _get_kids_surplus_529_monthly(conn)
+    kids = _get_kids(conn)
+    surplus_529 = _get_kids_surplus_529_monthly(conn, kids)
     conn.close()
     if not inputs_row:
         return {"inserted": 0, "message": "No planning inputs yet"}
     inputs = dict(inputs_row)
     try:
         projections = run_retirement_projection(inputs, accounts, life_events=life_events, surplus_allocations=surplus_allocations)
-        education   = run_education_projection(inputs, accounts, surplus_529_monthly=surplus_529)
+        education   = run_education_projection(inputs, accounts, surplus_529_monthly=surplus_529, kids=kids)
     except Exception:
         projections = {}
         education   = {}
@@ -1432,22 +1517,24 @@ def get_kids_projections():
     conn = get_db()
     accounts   = [dict(r) for r in conn.execute("SELECT * FROM accounts").fetchall()]
     inputs_row = conn.execute("SELECT * FROM planning_inputs WHERE id=1").fetchone()
-    surplus_529 = _get_kids_surplus_529_monthly(conn)
+    kids = _get_kids(conn)
+    surplus_529 = _get_kids_surplus_529_monthly(conn, kids)
     conn.close()
     from projection_engine import run_kids_projection
     inputs = dict(inputs_row) if inputs_row else {}
-    return run_kids_projection(accounts, inputs, surplus_529_monthly=surplus_529)
+    return run_kids_projection(accounts, inputs, surplus_529_monthly=surplus_529, kids=kids)
 
 @app.get("/api/projections/insurance")
 def get_insurance_analysis():
     conn = get_db()
     inputs_row = conn.execute("SELECT * FROM planning_inputs WHERE id=1").fetchone()
     accounts   = [dict(r) for r in conn.execute("SELECT * FROM accounts").fetchall()]
+    kids = _get_kids(conn)
     conn.close()
     if not inputs_row:
         raise HTTPException(status_code=400, detail="Planning inputs not set yet")
     from projection_engine import run_insurance_analysis
-    return run_insurance_analysis(dict(inputs_row), accounts)
+    return run_insurance_analysis(dict(inputs_row), accounts, kids=kids)
 
 # ── Annual Report ─────────────────────────────────────────────────────────────
 from fastapi.responses import Response
@@ -1459,7 +1546,8 @@ def generate_annual_report():
     accounts   = [dict(r) for r in conn.execute("SELECT * FROM accounts").fetchall()]
     life_events = _get_active_life_events(conn)
     surplus_allocations = _get_relevant_surplus_allocations(conn)
-    surplus_529 = _get_kids_surplus_529_monthly(conn)
+    kids = _get_kids(conn)
+    surplus_529 = _get_kids_surplus_529_monthly(conn, kids)
     conn.close()
 
     if not inputs_row:
@@ -1481,9 +1569,9 @@ def generate_annual_report():
     data = {
         "net_worth":  nw,
         "retirement": run_retirement_projection(inputs, accounts, life_events=life_events, surplus_allocations=surplus_allocations),
-        "education":  run_education_projection(inputs, accounts, surplus_529_monthly=surplus_529),
-        "kids":       run_kids_projection(accounts, inputs, surplus_529_monthly=surplus_529),
-        "insurance":  run_insurance_analysis(inputs, accounts),
+        "education":  run_education_projection(inputs, accounts, surplus_529_monthly=surplus_529, kids=kids),
+        "kids":       run_kids_projection(accounts, inputs, surplus_529_monthly=surplus_529, kids=kids),
+        "insurance":  run_insurance_analysis(inputs, accounts, kids=kids),
         "names": {
             "person1": inputs.get("person1_name", "Person 1"),
             "person2": inputs.get("person2_name", "Person 2"),

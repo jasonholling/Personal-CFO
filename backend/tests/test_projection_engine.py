@@ -199,7 +199,7 @@ class TestRunRetirementProjection:
 
     def test_kids_accounts_excluded_from_investable_assets(self, sample_inputs):
         accounts = [
-            {"id": 1, "name": "Kid Roth", "account_type": "roth_ira", "owner": "abby", "balance": 999999, "institution": "", "notes": ""},
+            {"id": 1, "name": "Kid Roth", "account_type": "roth_ira", "owner": "kid_1", "balance": 999999, "institution": "", "notes": ""},
         ]
         result = run_retirement_projection(sample_inputs, accounts, ret_ages=[55])
         scenario = result["scenarios"][0]
@@ -1352,13 +1352,28 @@ class TestAssetSaleGrowthYearsHandCalculated:
                 f"jason_age={jason_age} ret_age={ret_age} sale_age={sale_age}")
 
 
+def kids_from_inputs(inputs, ids=(1, 2)):
+    """Test-only bridge: this file was written against the OLD kid1_age/
+    kid2_age/abby_529_monthly/cooper_529_monthly-on-inputs convention --
+    every existing test keeps expressing overrides that way (e.g.
+    {**sample_inputs, "kid1_age": 15}) unchanged; this translates that
+    into the kids-variable-count `kids` list run_education_projection/
+    run_kids_projection/run_insurance_analysis now expect explicitly
+    instead of reading off `inputs`. ids default to (1, 2) so the
+    resulting stable keys are "kid_1"/"kid_2", matching sample_kids."""
+    return [
+        {"id": ids[0], "name": inputs.get("kid1_name", "Child 1"), "age": inputs.get("kid1_age", 0), "monthly_529": inputs.get("abby_529_monthly", 0)},
+        {"id": ids[1], "name": inputs.get("kid2_name", "Child 2"), "age": inputs.get("kid2_age", 0), "monthly_529": inputs.get("cooper_529_monthly", 0)},
+    ]
+
+
 class TestRunEducationProjection:
     def test_returns_two_goals(self, sample_inputs, sample_accounts):
-        result = run_education_projection(sample_inputs, sample_accounts)
+        result = run_education_projection(sample_inputs, sample_accounts, kids=kids_from_inputs(sample_inputs))
         assert len(result["goals"]) == 2
 
     def test_child_names_come_from_inputs(self, sample_inputs, sample_accounts):
-        result = run_education_projection(sample_inputs, sample_accounts)
+        result = run_education_projection(sample_inputs, sample_accounts, kids=kids_from_inputs(sample_inputs))
         names = {g["child_name"] for g in result["goals"]}
         assert names == {"Kid A", "Kid B"}
 
@@ -1366,7 +1381,7 @@ class TestRunEducationProjection:
         """Regression test — kid ages used to be hardcoded (11, 7) instead of
         read from kid1_age/kid2_age."""
         custom = {**sample_inputs, "kid1_age": 15, "kid2_age": 3}
-        result = run_education_projection(custom, sample_accounts)
+        result = run_education_projection(custom, sample_accounts, kids=kids_from_inputs(custom))
         ages = {g["current_age"] for g in result["goals"]}
         assert ages == {15, 3}
 
@@ -1376,7 +1391,7 @@ class TestRunEducationProjection:
         instead of the real unl_annual_cost input already used correctly
         elsewhere in this same function's total_cost/funding math."""
         custom = {**sample_inputs, "unl_annual_cost": 21000}
-        result = run_education_projection(custom, sample_accounts)
+        result = run_education_projection(custom, sample_accounts, kids=kids_from_inputs(custom))
         for goal in result["goals"]:
             assert goal["current_annual_cost"] == 21000
 
@@ -1384,22 +1399,22 @@ class TestRunEducationProjection:
         # sample_inputs' jason_age is well under the retirement cutoff, so
         # college start (not retirement) is the binding constraint here.
         custom = {**sample_inputs, "jason_age": 40, "kid1_age": 12}
-        result = run_education_projection(custom, sample_accounts)
-        abby = next(g for g in result["goals"] if g["child"] == "Abby")
+        result = run_education_projection(custom, sample_accounts, kids=kids_from_inputs(custom))
+        abby = next(g for g in result["goals"] if g["child"] == "kid_1")
         assert abby["contributions_stop_in_years"] == abby["years_to_college"]  # 6
 
     def test_continue_contributions_during_college_extends_window(self, sample_inputs, sample_accounts):
         custom = {**sample_inputs, "jason_age": 40, "kid1_age": 12}
-        result = run_education_projection(custom, sample_accounts, continue_contributions_during_college=True)
-        abby = next(g for g in result["goals"] if g["child"] == "Abby")
+        result = run_education_projection(custom, sample_accounts, continue_contributions_during_college=True, kids=kids_from_inputs(custom))
+        abby = next(g for g in result["goals"] if g["child"] == "kid_1")
         assert abby["contributions_stop_in_years"] == abby["years_to_college"] + 4  # + COLLEGE_YEARS
 
     def test_continuing_during_college_never_produces_a_lower_projected_balance(self, sample_inputs, sample_accounts):
         custom = {**sample_inputs, "jason_age": 40, "kid1_age": 12}
-        without = run_education_projection(custom, sample_accounts, continue_contributions_during_college=False)
-        withh   = run_education_projection(custom, sample_accounts, continue_contributions_during_college=True)
-        abby_without = next(g for g in without["goals"] if g["child"] == "Abby")
-        abby_with    = next(g for g in withh["goals"] if g["child"] == "Abby")
+        without = run_education_projection(custom, sample_accounts, continue_contributions_during_college=False, kids=kids_from_inputs(custom))
+        withh   = run_education_projection(custom, sample_accounts, continue_contributions_during_college=True, kids=kids_from_inputs(custom))
+        abby_without = next(g for g in without["goals"] if g["child"] == "kid_1")
+        abby_with    = next(g for g in withh["goals"] if g["child"] == "kid_1")
         assert abby_with["yearly_chart"][-1]["balance"] >= abby_without["yearly_chart"][-1]["balance"]
 
     def test_contributions_stop_at_parent_retirement_even_before_college(self, sample_inputs, sample_accounts):
@@ -1407,16 +1422,16 @@ class TestRunEducationProjection:
         retirement-age assumption should show zero years of further
         contributions, regardless of how far off college still is."""
         custom = {**sample_inputs, "jason_age": PARENT_RETIREMENT_AGE_ASSUMPTION, "kid1_age": 5}
-        result = run_education_projection(custom, sample_accounts)
-        abby = next(g for g in result["goals"] if g["child"] == "Abby")
+        result = run_education_projection(custom, sample_accounts, kids=kids_from_inputs(custom))
+        abby = next(g for g in result["goals"] if g["child"] == "kid_1")
         assert abby["contributions_stop_in_years"] == 0
 
     def test_retirement_cutoff_binds_before_college_window_when_sooner(self, sample_inputs, sample_accounts):
         # Parent is 5 years from the retirement-age assumption; kid is 10
         # years from college — retirement should be the binding constraint.
         custom = {**sample_inputs, "jason_age": PARENT_RETIREMENT_AGE_ASSUMPTION - 5, "kid1_age": 8}
-        result = run_education_projection(custom, sample_accounts)
-        abby = next(g for g in result["goals"] if g["child"] == "Abby")
+        result = run_education_projection(custom, sample_accounts, kids=kids_from_inputs(custom))
+        abby = next(g for g in result["goals"] if g["child"] == "kid_1")
         assert abby["contributions_stop_in_years"] == 5
         assert abby["contributions_stop_in_years"] < abby["years_to_college"]
 
@@ -1434,13 +1449,13 @@ class TestRunEducationProjection:
         # so the account doesn't fully deplete in either case — otherwise
         # both scenarios floor at $0 and there's nothing to compare.
         accounts = sample_accounts + [
-            {"id": 99, "name": "Abby 529", "account_type": "529", "owner": "abby", "balance": 300000, "institution": "", "notes": ""},
+            {"id": 99, "name": "Abby 529", "account_type": "529", "owner": "kid_1", "balance": 300000, "institution": "", "notes": ""},
         ]
         custom = {**sample_inputs, "jason_age": 40, "kid1_age": 12, "unl_annual_cost": 15000}
-        without = run_education_projection(custom, accounts, continue_contributions_during_college=False)
-        withh   = run_education_projection(custom, accounts, continue_contributions_during_college=True)
-        abby_without = next(g for g in without["goals"] if g["child"] == "Abby")
-        abby_with    = next(g for g in withh["goals"] if g["child"] == "Abby")
+        without = run_education_projection(custom, accounts, continue_contributions_during_college=False, kids=kids_from_inputs(custom))
+        withh   = run_education_projection(custom, accounts, continue_contributions_during_college=True, kids=kids_from_inputs(custom))
+        abby_without = next(g for g in without["goals"] if g["child"] == "kid_1")
+        abby_with    = next(g for g in withh["goals"] if g["child"] == "kid_1")
         assert abby_with["funding_percent"] == abby_without["funding_percent"]
         assert abby_with["balance_after_college"] > abby_without["balance_after_college"]
 
@@ -1450,8 +1465,8 @@ class TestRunEducationProjection:
         from the year-by-year chart simulation — the two only agreed by
         coincidence. This confirms they're now one calculation."""
         custom = {**sample_inputs, "jason_age": PARENT_RETIREMENT_AGE_ASSUMPTION - 3, "kid1_age": 10}
-        result = run_education_projection(custom, sample_accounts)
-        abby = next(g for g in result["goals"] if g["child"] == "Abby")
+        result = run_education_projection(custom, sample_accounts, kids=kids_from_inputs(custom))
+        abby = next(g for g in result["goals"] if g["child"] == "kid_1")
         # The last "saving"-phase chart entry's balance is what college
         # starts with, exactly matching projected_529_at_college.
         saving_entries = [y for y in abby["yearly_chart"] if y["phase"] == "saving"]
@@ -1467,8 +1482,8 @@ class TestRunEducationProjection:
         earn returns all through the 4 college years, already ends with
         money left over. The recommendation must only ever fire when the
         account genuinely would run out."""
-        never_short = next(g for g in run_education_projection(sample_inputs, sample_accounts)["goals"]
-                            if g["child"] == "Abby")
+        never_short = next(g for g in run_education_projection(sample_inputs, sample_accounts, kids=kids_from_inputs(sample_inputs))["goals"]
+                            if g["child"] == "kid_1")
         if not never_short["depleted_during_college"]:
             assert never_short["funding_gap"] == 0
             assert never_short["monthly_savings_to_close_gap"] == 0
@@ -1478,11 +1493,11 @@ class TestRunEducationProjection:
         # ongoing contribution, expensive college — should both report a
         # gap AND actually deplete, and the two must agree with each other.
         short_accounts = sample_accounts + [
-            {"id": 98, "name": "Abby 529", "account_type": "529", "owner": "abby", "balance": 500, "institution": "", "notes": ""},
+            {"id": 98, "name": "Abby 529", "account_type": "529", "owner": "kid_1", "balance": 500, "institution": "", "notes": ""},
         ]
         short_inputs = {**sample_inputs, "kid1_age": 16, "abby_529_monthly": 10, "unl_annual_cost": 30000}
-        result = run_education_projection(short_inputs, short_accounts)
-        abby = next(g for g in result["goals"] if g["child"] == "Abby")
+        result = run_education_projection(short_inputs, short_accounts, kids=kids_from_inputs(short_inputs))
+        abby = next(g for g in result["goals"] if g["child"] == "kid_1")
         assert abby["depleted_during_college"] is True
         assert abby["funding_gap"] > 0
         assert abby["monthly_savings_to_close_gap"] > 0
@@ -1509,10 +1524,10 @@ class TestEducationAndKidsProjectionsAgreeOn529AtCollege:
         exact reported case: 1 year of contributions left before the parent's
         assumed retirement (60), not the full 8 years to college."""
         inputs = {**sample_inputs, "jason_age": 59, "kid1_age": 10, "abby_529_monthly": 100}
-        edu = run_education_projection(inputs, sample_accounts)
-        kid = run_kids_projection(sample_accounts, inputs)
-        edu_abby = next(g for g in edu["goals"] if g["child"] == "Abby")
-        kid_abby = next(k for k in kid["kids"] if k["child"] == "Abby")
+        edu = run_education_projection(inputs, sample_accounts, kids=kids_from_inputs(inputs))
+        kid = run_kids_projection(sample_accounts, inputs, kids=kids_from_inputs(inputs))
+        edu_abby = next(g for g in edu["goals"] if g["child"] == "kid_1")
+        kid_abby = next(k for k in kid["kids"] if k["child"] == "kid_1")
         assert edu_abby["projected_529_at_college"] == kid_abby["529"]["at_18"]
         # Sanity: the cutoff actually bound (contributions stop well before
         # the 8 years to college), otherwise this test wouldn't be
@@ -1525,10 +1540,10 @@ class TestEducationAndKidsProjectionsAgreeOn529AtCollege:
         retirement) is the binding constraint for both functions, and they
         should still agree."""
         inputs = {**sample_inputs, "jason_age": 40, "kid1_age": 10, "abby_529_monthly": 100}
-        edu = run_education_projection(inputs, sample_accounts)
-        kid = run_kids_projection(sample_accounts, inputs)
-        edu_abby = next(g for g in edu["goals"] if g["child"] == "Abby")
-        kid_abby = next(k for k in kid["kids"] if k["child"] == "Abby")
+        edu = run_education_projection(inputs, sample_accounts, kids=kids_from_inputs(inputs))
+        kid = run_kids_projection(sample_accounts, inputs, kids=kids_from_inputs(inputs))
+        edu_abby = next(g for g in edu["goals"] if g["child"] == "kid_1")
+        kid_abby = next(k for k in kid["kids"] if k["child"] == "kid_1")
         assert edu_abby["contributions_stop_in_years"] == edu_abby["years_to_college"]
         assert edu_abby["projected_529_at_college"] == kid_abby["529"]["at_18"]
 
@@ -1544,10 +1559,10 @@ class TestSharedSavingPhaseHelper:
 
     def test_matches_education_projection_headline_number(self, sample_inputs, sample_accounts):
         inputs = {**sample_inputs, "jason_age": 45, "kid1_age": 8, "abby_529_monthly": 300}
-        edu = run_education_projection(inputs, sample_accounts)
-        edu_abby = next(g for g in edu["goals"] if g["child"] == "Abby")
+        edu = run_education_projection(inputs, sample_accounts, kids=kids_from_inputs(inputs))
+        edu_abby = next(g for g in edu["goals"] if g["child"] == "kid_1")
         balance_529 = sum(a["balance"] for a in sample_accounts
-                           if a["account_type"] == "529" and a["owner"] == "abby")
+                           if a["account_type"] == "529" and a["owner"] == "kid_1")
         years_to_college = 18 - 8
         years_until_parent_retires = max(0, PARENT_RETIREMENT_AGE_ASSUMPTION - 45)
         balance, contribution_years = _project_529_saving_phase(
@@ -1557,10 +1572,10 @@ class TestSharedSavingPhaseHelper:
 
     def test_matches_kids_projection_headline_number(self, sample_inputs, sample_accounts):
         inputs = {**sample_inputs, "jason_age": 45, "kid1_age": 8, "abby_529_monthly": 300}
-        kid = run_kids_projection(sample_accounts, inputs)
-        kid_abby = next(k for k in kid["kids"] if k["child"] == "Abby")
+        kid = run_kids_projection(sample_accounts, inputs, kids=kids_from_inputs(inputs))
+        kid_abby = next(k for k in kid["kids"] if k["child"] == "kid_1")
         balance_529 = sum(a["balance"] for a in sample_accounts
-                           if a["account_type"] == "529" and a["owner"] == "abby")
+                           if a["account_type"] == "529" and a["owner"] == "kid_1")
         years_to_college = 18 - 8
         years_until_parent_retires = max(0, PARENT_RETIREMENT_AGE_ASSUMPTION - 45)
         balance, _ = _project_529_saving_phase(balance_529, 300, years_to_college, years_until_parent_retires)
@@ -1612,8 +1627,8 @@ class TestSharedCollegeDrawdownHelper:
 
     def test_matches_education_projection_headline_number(self, sample_inputs, sample_accounts):
         inputs = {**sample_inputs, "jason_age": 45, "kid1_age": 8, "abby_529_monthly": 300, "unl_annual_cost": 25000}
-        edu = run_education_projection(inputs, sample_accounts)
-        edu_abby = next(g for g in edu["goals"] if g["child"] == "Abby")
+        edu = run_education_projection(inputs, sample_accounts, kids=kids_from_inputs(inputs))
+        edu_abby = next(g for g in edu["goals"] if g["child"] == "kid_1")
         yearly, worst_deficit, worst_deficit_years_out = _project_college_drawdown(
             edu_abby["projected_529_at_college"], 300, 0.07, 25000,
             edu_abby["years_to_college"], edu_abby["contributions_stop_in_years"], track_unclamped=True)
@@ -1623,8 +1638,8 @@ class TestSharedCollegeDrawdownHelper:
 
     def test_matches_kids_projection_headline_number(self, sample_inputs, sample_accounts):
         inputs = {**sample_inputs, "jason_age": 45, "kid1_age": 8, "abby_529_monthly": 300, "unl_annual_cost": 25000}
-        kid = run_kids_projection(sample_accounts, inputs)
-        kid_abby = next(k for k in kid["kids"] if k["child"] == "Abby")
+        kid = run_kids_projection(sample_accounts, inputs, kids=kids_from_inputs(inputs))
+        kid_abby = next(k for k in kid["kids"] if k["child"] == "kid_1")
         years_to_18 = 18 - 8
         proj_529_at_18 = kid_abby["529"]["at_18"]
         yearly, _, _ = _project_college_drawdown(proj_529_at_18, 300, 0.07, 25000, years_to_18, years_to_18)
@@ -1694,15 +1709,15 @@ class TestSharedCollegeDrawdownHelper:
 
 class TestRunKidsProjection:
     def test_returns_two_kids(self, sample_inputs, sample_accounts):
-        result = run_kids_projection(sample_accounts, sample_inputs)
+        result = run_kids_projection(sample_accounts, sample_inputs, kids=kids_from_inputs(sample_inputs))
         assert len(result["kids"]) == 2
 
     def test_529_balance_at_18_pulled_from_real_account_balance(self, sample_inputs, sample_accounts):
         accounts = sample_accounts + [
-            {"id": 97, "name": "Abby 529", "account_type": "529", "owner": "abby", "balance": 40000, "institution": "", "notes": ""},
+            {"id": 97, "name": "Abby 529", "account_type": "529", "owner": "kid_1", "balance": 40000, "institution": "", "notes": ""},
         ]
-        result = run_kids_projection(accounts, sample_inputs)
-        abby = next(k for k in result["kids"] if k["child"] == "Abby")
+        result = run_kids_projection(accounts, sample_inputs, kids=kids_from_inputs(sample_inputs))
+        abby = next(k for k in result["kids"] if k["child"] == "kid_1")
         assert abby["529"]["current"] == 40000
         # With a real starting balance, projected balance at 18 must be
         # well above the raw contributions alone — confirms the account
@@ -1715,10 +1730,10 @@ class TestRunKidsProjection:
         or was spent at 18 (nothing in this model actually spends them).
         Reported as confusing/looks-like-a-bug on the Kids tab."""
         accounts = sample_accounts + [
-            {"id": 95, "name": "Abby Savings Bond", "account_type": "other", "owner": "abby", "balance": 2000, "institution": "", "notes": ""},
+            {"id": 95, "name": "Abby Savings Bond", "account_type": "other", "owner": "kid_1", "balance": 2000, "institution": "", "notes": ""},
         ]
-        result = run_kids_projection(accounts, sample_inputs)
-        abby = next(k for k in result["kids"] if k["child"] == "Abby")
+        result = run_kids_projection(accounts, sample_inputs, kids=kids_from_inputs(sample_inputs))
+        abby = next(k for k in result["kids"] if k["child"] == "kid_1")
         assert abby["bonds"]["current"] == 2000
         assert abby["bonds"]["at_60"] > abby["bonds"]["at_18"] > abby["bonds"]["current"]
 
@@ -1730,20 +1745,20 @@ class TestRunKidsProjection:
         growth is capped at BOND_MAX_GROWTH_YEARS from today as a
         reasonable stand-in."""
         accounts = sample_accounts + [
-            {"id": 94, "name": "Cooper Savings Bond", "account_type": "other", "owner": "cooper", "balance": 1000, "institution": "", "notes": ""},
+            {"id": 94, "name": "Cooper Savings Bond", "account_type": "other", "owner": "kid_2", "balance": 1000, "institution": "", "notes": ""},
         ]
         # Cooper is young enough (per sample_inputs' kid2_age) that 60 minus
         # his current age is well past BOND_MAX_GROWTH_YEARS.
         young_inputs = {**sample_inputs, "kid2_age": 5}
-        result = run_kids_projection(accounts, young_inputs)
-        cooper = next(k for k in result["kids"] if k["child"] == "Cooper")
+        result = run_kids_projection(accounts, young_inputs, kids=kids_from_inputs(young_inputs))
+        cooper = next(k for k in result["kids"] if k["child"] == "kid_2")
         assert cooper["current_age"] == 5
         assert 60 - cooper["current_age"] > BOND_MAX_GROWTH_YEARS
         expected_at_60 = round(_fv(1000, 0.04, BOND_MAX_GROWTH_YEARS))
         assert cooper["bonds"]["at_60"] == expected_at_60
 
     def test_no_bonds_means_zero_at_every_horizon(self, sample_inputs, sample_accounts):
-        result = run_kids_projection(sample_accounts, sample_inputs)
+        result = run_kids_projection(sample_accounts, sample_inputs, kids=kids_from_inputs(sample_inputs))
         for k in result["kids"]:
             assert k["bonds"]["current"] == 0
             assert k["bonds"]["at_18"] == 0
@@ -1755,7 +1770,7 @@ class TestRunKidsProjection:
         18 doesn't mean the balance itself is spent. Now continues
         compounding out to 60, picking up from the already-computed
         age-24 value."""
-        result = run_kids_projection(sample_accounts, sample_inputs)
+        result = run_kids_projection(sample_accounts, sample_inputs, kids=kids_from_inputs(sample_inputs))
         for k in result["kids"]:
             if k["custodial"]["current"] > 0 or k["custodial"]["monthly_contribution"] > 0:
                 assert k["custodial"]["at_60"] > k["custodial"]["at_24"] > 0
@@ -1768,9 +1783,9 @@ class TestRunKidsProjection:
         then has decades left to compound. Confirms this isn't a
         per-kid-inconsistent-calculation bug — it's the same formula
         producing different, correct outputs for different ages/balances."""
-        result = run_kids_projection(sample_accounts, sample_inputs)
-        abby = next(k for k in result["kids"] if k["child"] == "Abby")
-        cooper = next(k for k in result["kids"] if k["child"] == "Cooper")
+        result = run_kids_projection(sample_accounts, sample_inputs, kids=kids_from_inputs(sample_inputs))
+        abby = next(k for k in result["kids"] if k["child"] == "kid_1")
+        cooper = next(k for k in result["kids"] if k["child"] == "kid_2")
         assert abby["current_age"] != cooper["current_age"]
         younger, older = (cooper, abby) if cooper["current_age"] < abby["current_age"] else (abby, cooper)
         # The younger kid has strictly more years of $/mo Roth contribution
@@ -1787,12 +1802,12 @@ class TestRunKidsProjection:
         both the leftover 529 balance at 22 and the Roth 529-rollover
         (both of which are displayed on the Kids tab)."""
         accounts = sample_accounts + [
-            {"id": 96, "name": "Abby 529", "account_type": "529", "owner": "abby", "balance": 200000, "institution": "", "notes": ""},
+            {"id": 96, "name": "Abby 529", "account_type": "529", "owner": "kid_1", "balance": 200000, "institution": "", "notes": ""},
         ]
         zero_cost = {**sample_inputs, "unl_annual_cost": 0}
         real_cost = {**sample_inputs, "unl_annual_cost": 25000}
-        abby_zero = next(k for k in run_kids_projection(accounts, zero_cost)["kids"] if k["child"] == "Abby")
-        abby_real = next(k for k in run_kids_projection(accounts, real_cost)["kids"] if k["child"] == "Abby")
+        abby_zero = next(k for k in run_kids_projection(accounts, zero_cost, kids=kids_from_inputs(zero_cost))["kids"] if k["child"] == "kid_1")
+        abby_real = next(k for k in run_kids_projection(accounts, real_cost, kids=kids_from_inputs(real_cost))["kids"] if k["child"] == "kid_1")
         # A real, positive college cost must draw the 529 down further than
         # a $0 cost would — if the bug were still present, both would be
         # identical (the config value would be ignored either way).
@@ -1809,11 +1824,11 @@ class TestRunKidsProjection:
         inputs = {**sample_inputs, "kid1_age": 18, "kid2_age": 8,
                   "unl_annual_cost": 0, "abby_529_monthly": 0, "kids_roth_monthly": 0}
         accounts = sample_accounts + [
-            {"id": 90, "name": "Abby 529", "account_type": "529", "owner": "abby",
+            {"id": 90, "name": "Abby 529", "account_type": "529", "owner": "kid_1",
              "balance": 10000, "institution": "", "notes": ""},
         ]
-        result = run_kids_projection(accounts, inputs)
-        abby = next(k for k in result["kids"] if k["child"] == "Abby")
+        result = run_kids_projection(accounts, inputs, kids=kids_from_inputs(inputs))
+        abby = next(k for k in result["kids"] if k["child"] == "kid_1")
         expected_at_22 = round(10000 * (1.07 ** 4))
         assert abby["529"]["at_18"] == 10000
         assert abby["roth"]["529_rollover"] == expected_at_22  # under the $35k cap, so fully rolled
@@ -1842,8 +1857,8 @@ class TestRunKidsProjection:
         separate (and much smaller) modeling-granularity difference, not
         the contributions-continue-past-18 bug being fixed here."""
         inputs = {**sample_inputs, "kid1_age": 10, "kids_custodial_monthly": 100}
-        result = run_kids_projection(sample_accounts, inputs)
-        abby = next(k for k in result["kids"] if k["child"] == "Abby")
+        result = run_kids_projection(sample_accounts, inputs, kids=kids_from_inputs(inputs))
+        abby = next(k for k in result["kids"] if k["child"] == "kid_1")
         timeline_at_24 = next(t for t in abby["timeline"] if t["age"] == 24)["custodial"]
         headline_at_24 = abby["custodial"]["at_24"]
         assert headline_at_24 > timeline_at_24 > 0
@@ -1860,11 +1875,11 @@ class TestRunKidsProjection:
         inputs = {**sample_inputs, "kid1_age": 18, "kid2_age": 8,
                   "unl_annual_cost": 0, "abby_529_monthly": 0, "kids_roth_monthly": 0}
         accounts = sample_accounts + [
-            {"id": 91, "name": "Abby Roth IRA", "account_type": "roth_ira", "owner": "abby",
+            {"id": 91, "name": "Abby Roth IRA", "account_type": "roth_ira", "owner": "kid_1",
              "balance": 10000, "institution": "", "notes": ""},
         ]
-        result = run_kids_projection(accounts, inputs)
-        abby = next(k for k in result["kids"] if k["child"] == "Abby")
+        result = run_kids_projection(accounts, inputs, kids=kids_from_inputs(inputs))
+        abby = next(k for k in result["kids"] if k["child"] == "kid_1")
         chart_at_60 = next(c for c in abby["roth_to_60"] if c["age"] == 60)
         assert chart_at_60["balance"] == abby["roth"]["at_60"]
         # And the chart's own age-18 entry must be the raw starting balance,
@@ -1882,21 +1897,21 @@ class TestSurplus529ContributionsInEducationAndKidsProjections:
     other kid."""
 
     def test_default_no_surplus_is_unchanged(self, sample_inputs, sample_accounts):
-        no_kwarg      = run_education_projection(sample_inputs, sample_accounts)
-        explicit_none = run_education_projection(sample_inputs, sample_accounts, surplus_529_monthly=None)
-        explicit_empty = run_education_projection(sample_inputs, sample_accounts, surplus_529_monthly={})
-        a = next(g for g in no_kwarg["goals"] if g["child"] == "Abby")
-        b = next(g for g in explicit_none["goals"] if g["child"] == "Abby")
-        c = next(g for g in explicit_empty["goals"] if g["child"] == "Abby")
+        no_kwarg      = run_education_projection(sample_inputs, sample_accounts, kids=kids_from_inputs(sample_inputs))
+        explicit_none = run_education_projection(sample_inputs, sample_accounts, surplus_529_monthly=None, kids=kids_from_inputs(sample_inputs))
+        explicit_empty = run_education_projection(sample_inputs, sample_accounts, surplus_529_monthly={}, kids=kids_from_inputs(sample_inputs))
+        a = next(g for g in no_kwarg["goals"] if g["child"] == "kid_1")
+        b = next(g for g in explicit_none["goals"] if g["child"] == "kid_1")
+        c = next(g for g in explicit_empty["goals"] if g["child"] == "kid_1")
         assert a["projected_529_at_college"] == b["projected_529_at_college"] == c["projected_529_at_college"]
 
     def test_education_projection_surplus_adds_on_top_of_base_rate_for_that_kid_only(self, sample_inputs, sample_accounts):
-        baseline   = run_education_projection(sample_inputs, sample_accounts)
-        with_surplus = run_education_projection(sample_inputs, sample_accounts, surplus_529_monthly={"abby": 200})
-        b_abby = next(g for g in baseline["goals"] if g["child"] == "Abby")
-        w_abby = next(g for g in with_surplus["goals"] if g["child"] == "Abby")
-        b_cooper = next(g for g in baseline["goals"] if g["child"] == "Cooper")
-        w_cooper = next(g for g in with_surplus["goals"] if g["child"] == "Cooper")
+        baseline   = run_education_projection(sample_inputs, sample_accounts, kids=kids_from_inputs(sample_inputs))
+        with_surplus = run_education_projection(sample_inputs, sample_accounts, surplus_529_monthly={"kid_1": 200}, kids=kids_from_inputs(sample_inputs))
+        b_abby = next(g for g in baseline["goals"] if g["child"] == "kid_1")
+        w_abby = next(g for g in with_surplus["goals"] if g["child"] == "kid_1")
+        b_cooper = next(g for g in baseline["goals"] if g["child"] == "kid_2")
+        w_cooper = next(g for g in with_surplus["goals"] if g["child"] == "kid_2")
         # monthly_contribution reflects base ($100 in the fixture) + $200 surplus.
         assert w_abby["monthly_contribution"] == b_abby["monthly_contribution"] + 200
         assert w_abby["projected_529_at_college"] > b_abby["projected_529_at_college"]
@@ -1905,22 +1920,22 @@ class TestSurplus529ContributionsInEducationAndKidsProjections:
         assert w_cooper["projected_529_at_college"] == b_cooper["projected_529_at_college"]
 
     def test_education_projection_surplus_is_per_kid_independent(self, sample_inputs, sample_accounts):
-        baseline = run_education_projection(sample_inputs, sample_accounts)
-        both = run_education_projection(sample_inputs, sample_accounts, surplus_529_monthly={"abby": 150, "cooper": 75})
-        b_abby, b_cooper = (next(g for g in baseline["goals"] if g["child"] == c) for c in ("Abby", "Cooper"))
-        w_abby, w_cooper = (next(g for g in both["goals"] if g["child"] == c) for c in ("Abby", "Cooper"))
+        baseline = run_education_projection(sample_inputs, sample_accounts, kids=kids_from_inputs(sample_inputs))
+        both = run_education_projection(sample_inputs, sample_accounts, surplus_529_monthly={"kid_1": 150, "kid_2": 75}, kids=kids_from_inputs(sample_inputs))
+        b_abby, b_cooper = (next(g for g in baseline["goals"] if g["child"] == c) for c in ("kid_1", "kid_2"))
+        w_abby, w_cooper = (next(g for g in both["goals"] if g["child"] == c) for c in ("kid_1", "kid_2"))
         assert w_abby["monthly_contribution"] == b_abby["monthly_contribution"] + 150
         assert w_cooper["monthly_contribution"] == b_cooper["monthly_contribution"] + 75
         assert w_abby["projected_529_at_college"] > b_abby["projected_529_at_college"]
         assert w_cooper["projected_529_at_college"] > b_cooper["projected_529_at_college"]
 
     def test_kids_projection_surplus_raises_529_balance_for_that_kid_only(self, sample_inputs, sample_accounts):
-        baseline = run_kids_projection(sample_accounts, sample_inputs)
-        with_surplus = run_kids_projection(sample_accounts, sample_inputs, surplus_529_monthly={"cooper": 400})
-        b_abby = next(k for k in baseline["kids"] if k["child"] == "Abby")
-        w_abby = next(k for k in with_surplus["kids"] if k["child"] == "Abby")
-        b_cooper = next(k for k in baseline["kids"] if k["child"] == "Cooper")
-        w_cooper = next(k for k in with_surplus["kids"] if k["child"] == "Cooper")
+        baseline = run_kids_projection(sample_accounts, sample_inputs, kids=kids_from_inputs(sample_inputs))
+        with_surplus = run_kids_projection(sample_accounts, sample_inputs, surplus_529_monthly={"kid_2": 400}, kids=kids_from_inputs(sample_inputs))
+        b_abby = next(k for k in baseline["kids"] if k["child"] == "kid_1")
+        w_abby = next(k for k in with_surplus["kids"] if k["child"] == "kid_1")
+        b_cooper = next(k for k in baseline["kids"] if k["child"] == "kid_2")
+        w_cooper = next(k for k in with_surplus["kids"] if k["child"] == "kid_2")
         # Abby unaffected by Cooper's surplus goal.
         assert w_abby["529"]["at_18"] == b_abby["529"]["at_18"]
         assert w_abby["roth"]["529_rollover"] == b_abby["roth"]["529_rollover"]
@@ -1939,12 +1954,12 @@ class TestSurplus529ContributionsInEducationAndKidsProjections:
         baseline case, so the increase is actually observable."""
         custom = {**sample_inputs, "kid1_age": 17, "unl_annual_cost": 3000, "abby_529_monthly": 50}
         accounts = sample_accounts + [
-            {"id": 93, "name": "Abby 529", "account_type": "529", "owner": "abby", "balance": 20000, "institution": "", "notes": ""},
+            {"id": 93, "name": "Abby 529", "account_type": "529", "owner": "kid_1", "balance": 20000, "institution": "", "notes": ""},
         ]
-        baseline = run_kids_projection(accounts, custom)
-        with_surplus = run_kids_projection(accounts, custom, surplus_529_monthly={"abby": 500})
-        b_abby = next(k for k in baseline["kids"] if k["child"] == "Abby")
-        w_abby = next(k for k in with_surplus["kids"] if k["child"] == "Abby")
+        baseline = run_kids_projection(accounts, custom, kids=kids_from_inputs(custom))
+        with_surplus = run_kids_projection(accounts, custom, surplus_529_monthly={"kid_1": 500}, kids=kids_from_inputs(custom))
+        b_abby = next(k for k in baseline["kids"] if k["child"] == "kid_1")
+        w_abby = next(k for k in with_surplus["kids"] if k["child"] == "kid_1")
         assert b_abby["roth"]["529_rollover"] < 35000  # not already capped, so the increase is visible
         assert w_abby["roth"]["529_rollover"] > b_abby["roth"]["529_rollover"]
         assert w_abby["roth"]["529_rollover"] <= 35000
@@ -1955,16 +1970,16 @@ class TestSurplus529ContributionsInEducationAndKidsProjections:
     def test_roth_rollover_stays_capped_at_35000_even_with_a_huge_surplus_contribution(self, sample_inputs, sample_accounts):
         custom = {**sample_inputs, "kid1_age": 17, "unl_annual_cost": 1000}
         accounts = sample_accounts + [
-            {"id": 92, "name": "Abby 529", "account_type": "529", "owner": "abby", "balance": 100000, "institution": "", "notes": ""},
+            {"id": 92, "name": "Abby 529", "account_type": "529", "owner": "kid_1", "balance": 100000, "institution": "", "notes": ""},
         ]
-        result = run_kids_projection(accounts, custom, surplus_529_monthly={"abby": 5000})
-        abby = next(k for k in result["kids"] if k["child"] == "Abby")
+        result = run_kids_projection(accounts, custom, surplus_529_monthly={"kid_1": 5000}, kids=kids_from_inputs(custom))
+        abby = next(k for k in result["kids"] if k["child"] == "kid_1")
         assert abby["roth"]["529_rollover"] == 35000
 
 
 class TestRunInsuranceAnalysis:
     def test_returns_jason_and_justin_sections(self, sample_inputs, sample_accounts):
-        result = run_insurance_analysis(sample_inputs, sample_accounts)
+        result = run_insurance_analysis(sample_inputs, sample_accounts, kids=kids_from_inputs(sample_inputs))
         assert "jason" in result and "justin" in result
 
     def test_property_matching_uses_configured_keys_not_hardcoded(self, sample_inputs):
@@ -1975,7 +1990,7 @@ class TestRunInsuranceAnalysis:
             {"id": 2, "name": "My Rental Unit",  "account_type": "real_estate", "owner": "joint", "balance": 250000, "institution": "", "notes": ""},
         ]
         configured = {**sample_inputs, "primary_residence_key": "Primary", "rental_property_key": "Rental"}
-        result = run_insurance_analysis(configured, accounts)
+        result = run_insurance_analysis(configured, accounts, kids=kids_from_inputs(configured))
         assert result["property"]["primary_home_value"] == 400000
         assert result["property"]["rental_value"] == 250000
 
@@ -1985,25 +2000,25 @@ class TestRunInsuranceAnalysis:
         accounts = [
             {"id": 1, "name": "Some House", "account_type": "real_estate", "owner": "joint", "balance": 400000, "institution": "", "notes": ""},
         ]
-        result = run_insurance_analysis(sample_inputs, accounts)  # keys are ""
+        result = run_insurance_analysis(sample_inputs, accounts, kids=kids_from_inputs(sample_inputs))  # keys are ""
         assert result["property"]["primary_home_value"] == 0
 
     def test_umbrella_recommended_rounds_up_to_nearest_million(self, sample_inputs, sample_accounts):
-        result = run_insurance_analysis(sample_inputs, sample_accounts)
+        result = run_insurance_analysis(sample_inputs, sample_accounts, kids=kids_from_inputs(sample_inputs))
         assert result["property"]["recommended_umbrella"] % 1_000_000 == 0
         assert result["property"]["recommended_umbrella"] >= 1_000_000
 
     def test_umbrella_adequate_when_coverage_meets_recommendation(self, sample_inputs, sample_accounts):
-        result = run_insurance_analysis(sample_inputs, sample_accounts)
+        result = run_insurance_analysis(sample_inputs, sample_accounts, kids=kids_from_inputs(sample_inputs))
         recommended = result["property"]["recommended_umbrella"]
         inputs = {**sample_inputs, "umbrella": recommended}
-        result2 = run_insurance_analysis(inputs, sample_accounts)
+        result2 = run_insurance_analysis(inputs, sample_accounts, kids=kids_from_inputs(inputs))
         assert result2["property"]["umbrella_adequate"] is True
         assert result2["property"]["umbrella_gap"] == 0
 
     def test_umbrella_gap_when_underinsured(self, sample_inputs, sample_accounts):
         inputs = {**sample_inputs, "umbrella": 0}
-        result = run_insurance_analysis(inputs, sample_accounts)
+        result = run_insurance_analysis(inputs, sample_accounts, kids=kids_from_inputs(inputs))
         assert result["property"]["umbrella_adequate"] is False
         assert result["property"]["umbrella_gap"] == result["property"]["recommended_umbrella"]
 
@@ -2015,8 +2030,10 @@ class TestRunInsuranceAnalysis:
         both correctly derive years_to_college from those same ages) as the
         kids got older. A kid much closer to 18 should show a smaller,
         less-inflated college cost than one who's much younger, all else equal."""
-        near_college  = run_insurance_analysis({**sample_inputs, "kid1_age": 17, "kid2_age": 17}, sample_accounts)
-        far_from_college = run_insurance_analysis({**sample_inputs, "kid1_age": 5, "kid2_age": 5}, sample_accounts)
+        near_inputs = {**sample_inputs, "kid1_age": 17, "kid2_age": 17}
+        far_inputs  = {**sample_inputs, "kid1_age": 5, "kid2_age": 5}
+        near_college  = run_insurance_analysis(near_inputs, sample_accounts, kids=kids_from_inputs(near_inputs))
+        far_from_college = run_insurance_analysis(far_inputs, sample_accounts, kids=kids_from_inputs(far_inputs))
         assert near_college["jason"]["college_funding"] < far_from_college["jason"]["college_funding"]
 
     def test_college_funding_gap_matches_education_projection_years_to_college(self, sample_inputs, sample_accounts):
@@ -2025,5 +2042,5 @@ class TestRunInsuranceAnalysis:
         independent assumption."""
         from projection_engine import run_education_projection
         inputs = {**sample_inputs, "kid1_age": 17, "kid2_age": 17, "unl_annual_cost": 20000}
-        edu = run_education_projection(inputs, sample_accounts)
+        edu = run_education_projection(inputs, sample_accounts, kids=kids_from_inputs(inputs))
         assert all(goal["years_to_college"] == 1 for goal in edu["goals"])

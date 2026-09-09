@@ -203,7 +203,7 @@ class TestNetWorth:
 
     def test_kids_assets_excluded_from_main_categories(self, client):
         client.post("/api/accounts", json={
-            "name": "Kid Roth", "account_type": "roth_ira", "owner": "abby",
+            "name": "Kid Roth", "account_type": "roth_ira", "owner": "kid_1",
             "institution": "", "balance": 5000, "notes": None,
         })
         r = client.get("/api/net-worth").json()
@@ -875,29 +875,30 @@ class TestSurplusAllocationsAffectRealProjectionAndSimulation:
 
 
 class TestPerKidEducationSurplusGoalsFeedEducationAndKidsProjections:
-    """The two per-kid education-funding surplus_allocations goals
-    ("Education funding - Abby" / "Education funding - Cooper") must move
-    /api/projections/education and /api/projections/kids for that specific
-    kid only, while staying excluded from /api/projections/retirement (and
-    Monte Carlo) — regression coverage for _get_relevant_surplus_allocations
-    continuing to exclude these two new goals exactly as the old single
-    "Education funding" goal was excluded."""
+    """The per-kid education-funding surplus_allocations goals (one per
+    kids-table row, "Education funding - kid_<id>" — originally two fixed
+    keys "Education funding - Abby"/"Cooper" before kids-variable-count)
+    must move /api/projections/education and /api/projections/kids for
+    that specific kid only, while staying excluded from
+    /api/projections/retirement (and Monte Carlo) — regression coverage
+    for _get_relevant_surplus_allocations continuing to exclude these
+    goals exactly as the old single "Education funding" goal was
+    excluded."""
 
     def _seed(self, client, sample_inputs, sample_accounts):
         _seed_planning_inputs(client, sample_inputs)
         _seed_accounts(client, sample_accounts)
+        kid_a = client.post("/api/kids", json={"name": "Kid A", "age": 10, "monthly_529": 100}).json()
+        kid_b = client.post("/api/kids", json={"name": "Kid B", "age": 8, "monthly_529": 100}).json()
+        return kid_a["id"], kid_b["id"]
 
-    def _abby_from_education(self, client):
+    def _from_education(self, client, owner):
         r = client.get("/api/projections/education")
-        return next(g for g in r.json()["goals"] if g["child"] == "Abby")
+        return next(g for g in r.json()["goals"] if g["child"] == owner)
 
-    def _cooper_from_education(self, client):
-        r = client.get("/api/projections/education")
-        return next(g for g in r.json()["goals"] if g["child"] == "Cooper")
-
-    def _abby_from_kids(self, client):
+    def _from_kids(self, client, owner):
         r = client.get("/api/projections/kids")
-        return next(k for k in r.json()["kids"] if k["child"] == "Abby")
+        return next(k for k in r.json()["kids"] if k["child"] == owner)
 
     def _portfolio_at_60(self, client):
         r = client.get("/api/projections/retirement")
@@ -905,43 +906,46 @@ class TestPerKidEducationSurplusGoalsFeedEducationAndKidsProjections:
         return scenario["portfolio_at_retirement"]
 
     def test_abby_goal_raises_abby_education_projection_only(self, client, sample_inputs, sample_accounts):
-        self._seed(client, sample_inputs, sample_accounts)
-        baseline_abby = self._abby_from_education(client)
-        baseline_cooper = self._cooper_from_education(client)
-        client.put("/api/surplus-allocations/Education funding - Abby", json={
-            "goal": "Education funding - Abby", "monthly_amount": 250, "notes": None,
+        id_a, id_b = self._seed(client, sample_inputs, sample_accounts)
+        owner_a, owner_b = f"kid_{id_a}", f"kid_{id_b}"
+        baseline_a = self._from_education(client, owner_a)
+        baseline_b = self._from_education(client, owner_b)
+        client.put(f"/api/surplus-allocations/Education funding - {owner_a}", json={
+            "goal": f"Education funding - {owner_a}", "monthly_amount": 250, "notes": None,
         })
-        with_goal_abby = self._abby_from_education(client)
-        with_goal_cooper = self._cooper_from_education(client)
-        assert with_goal_abby["projected_529_at_college"] > baseline_abby["projected_529_at_college"]
-        assert with_goal_cooper["projected_529_at_college"] == baseline_cooper["projected_529_at_college"]
+        with_goal_a = self._from_education(client, owner_a)
+        with_goal_b = self._from_education(client, owner_b)
+        assert with_goal_a["projected_529_at_college"] > baseline_a["projected_529_at_college"]
+        assert with_goal_b["projected_529_at_college"] == baseline_b["projected_529_at_college"]
 
     def test_cooper_goal_raises_cooper_kids_projection_only(self, client, sample_inputs, sample_accounts):
-        self._seed(client, sample_inputs, sample_accounts)
+        id_a, id_b = self._seed(client, sample_inputs, sample_accounts)
+        owner_a, owner_b = f"kid_{id_a}", f"kid_{id_b}"
         baseline = client.get("/api/projections/kids").json()["kids"]
-        baseline_abby = next(k for k in baseline if k["child"] == "Abby")
-        baseline_cooper = next(k for k in baseline if k["child"] == "Cooper")
-        client.put("/api/surplus-allocations/Education funding - Cooper", json={
-            "goal": "Education funding - Cooper", "monthly_amount": 150, "notes": None,
+        baseline_a = next(k for k in baseline if k["child"] == owner_a)
+        baseline_b = next(k for k in baseline if k["child"] == owner_b)
+        client.put(f"/api/surplus-allocations/Education funding - {owner_b}", json={
+            "goal": f"Education funding - {owner_b}", "monthly_amount": 150, "notes": None,
         })
         after = client.get("/api/projections/kids").json()["kids"]
-        after_abby = next(k for k in after if k["child"] == "Abby")
-        after_cooper = next(k for k in after if k["child"] == "Cooper")
-        assert after_cooper["529"]["at_18"] > baseline_cooper["529"]["at_18"]
-        assert after_abby["529"]["at_18"] == baseline_abby["529"]["at_18"]
+        after_a = next(k for k in after if k["child"] == owner_a)
+        after_b = next(k for k in after if k["child"] == owner_b)
+        assert after_b["529"]["at_18"] > baseline_b["529"]["at_18"]
+        assert after_a["529"]["at_18"] == baseline_a["529"]["at_18"]
 
     def test_education_surplus_goals_excluded_from_retirement_projection(self, client, sample_inputs, sample_accounts):
         """Regression test proving run_retirement_projection's output is
         completely unaffected by these two new goals having nonzero
         amounts — _get_relevant_surplus_allocations' explicit goal IN (...)
         filter must not accidentally pick them up."""
-        self._seed(client, sample_inputs, sample_accounts)
+        id_a, id_b = self._seed(client, sample_inputs, sample_accounts)
+        owner_a, owner_b = f"kid_{id_a}", f"kid_{id_b}"
         baseline = self._portfolio_at_60(client)
-        client.put("/api/surplus-allocations/Education funding - Abby", json={
-            "goal": "Education funding - Abby", "monthly_amount": 1000, "notes": None,
+        client.put(f"/api/surplus-allocations/Education funding - {owner_a}", json={
+            "goal": f"Education funding - {owner_a}", "monthly_amount": 1000, "notes": None,
         })
-        client.put("/api/surplus-allocations/Education funding - Cooper", json={
-            "goal": "Education funding - Cooper", "monthly_amount": 1000, "notes": None,
+        client.put(f"/api/surplus-allocations/Education funding - {owner_b}", json={
+            "goal": f"Education funding - {owner_b}", "monthly_amount": 1000, "notes": None,
         })
         after = self._portfolio_at_60(client)
         assert after == baseline
@@ -950,13 +954,14 @@ class TestPerKidEducationSurplusGoalsFeedEducationAndKidsProjections:
         """GET /api/surplus-allocations (the plain tracking view) must still
         show these goals regardless of them being excluded from the
         retirement-projection wiring."""
-        self._seed(client, sample_inputs, sample_accounts)
-        client.put("/api/surplus-allocations/Education funding - Abby", json={
-            "goal": "Education funding - Abby", "monthly_amount": 250, "notes": None,
+        id_a, id_b = self._seed(client, sample_inputs, sample_accounts)
+        owner_a = f"kid_{id_a}"
+        client.put(f"/api/surplus-allocations/Education funding - {owner_a}", json={
+            "goal": f"Education funding - {owner_a}", "monthly_amount": 250, "notes": None,
         })
         overlay = client.get("/api/surplus-allocations").json()
         goals = {row["goal"] for row in overlay["allocations"]}
-        assert "Education funding - Abby" in goals
+        assert f"Education funding - {owner_a}" in goals
 
 
 class TestDebtRecommendationEndpoints:
