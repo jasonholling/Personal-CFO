@@ -3985,3 +3985,75 @@ floor. Sensitive-data check passed. All prior review-round tests
 Branch: `codex/two-age-survivor-design`, pushed — **not merged to
 `main`** beyond Milestone 1, same standing instruction as sections
 39-41.
+
+## 43. Survivor Scenario — eighth independent review round: death year becomes one integrated calculation (2026-09-08, on `codex/two-age-survivor-design`)
+
+Independent review of commit `889fb5b` confirmed the waterfall fix
+passes its three reproductions plus 72 additional mixed-cash-flow
+cases, but found one P1 remaining in the deceased's final-RMD catch-up
+-- the SAME root cause every round from section 39 onward kept
+resurfacing in a new form: the catch-up modified `death_row`'s balances
+*after* that year's spending, tax, and growth calculations had already
+finished, rather than being part of the year's own single calculation.
+
+Reproduced exactly:
+- Jason 61, Justin 75, Justin's $1,000,000 IRA, $100,000 joint taxable,
+  $50,000 spending, $0 growth, joint survivorship disabled: reported
+  $1,020,935 instead of $1,002,642. The Jason-anchored aggregate RMD at
+  Jason's age 61 is $0, so the normal year funded the full $50,000
+  spending entirely from joint taxable; the RMD catch-up was then
+  bolted on AFTER, never getting the chance to fund spending itself --
+  leaving too much Justin-owned cash and draining joint further than
+  necessary.
+- $100,000 pension exactly funding $100,000 spending, same IRA: the
+  additional RMD should push the marginal-rate estimate from 12% to
+  22%, but the catch-up reused the rate already computed BEFORE its own
+  addition -- $995,122 instead of the correctly-taxed $991,057.
+
+**Fixed by restructuring the death year as one calculation**, per the
+review's own explicit guidance ("incorporate the deceased's required
+distribution before determining taxes, funding spending, allocating
+ownership, and applying growth — avoid adjusting completed balances
+afterward"):
+- `run_owner_split_two_dimensional_projection` gained two optional
+  parameters, `death_jason_age`/`deceased` (every other two-age
+  consumer leaves them at their `None` default, completely unaffected).
+  When set, the FIRST year reaching `death_jason_age` computes the
+  deceased's own individual RMD obligation (their own age, their own
+  STARTING-of-year pretax balance) and folds `rmd = max(rmd, deceased_
+  individual_rmd)` in **before** `taxable_income_est`/`pretax_tax_rate`
+  are derived — so a bigger forced distribution correctly moves the
+  bracket in the SAME calculation that uses it, not a stale one.
+  `simulate_withdrawal_year` then funds that year's spending against
+  this already-correct combined RMD, exactly like any other year.
+- The pretax allocation step forces the deceased's own account to
+  contribute AT LEAST its own individual RMD first (capped at what's
+  actually there), then allocates whatever's left of the total pretax
+  change normally (`WITHDRAWAL_OWNER_ORDER`) across the remaining
+  balances — so the aggregate RMD is satisfied WITHOUT double-counting
+  a separate obligation on top of it.
+- `_run_survivor_scenario_two_age` now computes `phase2_start_age`/
+  `later_retiree` directly from its own already-built `timeline`
+  (identical formulas the walk uses internally) so `death_jason_age`
+  can be determined and passed into the walk from the start, calling
+  it exactly once. The entire ~60-line post-hoc catch-up block
+  (findings 8, fifth-follow-up-1, sixth-follow-up-2) is deleted —
+  `death_row["owner_balances"]` is read as-is.
+
+New test class in `test_two_age_survivor_scenario.py` reproducing both
+cases exactly ($1,002,642 and $991,057). One existing test (Jason-
+deceased catch-up, section 41) had its scenario adjusted: since the
+deceased's own minimum now draws as part of the SAME aggregate RMD
+rather than layered on top, a mixed jason+joint-pretax scenario needed
+`spousal_rollover_election=False` to isolate whether Jason's own
+account was actually touched (the aggregate total alone can't
+distinguish the two allocations when both owners' shares roll into the
+survivor by default).
+
+**Verified:** full backend suite passed, coverage at/above the 95%
+floor. Sensitive-data check passed. All prior review-round tests
+(sections 39-42) still pass against the restructured approach.
+
+Branch: `codex/two-age-survivor-design`, pushed — **not merged to
+`main`** beyond Milestone 1, same standing instruction as sections
+39-42.

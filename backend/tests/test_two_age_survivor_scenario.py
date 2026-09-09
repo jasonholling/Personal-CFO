@@ -436,30 +436,70 @@ class TestDeceasedsFinalYearRmdIsSatisfied:
         but the pooled RMD draws from JOINT's pretax first
         (WITHDRAWAL_OWNER_ORDER), so when Jason is deceased and his own
         pretax is untouched (all the year's RMD came out of a joint
-        IRA instead), his own individual RMD obligation went completely
-        unenforced. Both spouses 75, Jason's OWN $1,000,000 IRA plus a
-        $1,000,000 joint IRA -- the pooled RMD (based on the combined
-        $2,000,000 pretax) is fully absorbed by joint (drawn first),
-        leaving Jason's own account fully untouched by the normal walk;
-        the catch-up must still force Jason's own $1,000,000/24.6 =
-        $40,650.41 obligation out of HIS OWN account."""
+        IRA instead), his own individual RMD obligation could go
+        completely unenforced. Both spouses 75, Jason's OWN $1,000,000
+        IRA plus a $1,000,000 joint IRA. With the eighth-follow-up
+        integration (section 42), Jason's own $1,000,000/24.6 =
+        $40,650.41 is forced from HIS OWN account FIRST, as part of the
+        SAME aggregate $81,300.81 RMD (not layered on top of it) -- the
+        remaining $40,650.40 comes from joint, so joint ends at
+        $959,349.60, not the $918,699.19 it would be if Jason's own
+        account were never touched at all. Declining rollover isolates
+        this (excludes Jason's own now-irrelevant balance from the
+        survivor, leaving only joint's own reduced contribution
+        visible) -- if Jason's own account had gone untouched, joint
+        alone would have absorbed the full $81,300.81."""
         inputs = base_inputs(jason_age=75, justin_age=75, retirement_income_today_dollars=0,
                               retirement_end_age=76)
         accounts = [IRA(1000000, "jason"), IRA(1000000, "joint")]
         r = run_survivor_scenario(inputs, accounts, deceased="jason", death_age=75,
+                                   jason_ret_age=61, justin_ret_age=61,
+                                   spousal_rollover_election=False)
+        assert r["starting_pretax_after_payout"] == pytest.approx(959350, abs=5)
+
+
+class TestDeathYearIsOneIntegratedCalculationNotAPostHocPatch:
+    """Independent review, 2026-09-08, eighth follow-up, P1: every
+    earlier round patched the deceased's own final-RMD catch-up onto
+    death_row's balances AFTER that year's spending, tax, and growth
+    were already finished -- which kept reintroducing new errors
+    (double-withdrawal, untaxed, ungrown). The catch-up must instead be
+    incorporated into the death year's SINGLE calculation from the
+    start: before the tax rate is estimated, before spending is funded,
+    before ownership is allocated, before growth is applied."""
+
+    def test_rmd_funds_spending_before_joint_taxable_is_drawn(self):
+        """Jason 61, Justin 75, Justin's $1,000,000 IRA, $100,000 joint
+        taxable, $50,000 spending, $0 growth, joint survivorship
+        disabled. Patching the RMD in AFTER the year's spending was
+        already funded (entirely from joint taxable, since the normal
+        Jason-anchored aggregate RMD is $0 at Jason's age 61) leaves too
+        much Justin-owned cash and drains joint further than necessary.
+        Integrated, the RMD funds spending FIRST, exactly as it would
+        for a real household. Correct: $1,002,642 (was $1,020,935)."""
+        inputs = base_inputs(jason_age=61, justin_age=75, retirement_income_today_dollars=50000,
+                              retirement_end_age=62)
+        accounts = [IRA(1000000, "justin"), TAXABLE(100000, "joint")]
+        r = run_survivor_scenario(inputs, accounts, deceased="justin", death_age=75,
+                                   jason_ret_age=61, justin_ret_age=61,
+                                   joint_accounts_survivorship=False)
+        assert r["starting_balance_after_payout"] == pytest.approx(1002642, abs=2)
+
+    def test_the_added_rmd_moves_the_marginal_rate_in_the_same_calculation(self):
+        """Jason 61, Justin 75, Justin's $1,000,000 IRA, a $100,000
+        pension exactly funding $100,000 spending, $0 growth. Reusing a
+        tax rate computed BEFORE the deceased's own RMD was added left
+        the estimate stuck at a stale, too-low bracket (12%); folding
+        the RMD into the SAME taxable-income estimate the rate is
+        derived from correctly pushes it to 22%. Correct: $991,057
+        (was $995,122)."""
+        inputs = base_inputs(jason_age=61, justin_age=75, retirement_income_today_dollars=100000,
+                              pension_55=100000, pension_60=100000, pension_65=100000,
+                              retirement_end_age=62)
+        accounts = [IRA(1000000, "justin")]
+        r = run_survivor_scenario(inputs, accounts, deceased="justin", death_age=75,
                                    jason_ret_age=61, justin_ret_age=61)
-        # Pooled RMD on the combined $2,000,000 pretax (both 75) is
-        # 2,000,000/24.6 = 81,300.81, drawn entirely from joint (drawn
-        # first) -- joint ends the normal year at 1,000,000 - 81,300.81
-        # = 918,699.19, Jason's own account fully untouched at
-        # 1,000,000. The catch-up must then force Jason's own
-        # 1,000,000/24.6 = 40,650.41 out of HIS OWN account: Jason's
-        # pretax becomes 959,349.59. Total surviving pretax (Justin's
-        # own $0 + Jason's rolled-over 959,349.59 + joint's full
-        # 918,699.19) = 1,878,048.78 -- if Jason's own catch-up never
-        # ran, this would instead be 1,918,699.19 (joint's reduction
-        # only, Jason's own account still untouched at $1,000,000).
-        assert r["starting_pretax_after_payout"] == pytest.approx(1878049, abs=5)
+        assert r["starting_balance_after_payout"] == pytest.approx(991057, abs=2)
 
 
 class TestOwnerCashFlowWaterfallReplacesGrossProportionalReweighting:

@@ -126,6 +126,20 @@ leftovers) per the review's own explicit architectural guidance — see
 section 42. All three reproductions now match exactly. Still nothing
 merged to `main` beyond Milestone 1.
 
+**2026-09-08, eighth review round addendum (section 43):** the
+auditor's review of commit `889fb5b` confirmed the waterfall fix
+passes its three reproductions plus 72 additional mixed-cash-flow
+cases, and found one more P1 in the deceased's final-RMD catch-up —
+the same root cause every round since section 39 kept resurfacing in a
+new form: patching completed balances after the fact instead of
+folding the deceased's obligation into the death year's own single
+calculation. Restructured per the review's own explicit guidance
+(`run_owner_split_two_dimensional_projection` now accepts optional
+`death_jason_age`/`deceased`, integrating the catch-up before tax,
+spending, ownership, and growth are determined for that year) — see
+section 43. Both reproductions now match exactly. Still nothing merged
+to `main` beyond Milestone 1.
+
 ## Final status against Jason's 9-item follow-on task list
 
 All 9 items are resolved:

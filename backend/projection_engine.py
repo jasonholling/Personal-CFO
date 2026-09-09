@@ -1890,7 +1890,8 @@ def _allocate_type_delta_across_owners(owner_balances_this_type: Dict[str, float
 def run_owner_split_two_dimensional_projection(inputs: Dict, accounts: List[Dict], jason_ret_age: int, justin_ret_age: int,
                                                  ss_timing: str = "early", salary_growth_pct: float = None,
                                                  life_events: List[Dict] = None,
-                                                 surplus_allocations: List[Dict] = None) -> Dict:
+                                                 surplus_allocations: List[Dict] = None,
+                                                 death_jason_age: int = None, deceased: str = None) -> Dict:
     """Owner-attributed year-by-year walk (CALCULATION_CONTRACT.md
     section 37.4) -- carries jason/justin/joint/trust buckets through
     EVERY year from phase2_start onward, not just a one-time split at
@@ -1922,7 +1923,22 @@ def run_owner_split_two_dimensional_projection(inputs: Dict, accounts: List[Dict
     Returns the same shape as run_two_dimensional_retirement_projection
     plus an owner-split `yearly_detail` (each year holding a
     `{owner: {"pretax":..,"roth":..,"taxable":..,"hsa":..}}` closing
-    snapshot) and the final `ending_buckets`."""
+    snapshot) and the final `ending_buckets`.
+
+    death_jason_age/deceased (independent review, 2026-09-08, eighth
+    follow-up, P1): optional -- when both are given, the FIRST year
+    with jason-age >= death_jason_age incorporates the deceased's own
+    individual RMD obligation into THAT YEAR's single calculation,
+    before tax-rate determination, before funding spending, before
+    ownership allocation, and before growth -- not as a downstream
+    patch applied to an already-finished year (the approach every
+    earlier round of this fix used, and the review kept finding new
+    ways it went wrong: double-withdrawing, bypassing tax, bypassing
+    growth, and now this -- funding spending from the wrong money and
+    using a stale tax rate). Survivor Scenario is the only caller that
+    passes these; every other two-age consumer leaves them at their
+    None default and this function's behavior for them is completely
+    unchanged."""
     salary_growth_pct = inputs.get("_salary_growth_pct", 0.0) if salary_growth_pct is None else salary_growth_pct
     jason_age  = inputs["jason_age"]
     justin_age = inputs["justin_age"]
@@ -1959,6 +1975,8 @@ def run_owner_split_two_dimensional_projection(inputs: Dict, accounts: List[Dict
 
     from retirement_tools_engine import marginal_rate as _marginal_rate, STD_DEDUCTION_MFJ_2026 as _STD_DED
 
+    death_year_applied = False
+
     yearly = []
     for yr in range(retire_years):
         age = timeline.age(yr)
@@ -1980,6 +1998,24 @@ def run_owner_split_two_dimensional_projection(inputs: Dict, accounts: List[Dict
 
         pooled_pretax = sum(buckets[o]["pretax"] for o in OWNER_BUCKETS)
         rmd = _rmd(pooled_pretax, age, jason_rmd_start_age)
+
+        # Death-year integration (independent review, 2026-09-08, eighth
+        # follow-up, P1) -- the deceased's own individual RMD obligation
+        # (their own age/balance, not the aggregate Jason-anchored
+        # figure above) is folded into THIS year's `rmd` BEFORE the tax
+        # rate is estimated below, so a bigger forced distribution
+        # correctly pushes the marginal rate up in the SAME calculation
+        # that uses it, not a stale rate computed before the addition.
+        deceased_forced_from_own_account = 0.0
+        if deceased is not None and death_jason_age is not None and not death_year_applied and age >= death_jason_age:
+            death_year_applied = True
+            deceased_age_at_death = age if deceased == "jason" else justin_age_this_year
+            deceased_own_rmd_start_age = rmd_start_age(inputs["jason_age"] if deceased == "jason" else inputs["justin_age"])
+            deceased_pretax_at_start = buckets[deceased]["pretax"]
+            deceased_individual_rmd = _rmd(deceased_pretax_at_start, deceased_age_at_death, deceased_own_rmd_start_age)
+            deceased_forced_from_own_account = min(deceased_individual_rmd, deceased_pretax_at_start)
+            rmd = max(rmd, deceased_individual_rmd)
+
         taxable_income_est = max(0, year_pen + (year_jss + year_uss) * 0.85 + rmd - _STD_DED)
         pretax_tax_rate = min(0.90, _marginal_rate(taxable_income_est) + max(0, float(inputs.get("state_income_tax_rate") or 0)))
 
@@ -2011,7 +2047,19 @@ def run_owner_split_two_dimensional_projection(inputs: Dict, accounts: List[Dict
         # of Jason).
         pretax_delta = pooled_closing_pregrowth["pretax"] - pooled_opening["pretax"]
         pretax_owner_balances = {o: buckets[o]["pretax"] for o in OWNER_BUCKETS}
-        pretax_allocation = _allocate_type_delta_across_owners(pretax_owner_balances, pretax_delta)
+        if deceased_forced_from_own_account > 0:
+            # The deceased's own account contributes AT LEAST its own
+            # individual RMD first; whatever's left of pretax_delta is
+            # allocated normally (WITHDRAWAL_OWNER_ORDER) across the
+            # REMAINING balances, which may still include the deceased's
+            # own account for any further draw beyond their own minimum.
+            remaining_balances = dict(pretax_owner_balances)
+            remaining_balances[deceased] -= deceased_forced_from_own_account
+            remaining_delta = pretax_delta + deceased_forced_from_own_account
+            pretax_allocation = _allocate_type_delta_across_owners(remaining_balances, remaining_delta)
+            pretax_allocation[deceased] = pretax_allocation.get(deceased, 0.0) - deceased_forced_from_own_account
+        else:
+            pretax_allocation = _allocate_type_delta_across_owners(pretax_owner_balances, pretax_delta)
         for o in OWNER_BUCKETS:
             pregrowth = buckets[o]["pretax"] + pretax_allocation.get(o, 0.0)
             buckets[o]["pretax"] = max(0.0, pregrowth) * (1 + post_ret)

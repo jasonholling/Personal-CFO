@@ -3842,20 +3842,19 @@ def _run_survivor_scenario_two_age(inputs: Dict, accounts: List[Dict], jason_ret
     _salary_growth_pct = inputs.get("_salary_growth_pct", 0.0)
 
     # timeline built once, up front -- used for the pension-gate age
-    # (jason_effective_start_age), post-death life events, and gap
-    # income below. Rebuilt here (not threaded out of `walk`, which
-    # returns plain dicts, not the TwoPersonTimeline object itself) --
-    # same inputs, so it's the identical timeline the walk already used.
+    # (jason_effective_start_age), post-death life events, gap income
+    # below, AND (independent review, 2026-09-08, eighth follow-up) to
+    # compute phase2_start_age/later_retiree directly -- the IDENTICAL
+    # formulas run_owner_split_two_dimensional_projection uses
+    # internally (phase2_start_age = jason_age + timeline.phase2_start_years,
+    # later_retiree = timeline.later_retiree), needed here BEFORE the
+    # walk itself runs so death_jason_age can be threaded into that
+    # single walk call from the start (see below).
     timeline = build_two_person_timeline(jason_age, justin_age, jason_ret_age, justin_ret_age,
                                           inputs.get("retirement_end_age"))
     jason_effective_start_age = timeline.jason_effective_start_age
-
-    walk = run_owner_split_two_dimensional_projection(inputs, accounts, jason_ret_age, justin_ret_age,
-                                                        ss_timing=ss_timing, salary_growth_pct=_salary_growth_pct,
-                                                        life_events=life_events, surplus_allocations=surplus_allocations)
-    yearly = walk["yearly_detail"]
-    phase2_start_age = walk["phase2_start_age"]
-    later_retiree = walk["later_retiree"]
+    phase2_start_age = jason_age + timeline.phase2_start_years
+    later_retiree = timeline.later_retiree
 
     if death_age is None:
         deceased_effective_start_age = (phase2_start_age if deceased == "jason"
@@ -3882,6 +3881,32 @@ def _run_survivor_scenario_two_age(inputs: Dict, accounts: List[Dict], jason_ret
             ),
         }
 
+    # Independent review, 2026-09-08, eighth follow-up, P1: death_jason_age
+    # and deceased are now passed INTO the walk itself, so the deceased's
+    # own final-year RMD is incorporated as part of THAT year's own
+    # single calculation (tax rate, spending funding, ownership
+    # allocation, growth all computed together) -- not as a downstream
+    # patch applied after the year's own numbers were already final.
+    # Every earlier round of this fix (findings 8, fifth-follow-up-1,
+    # sixth-follow-up-2) patched death_row's already-finished balances
+    # afterward and kept finding new ways that went wrong: double-
+    # withdrawing, bypassing tax, bypassing growth, and now (eighth
+    # follow-up) funding spending from the wrong money and using a
+    # stale tax rate. Reproduced: Jason 61, Justin 75, Justin's
+    # $1,000,000 IRA, $100,000 joint taxable, $50,000 spending, joint
+    # survivorship disabled -- the old patch-after-the-fact approach
+    # reported $1,020,935 (the RMD never got the chance to fund spending
+    # before joint taxable was drawn down); integrated, it's $1,002,642.
+    # With a $100,000 pension funding $100,000 spending, folding the
+    # extra RMD into `rmd` BEFORE the tax-rate estimate correctly moves
+    # the marginal rate from 12% to 22% (was stuck at the stale
+    # pre-addition rate) -- $991,057, not $995,122.
+    walk = run_owner_split_two_dimensional_projection(inputs, accounts, jason_ret_age, justin_ret_age,
+                                                        ss_timing=ss_timing, salary_growth_pct=_salary_growth_pct,
+                                                        life_events=life_events, surplus_allocations=surplus_allocations,
+                                                        death_jason_age=death_jason_age, deceased=deceased)
+    yearly = walk["yearly_detail"]
+
     death_row_index = next((i for i, y in enumerate(yearly) if y["jason_age"] >= death_jason_age), None)
     if death_row_index is None:
         return {"has_data": False}
@@ -3900,70 +3925,14 @@ def _run_survivor_scenario_two_age(inputs: Dict, accounts: List[Dict], jason_ret
                   + inputs.get("justin_life_kids", 0))
         survivor_owner, deceased_owner = "jason", "justin"
 
-    # Own copy -- the finding 8 catch-up below mutates this before the
-    # ownership transfer reads it, and death_row's own dict shouldn't be
-    # mutated in place.
-    ob = {o: dict(death_row["owner_balances"][o]) for o in OWNER_BUCKETS}
-
-    # Finding 8 fix: the DECEASED's own final-year RMD. The pre-death
-    # walk's RMD is always Jason-anchored (pooled_pretax, age,
-    # jason_rmd_start_age -- see run_owner_split_two_dimensional_projection)
-    # and drawn from the POOLED total via WITHDRAWAL_OWNER_ORDER (joint
-    # first) -- so even when the deceased IS Jason, the dollars actually
-    # withdrawn that year might have come entirely from JOINT's pretax,
-    # never touching Jason's own individually-owned account at all, even
-    # though an RMD is an obligation of the INDIVIDUAL account, not a
-    # poolable household total. Force whatever's left of the deceased's
-    # own obligation out of their own pretax bucket into taxable before
-    # anything transfers to the survivor.
-    #
-    # Independent review, 2026-09-08, fifth follow-up, finding 1 (P1):
-    # the ORIGINAL version of this catch-up computed the full RMD
-    # against the deceased's END-of-death-year pretax balance (already
-    # net of whatever the normal death-year draw/RMD had already taken)
-    # and forced that WHOLE amount out again -- double-withdrawing
-    # whenever the normal year's pooled RMD had already satisfied some
-    # or all of the obligation. Fixed: compute the deceased's own TOTAL
-    # obligation against their STARTING-of-year balance, then only force
-    # the REMAINDER not already covered by whatever their own pretax was
-    # reduced by this year (growth-adjusted so a nonzero post_ret doesn't
-    # mask the real draw amount).
-    #
-    # Independent review, 2026-09-08, sixth follow-up, finding 2 (P1):
-    # that fix still (a) only ever checked Justin, never Jason, even
-    # though the joint-drawn-first ordering above means Jason's own
-    # obligation can equally go unmet, and (b) moved the shortfall into
-    # taxable UNTAXED and OUTSIDE the year's own growth -- a real RMD
-    # is taxed like any other pretax distribution, and happening
-    # "inside" the death year means it should grow right along with
-    # everything else that year, not get bolted on after growth already
-    # ran. Reproduced exactly: Jason 61, Justin 75, Justin's $1,000,000
-    # IRA, $0 spending/growth -- the shortfall ($40,650.41) taxed at that
-    # year's own 10% rate (death_row's own pretax_tax_rate, $0 other
-    # income here) leaves $995,935, not $1,000,000; with 10% growth, the
-    # correctly-taxed-then-grown result is $1,095,528, not $1.1M. Fixed:
-    # generalized to whichever spouse is `deceased`, taxed at the SAME
-    # pretax_tax_rate the death row's own normal draw used, and applied
-    # PRE-growth (reversing/reapplying (1 + post_ret) around the
-    # adjustment) so it grows symmetrically with the rest of that year.
-    deceased_age_at_death = death_row[f"{deceased}_age"]
-    deceased_own_rmd_start_age = rmd_start_age(inputs[f"{deceased}_age"])
-    prior_balances = (yearly[death_row_index - 1]["owner_balances"] if death_row_index > 0
-                       else walk["starting_buckets"])
-    deceased_pretax_at_year_start = prior_balances[deceased]["pretax"]
-    deceased_pretax_pregrowth_end = (ob[deceased]["pretax"] / (1 + post_ret)) if (1 + post_ret) != 0 else ob[deceased]["pretax"]
-    already_reduced_this_year = max(0.0, deceased_pretax_at_year_start - deceased_pretax_pregrowth_end)
-    deceased_own_full_rmd = _rmd(deceased_pretax_at_year_start, deceased_age_at_death, deceased_own_rmd_start_age)
-    deceased_final_rmd_shortfall = max(0.0, deceased_own_full_rmd - already_reduced_this_year)
-    if deceased_final_rmd_shortfall > 0:
-        deceased_final_rmd_shortfall = min(deceased_final_rmd_shortfall, deceased_pretax_pregrowth_end)
-        death_year_pretax_tax_rate = death_row.get("pretax_tax_rate", 0.0)
-        after_tax_shortfall = deceased_final_rmd_shortfall * (1 - death_year_pretax_tax_rate)
-        taxable_pregrowth_end = (ob[deceased]["taxable"] / (1 + post_ret)) if (1 + post_ret) != 0 else ob[deceased]["taxable"]
-        new_pretax_pregrowth = deceased_pretax_pregrowth_end - deceased_final_rmd_shortfall
-        new_taxable_pregrowth = taxable_pregrowth_end + after_tax_shortfall
-        ob[deceased]["pretax"] = new_pretax_pregrowth * (1 + post_ret)
-        ob[deceased]["taxable"] = new_taxable_pregrowth * (1 + post_ret)
+    # The deceased's own final-year RMD (findings 8, fifth-follow-up-1,
+    # sixth-follow-up-2, eighth-follow-up-1) is now fully incorporated
+    # INSIDE death_row itself -- run_owner_split_two_dimensional_projection
+    # folded it into that year's own tax rate, spending funding, ownership
+    # allocation, and growth as a single calculation (death_jason_age/
+    # deceased passed into the walk above). death_row["owner_balances"]
+    # is simply read as-is, no downstream patch needed or applied.
+    ob = death_row["owner_balances"]
 
     # Ownership transfer at death (section 37.1-37.3, explicit scenario
     # assumptions, never inferred).
