@@ -61,7 +61,7 @@ function SliderRow({ label, hint, value, min, max, step, format, onChange, delta
   )
 }
 
-export default function WhatIf({ onNavigate, onAssumptionsChange }) {
+export default function WhatIf({ onNavigate, onAssumptionsChange, onSettingsLoaded }) {
   const [base, setBase]       = useState(null)
   const [result, setResult]   = useState(null)
   const [loading, setLoading] = useState(true)
@@ -133,6 +133,13 @@ export default function WhatIf({ onNavigate, onAssumptionsChange }) {
       setPreReturn(next.preReturn); setPostReturn(next.postReturn); setInflation(next.inflation)
       setIncome(next.income); setHealthcare(next.healthcare); setBridgeIncome(next.bridgeIncome)
       setSettingsReady(true)
+      // StressTestWhatIf.jsx stays mounted (hidden, not unmounted) on
+      // every tab (external audit review of commit 0c1a569, finding 5)
+      // so it reuses THIS fetch — the only /api/planning-inputs call in
+      // this whole flow — to know whether a saved claim age should
+      // disable the Monte Carlo/Stress tabs' Early/Delayed toggle,
+      // rather than adding a second, duplicate fetch there.
+      onSettingsLoaded?.(d)
     }).catch(() => {})
   }
 

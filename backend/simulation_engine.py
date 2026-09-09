@@ -11,6 +11,7 @@ from projection_engine import (
     JASON_SS_EARLY_DEFAULT as JASON_SS_EARLY,
     JASON_SS_DELAYED_DEFAULT as JASON_SS_DELAYED,
     JUSTIN_SPOUSAL_ANNUAL, JUSTIN_SPOUSAL_AGE, CURRENT_YEAR,
+    resolve_ss_benefits, resolve_ss_claim_ages,
     _fv, _fv_annuity, _fv_annuity_monthly, _rmd, pension_for_age, rmd_start_age,
     _split_life_events, _post_retirement_year_effects, _post_retirement_asset_sale_events,
     justin_years_to_retire_for, justin_gap_income_inputs, justin_gap_income_for_year,
@@ -791,12 +792,14 @@ def _run_swr_analysis_two_age(inputs: Dict, accounts: List[Dict], jason_ret_age:
     _salary_growth_pct = inputs.get("_salary_growth_pct", 0.0)
 
     pension_annual = pension_for_age(inputs, jason_ret_age)
-    jason_ss_early   = inputs.get("jason_social_security", JASON_SS_EARLY)
-    jason_ss_delayed = inputs.get("jason_ss_delayed", JASON_SS_DELAYED)
-    jason_ss_annual  = jason_ss_early if ss_timing == "early" else jason_ss_delayed
-    jason_ss_age     = 62 if ss_timing == "early" else 67
-    justin_ss_annual = inputs.get("justin_social_security", JUSTIN_SPOUSAL_ANNUAL)
-    justin_ss_age    = inputs.get("justin_ss_age", JUSTIN_SPOUSAL_AGE)
+    # SS resolution (2026-09-08, CALCULATION_CONTRACT.md section 44,
+    # milestone 5): resolve_ss_benefits, claim ages read off `inputs`
+    # (see run_two_dimensional_retirement_projection's identical
+    # convention -- the public dispatcher injects its own
+    # jason_ss_claim_age/justin_ss_claim_age params into `inputs`
+    # before delegating to this function).
+    jason_ss_annual, jason_ss_age, justin_ss_annual, justin_ss_age = resolve_ss_benefits(
+        inputs, ss_timing, inputs.get("jason_ss_claim_age"), inputs.get("justin_ss_claim_age"))
 
     from projection_engine import run_two_dimensional_retirement_projection
     _proj = run_two_dimensional_retirement_projection(inputs, accounts, jason_ret_age=jason_ret_age,
@@ -1058,8 +1061,14 @@ def _run_swr_analysis_two_age(inputs: Dict, accounts: List[Dict], jason_ret_age:
 def run_swr_analysis(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_timing: str = "early",
                       target_success: float = 0.95, life_events: List[Dict] = None,
                       surplus_allocations: List[Dict] = None,
-                      jason_ret_age: int = None, justin_ret_age: int = None) -> Dict:
+                      jason_ret_age: int = None, justin_ret_age: int = None,
+                      jason_ss_claim_age: int = None, justin_ss_claim_age: int = None) -> Dict:
     """Find the safe withdrawal rate at target success rate (default 95%).
+
+    jason_ss_claim_age/justin_ss_claim_age (2026-09-08, CALCULATION_
+    CONTRACT.md section 44, milestone 3): opt-in continuous SS claiming
+    age 62-70 per spouse -- see resolve_ss_benefits's own docstring.
+    None-default leaves the existing ss_timing behavior unchanged.
 
     life_events: threaded through to run_retirement_projection below so
     pre-retirement events affect the starting portfolio; withdrawal-phase
@@ -1079,6 +1088,18 @@ def run_swr_analysis(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_t
     left at their None default -- this is new, additive behavior, not a
     modification of the existing search."""
     if _require_both_two_age_or_neither(jason_ret_age, justin_ret_age):
+        # Independent review, 2026-09-08, ninth follow-up, finding 1 (P1):
+        # the old version here blindly overwrote BOTH spouses' claim-age
+        # fields with this call's own explicit params, even when only
+        # ONE spouse was actually being overridden -- silently clearing
+        # the OTHER spouse's own saved value back to None. Fixed:
+        # resolve_ss_claim_ages layers explicit override > whatever
+        # `inputs` already has (the saved value) > None, per spouse
+        # independently, and clamps to [62, 70].
+        _jason_ss_claim_age, _justin_ss_claim_age = resolve_ss_claim_ages(
+            inputs, jason_ss_claim_age, justin_ss_claim_age)
+        if _jason_ss_claim_age is not None or _justin_ss_claim_age is not None:
+            inputs = {**inputs, "jason_ss_claim_age": _jason_ss_claim_age, "justin_ss_claim_age": _justin_ss_claim_age}
         return _run_swr_analysis_two_age(inputs, accounts, jason_ret_age, justin_ret_age, ss_timing,
                                           target_success, life_events, surplus_allocations)
 
@@ -1105,19 +1126,23 @@ def run_swr_analysis(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_t
     justin_gap_years, justin_gap_income_at_start = justin_gap_income_inputs(
         inputs, _justin_years_to_retire, years_to_ret, _salary_growth_pct)
     pension_annual = pension_for_age(inputs, ret_age)
-    jason_ss_early  = inputs.get("jason_social_security", JASON_SS_EARLY)
-    jason_ss_delayed = inputs.get("jason_ss_delayed", JASON_SS_DELAYED)
-    jason_ss_annual = jason_ss_early if ss_timing == "early" else jason_ss_delayed
-    jason_ss_age    = 62 if ss_timing == "early" else 67
-    justin_ss       = inputs.get("justin_social_security", JUSTIN_SPOUSAL_ANNUAL)
-    justin_ss_age   = inputs.get("justin_ss_age", JUSTIN_SPOUSAL_AGE)
+    jason_ss_annual, jason_ss_age, justin_ss, justin_ss_age = resolve_ss_benefits(
+        inputs, ss_timing, jason_ss_claim_age, justin_ss_claim_age)
 
     # Get portfolio at retirement from projection engine — pass ret_age explicitly
     # so this works for any age, not just the default 55/60/65 anchors.
     from projection_engine import run_retirement_projection
+    # run_retirement_projection now takes jason_ss_claim_age/
+    # justin_ss_claim_age as EXPLICIT params (CALCULATION_CONTRACT.md
+    # section 44, milestone 6/ninth follow-up finding 1) -- passed
+    # directly below, no inputs-dict injection needed (and no risk of
+    # an unrelated caller's inputs dict silently switching this call
+    # into continuous-claim-age mode).
     _proj     = run_retirement_projection(inputs, accounts, ret_ages=[ret_age], life_events=life_events,
-                                           surplus_allocations=surplus_allocations)
-    _scenario = next((s for s in _proj["scenarios"] if s["label"] == f"age_{ret_age}_{ss_timing}"), None)
+                                           surplus_allocations=surplus_allocations,
+                                           jason_ss_claim_age=jason_ss_claim_age, justin_ss_claim_age=justin_ss_claim_age)
+    _ss_label = "custom" if jason_ss_claim_age is not None else ss_timing
+    _scenario = next((s for s in _proj["scenarios"] if s["label"] == f"age_{ret_age}_{_ss_label}"), None)
     pretax_at_ret  = _scenario["pretax_at_retirement"]
     roth_at_ret    = _scenario["roth_at_retirement"]
     taxable_at_ret = _scenario["taxable_at_retirement"]
@@ -1366,12 +1391,14 @@ def _run_monte_carlo_two_age(inputs: Dict, accounts: List[Dict], jason_ret_age: 
     _salary_growth_pct = inputs.get("_salary_growth_pct", 0.0)
 
     pension_annual = pension_for_age(inputs, jason_ret_age)
-    jason_ss_early   = inputs.get("jason_social_security", JASON_SS_EARLY)
-    jason_ss_delayed = inputs.get("jason_ss_delayed", JASON_SS_DELAYED)
-    jason_ss_annual  = jason_ss_early if ss_timing == "early" else jason_ss_delayed
-    jason_ss_age     = 62 if ss_timing == "early" else 67
-    justin_ss_annual = inputs.get("justin_social_security", JUSTIN_SPOUSAL_ANNUAL)
-    justin_ss_age    = inputs.get("justin_ss_age", JUSTIN_SPOUSAL_AGE)
+    # SS resolution (2026-09-08, CALCULATION_CONTRACT.md section 44,
+    # milestone 5): resolve_ss_benefits, claim ages read off `inputs`
+    # (see run_two_dimensional_retirement_projection's identical
+    # convention -- the public dispatcher injects its own
+    # jason_ss_claim_age/justin_ss_claim_age params into `inputs`
+    # before delegating to this function).
+    jason_ss_annual, jason_ss_age, justin_ss_annual, justin_ss_age = resolve_ss_benefits(
+        inputs, ss_timing, inputs.get("jason_ss_claim_age"), inputs.get("justin_ss_claim_age"))
 
     from projection_engine import run_two_dimensional_retirement_projection
     _proj = run_two_dimensional_retirement_projection(inputs, accounts, jason_ret_age=jason_ret_age,
@@ -1471,8 +1498,16 @@ def _run_monte_carlo_two_age(inputs: Dict, accounts: List[Dict], jason_ret_age: 
 
 def run_monte_carlo(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_timing: str = "early",
                      life_events: List[Dict] = None, surplus_allocations: List[Dict] = None,
-                     jason_ret_age: int = None, justin_ret_age: int = None) -> Dict:
+                     jason_ret_age: int = None, justin_ret_age: int = None,
+                     jason_ss_claim_age: int = None, justin_ss_claim_age: int = None) -> Dict:
     """Run 1000 Monte Carlo simulations.
+
+    jason_ss_claim_age/justin_ss_claim_age (2026-09-08, CALCULATION_
+    CONTRACT.md section 44, milestone 2): opt-in continuous SS claiming
+    age 62-70 per spouse, independent of each other -- see
+    resolve_ss_benefits's own docstring. Every existing caller that
+    leaves these at None gets the EXACT unchanged ss_timing-derived
+    early(62)/delayed(67) behavior.
 
     life_events: optional list of life_events rows (already filtered to
     included_in_projection=true by the caller). Pre-retirement events
@@ -1495,6 +1530,18 @@ def run_monte_carlo(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_ti
     their None default -- this is new, additive behavior, not a
     modification of the existing mode."""
     if _require_both_two_age_or_neither(jason_ret_age, justin_ret_age):
+        # Independent review, 2026-09-08, ninth follow-up, finding 1 (P1):
+        # the old version here blindly overwrote BOTH spouses' claim-age
+        # fields with this call's own explicit params, even when only
+        # ONE spouse was actually being overridden -- silently clearing
+        # the OTHER spouse's own saved value back to None. Fixed:
+        # resolve_ss_claim_ages layers explicit override > whatever
+        # `inputs` already has (the saved value) > None, per spouse
+        # independently, and clamps to [62, 70].
+        _jason_ss_claim_age, _justin_ss_claim_age = resolve_ss_claim_ages(
+            inputs, jason_ss_claim_age, justin_ss_claim_age)
+        if _jason_ss_claim_age is not None or _justin_ss_claim_age is not None:
+            inputs = {**inputs, "jason_ss_claim_age": _jason_ss_claim_age, "justin_ss_claim_age": _justin_ss_claim_age}
         return _run_monte_carlo_two_age(inputs, accounts, jason_ret_age, justin_ret_age, ss_timing,
                                          life_events, surplus_allocations)
 
@@ -1519,26 +1566,36 @@ def run_monte_carlo(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_ti
     justin_gap_years, justin_gap_income_at_start = justin_gap_income_inputs(
         inputs, _justin_years_to_retire, years_to_ret, _salary_growth_pct)
     pension_annual  = pension_for_age(inputs, ret_age)
-    jason_ss_early  = inputs.get("jason_social_security", JASON_SS_EARLY)
-    jason_ss_delayed = inputs.get("jason_ss_delayed", JASON_SS_DELAYED)
-    jason_ss_annual = jason_ss_early if ss_timing == "early" else jason_ss_delayed
-    jason_ss_age    = 62 if ss_timing == "early" else 67
-    # Previously hardcoded to the JUSTIN_SPOUSAL_ANNUAL/JUSTIN_SPOUSAL_AGE
-    # fallback constants (both 0) inside _run_single regardless of what was
-    # actually configured — Monte Carlo never reflected a real spousal SS
-    # benefit no matter what Settings said (external audit 2026-09-06).
-    # Read the same way run_retirement_projection/run_swr_analysis already
-    # do.
-    justin_ss_annual = inputs.get("justin_social_security", JUSTIN_SPOUSAL_ANNUAL)
-    justin_ss_age    = inputs.get("justin_ss_age", JUSTIN_SPOUSAL_AGE)
+    # SS resolution (2026-09-08, CALCULATION_CONTRACT.md section 44,
+    # milestone 2): resolve_ss_benefits replaces this file's own
+    # previously-independent ss_timing ternary -- previously hardcoded
+    # to the JUSTIN_SPOUSAL_ANNUAL/JUSTIN_SPOUSAL_AGE fallback constants
+    # (both 0) inside _run_single regardless of what was actually
+    # configured (external audit 2026-09-06), now read the same way
+    # every other consumer does, PLUS the new opt-in continuous claim-
+    # age support.
+    jason_ss_annual, jason_ss_age, justin_ss_annual, justin_ss_age = resolve_ss_benefits(
+        inputs, ss_timing, jason_ss_claim_age, justin_ss_claim_age)
     income_at_ret   = income_today * ((1 + inflation) ** years_to_ret)
 
     # Pull bucket values from projection_engine — pass ret_age explicitly so
     # this works for any age, not just the default 55/60/65 anchors.
+    # jason_ss_claim_age/justin_ss_claim_age forwarded so the internal
+    # scenario label matches: run_retirement_projection reports "custom"
+    # (not "early"/"delayed") when Jason's own claim age is set (see its
+    # own docstring, section 44 milestone 1).
     from projection_engine import (run_retirement_projection)
+    # run_retirement_projection now takes jason_ss_claim_age/
+    # justin_ss_claim_age as EXPLICIT params (CALCULATION_CONTRACT.md
+    # section 44, milestone 6/ninth follow-up finding 1) -- passed
+    # directly below, no inputs-dict injection needed (and no risk of
+    # an unrelated caller's inputs dict silently switching this call
+    # into continuous-claim-age mode).
     _proj = run_retirement_projection(inputs, accounts, ret_ages=[ret_age], life_events=life_events,
-                                       surplus_allocations=surplus_allocations)
-    _scenario = next((s for s in _proj["scenarios"] if s["label"] == f"age_{ret_age}_{ss_timing}"), None)
+                                       surplus_allocations=surplus_allocations,
+                                       jason_ss_claim_age=jason_ss_claim_age, justin_ss_claim_age=justin_ss_claim_age)
+    _ss_label = "custom" if jason_ss_claim_age is not None else ss_timing
+    _scenario = next((s for s in _proj["scenarios"] if s["label"] == f"age_{ret_age}_{_ss_label}"), None)
     pretax_at_ret  = _scenario["pretax_at_retirement"]
     roth_at_ret    = _scenario["roth_at_retirement"]
     taxable_at_ret = _scenario["taxable_at_retirement"]
@@ -1697,12 +1754,14 @@ def _run_stress_tests_two_age(inputs: Dict, accounts: List[Dict], jason_ret_age:
     _salary_growth_pct = inputs.get("_salary_growth_pct", 0.0)
 
     pension_annual = pension_for_age(inputs, jason_ret_age)
-    jason_ss_early   = inputs.get("jason_social_security", JASON_SS_EARLY)
-    jason_ss_delayed = inputs.get("jason_ss_delayed", JASON_SS_DELAYED)
-    jason_ss_annual  = jason_ss_early if ss_timing == "early" else jason_ss_delayed
-    jason_ss_age     = 62 if ss_timing == "early" else 67
-    justin_ss_annual = inputs.get("justin_social_security", JUSTIN_SPOUSAL_ANNUAL)
-    justin_ss_age    = inputs.get("justin_ss_age", JUSTIN_SPOUSAL_AGE)
+    # SS resolution (2026-09-08, CALCULATION_CONTRACT.md section 44,
+    # milestone 5): resolve_ss_benefits, claim ages read off `inputs`
+    # (see run_two_dimensional_retirement_projection's identical
+    # convention -- the public dispatcher injects its own
+    # jason_ss_claim_age/justin_ss_claim_age params into `inputs`
+    # before delegating to this function).
+    jason_ss_annual, jason_ss_age, justin_ss_annual, justin_ss_age = resolve_ss_benefits(
+        inputs, ss_timing, inputs.get("jason_ss_claim_age"), inputs.get("justin_ss_claim_age"))
 
     from projection_engine import run_two_dimensional_retirement_projection
     _proj = run_two_dimensional_retirement_projection(inputs, accounts, jason_ret_age=jason_ret_age,
@@ -1864,7 +1923,8 @@ def _run_stress_tests_two_age(inputs: Dict, accounts: List[Dict], jason_ret_age:
 
 def run_stress_tests(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_timing: str = "early",
                       life_events: List[Dict] = None, surplus_allocations: List[Dict] = None,
-                      jason_ret_age: int = None, justin_ret_age: int = None) -> Dict:
+                      jason_ret_age: int = None, justin_ret_age: int = None,
+                      jason_ss_claim_age: int = None, justin_ss_claim_age: int = None) -> Dict:
     """Run deterministic stress test scenarios.
 
     life_events: see run_monte_carlo — same optional, defaults-to-no-op
@@ -1876,8 +1936,25 @@ def run_stress_tests(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_t
     jason_ret_age/justin_ret_age: see run_monte_carlo's identical
     params -- both required together, delegates to
     _run_stress_tests_two_age, completely unaffected when left at their
-    None default (2026-09-08, CALCULATION_CONTRACT.md section 22)."""
+    None default (2026-09-08, CALCULATION_CONTRACT.md section 22).
+
+    jason_ss_claim_age/justin_ss_claim_age: see run_monte_carlo's
+    identical params (2026-09-08, CALCULATION_CONTRACT.md section 44,
+    milestone 2) -- opt-in continuous SS claiming age, None-default
+    leaves existing ss_timing behavior completely unchanged."""
     if _require_both_two_age_or_neither(jason_ret_age, justin_ret_age):
+        # Independent review, 2026-09-08, ninth follow-up, finding 1 (P1):
+        # the old version here blindly overwrote BOTH spouses' claim-age
+        # fields with this call's own explicit params, even when only
+        # ONE spouse was actually being overridden -- silently clearing
+        # the OTHER spouse's own saved value back to None. Fixed:
+        # resolve_ss_claim_ages layers explicit override > whatever
+        # `inputs` already has (the saved value) > None, per spouse
+        # independently, and clamps to [62, 70].
+        _jason_ss_claim_age, _justin_ss_claim_age = resolve_ss_claim_ages(
+            inputs, jason_ss_claim_age, justin_ss_claim_age)
+        if _jason_ss_claim_age is not None or _justin_ss_claim_age is not None:
+            inputs = {**inputs, "jason_ss_claim_age": _jason_ss_claim_age, "justin_ss_claim_age": _justin_ss_claim_age}
         return _run_stress_tests_two_age(inputs, accounts, jason_ret_age, justin_ret_age, ss_timing,
                                           life_events, surplus_allocations)
 
@@ -1899,20 +1976,25 @@ def run_stress_tests(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_t
     justin_gap_years, justin_gap_income_at_start = justin_gap_income_inputs(
         inputs, _justin_years_to_retire, years_to_ret, _salary_growth_pct)
     pension_annual  = pension_for_age(inputs, ret_age)
-    jason_ss_early  = inputs.get("jason_social_security", JASON_SS_EARLY)
-    jason_ss_delayed = inputs.get("jason_ss_delayed", JASON_SS_DELAYED)
-    jason_ss_annual = jason_ss_early if ss_timing == "early" else jason_ss_delayed
-    jason_ss_age    = 62 if ss_timing == "early" else 67
-    # See run_monte_carlo's identical comment — previously hardcoded to 0
-    # inside _run_single regardless of Settings (external audit 2026-09-06).
-    justin_ss_annual = inputs.get("justin_social_security", JUSTIN_SPOUSAL_ANNUAL)
-    justin_ss_age    = inputs.get("justin_ss_age", JUSTIN_SPOUSAL_AGE)
+    # SS resolution — see run_monte_carlo's identical comment (section
+    # 44, milestone 2). Previously hardcoded to 0 inside _run_single
+    # regardless of Settings (external audit 2026-09-06).
+    jason_ss_annual, jason_ss_age, justin_ss_annual, justin_ss_age = resolve_ss_benefits(
+        inputs, ss_timing, jason_ss_claim_age, justin_ss_claim_age)
     income_at_ret   = income_today * ((1 + inflation) ** years_to_ret)
 
     from projection_engine import run_retirement_projection
+    # run_retirement_projection now takes jason_ss_claim_age/
+    # justin_ss_claim_age as EXPLICIT params (CALCULATION_CONTRACT.md
+    # section 44, milestone 6/ninth follow-up finding 1) -- passed
+    # directly below, no inputs-dict injection needed (and no risk of
+    # an unrelated caller's inputs dict silently switching this call
+    # into continuous-claim-age mode).
     _proj = run_retirement_projection(inputs, accounts, ret_ages=[ret_age], life_events=life_events,
-                                       surplus_allocations=surplus_allocations)
-    _scenario = next(s for s in _proj["scenarios"] if s["label"] == f"age_{ret_age}_{ss_timing}")
+                                       surplus_allocations=surplus_allocations,
+                                       jason_ss_claim_age=jason_ss_claim_age, justin_ss_claim_age=justin_ss_claim_age)
+    _ss_label = "custom" if jason_ss_claim_age is not None else ss_timing
+    _scenario = next(s for s in _proj["scenarios"] if s["label"] == f"age_{ret_age}_{_ss_label}")
     pretax_at_ret  = _scenario["pretax_at_retirement"]
     roth_at_ret    = _scenario["roth_at_retirement"]
     taxable_at_ret = _scenario["taxable_at_retirement"]
@@ -1985,9 +2067,20 @@ def run_stress_tests(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_t
         if bridge_override is not None:
             sim_inputs["bridge_years_55"] = min(bridge_override, inputs.get("bridge_years_55", 0))
 
-        # For SS reduction
+        # For SS reduction. Independent review, 2026-09-08, ninth
+        # follow-up, finding 2 (P1): scenario_justin_ss used to reduce
+        # Justin's RAW FRA input (inputs.get("justin_social_security"))
+        # instead of his RESOLVED, claiming-age-selected benefit
+        # (justin_ss_annual) -- with an early claim age already below
+        # FRA, applying a further "reduction" to the un-adjusted FRA
+        # figure could produce a stressed benefit HIGHER than the real
+        # unstressed one. Reproduced: $10,500 selected (Justin's own
+        # resolved benefit at 62) vs. $15,000 FRA -- the old "25%
+        # reduction" paid $15,000*0.75=$11,250, more than the correct,
+        # already-lower $10,500. Fixed to match two-age mode's own
+        # already-correct treatment (line ~1873 above).
         scenario_ss = jason_ss_annual * ss_mult
-        scenario_justin_ss = inputs.get("justin_social_security", JUSTIN_SPOUSAL_ANNUAL) * ss_mult
+        scenario_justin_ss = justin_ss_annual * ss_mult
 
         returns = []
         inf_mults = []
@@ -2251,12 +2344,14 @@ def _run_roth_conversion_analysis_two_age(inputs: Dict, accounts: List[Dict], ja
     state_tax_rate = inputs.get("state_income_tax_rate", 0) or 0
 
     pension_annual = pension_for_age(inputs, jason_ret_age)
-    jason_ss_early   = inputs.get("jason_social_security", JASON_SS_EARLY)
-    jason_ss_delayed = inputs.get("jason_ss_delayed", JASON_SS_DELAYED)
-    jason_ss_annual  = jason_ss_early if ss_timing == "early" else jason_ss_delayed
-    jason_ss_age     = 62 if ss_timing == "early" else 67
-    justin_ss_annual = inputs.get("justin_social_security", JUSTIN_SPOUSAL_ANNUAL)
-    justin_ss_age    = inputs.get("justin_ss_age", JUSTIN_SPOUSAL_AGE)
+    # SS resolution (2026-09-08, CALCULATION_CONTRACT.md section 44,
+    # milestone 5): resolve_ss_benefits, claim ages read off `inputs`
+    # (see run_two_dimensional_retirement_projection's identical
+    # convention -- the public dispatcher injects its own
+    # jason_ss_claim_age/justin_ss_claim_age params into `inputs`
+    # before delegating to this function).
+    jason_ss_annual, jason_ss_age, justin_ss_annual, justin_ss_age = resolve_ss_benefits(
+        inputs, ss_timing, inputs.get("jason_ss_claim_age"), inputs.get("justin_ss_claim_age"))
 
     from retirement_tools_engine import ORDINARY_BRACKETS_MFJ_2026, STD_DEDUCTION_MFJ_2026
     BRACKET_TOP_22  = next(cap for rate, cap in ORDINARY_BRACKETS_MFJ_2026 if rate == 0.22)
@@ -2532,7 +2627,8 @@ def _run_roth_conversion_analysis_two_age(inputs: Dict, accounts: List[Dict], ja
 def run_roth_conversion_analysis(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_timing: str = "early",
                                   life_events: List[Dict] = None,
                                   surplus_allocations: List[Dict] = None,
-                                  jason_ret_age: int = None, justin_ret_age: int = None) -> Dict:
+                                  jason_ret_age: int = None, justin_ret_age: int = None,
+                                  jason_ss_claim_age: int = None, justin_ss_claim_age: int = None) -> Dict:
     """
     Find optimal annual Roth conversion amount between retirement and RMD age.
     Goal: fill the 22% bracket each year to minimize lifetime taxes.
@@ -2547,8 +2643,33 @@ def run_roth_conversion_analysis(inputs: Dict, accounts: List[Dict], ret_age: in
     required together (a ValueError if only one is given), delegating
     entirely to _run_roth_conversion_analysis_two_age. ret_age/ss_timing's
     own single-axis behavior below is completely unaffected when these
-    are left at their None default."""
+    are left at their None default.
+
+    jason_ss_claim_age/justin_ss_claim_age (2026-09-08, CALCULATION_
+    CONTRACT.md section 44, milestone 3): opt-in continuous SS claiming
+    age 62-70 per spouse, via the shared resolve_ss_benefits -- also
+    fixes a pre-existing inconsistency this function had versus every
+    other consumer: `jason_ss`/`justin_ss` used to default to a bare 0
+    when the corresponding Settings field was unset (`inputs.get(key,
+    0)`), instead of the JASON_SS_DELAYED_RATIO-based fallback every
+    sibling consumer already applies. A household with jason_social_
+    security set but jason_ss_delayed unset, requesting ss_timing=
+    "delayed", now gets the same fallback figure run_swr_analysis/
+    run_monte_carlo/run_stress_tests/run_retirement_projection already
+    give it, instead of a silent $0."""
     if _require_both_two_age_or_neither(jason_ret_age, justin_ret_age):
+        # Independent review, 2026-09-08, ninth follow-up, finding 1 (P1):
+        # the old version here blindly overwrote BOTH spouses' claim-age
+        # fields with this call's own explicit params, even when only
+        # ONE spouse was actually being overridden -- silently clearing
+        # the OTHER spouse's own saved value back to None. Fixed:
+        # resolve_ss_claim_ages layers explicit override > whatever
+        # `inputs` already has (the saved value) > None, per spouse
+        # independently, and clamps to [62, 70].
+        _jason_ss_claim_age, _justin_ss_claim_age = resolve_ss_claim_ages(
+            inputs, jason_ss_claim_age, justin_ss_claim_age)
+        if _jason_ss_claim_age is not None or _justin_ss_claim_age is not None:
+            inputs = {**inputs, "jason_ss_claim_age": _jason_ss_claim_age, "justin_ss_claim_age": _justin_ss_claim_age}
         return _run_roth_conversion_analysis_two_age(inputs, accounts, jason_ret_age, justin_ret_age, ss_timing,
                                                        life_events, surplus_allocations)
 
@@ -2569,14 +2690,8 @@ def run_roth_conversion_analysis(inputs: Dict, accounts: List[Dict], ret_age: in
     jason_age    = inputs["jason_age"]
     justin_age   = inputs["justin_age"]
     pension_annual = pension_for_age(inputs, ret_age)
-    jason_ss     = inputs.get("jason_social_security" if ss_timing == "early" else "jason_ss_delayed", 0)
-    justin_ss    = inputs.get("justin_social_security", 0)
-    jason_ss_age = 62 if ss_timing == "early" else 67
-    # Read the spouse's own claiming age instead of hardcoding 67 — and,
-    # below, compare it against the spouse's own current age rather than
-    # Jason's `age` directly (external audit 2026-09-06, same bug as
-    # elsewhere in this file).
-    justin_ss_age = inputs.get("justin_ss_age", JUSTIN_SPOUSAL_AGE)
+    jason_ss, jason_ss_age, justin_ss, justin_ss_age = resolve_ss_benefits(
+        inputs, ss_timing, jason_ss_claim_age, justin_ss_claim_age)
 
     # Derived from the canonical 2026 MFJ bracket table in
     # retirement_tools_engine.py instead of a local hardcoded copy — this
@@ -2592,9 +2707,17 @@ def run_roth_conversion_analysis(inputs: Dict, accounts: List[Dict], ret_age: in
     RMD_START_AGE   = rmd_start_age(jason_age)
 
     from projection_engine import run_retirement_projection
+    # run_retirement_projection now takes jason_ss_claim_age/
+    # justin_ss_claim_age as EXPLICIT params (CALCULATION_CONTRACT.md
+    # section 44, milestone 6/ninth follow-up finding 1) -- passed
+    # directly below, no inputs-dict injection needed (and no risk of
+    # an unrelated caller's inputs dict silently switching this call
+    # into continuous-claim-age mode).
     _proj = run_retirement_projection(inputs, accounts, ret_ages=[ret_age], life_events=life_events,
-                                       surplus_allocations=surplus_allocations)
-    _s = next(s for s in _proj["scenarios"] if s["label"] == f"age_{ret_age}_{ss_timing}")
+                                       surplus_allocations=surplus_allocations,
+                                       jason_ss_claim_age=jason_ss_claim_age, justin_ss_claim_age=justin_ss_claim_age)
+    _ss_label = "custom" if jason_ss_claim_age is not None else ss_timing
+    _s = next(s for s in _proj["scenarios"] if s["label"] == f"age_{ret_age}_{_ss_label}")
 
     years_to_ret   = max(0, ret_age - jason_age)
     pretax_at_ret  = _s["pretax_at_retirement"]
@@ -3095,12 +3218,14 @@ def _run_tax_efficiency_simulation_two_age(inputs: Dict, accounts: List[Dict], j
     _salary_growth_pct = inputs.get("_salary_growth_pct", 0.0)
 
     pension_annual = pension_for_age(inputs, jason_ret_age)
-    jason_ss_early   = inputs.get("jason_social_security", JASON_SS_EARLY)
-    jason_ss_delayed = inputs.get("jason_ss_delayed", JASON_SS_DELAYED)
-    jason_ss_annual  = jason_ss_early if ss_timing == "early" else jason_ss_delayed
-    jason_ss_age     = 62 if ss_timing == "early" else 67
-    justin_ss_annual = inputs.get("justin_social_security", JUSTIN_SPOUSAL_ANNUAL)
-    justin_ss_age    = inputs.get("justin_ss_age", JUSTIN_SPOUSAL_AGE)
+    # SS resolution (2026-09-08, CALCULATION_CONTRACT.md section 44,
+    # milestone 5): resolve_ss_benefits, claim ages read off `inputs`
+    # (see run_two_dimensional_retirement_projection's identical
+    # convention -- the public dispatcher injects its own
+    # jason_ss_claim_age/justin_ss_claim_age params into `inputs`
+    # before delegating to this function).
+    jason_ss_annual, jason_ss_age, justin_ss_annual, justin_ss_age = resolve_ss_benefits(
+        inputs, ss_timing, inputs.get("jason_ss_claim_age"), inputs.get("justin_ss_claim_age"))
 
     from projection_engine import run_two_dimensional_retirement_projection
     _proj = run_two_dimensional_retirement_projection(inputs, accounts, jason_ret_age=jason_ret_age,
@@ -3256,7 +3381,8 @@ def _run_tax_efficiency_simulation_two_age(inputs: Dict, accounts: List[Dict], j
 def run_tax_efficiency_simulation(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_timing: str = "early",
                                    life_events: List[Dict] = None,
                                    surplus_allocations: List[Dict] = None,
-                                   jason_ret_age: int = None, justin_ret_age: int = None) -> Dict:
+                                   jason_ret_age: int = None, justin_ret_age: int = None,
+                                   jason_ss_claim_age: int = None, justin_ss_claim_age: int = None) -> Dict:
     """
     Run 1000 market scenarios for 3 draw order strategies.
     Simplified tax: flat 22% on pretax withdrawals, 0% on Roth, 15% on taxable gains.
@@ -3271,8 +3397,25 @@ def run_tax_efficiency_simulation(inputs: Dict, accounts: List[Dict], ret_age: i
     required together (a ValueError if only one is given), delegating
     entirely to _run_tax_efficiency_simulation_two_age. ret_age/
     ss_timing's own single-axis behavior below is completely unaffected
-    when these are left at their None default."""
+    when these are left at their None default.
+
+    jason_ss_claim_age/justin_ss_claim_age (2026-09-08, CALCULATION_
+    CONTRACT.md section 44, milestone 3): opt-in continuous SS claiming
+    age 62-70 per spouse, via the shared resolve_ss_benefits. None-
+    default leaves the existing ss_timing behavior unchanged."""
     if _require_both_two_age_or_neither(jason_ret_age, justin_ret_age):
+        # Independent review, 2026-09-08, ninth follow-up, finding 1 (P1):
+        # the old version here blindly overwrote BOTH spouses' claim-age
+        # fields with this call's own explicit params, even when only
+        # ONE spouse was actually being overridden -- silently clearing
+        # the OTHER spouse's own saved value back to None. Fixed:
+        # resolve_ss_claim_ages layers explicit override > whatever
+        # `inputs` already has (the saved value) > None, per spouse
+        # independently, and clamps to [62, 70].
+        _jason_ss_claim_age, _justin_ss_claim_age = resolve_ss_claim_ages(
+            inputs, jason_ss_claim_age, justin_ss_claim_age)
+        if _jason_ss_claim_age is not None or _justin_ss_claim_age is not None:
+            inputs = {**inputs, "jason_ss_claim_age": _jason_ss_claim_age, "justin_ss_claim_age": _justin_ss_claim_age}
         return _run_tax_efficiency_simulation_two_age(inputs, accounts, jason_ret_age, justin_ret_age, ss_timing,
                                                         life_events, surplus_allocations)
 
@@ -3310,17 +3453,21 @@ def run_tax_efficiency_simulation(inputs: Dict, accounts: List[Dict], ret_age: i
         inputs, _justin_years_to_retire_te, years_to_ret_te, _salary_growth_pct)
 
     pension_annual = pension_for_age(inputs, ret_age)
-    jason_ss_early  = inputs.get("jason_social_security", JASON_SS_EARLY)
-    jason_ss_delayed = inputs.get("jason_ss_delayed", JASON_SS_DELAYED)
-    jason_ss_annual = jason_ss_early if ss_timing == "early" else jason_ss_delayed
-    jason_ss_age    = 62 if ss_timing == "early" else 67
-    justin_ss       = inputs.get("justin_social_security", JUSTIN_SPOUSAL_ANNUAL)
-    justin_ss_age   = inputs.get("justin_ss_age", JUSTIN_SPOUSAL_AGE)
+    jason_ss_annual, jason_ss_age, justin_ss, justin_ss_age = resolve_ss_benefits(
+        inputs, ss_timing, jason_ss_claim_age, justin_ss_claim_age)
 
     from projection_engine import run_retirement_projection
+    # run_retirement_projection now takes jason_ss_claim_age/
+    # justin_ss_claim_age as EXPLICIT params (CALCULATION_CONTRACT.md
+    # section 44, milestone 6/ninth follow-up finding 1) -- passed
+    # directly below, no inputs-dict injection needed (and no risk of
+    # an unrelated caller's inputs dict silently switching this call
+    # into continuous-claim-age mode).
     _proj = run_retirement_projection(inputs, accounts, ret_ages=[ret_age], life_events=life_events,
-                                       surplus_allocations=surplus_allocations)
-    _s = next(s for s in _proj["scenarios"] if s["label"] == f"age_{ret_age}_{ss_timing}")
+                                       surplus_allocations=surplus_allocations,
+                                       jason_ss_claim_age=jason_ss_claim_age, justin_ss_claim_age=justin_ss_claim_age)
+    _ss_label = "custom" if jason_ss_claim_age is not None else ss_timing
+    _s = next(s for s in _proj["scenarios"] if s["label"] == f"age_{ret_age}_{_ss_label}")
     pretax_start  = _s["pretax_at_retirement"]
     roth_start    = _s["roth_at_retirement"]
     taxable_start = _s["taxable_at_retirement"]
@@ -3901,10 +4048,28 @@ def _run_survivor_scenario_two_age(inputs: Dict, accounts: List[Dict], jason_ret
     # extra RMD into `rmd` BEFORE the tax-rate estimate correctly moves
     # the marginal rate from 12% to 22% (was stuck at the stale
     # pre-addition rate) -- $991,057, not $995,122.
+    # External audit review of commit 0c1a569, finding 1 (P1):
+    # run_owner_split_two_dimensional_projection now takes
+    # jason_ss_claim_age/justin_ss_claim_age as EXPLICIT parameters only
+    # (CALCULATION_CONTRACT.md section 49, finding 1's architectural
+    # fix) -- it no longer reads them off `inputs` at all. This call
+    # left them unset, so the pre-death owner walk silently fell back to
+    # the legacy ss_timing early/delayed default regardless of what
+    # claim age the dispatcher had already resolved and injected into
+    # `inputs` above resolve_ss_benefits's own call a few lines down.
+    # Reproduced exactly: both spouses 67, Jason claims at 70, Justin
+    # dies at 69, $1M portfolio, zero spending/returns -- the pre-death
+    # walk credited three years (67-69) of Jason's EARLY benefit he
+    # never actually claims, reporting $1,063,000 at death instead of
+    # $1,000,000. Fixed by passing the same claim ages the post-death
+    # resolve_ss_benefits call below already reads off `inputs`.
+    _jason_ss_claim_age = inputs.get("jason_ss_claim_age")
+    _justin_ss_claim_age = inputs.get("justin_ss_claim_age")
     walk = run_owner_split_two_dimensional_projection(inputs, accounts, jason_ret_age, justin_ret_age,
                                                         ss_timing=ss_timing, salary_growth_pct=_salary_growth_pct,
                                                         life_events=life_events, surplus_allocations=surplus_allocations,
-                                                        death_jason_age=death_jason_age, deceased=deceased)
+                                                        death_jason_age=death_jason_age, deceased=deceased,
+                                                        jason_ss_claim_age=_jason_ss_claim_age, justin_ss_claim_age=_justin_ss_claim_age)
     yearly = walk["yearly_detail"]
 
     death_row_index = next((i for i, y in enumerate(yearly) if y["jason_age"] >= death_jason_age), None)
@@ -3963,14 +4128,16 @@ def _run_survivor_scenario_two_age(inputs: Dict, accounts: List[Dict], jason_ret
 
     # Social Security selection (finding 3 fix): the SAME per-spouse,
     # ss_timing-selected, own-claim-age convention every other two-age
-    # consumer in this file already uses -- computed per year in the
-    # post-death loop below, not as a single flat scalar here.
-    jason_ss_early   = inputs.get("jason_social_security", JASON_SS_EARLY)
-    jason_ss_delayed = inputs.get("jason_ss_delayed", JASON_SS_DELAYED)
-    jason_ss_annual  = jason_ss_early if ss_timing == "early" else jason_ss_delayed
-    jason_ss_age     = 62 if ss_timing == "early" else 67
-    justin_ss_annual = inputs.get("justin_social_security", JUSTIN_SPOUSAL_ANNUAL)
-    justin_ss_age    = inputs.get("justin_ss_age", JUSTIN_SPOUSAL_AGE)
+    # consumer in this file already uses -- these base annual/age
+    # figures feed the per-year COLA-compounding gate in the post-death
+    # loop below, not a single flat scalar applied directly. As of
+    # 2026-09-08 (CALCULATION_CONTRACT.md section 44, milestone 5),
+    # resolve_ss_benefits provides them -- jason_ss_claim_age/justin_ss_
+    # claim_age read off `inputs` (the public run_survivor_scenario
+    # dispatcher injects its own same-named params into `inputs` before
+    # delegating here), same convention as every other two-age consumer.
+    jason_ss_annual, jason_ss_age, justin_ss_annual, justin_ss_age = resolve_ss_benefits(
+        inputs, ss_timing, inputs.get("jason_ss_claim_age"), inputs.get("justin_ss_claim_age"))
 
     # Pension (finding 2 fix): section 37.5, Option A (decided) -- if
     # Jason (its owner) is the deceased, the survivor gets the full
@@ -4163,8 +4330,23 @@ def run_survivor_scenario(inputs: Dict, accounts: List[Dict], ret_age: int = 60,
                            ss_timing: str = "early",
                            trust_available_to_survivor: bool = False,
                            joint_accounts_survivorship: bool = True,
-                           spousal_rollover_election: bool = True) -> Dict:
-    """jason_ret_age/justin_ret_age (2026-09-08, CALCULATION_CONTRACT.md
+                           spousal_rollover_election: bool = True,
+                           jason_ss_claim_age: int = None, justin_ss_claim_age: int = None) -> Dict:
+    """jason_ss_claim_age/justin_ss_claim_age (2026-09-08, CALCULATION_
+    CONTRACT.md section 44, milestone 4): opt-in continuous SS claiming
+    age 62-70 per spouse, via the shared resolve_ss_benefits -- also
+    fixes a pre-existing gap this function had versus every other
+    consumer: survivor_ss_annual read the raw jason_social_security/
+    justin_social_security inputs directly, ignoring ss_timing entirely
+    (a household that selected "delayed" still saw the survivor
+    schedule computed off the early-claim figure). Still a single flat
+    figure COLA'd from the death year forward (unchanged simplification
+    -- rebuilding this into a genuinely per-year claim-age-gated
+    schedule, like the two-age Survivor's own finding-3 fix, is a
+    larger scope than adding claim-age input support and not attempted
+    here).
+
+    jason_ret_age/justin_ret_age (2026-09-08, CALCULATION_CONTRACT.md
     sections 36-37, Milestone 4 of 4): two-age mode with an owner-
     attributed account ledger, both ages required together, delegating
     entirely to _run_survivor_scenario_two_age. ret_age's own single-axis
@@ -4226,6 +4408,18 @@ def run_survivor_scenario(inputs: Dict, accounts: List[Dict], ret_age: int = 60,
     and a past-selected-ret_age scenario.
     """
     if _require_both_two_age_or_neither(jason_ret_age, justin_ret_age):
+        # Independent review, 2026-09-08, ninth follow-up, finding 1 (P1):
+        # the old version here blindly overwrote BOTH spouses' claim-age
+        # fields with this call's own explicit params, even when only
+        # ONE spouse was actually being overridden -- silently clearing
+        # the OTHER spouse's own saved value back to None. Fixed:
+        # resolve_ss_claim_ages layers explicit override > whatever
+        # `inputs` already has (the saved value) > None, per spouse
+        # independently, and clamps to [62, 70].
+        _jason_ss_claim_age, _justin_ss_claim_age = resolve_ss_claim_ages(
+            inputs, jason_ss_claim_age, justin_ss_claim_age)
+        if _jason_ss_claim_age is not None or _justin_ss_claim_age is not None:
+            inputs = {**inputs, "jason_ss_claim_age": _jason_ss_claim_age, "justin_ss_claim_age": _justin_ss_claim_age}
         return _run_survivor_scenario_two_age(inputs, accounts, jason_ret_age, justin_ret_age, ss_timing,
                                                deceased, death_age, survivor_need_factor,
                                                life_events, surplus_allocations,
@@ -4284,9 +4478,28 @@ def run_survivor_scenario(inputs: Dict, accounts: List[Dict], ret_age: int = 60,
                                          else timeline.justin_age_at(timeline.effective_start_age))
         death_age = deceased_effective_start_age + 10
 
+    # run_retirement_projection now takes jason_ss_claim_age/
+    # justin_ss_claim_age as EXPLICIT params (CALCULATION_CONTRACT.md
+    # section 44, milestone 6/ninth follow-up finding 1) -- passed
+    # directly below, no inputs-dict injection needed (and no risk of
+    # an unrelated caller's inputs dict silently switching this call
+    # into continuous-claim-age mode).
     _proj = run_retirement_projection(inputs, accounts, ret_ages=[ret_age], life_events=life_events,
-                                       surplus_allocations=surplus_allocations)
-    _scenario = next((s for s in _proj["scenarios"] if s["label"] == f"age_{ret_age}_early"), None)
+                                       surplus_allocations=surplus_allocations,
+                                       jason_ss_claim_age=jason_ss_claim_age, justin_ss_claim_age=justin_ss_claim_age)
+    # Independent review, 2026-09-08, ninth follow-up, finding 3 (P1):
+    # this used to hardcode "early" regardless of ss_timing, on the
+    # theory that "portfolio/pension figures don't vary by SS choice" --
+    # wrong: death_row["portfolio_balance"] comes from the WITHDRAWAL-
+    # PHASE walk, where SS directly affects each year's guaranteed
+    # income and therefore how much gets drawn from the portfolio.
+    # Hardcoding "early" silently used the wrong scenario's own
+    # portfolio trajectory for a household that had selected "delayed"
+    # (reproduced: $1,126,000 at death reported instead of the correct
+    # $1,030,000). Fixed to fall back to the real ss_timing, matching
+    # every other consumer's own convention.
+    _ss_label = "custom" if jason_ss_claim_age is not None else ss_timing
+    _scenario = next((s for s in _proj["scenarios"] if s["label"] == f"age_{ret_age}_{_ss_label}"), None)
     if not _scenario:
         return {"has_data": False}
 
@@ -4318,7 +4531,22 @@ def run_survivor_scenario(inputs: Dict, accounts: List[Dict], ret_age: int = 60,
 
     portfolio_at_death   = death_row["portfolio_balance"]
     starting_balance     = portfolio_at_death + payout
-    survivor_ss_annual   = max(inputs.get("jason_social_security", 0), inputs.get("justin_social_security", 0))
+    # Independent review, 2026-09-08, ninth follow-up, finding 3 (P1),
+    # part 2: survivor_ss_annual used to be a single flat figure (the
+    # higher of the two spouses' RESOLVED benefits) applied from the
+    # very first survivor year regardless of whether either spouse had
+    # actually REACHED their own claim age yet. Reproduced: Jason
+    # claiming at 70, Justin dies at 62 -- the survivor schedule paid
+    # Jason's full $37,200 (his age-70 benefit) starting at age 63, 7
+    # years before he'd have actually claimed it. Fixed to match the
+    # two-age Survivor's own already-reviewed per-year gate (its own
+    # finding 3, sections 39-43): each spouse's own resolved annual/age
+    # feed a PER-YEAR check in the loop below (age >= that spouse's own
+    # claim age), taking the higher of whichever is actually active
+    # that year, continuing each one's own COLA from ITS OWN claim year
+    # -- not the death year.
+    _jason_ss_annual, _jason_ss_age, _justin_ss_annual, _justin_ss_age = resolve_ss_benefits(
+        inputs, ss_timing, jason_ss_claim_age, justin_ss_claim_age)
     pension_annual       = death_row["pension"]  # 100% J&S assumption already baked into this figure
     # Total years from TODAY to the death year, not just from retirement
     # to death — the old years_since_ret omitted the years between today
@@ -4351,6 +4579,7 @@ def run_survivor_scenario(inputs: Dict, accounts: List[Dict], ret_age: int = 60,
     # (external audit 2026-09-07, reproduced: baseline age 60 ends at
     # $865,608 after spending $134,392; survivor age 60 then spent
     # another $100,000 in the same nominal year).
+    first_year_ss = None
     for i, age in enumerate(range(death_jason_age + 1, end_age)):
         need       = income_need_at_death * ((1 + inflation) ** (i + 1))
         # Pension is frozen (no COLA) everywhere else in this app — only
@@ -4358,7 +4587,20 @@ def run_survivor_scenario(inputs: Dict, accounts: List[Dict], ret_age: int = 60,
         # apply COLA to the combined pension+SS total, inflating the
         # (supposedly frozen) pension portion right along with SS
         # (external audit 2026-09-07).
-        guaranteed = pension_annual + survivor_ss_annual * ((1 + inflation) ** (i + 1))
+        # Finding 3 fix (see above): each spouse's own resolved benefit
+        # only actually applies once THEY reach their own claim age --
+        # computed per year here instead of a single flat figure applied
+        # from the first survivor year regardless of either spouse's own
+        # timing, each continuing its own COLA from its own claim year.
+        justin_age_this_year = age - age_gap
+        year_jss = (_jason_ss_annual * ((1 + inflation) ** max(0, age - _jason_ss_age))
+                    if age >= _jason_ss_age else 0.0)
+        year_uss = (_justin_ss_annual * ((1 + inflation) ** max(0, justin_age_this_year - _justin_ss_age))
+                    if justin_age_this_year >= _justin_ss_age else 0.0)
+        survivor_ss_this_year = max(year_jss, year_uss)
+        if first_year_ss is None:
+            first_year_ss = survivor_ss_this_year
+        guaranteed = pension_annual + survivor_ss_this_year
         # Second-earner gap income (backlog item 1, closed for Survivor
         # 2026-09-08 second follow-up): only applies if Justin is the
         # SURVIVOR (deceased != "justin") -- if Justin is the one who
@@ -4474,6 +4716,17 @@ def run_survivor_scenario(inputs: Dict, accounts: List[Dict], ret_age: int = 60,
         cap_need = _minimum_survivor_funding(net_needs, post_ret)
         additional_insurance_needed = max(0, round(cap_need - starting_balance))
 
+
+    if first_year_ss is None:
+        # No post-death years at all (end_age == death_jason_age + 1) --
+        # report what the first (only) year would have been, same
+        # formulas as inside the loop, so this field is never left None.
+        _next_age = death_jason_age + 1
+        _next_justin_age = _next_age - age_gap
+        first_year_ss = max(
+            _jason_ss_annual * ((1 + inflation) ** max(0, _next_age - _jason_ss_age)) if _next_age >= _jason_ss_age else 0.0,
+            _justin_ss_annual * ((1 + inflation) ** max(0, _next_justin_age - _justin_ss_age)) if _next_justin_age >= _justin_ss_age else 0.0,
+        )
     if survives:
         recommendation = (
             f"If {deceased} dies at {death_age}, the ${payout:,.0f} life insurance payout plus the portfolio "
@@ -4498,7 +4751,7 @@ def run_survivor_scenario(inputs: Dict, accounts: List[Dict], ret_age: int = 60,
         "portfolio_at_death": round(portfolio_at_death),
         "life_insurance_payout": round(payout),
         "starting_balance_after_payout": round(starting_balance),
-        "survivor_ss_annual": round(survivor_ss_annual),
+        "survivor_ss_annual": round(first_year_ss),
         "pension_annual": round(pension_annual),
         "income_need_at_death": round(income_need_at_death),
         "survivor_need_factor": survivor_need_factor,

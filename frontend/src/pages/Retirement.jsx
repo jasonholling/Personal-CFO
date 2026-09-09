@@ -40,6 +40,7 @@ export default function Retirement({ onNavigate }) {
   const [data, setData]         = useState(null)
   const [loading, setLoading]   = useState(true)
   const [error, setError]       = useState(null)
+  const [hasCustomClaimAge, setHasCustomClaimAge] = useState(false)
   const { retAge: sharedRetAge, ssTiming, setRetAge, setSsTiming } = useScenario()
   const retAge = nearestOf(sharedRetAge, RET_AGES)
 
@@ -47,6 +48,15 @@ export default function Retirement({ onNavigate }) {
     axios.get('/api/projections/retirement')
       .then(r => { setData(r.data); setLoading(false) })
       .catch(e => { setError(e.response?.data?.detail || 'Could not load projections'); setLoading(false) })
+    // This page's own Early/Delayed toggle always shows those two
+    // scenarios (see main.py's get_retirement_projections comment,
+    // CALCULATION_CONTRACT.md section 50) — a saved claim age from
+    // Settings doesn't change this page, only Monte Carlo/Stress/SWR/
+    // Roth/Tax Efficiency/Survivor/Sequence Risk. Surface that split
+    // explicitly rather than let the toggle silently look ignored.
+    axios.get('/api/planning-inputs')
+      .then(r => setHasCustomClaimAge(r.data?.jason_ss_claim_age != null || r.data?.justin_ss_claim_age != null))
+      .catch(() => {})
   }, [])
 
   if (loading) return <div className="loading">Running projections...</div>
@@ -90,6 +100,14 @@ export default function Retirement({ onNavigate }) {
       <div style={{ marginBottom:28 }}>
         <p className="section-sub" style={{ margin:0 }}>Three scenarios · Toggle SS timing · Modeled to age {s.retirement_end_age}</p>
       </div>
+
+      {hasCustomClaimAge && (
+        <div style={{ padding:'10px 14px', background:'var(--bg3)', borderRadius:8, marginBottom:20, fontSize:12, color:'var(--text2)' }}>
+          ℹ You've saved a specific Social Security claim age in Settings. It's used on Monte Carlo, Stress Tests,
+          SWR, Roth Conversion, Tax Efficiency, and Survivor Scenario — this page still uses the Take at 62 /
+          Wait until 67 toggle below.
+        </div>
+      )}
 
       {/* Scenario selector */}
       <div style={{ display:'flex', gap:24, marginBottom:24, alignItems:'center', flexWrap:'wrap' }}>

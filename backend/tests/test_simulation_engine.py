@@ -1346,9 +1346,20 @@ class TestRunSurvivorScenario:
         assert result["life_insurance_payout"] == 395000
 
     def test_survivor_ss_is_higher_of_the_two_not_both(self, sample_inputs, sample_accounts):
+        # Was asserting a flat, uncompounded 30000 -- the review's ninth
+        # follow-up round (CALCULATION_CONTRACT.md section 49, finding
+        # 3b) fixed run_survivor_scenario to apply real COLA compounding
+        # per post-death year instead of a flat lifetime max, matching
+        # two-age Survivor's own already-correct treatment. jason claims
+        # ss_timing="early" at 62 (default); he dies at 70, so the first
+        # post-death year is his age 71 -- 9 years of 2% COLA on his
+        # 30000 benefit. justin (age_gap=2, per sample_inputs) is 69 by
+        # then, past his own FRA-default claim age of 67, so his own
+        # 2-years-compounded 15000 figure is also live but lower.
         inputs = {**sample_inputs, "jason_social_security": 30000, "justin_social_security": 15000}
         result = run_survivor_scenario(inputs, sample_accounts, ret_age=60, deceased="jason", death_age=70)
-        assert result["survivor_ss_annual"] == 30000
+        expected_jason_leg = 30000 * (1.02 ** (71 - 62))
+        assert result["survivor_ss_annual"] == round(expected_jason_leg)
 
     def test_generous_insurance_and_low_need_survives(self, sample_inputs, sample_accounts):
         inputs = {**sample_inputs, "jason_life_basic": 400000, "jason_life_supplemental": 2000000,

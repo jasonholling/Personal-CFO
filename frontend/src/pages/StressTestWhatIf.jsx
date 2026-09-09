@@ -205,6 +205,56 @@ export default function StressTestWhatIf({ onNavigate }) {
   const [jasonRetAge, setJasonRetAge] = useState(65)
   const [justinRetAge, setJustinRetAge] = useState(65)
 
+  // External audit review of commit 0c1a569, finding 5 (P2): once a
+  // spouse has a claim age saved in Settings, resolve_ss_claim_ages'
+  // 3-tier resolution (CALCULATION_CONTRACT.md section 49) makes that
+  // saved value win over the Early/Delayed buttons below on every page
+  // that reads it -- Monte Carlo and Historical Stress included (both
+  // single-axis and two-age mode -- CALCULATION_CONTRACT.md section
+  // 48). The buttons still render as active/clickable and the response
+  // still labels itself "early"/"delayed", so clicking them silently
+  // does nothing with no indication why. Surface it explicitly instead
+  // of leaving an apparently-live control that's actually inert.
+  // Sourced from WhatIf.jsx's own onSettingsLoaded callback (below)
+  // rather than a second /api/planning-inputs fetch here -- WhatIf
+  // stays mounted on every tab already, so its one fetch is the single
+  // source.
+  //
+  // External audit review of commit aaa3cf5, finding 3 (P2): each
+  // spouse's claim age resolves INDEPENDENTLY (resolve_ss_claim_ages,
+  // section 49 finding 1) -- with only one spouse's age saved, these
+  // buttons keep controlling the OTHER spouse's SS normally. A single
+  // "these buttons have no effect" banner was simply false in that
+  // case (reproduced: only Justin's claim age saved, toggling Early/
+  // Delayed still moved the final balance from $1,423,000 to
+  // $1,540,000 via Jason's own SS). Now tracks each spouse's saved age
+  // separately and only claims override for the spouse(s) actually
+  // overridden; also now shown in two-age mode, which the original
+  // banner skipped even though saved claim ages apply there too.
+  //
+  // External audit review of commit ecc862b, finding 1: these buttons
+  // (ssTiming) only ever drive JASON's benefit -- resolve_ss_benefits'
+  // own non-claim-age branch never reads ss_timing for Justin at all,
+  // with or without a claim age saved (Justin's benefit has always
+  // been a flat figure here). The jasonOverridden-only message said
+  // "Justin's SS still responds normally," implying these buttons
+  // ever controlled Justin's SS to begin with -- they never did, so
+  // once Jason is overridden the buttons have no effect on ANYONE, not
+  // "no effect on Jason but Justin still responds." Rewritten below to
+  // state that fact directly instead of implying a Justin dependency
+  // that was never true. Distinguishes the justin-only case (these
+  // buttons are still fully live for Jason as always -- Justin's own
+  // saved age is unrelated to what this toggle does) with a plain
+  // info note rather than an "overridden" warning, since nothing about
+  // these buttons' behavior actually changed in that case.
+  const [savedClaimAges, setSavedClaimAges] = useState({ jason: null, justin: null })
+  const jasonOverridden  = savedClaimAges.jason  != null
+  const justinOverridden = savedClaimAges.justin != null
+  const anyOverridden = jasonOverridden || justinOverridden
+  const overrideNote = jasonOverridden
+    ? `These buttons have no effect right now — ${person1Name}'s Social Security claim age (${savedClaimAges.jason}) is saved in Settings and controls ${person1Name}'s benefit regardless of this toggle. (This toggle only ever affects ${person1Name}'s SS, not ${person2Name}'s.)`
+    : `${person2Name}'s Social Security claim age (${savedClaimAges.justin}) is saved in Settings, fixing ${person2Name}'s benefit at that age. These buttons still work normally for ${person1Name}'s SS as usual — they were never connected to ${person2Name}'s.`
+
   return (
     <div>
       <div style={{ marginBottom:28 }}>
@@ -257,7 +307,7 @@ export default function StressTestWhatIf({ onNavigate }) {
           claiming-age timing don't apply in two-age mode v1 (out of
           scope), so that selector is hidden while it's on. */}
       {tab !== 'whatif' && tab !== 'survivor' && !twoAgeMode && (
-        <div style={{ display:'flex', gap:24, marginBottom:28, flexWrap:'wrap', alignItems:'flex-end' }}>
+        <div style={{ display:'flex', gap:24, marginBottom:anyOverridden ? 8 : 28, flexWrap:'wrap', alignItems:'flex-end' }}>
           <div>
             <div className="label" style={{ marginBottom:8 }}>Retirement Age</div>
             <div style={{ display:'flex', flexWrap:'wrap', gap:6, maxWidth:420 }}>
@@ -270,7 +320,9 @@ export default function StressTestWhatIf({ onNavigate }) {
             </div>
           </div>
           <div>
-            <div className="label" style={{ marginBottom:8 }}>Social Security</div>
+            <div className="label" style={{ marginBottom:8 }}>
+              Social Security{jasonOverridden ? ' (overridden by Settings)' : ''}
+            </div>
             <div style={{ display:'flex', gap:6 }}>
               {SS_OPTS.map(o => (
                 <button key={o.value}
@@ -282,8 +334,13 @@ export default function StressTestWhatIf({ onNavigate }) {
           </div>
         </div>
       )}
+      {tab !== 'whatif' && tab !== 'survivor' && !twoAgeMode && anyOverridden && (
+        <div style={{ padding:'8px 14px', background:'var(--bg3)', borderRadius:8, marginBottom:20, fontSize:12, color:'var(--text2)' }}>
+          ℹ {overrideNote}{jasonOverridden ? ' Change or clear it on the Settings page instead.' : ''}
+        </div>
+      )}
       {tab !== 'whatif' && tab !== 'survivor' && twoAgeMode && (
-        <div style={{ display:'flex', gap:24, marginBottom:28, flexWrap:'wrap', alignItems:'flex-end' }}>
+        <div style={{ display:'flex', gap:24, marginBottom:anyOverridden ? 8 : 28, flexWrap:'wrap', alignItems:'flex-end' }}>
           <div>
             <div className="label" style={{ marginBottom:8 }}>{person1Name}'s Retirement Age</div>
             <input type="number" value={jasonRetAge} onChange={e => setJasonRetAge(parseInt(e.target.value) || 0)} />
@@ -300,7 +357,9 @@ export default function StressTestWhatIf({ onNavigate }) {
               for a two-age scenario. Kept visible here so the selection
               persists AND stays user-editable across the mode switch. */}
           <div>
-            <div className="label" style={{ marginBottom:8 }}>Social Security</div>
+            <div className="label" style={{ marginBottom:8 }}>
+              Social Security{jasonOverridden ? ' (overridden by Settings)' : ''}
+            </div>
             <div style={{ display:'flex', gap:6 }}>
               {SS_OPTS.map(o => (
                 <button key={o.value}
@@ -312,9 +371,20 @@ export default function StressTestWhatIf({ onNavigate }) {
           </div>
         </div>
       )}
+      {/* External audit review of commit aaa3cf5, finding 3 (P2): this
+          note used to be skipped entirely in two-age mode, even though
+          saved claim ages apply there too (CALCULATION_CONTRACT.md
+          section 48 -- every two-age dispatcher resolves them the same
+          way as single-axis). */}
+      {tab !== 'whatif' && tab !== 'survivor' && twoAgeMode && anyOverridden && (
+        <div style={{ padding:'8px 14px', background:'var(--bg3)', borderRadius:8, marginBottom:20, fontSize:12, color:'var(--text2)' }}>
+          ℹ {overrideNote}{jasonOverridden ? ' Change or clear it on the Settings page instead.' : ''}
+        </div>
+      )}
 
       <div hidden={tab !== 'whatif'}>
-        <WhatIf onNavigate={onNavigate} onAssumptionsChange={setWhatIfAssumptions} />
+        <WhatIf onNavigate={onNavigate} onAssumptionsChange={setWhatIfAssumptions}
+                onSettingsLoaded={d => setSavedClaimAges({ jason: d?.jason_ss_claim_age ?? null, justin: d?.justin_ss_claim_age ?? null })} />
       </div>
       {tab === 'monte_carlo' && <MonteCarloSection retAge={retAge} ssTiming={ssTiming} overrides={whatIfAssumptions}
                                                      jasonRetAge={twoAgeMode ? jasonRetAge : null}
