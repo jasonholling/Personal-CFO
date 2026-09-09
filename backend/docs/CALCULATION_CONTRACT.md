@@ -4731,3 +4731,35 @@ frontend-only (banner wording), verified by inspection and
 re-run; sensitive-data check passed.
 
 Branch: `codex/ss-claim-age`, pushed — **not merged to `main`**.
+
+## 53. Social Security claiming age 62-70 — closeout review of commit ecc862b, fix (2026-09-09, on `codex/ss-claim-age`)
+
+Independent review of commit ecc862b (three-finding fix round) found
+one small wording correction before merge, frontend-only.
+
+**Finding — the override banner's jasonOverridden-only message implied
+these buttons ever controlled Justin's SS.** `ssTiming` (the Early/
+Delayed buttons) only ever drives Jason's benefit -- `resolve_ss_benefits`'
+non-claim-age branch never reads `ss_timing` for Justin at all, with or
+without a claim age saved; Justin's benefit has always been a flat
+figure independent of this toggle. The jasonOverridden-only banner text
+said "...overrides these buttons for Jason — Justin's SS still responds
+normally," which implied the buttons ever affected Justin to begin
+with. They never did, so once Jason is overridden the buttons have no
+effect on ANYONE, not "no effect on Jason but Justin still responds."
+Fixed: the jasonOverridden case now states plainly that the buttons
+have no effect right now and that they only ever affected Jason's SS,
+not Justin's. Applied the same correction to the justin-only case and
+the button-group label suffix, which had the same category of error
+(implying the toggle was "overridden for Justin" when it was never
+connected to Justin's SS at all) -- that case now reads as a plain
+informational note (Justin's claim age is fixed independently; the
+buttons still work normally for Jason as always) rather than an
+"overridden" warning, and the label suffix only appears when Jason's
+claim age is actually what makes the buttons inert.
+
+Verification: `npm test` 39/39, `npm run build` clean. No backend code
+changed — full backend suite not re-run for this frontend-only wording
+fix.
+
+Branch: `codex/ss-claim-age`, pushed — **not merged to `main`**.

@@ -231,15 +231,29 @@ export default function StressTestWhatIf({ onNavigate }) {
   // separately and only claims override for the spouse(s) actually
   // overridden; also now shown in two-age mode, which the original
   // banner skipped even though saved claim ages apply there too.
+  //
+  // External audit review of commit ecc862b, finding 1: these buttons
+  // (ssTiming) only ever drive JASON's benefit -- resolve_ss_benefits'
+  // own non-claim-age branch never reads ss_timing for Justin at all,
+  // with or without a claim age saved (Justin's benefit has always
+  // been a flat figure here). The jasonOverridden-only message said
+  // "Justin's SS still responds normally," implying these buttons
+  // ever controlled Justin's SS to begin with -- they never did, so
+  // once Jason is overridden the buttons have no effect on ANYONE, not
+  // "no effect on Jason but Justin still responds." Rewritten below to
+  // state that fact directly instead of implying a Justin dependency
+  // that was never true. Distinguishes the justin-only case (these
+  // buttons are still fully live for Jason as always -- Justin's own
+  // saved age is unrelated to what this toggle does) with a plain
+  // info note rather than an "overridden" warning, since nothing about
+  // these buttons' behavior actually changed in that case.
   const [savedClaimAges, setSavedClaimAges] = useState({ jason: null, justin: null })
   const jasonOverridden  = savedClaimAges.jason  != null
   const justinOverridden = savedClaimAges.justin != null
   const anyOverridden = jasonOverridden || justinOverridden
-  const overrideNote = jasonOverridden && justinOverridden
-    ? `Both ${person1Name} (age ${savedClaimAges.jason}) and ${person2Name} (age ${savedClaimAges.justin}) have a Social Security claim age saved in Settings — these buttons have no effect for either of them.`
-    : jasonOverridden
-    ? `${person1Name}'s Social Security claim age (${savedClaimAges.jason}) is saved in Settings and overrides these buttons for ${person1Name} — ${person2Name}'s SS still responds normally.`
-    : `${person2Name}'s Social Security claim age (${savedClaimAges.justin}) is saved in Settings and overrides these buttons for ${person2Name} — ${person1Name}'s SS still responds normally.`
+  const overrideNote = jasonOverridden
+    ? `These buttons have no effect right now — ${person1Name}'s Social Security claim age (${savedClaimAges.jason}) is saved in Settings and controls ${person1Name}'s benefit regardless of this toggle. (This toggle only ever affects ${person1Name}'s SS, not ${person2Name}'s.)`
+    : `${person2Name}'s Social Security claim age (${savedClaimAges.justin}) is saved in Settings, fixing ${person2Name}'s benefit at that age. These buttons still work normally for ${person1Name}'s SS as usual — they were never connected to ${person2Name}'s.`
 
   return (
     <div>
@@ -307,7 +321,7 @@ export default function StressTestWhatIf({ onNavigate }) {
           </div>
           <div>
             <div className="label" style={{ marginBottom:8 }}>
-              Social Security{anyOverridden ? ' (partially overridden by Settings)' : ''}
+              Social Security{jasonOverridden ? ' (overridden by Settings)' : ''}
             </div>
             <div style={{ display:'flex', gap:6 }}>
               {SS_OPTS.map(o => (
@@ -322,7 +336,7 @@ export default function StressTestWhatIf({ onNavigate }) {
       )}
       {tab !== 'whatif' && tab !== 'survivor' && !twoAgeMode && anyOverridden && (
         <div style={{ padding:'8px 14px', background:'var(--bg3)', borderRadius:8, marginBottom:20, fontSize:12, color:'var(--text2)' }}>
-          ℹ {overrideNote} Change or clear it on the Settings page instead.
+          ℹ {overrideNote}{jasonOverridden ? ' Change or clear it on the Settings page instead.' : ''}
         </div>
       )}
       {tab !== 'whatif' && tab !== 'survivor' && twoAgeMode && (
@@ -344,7 +358,7 @@ export default function StressTestWhatIf({ onNavigate }) {
               persists AND stays user-editable across the mode switch. */}
           <div>
             <div className="label" style={{ marginBottom:8 }}>
-              Social Security{anyOverridden ? ' (partially overridden by Settings)' : ''}
+              Social Security{jasonOverridden ? ' (overridden by Settings)' : ''}
             </div>
             <div style={{ display:'flex', gap:6 }}>
               {SS_OPTS.map(o => (
@@ -364,7 +378,7 @@ export default function StressTestWhatIf({ onNavigate }) {
           way as single-axis). */}
       {tab !== 'whatif' && tab !== 'survivor' && twoAgeMode && anyOverridden && (
         <div style={{ padding:'8px 14px', background:'var(--bg3)', borderRadius:8, marginBottom:20, fontSize:12, color:'var(--text2)' }}>
-          ℹ {overrideNote} Change or clear it on the Settings page instead.
+          ℹ {overrideNote}{jasonOverridden ? ' Change or clear it on the Settings page instead.' : ''}
         </div>
       )}
 
