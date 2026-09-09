@@ -3780,3 +3780,75 @@ into `codex/two-age-survivor-design` (findings 2–8), all pushed —
 **none merged to `main`** beyond Milestone 1, per Jason's standing
 instruction (auditor unavailable; get everything built and reviewed as
 a set).
+
+## 40. Survivor Scenario — fifth independent review round, fixes (2026-09-08, on `codex/two-age-survivor-design`)
+
+Independent review of section 39's own fixes found 3 more issues (1
+P1 double-withdrawal, 1 P1 ownership-attribution gap, 1 P2 ownership-
+attribution gap) — all in code section 39 had just introduced or
+touched.
+
+**Finding 1 (P1)** — the finding-8 catch-up (deceased's own final-year
+RMD) computed Justin's full obligation against his END-of-death-year
+pretax balance (already net of whatever the normal death-year draw/RMD
+had already taken), then forced that WHOLE amount out again. Reproduced
+exactly: both spouses 75, Justin's $1,000,000 sole pretax IRA — the
+normal year already withdraws $40,650 (pooled RMD, Jason also 75); the
+bug then pulled ANOTHER $38,998 from the remaining ~$959,350. With
+rollover declined and a subsequent $100,000 expense, this overstated
+insurance needed at $63,415 instead of the correct $24,417. Fixed:
+Justin's own full obligation is now computed against his STARTING-of-
+year pretax balance (from the prior walk row, or `starting_buckets` if
+the death year is the walk's first row), and only the shortfall (if
+any) beyond what his own pretax was already reduced by that year
+(growth-adjusted, so a nonzero `post_ret` doesn't mask the real draw
+amount) is forced.
+
+**Finding 2 (P1, `run_owner_split_two_dimensional_projection`)** — two
+related ownership-attribution gaps in the finding-4 surplus-source-
+shares fix:
+- Reinvested RMD proceeds (a positive delta with no cash-INCOME basis
+  to prorate against — $0 need, $0 guaranteed income, so the forced
+  RMD has nothing to fund and gets swept back to savings) still fell
+  back to the all-joint default, even though the money came directly
+  out of a specific owner's own pretax account. Reproduced: Jason 75
+  (his own $1,000,000 IRA), Justin 61, joint survivorship disabled —
+  survivor resources understated at $977,642 instead of $995,935.
+  Fixed: pretax is now allocated FIRST each year (its own reduction/
+  increase, via the existing `_allocate_type_delta_across_owners` call
+  moved ahead of the type loop), and any pretax reduction attributed to
+  an owner is folded into that owner's share of the basis alongside
+  cash income — a delta with no income basis but a real pretax
+  reduction now correctly attributes by whoever's pretax was drawn
+  from, instead of defaulting to joint.
+- Recurring monthly life-event income (`life_event_monthly_this_year`)
+  was missing from the basis entirely — only the one-time component
+  was counted — so it silently vanished into whichever OTHER source
+  happened to be in the basis, over-crediting that source. Reproduced:
+  $30,000 pension + $12,000/yr recurring household income, $0 spending,
+  disabled joint survivorship — $42,000 (all credited to Jason, since
+  the $12,000 wasn't in the basis at all) instead of the correct
+  $36,000 ($30,000 Jason's own pension, unaffected, + $6,000 = half of
+  joint's correctly-attributed $12,000). Fixed: `joint_income_this_year`
+  now includes `max(0.0, life_event_monthly_this_year)` alongside the
+  one-time component.
+
+**Finding 3 (P2, same function)** — the still-working spouse's own
+gap-income surplus was hardcoded to credit `justin_income_this_year`,
+even though the gap-income mechanism itself (`justin_gap_income_for_year`)
+is already generalized to whichever spouse is `timeline.later_retiree`.
+Reproduced: Jason retires at 65, Justin at 61, Jason earns $100,000, $0
+spending — the $65,000 net surplus went into Justin's bucket even
+though JASON is the one still working. Fixed: `still_working_income_this_year`
+now credits `jason_income_this_year` or `justin_income_this_year`
+based on `timeline.later_retiree`, not a hardcoded assumption.
+
+New tests: 1 in `test_two_age_survivor_scenario.py` (finding 1) plus 1
+new class (finding 2, recurring-income scope note above); 2 new
+classes in `test_owner_split_projection.py` (findings 2 part 1 and 3).
+
+**Verified:** full backend suite passed, coverage at/above the 95%
+floor. Sensitive-data check passed.
+
+Branch: `codex/two-age-survivor-design`, pushed — **not merged to
+`main`** beyond Milestone 1, same standing instruction as section 39.

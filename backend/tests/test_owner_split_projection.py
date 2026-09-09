@@ -163,3 +163,51 @@ class TestSurplusCreditsItsOwnIncomeSourceNotAlwaysJoint:
         first_year = split["yearly_detail"][0]
         assert first_year["owner_balances"]["justin"]["taxable"] > 0
         assert first_year["owner_balances"]["joint"]["taxable"] == 0
+
+
+class TestRmdReinvestmentCreditsThePretaxOwnerNotJoint:
+    """Independent review, 2026-09-08, fifth follow-up, finding 2 (P1),
+    part 1: a positive delta with no cash-INCOME basis (a pure RMD-
+    reinvestment year -- $0 spending need, $0 guaranteed income, so the
+    forced RMD has nothing to fund and gets swept back to savings)
+    still defaulted to joint, even though the money being reinvested
+    came directly out of a specific owner's own pretax account. Jason
+    75 (his own $1,000,000 IRA), Justin 61, $0 spending -- the RMD-
+    driven surplus must credit Jason's own taxable bucket, not joint."""
+
+    def test_rmd_reinvestment_credits_the_pretax_owner_not_joint(self):
+        inputs = {**BASE_INPUTS, "jason_age": 75, "justin_age": 61,
+                  "retirement_income_today_dollars": 0, "retirement_end_age": 76,
+                  "pension_55": 0, "pension_60": 0, "pension_65": 0,
+                  "jason_social_security": 0, "justin_social_security": 0,
+                  "w2_salary": 0, "justin_w2_salary": 0, "annual_rsu_value": 0,
+                  "justin_annual_rsu_value": 0, "annual_hsa_contribution": 0}
+        accounts = [{"name": "Jason IRA", "account_type": "ira", "owner": "jason", "balance": 1000000}]
+        split = run_owner_split_two_dimensional_projection(inputs, accounts, jason_ret_age=61, justin_ret_age=61)
+        first_year = split["yearly_detail"][0]
+        assert first_year["owner_balances"]["jason"]["taxable"] > 0
+        assert first_year["owner_balances"]["joint"]["taxable"] == 0
+
+
+class TestStillWorkingGapIncomeCreditsTheActualLaterRetiree:
+    """Independent review, 2026-09-08, fifth follow-up, finding 3 (P2):
+    the still-working spouse's own gap-income surplus was hardcoded to
+    credit "justin", even though the gap-income mechanism itself is
+    already generalized to whichever spouse is timeline.later_retiree.
+    Jason retires at 65, Justin at 61, Jason earns $100,000, $0
+    spending -- Jason is the one still working (later_retiree), so the
+    resulting ~$65,000 net surplus must credit HIS OWN bucket, not
+    Justin's."""
+
+    def test_jasons_own_working_income_surplus_credits_jason_not_justin(self):
+        inputs = {**BASE_INPUTS, "jason_age": 61, "justin_age": 61,
+                  "retirement_income_today_dollars": 0, "retirement_end_age": 62,
+                  "pension_55": 0, "pension_60": 0, "pension_65": 0,
+                  "jason_social_security": 0, "justin_social_security": 0,
+                  "w2_salary": 100000, "justin_w2_salary": 0,
+                  "annual_rsu_value": 0, "justin_annual_rsu_value": 0, "annual_hsa_contribution": 0}
+        accounts = [{"name": "Joint taxable", "account_type": "taxable", "owner": "joint", "balance": 0}]
+        split = run_owner_split_two_dimensional_projection(inputs, accounts, jason_ret_age=65, justin_ret_age=61)
+        first_year = split["yearly_detail"][0]
+        assert first_year["owner_balances"]["jason"]["taxable"] > 0
+        assert first_year["owner_balances"]["justin"]["taxable"] == 0

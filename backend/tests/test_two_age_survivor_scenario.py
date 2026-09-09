@@ -381,3 +381,60 @@ class TestDeceasedsFinalYearRmdIsSatisfied:
         assert r["starting_balance_after_payout"] == 1000000  # total unaffected
         assert r["starting_pretax_after_payout"] == pytest.approx(1000000 - 40650, abs=1)
         assert r["starting_other_after_payout"] == pytest.approx(40650, abs=1)
+
+    def test_no_double_draw_when_the_normal_death_year_already_satisfies_it(self):
+        """Independent review, 2026-09-08, fifth follow-up, finding 1
+        (P1): the ORIGINAL version of this catch-up computed Justin's
+        full RMD against his END-of-death-year pretax balance (already
+        net of whatever the normal death-year draw/RMD had already
+        taken), then forced that WHOLE amount out again. Both spouses
+        75, Justin's $1,000,000 sole pretax IRA -- the normal death
+        year already withdraws $40,650 (pooled RMD, Jason also 75); the
+        bug then pulled ANOTHER ~$38,998 from the remaining ~$959,350.
+        Fixed: only the shortfall (if any) between Justin's own full
+        obligation and what his own pretax was already reduced by this
+        year is forced -- here, that's ~$0 (the normal year's draw
+        already fully satisfies it)."""
+        inputs = base_inputs(jason_age=75, justin_age=75, retirement_income_today_dollars=0,
+                              retirement_end_age=76)
+        accounts = [IRA(1000000, "justin")]
+        r = run_survivor_scenario(inputs, accounts, deceased="justin", death_age=75,
+                                   jason_ret_age=61, justin_ret_age=61)
+        # Pretax dropped by exactly ONE $40,650 RMD, not two -- the
+        # normal year's own marginal tax on that RMD (unrelated to this
+        # fix) is what keeps starting_other_after_payout below the full
+        # pre-tax $40,650, so only the pretax side is asserted exactly.
+        assert r["starting_pretax_after_payout"] == pytest.approx(1000000 - 40650, abs=2)
+        assert r["starting_other_after_payout"] > 0
+        # A double draw would leave ~$920,352 total (1,000,000 - 40,650 -
+        # 38,998, each also net of tax) -- comfortably above that floor
+        # confirms the second draw never happened.
+        assert r["starting_balance_after_payout"] > 950000
+
+
+class TestRecurringLifeEventIncomeCreditsJointNotWhicheverSpouseWasCounted:
+    """Independent review, 2026-09-08, fifth follow-up, finding 2 (P1),
+    part 2: recurring monthly life-event income was missing from the
+    surplus-source-attribution basis entirely (only the one-time
+    component was counted), so it silently vanished into whichever
+    OTHER source happened to be in the basis, over-crediting that
+    source. Reproduced: $30,000 pension + $12,000/yr recurring
+    household income, $0 spending, immediate death, joint survivorship
+    disabled -- the recurring income has no individual owner and must
+    be credited to joint (then halved by the disabled-survivorship
+    assumption): $30,000 (Jason's own pension, unaffected) + $6,000
+    (half of joint's $12,000) = $36,000, not the bug's $42,000 (the
+    $12,000 silently becoming Jason's own money too, since it wasn't in
+    the attribution basis at all)."""
+
+    def test_recurring_income_is_halved_by_disabled_joint_survivorship_pensions_own_share_is_not(self):
+        inputs = base_inputs(jason_age=65, justin_age=65, retirement_income_today_dollars=0,
+                              pension_55=30000, pension_60=30000, pension_65=30000,
+                              retirement_end_age=66)
+        accounts = [TAXABLE(0, "joint")]
+        life_events = [{"event_year": 2026, "one_time_cash_delta": 0,
+                         "monthly_cash_flow_delta": 1000, "duration_months": 0}]
+        r = run_survivor_scenario(inputs, accounts, deceased="justin", death_age=65,
+                                   jason_ret_age=65, justin_ret_age=65,
+                                   joint_accounts_survivorship=False, life_events=life_events)
+        assert r["starting_balance_after_payout"] == 36000

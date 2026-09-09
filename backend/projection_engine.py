@@ -1999,31 +1999,70 @@ def run_owner_split_two_dimensional_projection(inputs: Dict, accounts: List[Dict
             for t in ("pretax", "roth", "taxable", "hsa")
         }
 
-        # Surplus source shares (section 37.4, finding 4 fix) -- of any
-        # positive delta this year, attribute it proportionally to
-        # whichever income source produced it: Jason's own pension +
-        # his own SS credits Jason, Justin's own SS + still-working gap
-        # income credits Justin, unattributed life-event cash credits
-        # joint. Only meaningful when there's a real positive income
-        # basis to prorate against (a pure RMD-reinvestment year with
-        # $0 guaranteed/life-event income falls back to the all-joint
-        # default inside _allocate_type_delta_across_owners itself).
+        # Pretax allocated FIRST (independent review, 2026-09-08, fifth
+        # follow-up, finding 2 fix, part 1) -- its own per-owner
+        # reduction/increase this year is needed BEFORE attributing any
+        # same-year taxable-type surplus (RMD proceeds reinvested) to
+        # the SAME owner(s) that RMD/draw actually came from, instead of
+        # defaulting reinvested RMD proceeds to joint (reproduced: Jason
+        # 75/Justin 61, Jason's own $1M IRA, joint survivorship
+        # disabled -- survivor resources understated by the RMD-
+        # reinvestment surplus that used to be credited to joint instead
+        # of Jason).
+        pretax_delta = pooled_closing_pregrowth["pretax"] - pooled_opening["pretax"]
+        pretax_owner_balances = {o: buckets[o]["pretax"] for o in OWNER_BUCKETS}
+        pretax_allocation = _allocate_type_delta_across_owners(pretax_owner_balances, pretax_delta)
+        for o in OWNER_BUCKETS:
+            pregrowth = buckets[o]["pretax"] + pretax_allocation.get(o, 0.0)
+            buckets[o]["pretax"] = max(0.0, pregrowth) * (1 + post_ret)
+
+        # Surplus source shares (section 37.4, findings 2-4 fix) -- of
+        # any positive delta this year (a cash-income surplus and/or
+        # RMD proceeds reinvested), attribute it proportionally to
+        # whichever source actually produced it:
+        # - Jason's own pension + his own SS credits Jason, Justin's own
+        #   SS credits Justin.
+        # - Still-working gap income credits whichever spouse is
+        #   ACTUALLY later_retiree (finding 3 fix -- previously
+        #   hardcoded to Justin, so Jason's own working-income surplus
+        #   was credited to Justin whenever JASON was the one still
+        #   working. Reproduced: Jason retires at 65, Justin at 61,
+        #   Jason earns $100,000, $0 spending -- the $65,000 net
+        #   surplus used to land in Justin's bucket).
+        # - Unattributed life-event cash (one-time AND recurring
+        #   monthly -- finding 2 fix, part 2: the recurring monthly
+        #   component was previously missing from this basis entirely,
+        #   even though it reduces `year_need` the same way guaranteed
+        #   income does, silently under-weighting joint's true
+        #   contribution to any resulting surplus) credits joint.
+        # - Any pretax reduction (ordinary draw or RMD) credits
+        #   whichever owner(s) it was actually drawn from, per
+        #   pretax_allocation above -- never defaulting reinvested RMD
+        #   proceeds to joint.
+        # Only meaningful when there's a real positive basis to prorate
+        # against (a delta with no income/life-event/RMD basis at all
+        # falls back to the all-joint default inside
+        # _allocate_type_delta_across_owners itself).
         jason_income_this_year = year_pen + year_jss
-        justin_income_this_year = year_uss + still_working_income_this_year
-        joint_income_this_year = max(0.0, life_event_cash_this_year)
-        total_income_basis = jason_income_this_year + justin_income_this_year + joint_income_this_year
+        justin_income_this_year = year_uss
+        if timeline.later_retiree == "jason":
+            jason_income_this_year += still_working_income_this_year
+        else:
+            justin_income_this_year += still_working_income_this_year
+        joint_income_this_year = max(0.0, life_event_cash_this_year) + max(0.0, life_event_monthly_this_year)
+        basis = {
+            "jason":  jason_income_this_year  + max(0.0, -pretax_allocation["jason"]),
+            "justin": justin_income_this_year + max(0.0, -pretax_allocation["justin"]),
+            "joint":  joint_income_this_year  + max(0.0, -pretax_allocation["joint"]),
+            "trust":  max(0.0, -pretax_allocation["trust"]),
+        }
+        total_basis = sum(basis.values())
         surplus_source_shares = (
-            {
-                "jason": jason_income_this_year / total_income_basis,
-                "justin": justin_income_this_year / total_income_basis,
-                "joint": joint_income_this_year / total_income_basis,
-                "trust": 0.0,
-            }
-            if total_income_basis > 1e-9 else None
+            {o: basis[o] / total_basis for o in OWNER_BUCKETS} if total_basis > 1e-9 else None
         )
 
-        year_owner_closing = {}
-        for t in ("pretax", "roth", "taxable", "hsa"):
+        year_owner_closing = {"pretax": {o: buckets[o]["pretax"] for o in OWNER_BUCKETS}}
+        for t in ("roth", "taxable", "hsa"):
             delta = pooled_closing_pregrowth[t] - pooled_opening[t]
             owner_balances_this_type = {o: buckets[o][t] for o in OWNER_BUCKETS}
             allocation = _allocate_type_delta_across_owners(owner_balances_this_type, delta, surplus_source_shares)

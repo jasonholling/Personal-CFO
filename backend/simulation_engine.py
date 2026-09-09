@@ -3882,9 +3882,10 @@ def _run_survivor_scenario_two_age(inputs: Dict, accounts: List[Dict], jason_ret
             ),
         }
 
-    death_row = next((y for y in yearly if y["jason_age"] >= death_jason_age), None)
-    if not death_row:
+    death_row_index = next((i for i, y in enumerate(yearly) if y["jason_age"] >= death_jason_age), None)
+    if death_row_index is None:
         return {"has_data": False}
+    death_row = yearly[death_row_index]
     death_jason_age = death_row["jason_age"]
 
     end_age = max(death_jason_age + 1, min(110, int(inputs.get("retirement_end_age") or 99)))
@@ -3913,10 +3914,32 @@ def _run_survivor_scenario_two_age(inputs: Dict, accounts: List[Dict], jason_ret
     # bucket into taxable before anything transfers to the survivor --
     # only Justin's side needs this catch-up; Jason's own RMD obligation
     # is always already satisfied by the Jason-anchored pooled RMD.
+    #
+    # Independent review, 2026-09-08, fifth follow-up, finding 1 (P1):
+    # the ORIGINAL version of this catch-up computed Justin's full RMD
+    # against his END-of-death-year pretax balance (ob["justin"]["pretax"],
+    # already net of whatever the normal death-year draw/RMD had already
+    # taken) and forced that WHOLE amount out again -- double-withdrawing
+    # whenever the normal year's pooled RMD had already satisfied some or
+    # all of Justin's own obligation. Reproduced: both spouses 75,
+    # Justin's $1,000,000 IRA -- the normal year already withdraws
+    # $40,650 (pooled RMD, Jason also 75); the old catch-up then pulled
+    # ANOTHER $38,998 from the remaining ~$959,350 balance. Fixed:
+    # compute Justin's own TOTAL obligation against his STARTING-of-year
+    # balance, then only force the REMAINDER not already covered by
+    # whatever his own pretax was reduced by this year (ordinary draw or
+    # RMD, growth-adjusted so a nonzero post_ret doesn't mask the real
+    # draw amount).
     if deceased == "justin":
         justin_age_at_death = death_row["justin_age"]
         justin_own_rmd_start_age = rmd_start_age(inputs["justin_age"])
-        justin_final_rmd = _rmd(ob["justin"]["pretax"], justin_age_at_death, justin_own_rmd_start_age)
+        prior_balances = (yearly[death_row_index - 1]["owner_balances"] if death_row_index > 0
+                           else walk["starting_buckets"])
+        justin_pretax_at_year_start = prior_balances["justin"]["pretax"]
+        justin_pretax_pregrowth_end = (ob["justin"]["pretax"] / (1 + post_ret)) if (1 + post_ret) != 0 else ob["justin"]["pretax"]
+        already_reduced_this_year = max(0.0, justin_pretax_at_year_start - justin_pretax_pregrowth_end)
+        justin_own_full_rmd = _rmd(justin_pretax_at_year_start, justin_age_at_death, justin_own_rmd_start_age)
+        justin_final_rmd = max(0.0, justin_own_full_rmd - already_reduced_this_year)
         if justin_final_rmd > 0:
             justin_final_rmd = min(justin_final_rmd, ob["justin"]["pretax"])
             ob["justin"]["pretax"] -= justin_final_rmd

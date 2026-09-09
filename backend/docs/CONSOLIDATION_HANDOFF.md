@@ -99,6 +99,13 @@ the full list. Still nothing merged to `main` beyond Milestone 1; the
 expected merge order is unchanged (Roth Conversion → Tax Efficiency →
 Survivor Scenario), pending the auditor's review of this round's fixes.
 
+**2026-09-08, fifth review round addendum (section 40):** the
+auditor's review of section 39's own fixes found 3 more issues (a
+double-RMD-withdrawal regression and two ownership-attribution gaps,
+all introduced or touched by section 39). All 3 are fixed, tested, and
+pushed — see section 40. Still nothing merged to `main` beyond
+Milestone 1.
+
 ## Final status against Jason's 9-item follow-on task list
 
 All 9 items are resolved:
