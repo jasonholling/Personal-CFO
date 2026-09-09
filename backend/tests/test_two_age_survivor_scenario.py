@@ -462,6 +462,65 @@ class TestDeceasedsFinalYearRmdIsSatisfied:
         assert r["starting_pretax_after_payout"] == pytest.approx(1878049, abs=5)
 
 
+class TestOwnerCashFlowWaterfallReplacesGrossProportionalReweighting:
+    """Independent review, 2026-09-08, seventh follow-up, finding 1
+    (P1): reweighting the pooled ending-balance change by GROSS income
+    shares mixes untaxed income surplus with gross (pre-tax) pretax
+    distributions, and clamps negative life-event costs to $0, dropping
+    them entirely. All three reproduced exactly per the review: spouses
+    75, $0 growth/inflation, trust availability disabled."""
+
+    def test_pension_exactly_leftover_after_need_trust_rmd_excluded(self):
+        """$60,000 Jason pension / $30,000 spending / $1,000,000 trust
+        IRA -- the pension alone funds need with a real $30,000 leftover
+        that's entirely Jason's own (untaxed); the trust's forced RMD is
+        separate money that's entirely the trust's own (excluded).
+        Correct: $30,000. The old gross-proportional weighting reported
+        $27,929 (diluting Jason's real leftover against the trust's
+        gross, pre-tax RMD)."""
+        inputs = base_inputs(jason_age=75, justin_age=75, retirement_income_today_dollars=30000,
+                              pension_55=60000, pension_60=60000, pension_65=60000,
+                              retirement_end_age=76)
+        accounts = [IRA(1000000, "trust")]
+        r = run_survivor_scenario(inputs, accounts, deceased="justin", death_age=75,
+                                   jason_ret_age=61, justin_ret_age=61,
+                                   trust_available_to_survivor=False)
+        assert r["starting_balance_after_payout"] == pytest.approx(30000, abs=2)
+
+    def test_negative_life_event_is_not_dropped_no_phantom_surplus(self):
+        """Same as above, plus a $40,000 one-time expense -- clamping
+        it to $0 previously dropped it entirely, inventing a phantom
+        $30,000 pension surplus that doesn't exist once the real
+        expense is netted in. Correct: $0 (the expense consumes the
+        pension entirely; only the trust's own excluded RMD proceeds
+        remain). The old code reported $10,944."""
+        inputs = base_inputs(jason_age=75, justin_age=75, retirement_income_today_dollars=30000,
+                              pension_55=60000, pension_60=60000, pension_65=60000,
+                              retirement_end_age=76)
+        accounts = [IRA(1000000, "trust")]
+        life_events = [{"event_year": 2026, "one_time_cash_delta": -40000,
+                         "monthly_cash_flow_delta": 0, "duration_months": 0}]
+        r = run_survivor_scenario(inputs, accounts, deceased="justin", death_age=75,
+                                   jason_ret_age=61, justin_ret_age=61,
+                                   trust_available_to_survivor=False, life_events=life_events)
+        assert r["starting_balance_after_payout"] == pytest.approx(0, abs=2)
+
+    def test_fully_consumed_distribution_does_not_still_get_credited_extra(self):
+        """No pension, $9,000 spending, $10,000 joint IRA + $990,000
+        trust IRA -- the joint IRA's own $9,000 after-tax RMD proceeds
+        already exactly fund spending; $0 should be left over for ANY
+        owner. Correct: $0. The old proportional split still credited
+        some of the trust's own proceeds as if joint's fully-consumed
+        distribution hadn't used its own money up -- reported $6,786."""
+        inputs = base_inputs(jason_age=75, justin_age=75, retirement_income_today_dollars=9000,
+                              retirement_end_age=76)
+        accounts = [IRA(10000, "joint"), IRA(990000, "trust")]
+        r = run_survivor_scenario(inputs, accounts, deceased="justin", death_age=75,
+                                   jason_ret_age=61, justin_ret_age=61,
+                                   trust_available_to_survivor=False)
+        assert r["starting_balance_after_payout"] == pytest.approx(0, abs=2)
+
+
 class TestRecurringLifeEventIncomeCreditsJointNotWhicheverSpouseWasCounted:
     """Independent review, 2026-09-08, fifth follow-up, finding 2 (P1),
     part 2: recurring monthly life-event income was missing from the

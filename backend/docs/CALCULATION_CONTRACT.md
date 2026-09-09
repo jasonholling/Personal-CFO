@@ -3918,3 +3918,70 @@ floor. Sensitive-data check passed.
 Branch: `codex/two-age-survivor-design`, pushed — **not merged to
 `main`** beyond Milestone 1, same standing instruction as sections
 39-40.
+
+## 42. Survivor Scenario — seventh independent review round: owner cash-flow waterfall replaces proportional reweighting (2026-09-08, on `codex/two-age-survivor-design`)
+
+Independent review of commit `ca898fb` confirmed the death-year tax/
+growth fix (section 41, finding 2) works, but found one more ownership-
+allocation issue with three reproducible cases, all in the same
+`run_owner_split_two_dimensional_projection` surplus-attribution code
+sections 39/40/41 had each iterated on without changing the underlying
+approach: **reweighting a pooled ending-balance change by proportional
+income shares fundamentally cannot preserve exact ownership**, because
+it mixes untaxed income with gross (pre-tax) pretax distributions, and
+because clamping negative life-event costs to $0 drops real signed
+cash flows from the calculation entirely.
+
+Reproduced exactly per the review (spouses 75, $0 growth/inflation,
+trust availability disabled):
+- $60,000 Jason pension / $30,000 spending / $1,000,000 trust IRA:
+  pension alone funds need with a real $30,000 leftover entirely
+  Jason's own; the trust's forced RMD is separate, entirely the
+  trust's own. Old: $27,929 survivor resources (diluted Jason's real
+  leftover against the trust's gross RMD). Correct: $30,000.
+- Same, plus a $40,000 one-time expense: clamped to $0 and dropped,
+  inventing a phantom $30,000 pension surplus. Old: $10,944. Correct:
+  $0 (the expense consumes the pension entirely; only the trust's own
+  excluded RMD proceeds remain).
+- No pension, $9,000 spending, $10,000 joint IRA + $990,000 trust IRA:
+  the joint IRA's own $9,000 after-tax RMD proceeds already exactly
+  fund spending. Old: $6,786 (still credited some of trust's own
+  proceeds despite joint's distribution being fully consumed).
+  Correct: $0.
+
+**Fixed with a structurally different approach**, per the review's own
+explicit guidance ("allocate actual cash transactions: preserve signed
+costs, track each owner's distribution and tax, apply the funding
+order, then credit only that owner's remaining proceeds — reweighting
+the pooled ending-balance change keeps losing this information"):
+1. Each owner's own AFTER-TAX pretax distribution this year is
+   computed from `pretax_allocation` (their own share of the pretax
+   reduction, already correctly per-owner from the finding-2/part-1
+   fix) taxed at that year's own `pretax_tax_rate`.
+2. Each owner's own cash this year is built SIGNED, never clamped:
+   jason/justin get their own guaranteed income (+ gap income for
+   whichever is `later_retiree`) plus their own after-tax pretax
+   proceeds; joint gets SIGNED life-event cash (one-time and
+   recurring, a real expense now stays negative) plus its own after-
+   tax pretax proceeds; trust gets only its own after-tax pretax
+   proceeds (no natural income).
+3. The TRUE underlying need (`year_need_baseline`) is funded from
+   those owner-cash amounts via a waterfall in `WITHDRAWAL_OWNER_ORDER`
+   — the SAME funding-order convention every account draw already
+   uses — and whatever's left over per owner becomes the attribution
+   weight for the actual pooled surplus delta. This never re-derives
+   the pooled total a second, independent way (preserving exact
+   reconciliation), it only changes how that total's ownership is
+   attributed.
+
+New test class in `test_two_age_survivor_scenario.py` reproducing all
+three cases exactly (`starting_balance_after_payout` == $30,000 / $0 /
+$0).
+
+**Verified:** full backend suite passed, coverage at/above the 95%
+floor. Sensitive-data check passed. All prior review-round tests
+(sections 39-41) still pass unchanged against the new approach.
+
+Branch: `codex/two-age-survivor-design`, pushed — **not merged to
+`main`** beyond Milestone 1, same standing instruction as sections
+39-41.

@@ -2016,73 +2016,82 @@ def run_owner_split_two_dimensional_projection(inputs: Dict, accounts: List[Dict
             pregrowth = buckets[o]["pretax"] + pretax_allocation.get(o, 0.0)
             buckets[o]["pretax"] = max(0.0, pregrowth) * (1 + post_ret)
 
-        # Surplus source shares (section 37.4, findings 2-4 fix, and
-        # independent review, 2026-09-08, sixth follow-up, finding 1
-        # fix) -- of any positive delta this year (a cash-income
-        # surplus and/or RMD proceeds reinvested), attribute it
-        # proportionally to whichever source actually produced it.
+        # Owner cash-flow waterfall (independent review, 2026-09-08,
+        # seventh follow-up, finding 1 (P1)) -- reweighting a pooled
+        # ending-balance change by GROSS income shares (the findings
+        # 2-4/sixth-follow-up-finding-1 approach) mixes untaxed income
+        # surplus with gross (pre-tax) pretax distributions, and clamps
+        # negative life-event costs to $0, dropping them from the
+        # calculation entirely. Reproduced (all three: spouses 75, $0
+        # growth/inflation, trust availability disabled):
+        # - $60,000 Jason pension / $30,000 spending / $1,000,000 trust
+        #   IRA: the pension alone funds need with a real $30,000
+        #   leftover that's entirely Jason's own; the trust's forced
+        #   RMD is separate money that's entirely the trust's own. The
+        #   old approach (weighting Jason's real $30,000 NET surplus
+        #   against the trust's $40,650 GROSS, pre-tax RMD) reported
+        #   $27,929 survivor resources instead of the correct $30,000
+        #   (trust excluded).
+        # - Same, plus a $40,000 one-time (or equivalent recurring)
+        #   expense: clamped to $0 and dropped entirely, inventing a
+        #   phantom $30,000 pension surplus that doesn't exist once the
+        #   real expense is netted in -- reported $10,944 instead of
+        #   the correct $0 (the expense consumes the pension entirely,
+        #   leaving only the trust's own excluded RMD proceeds).
+        # - No pension, $9,000 spending, $10,000 joint IRA + $990,000
+        #   trust IRA: the joint IRA's own $9,000 after-tax RMD
+        #   proceeds already exactly fund spending -- $0 should be left
+        #   over for ANY owner. The old proportional split still
+        #   credited some of the trust's own proceeds as if joint's
+        #   fully-consumed distribution hadn't used its own money up --
+        #   reported $6,786 instead of the correct $0.
         #
-        # Finding 1 (P1): gross income sources must NOT dilute a same-
-        # year RMD-reinvestment surplus that isn't actually theirs --
-        # only the portion of each income source that's genuinely LEFT
-        # OVER after funding need counts toward the basis, not its
-        # gross amount. Reproduced: $30,000 Jason pension exactly funds
-        # $30,000 spending (net contribution to any surplus is $0), a
-        # $1,000,000 trust IRA's forced RMD is reinvested the same
-        # year -- the old gross-proportion split still credited $15,190
-        # of that trust RMD to Jason (who contributed nothing left over)
-        # instead of the full amount correctly staying trust's own.
-        # Fixed: compute income_surplus_this_year = the ACTUAL leftover
-        # (total gross inflow minus the TRUE underlying need, i.e.
-        # year_need added back to what life-event/gap income already
-        # reduced it by) and split ONLY that leftover proportionally by
-        # gross share -- when gross inflow exactly equals need (as
-        # here), income_surplus_this_year is $0, so none of it dilutes
-        # the trust-owned RMD reinvestment, which is then attributed
-        # entirely via pretax_allocation below.
-        # - Jason's own pension + his own SS credits Jason, Justin's own
-        #   SS credits Justin.
-        # - Still-working gap income credits whichever spouse is
-        #   ACTUALLY later_retiree (finding 3 fix -- previously
-        #   hardcoded to Justin).
-        # - Unattributed life-event cash (one-time AND recurring
-        #   monthly -- finding 2 fix, part 2) credits joint.
-        # - Any pretax reduction (ordinary draw or RMD) credits
-        #   whichever owner(s) it was actually drawn from, per
-        #   pretax_allocation above -- never defaulting reinvested RMD
-        #   proceeds to joint.
-        # Only meaningful when there's a real positive basis to prorate
-        # against (a delta with no leftover income/life-event/RMD basis
-        # at all falls back to the all-joint default inside
-        # _allocate_type_delta_across_owners itself).
-        jason_gross = year_pen + year_jss
-        justin_gross = year_uss
-        if timeline.later_retiree == "jason":
-            jason_gross += still_working_income_this_year
-        else:
-            justin_gross += still_working_income_this_year
-        joint_gross = max(0.0, life_event_cash_this_year) + max(0.0, life_event_monthly_this_year)
-        gross_cash_available_this_year = jason_gross + justin_gross + joint_gross
-        # year_need has already been reduced by BOTH life_event_monthly
-        # and still_working_income above -- add them back to recover the
-        # TRUE underlying need this gross inflow is actually funding.
-        year_need_baseline = year_need + life_event_monthly_this_year + still_working_income_this_year
-        income_surplus_this_year = max(0.0, gross_cash_available_this_year - year_need_baseline)
-        if gross_cash_available_this_year > 1e-9:
-            jason_income_surplus  = income_surplus_this_year * (jason_gross  / gross_cash_available_this_year)
-            justin_income_surplus = income_surplus_this_year * (justin_gross / gross_cash_available_this_year)
-            joint_income_surplus  = income_surplus_this_year * (joint_gross  / gross_cash_available_this_year)
-        else:
-            jason_income_surplus = justin_income_surplus = joint_income_surplus = 0.0
-        basis = {
-            "jason":  jason_income_surplus  + max(0.0, -pretax_allocation["jason"]),
-            "justin": justin_income_surplus + max(0.0, -pretax_allocation["justin"]),
-            "joint":  joint_income_surplus  + max(0.0, -pretax_allocation["joint"]),
-            "trust":  max(0.0, -pretax_allocation["trust"]),
+        # Fixed: track each owner's own ACTUAL cash this year --
+        # guaranteed income (+ gap income for whichever spouse is
+        # later_retiree) for jason/justin, SIGNED life-event cash (one-
+        # time and recurring, no longer clamped to zero) for joint, and
+        # each owner's own AFTER-TAX pretax distribution (their own
+        # share of pretax_allocation's reduction above, taxed at this
+        # year's own pretax_tax_rate) for whichever owner(s) actually
+        # supplied this year's RMD/draw. Then fund the TRUE underlying
+        # need (year_need_baseline, adding back what life-event/gap
+        # income already reduced year_need by) from those owner cash
+        # amounts in WITHDRAWAL_OWNER_ORDER -- the SAME funding-order
+        # convention every account draw already uses -- and credit only
+        # what's left over, per owner, as the attribution weights for
+        # the actual pooled surplus delta (preserving exact
+        # reconciliation against the pooled total, which this does not
+        # re-derive a second, independent way).
+        owner_pretax_aftertax = {
+            o: max(0.0, -pretax_allocation[o]) * (1 - pretax_tax_rate) for o in OWNER_BUCKETS
         }
-        total_basis = sum(basis.values())
+        jason_gap_this_year  = still_working_income_this_year if timeline.later_retiree == "jason" else 0.0
+        justin_gap_this_year = still_working_income_this_year if timeline.later_retiree == "justin" else 0.0
+        owner_cash = {
+            "jason":  year_pen + year_jss + jason_gap_this_year + owner_pretax_aftertax["jason"],
+            "justin": year_uss + justin_gap_this_year + owner_pretax_aftertax["justin"],
+            "joint":  life_event_cash_this_year + life_event_monthly_this_year + owner_pretax_aftertax["joint"],
+            "trust":  owner_pretax_aftertax["trust"],
+        }
+        year_need_baseline = year_need + life_event_monthly_this_year + still_working_income_this_year
+        remaining_need = year_need_baseline
+        owner_leftover = {}
+        for o in WITHDRAWAL_OWNER_ORDER:
+            cash = owner_cash[o]
+            if cash >= 0:
+                used = min(cash, max(0.0, remaining_need))
+                owner_leftover[o] = cash - used
+                remaining_need -= used
+            else:
+                # A net negative contribution (e.g. a big expense funded
+                # by joint) increases what still needs funding from
+                # whoever's next in the order -- it contributes nothing
+                # of its own to leave over.
+                remaining_need += -cash
+                owner_leftover[o] = 0.0
+        total_leftover = sum(owner_leftover.values())
         surplus_source_shares = (
-            {o: basis[o] / total_basis for o in OWNER_BUCKETS} if total_basis > 1e-9 else None
+            {o: owner_leftover[o] / total_leftover for o in OWNER_BUCKETS} if total_leftover > 1e-9 else None
         )
 
         year_owner_closing = {"pretax": {o: buckets[o]["pretax"] for o in OWNER_BUCKETS}}

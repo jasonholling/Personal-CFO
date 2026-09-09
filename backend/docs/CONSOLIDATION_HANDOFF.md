@@ -114,6 +114,18 @@ deceased's final-RMD catch-up, both in code section 39/40 had just
 introduced or touched). Both are fixed, tested, and pushed — see
 section 41. Still nothing merged to `main` beyond Milestone 1.
 
+**2026-09-08, seventh review round addendum (section 42):** the
+auditor's review of commit `ca898fb` confirmed the death-year tax/
+growth fix works, and found one more ownership-allocation issue with
+three reproducible cases — the whole proportional-reweighting approach
+used since section 39 was structurally unable to preserve exact
+ownership. Replaced with an owner cash-flow waterfall (track each
+owner's own actual signed cash and after-tax pretax proceeds, fund
+need in the existing withdrawal owner-order, credit only genuine
+leftovers) per the review's own explicit architectural guidance — see
+section 42. All three reproductions now match exactly. Still nothing
+merged to `main` beyond Milestone 1.
+
 ## Final status against Jason's 9-item follow-on task list
 
 All 9 items are resolved:
