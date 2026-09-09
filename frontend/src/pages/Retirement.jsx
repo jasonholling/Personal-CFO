@@ -59,7 +59,6 @@ export default function Retirement({ onNavigate }) {
   // dependency, so this page's own slider below is the only way to
   // see a custom claim age reflected here -- it's a genuine, explicit
   // per-request override, not a read of the Settings value.
-  const hasOverride = jasonSsClaimAge != null || justinSsClaimAge != null
 
   useEffect(() => {
     const params = {}
@@ -135,27 +134,31 @@ export default function Retirement({ onNavigate }) {
             ))}
           </div>
         </div>
-        <div>
-          <div className="label" style={{ marginBottom:8 }}>
-            Social Security{jasonSsClaimAge != null ? ' (using custom claim age below)' : ''}
+        {/* External audit follow-up, 2026-09-09: shown-but-disabled
+            buttons next to a still-visible toggle read as confusing
+            broken UI once the slider below is active ("i just want
+            the slider and not the override thing with buttons still
+            below") -- hidden entirely instead, same fix as
+            StressTestWhatIf.jsx. */}
+        {jasonSsClaimAge == null && (
+          <div>
+            <div className="label" style={{ marginBottom:8 }}>Social Security</div>
+            <div style={{ display:'flex', gap:6 }}>
+              <button
+                className={ssTiming === 'early' ? 'btn-primary' : 'btn-secondary'}
+                onClick={() => setSsTiming('early')}
+              >
+                Take at 62{earlyScenario?.jason_ss_annual ? ` · ${fmt(earlyScenario.jason_ss_annual / 12)}/mo` : ''}
+              </button>
+              <button
+                className={ssTiming === 'delayed' ? 'btn-primary' : 'btn-secondary'}
+                onClick={() => setSsTiming('delayed')}
+              >
+                Wait until 67{delayedScenario?.jason_ss_annual ? ` · ${fmt(delayedScenario.jason_ss_annual / 12)}/mo` : ''}
+              </button>
+            </div>
           </div>
-          <div style={{ display:'flex', gap:6, opacity: jasonSsClaimAge != null ? 0.5 : 1 }}>
-            <button
-              className={ssTiming === 'early' ? 'btn-primary' : 'btn-secondary'}
-              onClick={() => setSsTiming('early')}
-              disabled={jasonSsClaimAge != null}
-            >
-              Take at 62{earlyScenario?.jason_ss_annual ? ` · ${fmt(earlyScenario.jason_ss_annual / 12)}/mo` : ''}
-            </button>
-            <button
-              className={ssTiming === 'delayed' ? 'btn-primary' : 'btn-secondary'}
-              onClick={() => setSsTiming('delayed')}
-              disabled={jasonSsClaimAge != null}
-            >
-              Wait until 67{delayedScenario?.jason_ss_annual ? ` · ${fmt(delayedScenario.jason_ss_annual / 12)}/mo` : ''}
-            </button>
-          </div>
-        </div>
+        )}
       </div>
 
       {/* Custom claim age (2026-09-09, CALCULATION_CONTRACT.md section

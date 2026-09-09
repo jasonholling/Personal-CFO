@@ -86,6 +86,13 @@ export default function RothConversion() {
     ...(jasonSsClaimAge  != null ? { jason_ss_claim_age: jasonSsClaimAge } : {}),
     ...(justinSsClaimAge != null ? { justin_ss_claim_age: justinSsClaimAge } : {}),
   }
+  // Jason's effective claim age -- this page's own slider, or (unlike
+  // Retirement.jsx) whatever's saved in Settings, since this endpoint
+  // DOES fall back there. Either way, the SS Timing buttons below have
+  // no effect on Jason once one is set, so they're hidden entirely
+  // rather than shown disabled (2026-09-09 follow-up: "i just want the
+  // slider and not the override thing with buttons still below").
+  const jasonOverridden = jasonSsClaimAge != null || ssAnchors.savedJasonClaimAge != null
 
   useEffect(() => {
     const gen = ++genRef.current
@@ -186,14 +193,16 @@ export default function RothConversion() {
                 ))}
               </div>
             </div>
-            <div>
-              <div className="label" style={{ marginBottom:8 }}>Social Security Timing</div>
-              <div style={{ display:'flex', gap:8 }}>
-                {SS_TIMINGS.map(o => (
-                  <button key={o.value} className={o.value === ssTiming ? 'btn-primary' : 'btn-secondary'} onClick={() => setSsTiming(o.value)}>{o.label}</button>
-                ))}
+            {!jasonOverridden && (
+              <div>
+                <div className="label" style={{ marginBottom:8 }}>Social Security Timing</div>
+                <div style={{ display:'flex', gap:8 }}>
+                  {SS_TIMINGS.map(o => (
+                    <button key={o.value} className={o.value === ssTiming ? 'btn-primary' : 'btn-secondary'} onClick={() => setSsTiming(o.value)}>{o.label}</button>
+                  ))}
+                </div>
               </div>
-            </div>
+            )}
           </div>
         ) : (
           <div style={{ display:'flex', gap:24, flexWrap:'wrap', alignItems:'flex-end' }}>
@@ -205,14 +214,16 @@ export default function RothConversion() {
               <div className="label" style={{ marginBottom:8 }}>{person2Name}'s Retirement Age</div>
               <input type="number" value={justinRetAge} onChange={e => setJustinRetAge(parseInt(e.target.value) || 0)} />
             </div>
-            <div>
-              <div className="label" style={{ marginBottom:8 }}>Social Security Timing</div>
-              <div style={{ display:'flex', gap:8 }}>
-                {SS_TIMINGS.map(o => (
-                  <button key={o.value} className={o.value === ssTiming ? 'btn-primary' : 'btn-secondary'} onClick={() => setSsTiming(o.value)}>{o.label}</button>
-                ))}
+            {!jasonOverridden && (
+              <div>
+                <div className="label" style={{ marginBottom:8 }}>Social Security Timing</div>
+                <div style={{ display:'flex', gap:8 }}>
+                  {SS_TIMINGS.map(o => (
+                    <button key={o.value} className={o.value === ssTiming ? 'btn-primary' : 'btn-secondary'} onClick={() => setSsTiming(o.value)}>{o.label}</button>
+                  ))}
+                </div>
               </div>
-            </div>
+            )}
           </div>
         )}
       </div>

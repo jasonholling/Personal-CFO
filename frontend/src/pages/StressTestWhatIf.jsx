@@ -296,18 +296,22 @@ export default function StressTestWhatIf({ onNavigate }) {
   // (jasonSsClaimAge/justinSsClaimAge, shared scenario state) -- an
   // "effective" claim age is whichever one actually reaches the
   // backend: this page's own slider if set, else whatever's saved in
-  // Settings. The override note below needs to say WHICH source is
-  // driving it, not just that Jason/Justin is overridden.
+  // Settings.
+  //
+  // 2026-09-09 follow-up: once Jason's claim age is active, the
+  // Early/Delayed buttons below are hidden entirely (not shown
+  // disabled next to a "these buttons have no effect" banner --
+  // "this ux is confusing... i just want the slider and not the
+  // override thing with buttons still below"), so overrideNote only
+  // ever needs to cover the justin-only case now: the buttons stay
+  // visible and fully live for Jason's own SS there, with just a
+  // plain note that Justin's is fixed separately.
   const effectiveJason  = jasonSsClaimAge  ?? savedClaimAges.jason
   const effectiveJustin = justinSsClaimAge ?? savedClaimAges.justin
   const jasonOverridden  = effectiveJason  != null
   const justinOverridden = effectiveJustin != null
-  const anyOverridden = jasonOverridden || justinOverridden
-  const jasonSource  = jasonSsClaimAge  != null ? 'set on this page' : 'saved in Settings'
   const justinSource = justinSsClaimAge != null ? 'set on this page' : 'saved in Settings'
-  const overrideNote = jasonOverridden
-    ? `These buttons have no effect right now — ${person1Name}'s Social Security claim age (${effectiveJason}, ${jasonSource}) controls ${person1Name}'s benefit regardless of this toggle. (This toggle only ever affects ${person1Name}'s SS, not ${person2Name}'s.)`
-    : `${person2Name}'s Social Security claim age (${effectiveJustin}, ${justinSource}) fixes ${person2Name}'s benefit at that age. These buttons still work normally for ${person1Name}'s SS as usual — they were never connected to ${person2Name}'s.`
+  const overrideNote = `${person2Name}'s Social Security claim age (${effectiveJustin}, ${justinSource}) fixes ${person2Name}'s benefit at that age. These buttons still work normally for ${person1Name}'s SS as usual — they were never connected to ${person2Name}'s.`
 
   return (
     <div>
@@ -398,7 +402,7 @@ export default function StressTestWhatIf({ onNavigate }) {
           claiming-age timing don't apply in two-age mode v1 (out of
           scope), so that selector is hidden while it's on. */}
       {tab !== 'whatif' && tab !== 'survivor' && !twoAgeMode && (
-        <div style={{ display:'flex', gap:24, marginBottom:anyOverridden ? 8 : 28, flexWrap:'wrap', alignItems:'flex-end' }}>
+        <div style={{ display:'flex', gap:24, marginBottom:!jasonOverridden && justinOverridden ? 8 : 28, flexWrap:'wrap', alignItems:'flex-end' }}>
           <div>
             <div className="label" style={{ marginBottom:8 }}>Retirement Age</div>
             <div style={{ display:'flex', flexWrap:'wrap', gap:6, maxWidth:420 }}>
@@ -410,28 +414,38 @@ export default function StressTestWhatIf({ onNavigate }) {
               ))}
             </div>
           </div>
-          <div>
-            <div className="label" style={{ marginBottom:8 }}>
-              Social Security{jasonOverridden ? (jasonSsClaimAge != null ? ' (overridden below)' : ' (overridden by Settings)') : ''}
+          {/* External audit follow-up, 2026-09-09: with Jason's claim
+              age active (slider above or saved in Settings), these
+              buttons are dead -- showing them anyway, disabled, next
+              to a large "these buttons have no effect" banner reads as
+              confusing broken UI rather than a clear control ("this ux
+              is confusing... i just want the slider and not the
+              'override' thing with buttons still below"). Hidden
+              entirely in that case instead of shown-but-inert. */}
+          {!jasonOverridden && (
+            <div>
+              <div className="label" style={{ marginBottom:8 }}>
+                Social Security{justinOverridden ? ' (Justin overridden below)' : ''}
+              </div>
+              <div style={{ display:'flex', gap:6 }}>
+                {SS_OPTS.map(o => (
+                  <button key={o.value}
+                    className={ssTiming===o.value ? 'btn-primary' : 'btn-secondary'}
+                    onClick={() => setSsTiming(o.value)}
+                  >{o.label}</button>
+                ))}
+              </div>
             </div>
-            <div style={{ display:'flex', gap:6 }}>
-              {SS_OPTS.map(o => (
-                <button key={o.value}
-                  className={ssTiming===o.value ? 'btn-primary' : 'btn-secondary'}
-                  onClick={() => setSsTiming(o.value)}
-                >{o.label}</button>
-              ))}
-            </div>
-          </div>
+          )}
         </div>
       )}
-      {tab !== 'whatif' && tab !== 'survivor' && !twoAgeMode && anyOverridden && (
+      {tab !== 'whatif' && tab !== 'survivor' && !twoAgeMode && !jasonOverridden && justinOverridden && (
         <div style={{ padding:'8px 14px', background:'var(--bg3)', borderRadius:8, marginBottom:20, fontSize:12, color:'var(--text2)' }}>
-          ℹ {overrideNote}{jasonOverridden ? (jasonSsClaimAge != null ? ' Change or clear it in the slider below instead.' : ' Change or clear it on the Settings page instead.') : ''}
+          ℹ {overrideNote}
         </div>
       )}
       {tab !== 'whatif' && tab !== 'survivor' && twoAgeMode && (
-        <div style={{ display:'flex', gap:24, marginBottom:anyOverridden ? 8 : 28, flexWrap:'wrap', alignItems:'flex-end' }}>
+        <div style={{ display:'flex', gap:24, marginBottom:!jasonOverridden && justinOverridden ? 8 : 28, flexWrap:'wrap', alignItems:'flex-end' }}>
           <div>
             <div className="label" style={{ marginBottom:8 }}>{person1Name}'s Retirement Age</div>
             <input type="number" value={jasonRetAge} onChange={e => setJasonRetAge(parseInt(e.target.value) || 0)} />
@@ -446,20 +460,25 @@ export default function StressTestWhatIf({ onNavigate }) {
               ssTiming happened to already be set (always 'early' on
               first load), not necessarily what the user actually wants
               for a two-age scenario. Kept visible here so the selection
-              persists AND stays user-editable across the mode switch. */}
-          <div>
-            <div className="label" style={{ marginBottom:8 }}>
-              Social Security{jasonOverridden ? (jasonSsClaimAge != null ? ' (overridden below)' : ' (overridden by Settings)') : ''}
+              persists AND stays user-editable across the mode switch.
+              (2026-09-09: hidden entirely once Jason's claim age is
+              active instead, same as single-axis above -- see comment
+              there.) */}
+          {!jasonOverridden && (
+            <div>
+              <div className="label" style={{ marginBottom:8 }}>
+                Social Security{justinOverridden ? ' (Justin overridden below)' : ''}
+              </div>
+              <div style={{ display:'flex', gap:6 }}>
+                {SS_OPTS.map(o => (
+                  <button key={o.value}
+                    className={ssTiming===o.value ? 'btn-primary' : 'btn-secondary'}
+                    onClick={() => setSsTiming(o.value)}
+                  >{o.label}</button>
+                ))}
+              </div>
             </div>
-            <div style={{ display:'flex', gap:6 }}>
-              {SS_OPTS.map(o => (
-                <button key={o.value}
-                  className={ssTiming===o.value ? 'btn-primary' : 'btn-secondary'}
-                  onClick={() => setSsTiming(o.value)}
-                >{o.label}</button>
-              ))}
-            </div>
-          </div>
+          )}
         </div>
       )}
       {/* External audit review of commit aaa3cf5, finding 3 (P2): this
@@ -467,9 +486,9 @@ export default function StressTestWhatIf({ onNavigate }) {
           saved claim ages apply there too (CALCULATION_CONTRACT.md
           section 48 -- every two-age dispatcher resolves them the same
           way as single-axis). */}
-      {tab !== 'whatif' && tab !== 'survivor' && twoAgeMode && anyOverridden && (
+      {tab !== 'whatif' && tab !== 'survivor' && twoAgeMode && !jasonOverridden && justinOverridden && (
         <div style={{ padding:'8px 14px', background:'var(--bg3)', borderRadius:8, marginBottom:20, fontSize:12, color:'var(--text2)' }}>
-          ℹ {overrideNote}{jasonOverridden ? (jasonSsClaimAge != null ? ' Change or clear it in the slider below instead.' : ' Change or clear it on the Settings page instead.') : ''}
+          ℹ {overrideNote}
         </div>
       )}
 
