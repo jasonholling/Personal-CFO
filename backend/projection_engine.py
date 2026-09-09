@@ -2016,44 +2016,68 @@ def run_owner_split_two_dimensional_projection(inputs: Dict, accounts: List[Dict
             pregrowth = buckets[o]["pretax"] + pretax_allocation.get(o, 0.0)
             buckets[o]["pretax"] = max(0.0, pregrowth) * (1 + post_ret)
 
-        # Surplus source shares (section 37.4, findings 2-4 fix) -- of
-        # any positive delta this year (a cash-income surplus and/or
-        # RMD proceeds reinvested), attribute it proportionally to
-        # whichever source actually produced it:
+        # Surplus source shares (section 37.4, findings 2-4 fix, and
+        # independent review, 2026-09-08, sixth follow-up, finding 1
+        # fix) -- of any positive delta this year (a cash-income
+        # surplus and/or RMD proceeds reinvested), attribute it
+        # proportionally to whichever source actually produced it.
+        #
+        # Finding 1 (P1): gross income sources must NOT dilute a same-
+        # year RMD-reinvestment surplus that isn't actually theirs --
+        # only the portion of each income source that's genuinely LEFT
+        # OVER after funding need counts toward the basis, not its
+        # gross amount. Reproduced: $30,000 Jason pension exactly funds
+        # $30,000 spending (net contribution to any surplus is $0), a
+        # $1,000,000 trust IRA's forced RMD is reinvested the same
+        # year -- the old gross-proportion split still credited $15,190
+        # of that trust RMD to Jason (who contributed nothing left over)
+        # instead of the full amount correctly staying trust's own.
+        # Fixed: compute income_surplus_this_year = the ACTUAL leftover
+        # (total gross inflow minus the TRUE underlying need, i.e.
+        # year_need added back to what life-event/gap income already
+        # reduced it by) and split ONLY that leftover proportionally by
+        # gross share -- when gross inflow exactly equals need (as
+        # here), income_surplus_this_year is $0, so none of it dilutes
+        # the trust-owned RMD reinvestment, which is then attributed
+        # entirely via pretax_allocation below.
         # - Jason's own pension + his own SS credits Jason, Justin's own
         #   SS credits Justin.
         # - Still-working gap income credits whichever spouse is
         #   ACTUALLY later_retiree (finding 3 fix -- previously
-        #   hardcoded to Justin, so Jason's own working-income surplus
-        #   was credited to Justin whenever JASON was the one still
-        #   working. Reproduced: Jason retires at 65, Justin at 61,
-        #   Jason earns $100,000, $0 spending -- the $65,000 net
-        #   surplus used to land in Justin's bucket).
+        #   hardcoded to Justin).
         # - Unattributed life-event cash (one-time AND recurring
-        #   monthly -- finding 2 fix, part 2: the recurring monthly
-        #   component was previously missing from this basis entirely,
-        #   even though it reduces `year_need` the same way guaranteed
-        #   income does, silently under-weighting joint's true
-        #   contribution to any resulting surplus) credits joint.
+        #   monthly -- finding 2 fix, part 2) credits joint.
         # - Any pretax reduction (ordinary draw or RMD) credits
         #   whichever owner(s) it was actually drawn from, per
         #   pretax_allocation above -- never defaulting reinvested RMD
         #   proceeds to joint.
         # Only meaningful when there's a real positive basis to prorate
-        # against (a delta with no income/life-event/RMD basis at all
-        # falls back to the all-joint default inside
+        # against (a delta with no leftover income/life-event/RMD basis
+        # at all falls back to the all-joint default inside
         # _allocate_type_delta_across_owners itself).
-        jason_income_this_year = year_pen + year_jss
-        justin_income_this_year = year_uss
+        jason_gross = year_pen + year_jss
+        justin_gross = year_uss
         if timeline.later_retiree == "jason":
-            jason_income_this_year += still_working_income_this_year
+            jason_gross += still_working_income_this_year
         else:
-            justin_income_this_year += still_working_income_this_year
-        joint_income_this_year = max(0.0, life_event_cash_this_year) + max(0.0, life_event_monthly_this_year)
+            justin_gross += still_working_income_this_year
+        joint_gross = max(0.0, life_event_cash_this_year) + max(0.0, life_event_monthly_this_year)
+        gross_cash_available_this_year = jason_gross + justin_gross + joint_gross
+        # year_need has already been reduced by BOTH life_event_monthly
+        # and still_working_income above -- add them back to recover the
+        # TRUE underlying need this gross inflow is actually funding.
+        year_need_baseline = year_need + life_event_monthly_this_year + still_working_income_this_year
+        income_surplus_this_year = max(0.0, gross_cash_available_this_year - year_need_baseline)
+        if gross_cash_available_this_year > 1e-9:
+            jason_income_surplus  = income_surplus_this_year * (jason_gross  / gross_cash_available_this_year)
+            justin_income_surplus = income_surplus_this_year * (justin_gross / gross_cash_available_this_year)
+            joint_income_surplus  = income_surplus_this_year * (joint_gross  / gross_cash_available_this_year)
+        else:
+            jason_income_surplus = justin_income_surplus = joint_income_surplus = 0.0
         basis = {
-            "jason":  jason_income_this_year  + max(0.0, -pretax_allocation["jason"]),
-            "justin": justin_income_this_year + max(0.0, -pretax_allocation["justin"]),
-            "joint":  joint_income_this_year  + max(0.0, -pretax_allocation["joint"]),
+            "jason":  jason_income_surplus  + max(0.0, -pretax_allocation["jason"]),
+            "justin": justin_income_surplus + max(0.0, -pretax_allocation["justin"]),
+            "joint":  joint_income_surplus  + max(0.0, -pretax_allocation["joint"]),
             "trust":  max(0.0, -pretax_allocation["trust"]),
         }
         total_basis = sum(basis.values())
@@ -2078,6 +2102,13 @@ def run_owner_split_two_dimensional_projection(inputs: Dict, accounts: List[Dict
             "rmd": round(rmd), "unmet_need": round(year_result.unmet_need),
             "portfolio_balance": round(sum(buckets[o][t] for o in OWNER_BUCKETS for t in ("pretax", "roth", "taxable", "hsa"))),
             "owner_balances": {o: {t: round(buckets[o][t]) for t in ("pretax", "roth", "taxable", "hsa")} for o in OWNER_BUCKETS},
+            # Exposed so a death-transition consumer (Survivor Scenario's
+            # own deceased-final-RMD catch-up) can tax a same-year
+            # shortfall distribution at the IDENTICAL rate this year's
+            # own normal draw already used, instead of recomputing the
+            # formula a second, independent way (independent review,
+            # 2026-09-08, sixth follow-up, finding 2).
+            "pretax_tax_rate": round(pretax_tax_rate, 6),
         })
 
     return {

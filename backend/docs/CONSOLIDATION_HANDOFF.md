@@ -106,6 +106,14 @@ all introduced or touched by section 39). All 3 are fixed, tested, and
 pushed — see section 40. Still nothing merged to `main` beyond
 Milestone 1.
 
+**2026-09-08, sixth review round addendum (section 41):** the
+auditor's review of commit `08198b2` confirmed the three prior
+reproductions now pass, and found 2 more issues (a gross-vs-net
+income-attribution gap and a death-year tax/growth gap in the
+deceased's final-RMD catch-up, both in code section 39/40 had just
+introduced or touched). Both are fixed, tested, and pushed — see
+section 41. Still nothing merged to `main` beyond Milestone 1.
+
 ## Final status against Jason's 9-item follow-on task list
 
 All 9 items are resolved:

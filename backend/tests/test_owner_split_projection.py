@@ -189,6 +189,34 @@ class TestRmdReinvestmentCreditsThePretaxOwnerNotJoint:
         assert first_year["owner_balances"]["joint"]["taxable"] == 0
 
 
+class TestNetOfNeedIncomeAttributionDoesNotDiluteAnUnrelatedRmdSurplus:
+    """Independent review, 2026-09-08, sixth follow-up, finding 1 (P1):
+    gross income sources must not dilute a same-year RMD-reinvestment
+    surplus that isn't actually theirs -- only the portion of an
+    income source that's genuinely left over after funding need counts
+    toward the attribution basis, not its gross amount. Jason's
+    $30,000 pension exactly funds $30,000 spending (net contribution
+    to any surplus is $0); a trust-owned $1,000,000 IRA's forced RMD is
+    reinvested the same year -- the reinvested RMD must credit the
+    trust entirely, not get diluted by Jason's already-fully-consumed
+    pension (the old gross-proportion split credited ~$15,190 of it to
+    Jason instead)."""
+
+    def test_pension_exactly_funding_need_does_not_dilute_trusts_own_rmd_surplus(self):
+        inputs = {**BASE_INPUTS, "jason_age": 75, "justin_age": 75,
+                  "retirement_income_today_dollars": 30000, "retirement_end_age": 76,
+                  "pension_55": 30000, "pension_60": 30000, "pension_65": 30000,
+                  "jason_social_security": 0, "justin_social_security": 0,
+                  "w2_salary": 0, "justin_w2_salary": 0, "annual_rsu_value": 0,
+                  "justin_annual_rsu_value": 0, "annual_hsa_contribution": 0,
+                  "healthcare_pre_medicare": 0, "healthcare_post_medicare": 0}
+        accounts = [{"name": "Trust IRA", "account_type": "ira", "owner": "trust", "balance": 1000000}]
+        split = run_owner_split_two_dimensional_projection(inputs, accounts, jason_ret_age=61, justin_ret_age=61)
+        first_year = split["yearly_detail"][0]
+        assert first_year["owner_balances"]["jason"]["taxable"] == 0
+        assert first_year["owner_balances"]["trust"]["taxable"] > 0
+
+
 class TestStillWorkingGapIncomeCreditsTheActualLaterRetiree:
     """Independent review, 2026-09-08, fifth follow-up, finding 3 (P2):
     the still-working spouse's own gap-income surplus was hardcoded to

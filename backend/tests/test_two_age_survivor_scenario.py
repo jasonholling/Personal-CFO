@@ -367,10 +367,14 @@ class TestDeceasedsFinalYearRmdIsSatisfied:
     anchored). Reproduced exactly per the review: Jason 61, Justin 75,
     Justin's own $1,000,000 IRA -- this repository's own RMD table gives
     _rmd(1000000, 75, 75) == 1000000/24.6 == $40,650.41, versus the old
-    bug's $0. Verified here via the starting_pretax_after_payout/
-    starting_other_after_payout diagnostic fields (added alongside this
-    fix) since the total starting_balance_after_payout is unaffected by
-    money moving between buckets within the same owner."""
+    bug's $0.
+
+    Independent review, 2026-09-08, sixth follow-up, finding 2 (P1):
+    the shortfall must be TAXED (at that year's own pretax_tax_rate,
+    same as any other pretax distribution) before landing in taxable --
+    $0 other income here means the lowest bracket, 10% -- leaving
+    $995,935 total, not the untaxed $1,000,000 the original version of
+    this catch-up reported."""
 
     def test_justins_own_final_rmd_moves_from_pretax_to_taxable_at_death(self):
         inputs = base_inputs(jason_age=61, justin_age=75, retirement_income_today_dollars=0,
@@ -378,9 +382,9 @@ class TestDeceasedsFinalYearRmdIsSatisfied:
         accounts = [IRA(1000000, "justin")]
         r = run_survivor_scenario(inputs, accounts, deceased="justin", death_age=75,
                                    jason_ret_age=61, justin_ret_age=61)
-        assert r["starting_balance_after_payout"] == 1000000  # total unaffected
+        assert r["starting_balance_after_payout"] == pytest.approx(995935, abs=2)
         assert r["starting_pretax_after_payout"] == pytest.approx(1000000 - 40650, abs=1)
-        assert r["starting_other_after_payout"] == pytest.approx(40650, abs=1)
+        assert r["starting_other_after_payout"] == pytest.approx(40650 * 0.9, abs=2)
 
     def test_no_double_draw_when_the_normal_death_year_already_satisfies_it(self):
         """Independent review, 2026-09-08, fifth follow-up, finding 1
@@ -410,6 +414,52 @@ class TestDeceasedsFinalYearRmdIsSatisfied:
         # 38,998, each also net of tax) -- comfortably above that floor
         # confirms the second draw never happened.
         assert r["starting_balance_after_payout"] > 950000
+
+    def test_shortfall_is_taxed_and_grows_with_the_death_year(self):
+        """Independent review, 2026-09-08, sixth follow-up, finding 2
+        (P1): with 10% growth on top of the same $0-spending/$0-other-
+        income scenario, the correctly-taxed-then-grown shortfall
+        ($40,650.41 taxed at 10% = $36,585.37 after-tax, both figures
+        then grown 10% right along with everything else that year)
+        gives $1,095,528.46 total, not the original bug's untaxed,
+        ungrown $1,100,000."""
+        inputs = base_inputs(jason_age=61, justin_age=75, retirement_income_today_dollars=0,
+                              retirement_end_age=76, expected_return_post_retirement=0.10)
+        accounts = [IRA(1000000, "justin")]
+        r = run_survivor_scenario(inputs, accounts, deceased="justin", death_age=75,
+                                   jason_ret_age=61, justin_ret_age=61)
+        assert r["starting_balance_after_payout"] == pytest.approx(1095528, abs=2)
+
+    def test_jasons_own_shortfall_is_also_enforced_not_only_justins(self):
+        """Independent review, 2026-09-08, sixth follow-up, finding 2
+        (P1), part 2: the original catch-up only ever checked Justin --
+        but the pooled RMD draws from JOINT's pretax first
+        (WITHDRAWAL_OWNER_ORDER), so when Jason is deceased and his own
+        pretax is untouched (all the year's RMD came out of a joint
+        IRA instead), his own individual RMD obligation went completely
+        unenforced. Both spouses 75, Jason's OWN $1,000,000 IRA plus a
+        $1,000,000 joint IRA -- the pooled RMD (based on the combined
+        $2,000,000 pretax) is fully absorbed by joint (drawn first),
+        leaving Jason's own account fully untouched by the normal walk;
+        the catch-up must still force Jason's own $1,000,000/24.6 =
+        $40,650.41 obligation out of HIS OWN account."""
+        inputs = base_inputs(jason_age=75, justin_age=75, retirement_income_today_dollars=0,
+                              retirement_end_age=76)
+        accounts = [IRA(1000000, "jason"), IRA(1000000, "joint")]
+        r = run_survivor_scenario(inputs, accounts, deceased="jason", death_age=75,
+                                   jason_ret_age=61, justin_ret_age=61)
+        # Pooled RMD on the combined $2,000,000 pretax (both 75) is
+        # 2,000,000/24.6 = 81,300.81, drawn entirely from joint (drawn
+        # first) -- joint ends the normal year at 1,000,000 - 81,300.81
+        # = 918,699.19, Jason's own account fully untouched at
+        # 1,000,000. The catch-up must then force Jason's own
+        # 1,000,000/24.6 = 40,650.41 out of HIS OWN account: Jason's
+        # pretax becomes 959,349.59. Total surviving pretax (Justin's
+        # own $0 + Jason's rolled-over 959,349.59 + joint's full
+        # 918,699.19) = 1,878,048.78 -- if Jason's own catch-up never
+        # ran, this would instead be 1,918,699.19 (joint's reduction
+        # only, Jason's own account still untouched at $1,000,000).
+        assert r["starting_pretax_after_payout"] == pytest.approx(1878049, abs=5)
 
 
 class TestRecurringLifeEventIncomeCreditsJointNotWhicheverSpouseWasCounted:

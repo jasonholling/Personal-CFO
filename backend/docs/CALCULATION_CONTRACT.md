@@ -3852,3 +3852,69 @@ floor. Sensitive-data check passed.
 
 Branch: `codex/two-age-survivor-design`, pushed — **not merged to
 `main`** beyond Milestone 1, same standing instruction as section 39.
+
+## 41. Survivor Scenario — sixth independent review round, fixes (2026-09-08, on `codex/two-age-survivor-design`)
+
+Independent review of commit `08198b2` found the three previous
+reproductions now pass, but 2 more calculation issues still blocked
+approval — both in code section 39/40 had just introduced or touched.
+
+**Finding 1 (P1, `run_owner_split_two_dimensional_projection`)** —
+the finding-4/2 surplus-source-shares fix attributed a positive delta
+by each income source's GROSS amount, which let money already fully
+consumed by spending still dilute an unrelated same-year RMD-
+reinvestment surplus. Reproduced: $30,000 Jason pension exactly funds
+$30,000 spending (Jason's net contribution to any surplus is $0); a
+trust-owned $1,000,000 IRA's forced RMD is reinvested the same year —
+the old gross-proportion split still credited $15,190 of that trust
+RMD to Jason, making it available to the survivor even with trust
+availability disabled. Fixed: the basis now uses each source's NET
+leftover after funding need, not its gross amount — the true
+underlying need (`year_need_baseline`, adding back what life-event/
+gap income already reduced `year_need` by) is subtracted from total
+gross cash available to get `income_surplus_this_year`, and ONLY that
+actual leftover is split proportionally by gross share. When gross
+income exactly equals need (as here), the leftover is $0, so nothing
+dilutes the trust-owned RMD reinvestment, which is then attributed
+entirely via the existing pretax-reduction shares.
+
+**Finding 2 (P1, `_run_survivor_scenario_two_age`)** — the finding-8/1
+deceased final-RMD catch-up bypassed both the death year's own tax
+treatment and its growth:
+- It moved the shortfall into taxable UNTAXED, when a real RMD is
+  taxed like any other pretax distribution. Reproduced: Jason 61,
+  Justin 75, Justin's $1,000,000 IRA, $0 spending/growth — the
+  catch-up reported $1,000,000 total (untaxed), not the correctly-
+  taxed $995,935 ($40,650.41 shortfall taxed at that year's own 10%
+  rate, $0 other income here).
+- It applied the adjustment AFTER that year's growth had already run,
+  instead of "inside" the death year alongside everything else.
+  Reproduced with 10% growth: reported $1.1M instead of the correctly
+  taxed-then-grown $1,095,528.
+- It also only ever checked Justin, never Jason — but the pooled RMD
+  draws from JOINT's pretax FIRST (`WITHDRAWAL_OWNER_ORDER`), so when
+  Jason is deceased and the year's RMD came entirely out of a joint
+  account, his own individually-owned account's RMD obligation went
+  completely unenforced.
+
+Fixed: generalized to whichever spouse is `deceased` (reads
+`death_row[f"{deceased}_age"]`/`inputs[f"{deceased}_age"]` instead of
+hardcoding `"justin"`), taxed at the SAME `pretax_tax_rate` the death
+row's own normal draw used (now exposed in `yearly_detail` alongside
+every other per-year field, so this doesn't recompute the marginal-
+rate formula a second, independent way), and applied PRE-growth
+(reversing/reapplying `(1 + post_ret)` around the pretax reduction AND
+the taxable addition) so the shortfall grows symmetrically with the
+rest of that year, matching the main per-year loop's own convention.
+
+New tests: 1 class in `test_owner_split_projection.py` (finding 1); 2
+new tests plus 1 existing test's assertions updated to the now-correct
+(taxed) numbers in `test_two_age_survivor_scenario.py` (finding 2,
+including a growth case and a Jason-deceased case).
+
+**Verified:** full backend suite passed, coverage at/above the 95%
+floor. Sensitive-data check passed.
+
+Branch: `codex/two-age-survivor-design`, pushed — **not merged to
+`main`** beyond Milestone 1, same standing instruction as sections
+39-40.

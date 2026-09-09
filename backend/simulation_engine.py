@@ -3905,45 +3905,65 @@ def _run_survivor_scenario_two_age(inputs: Dict, accounts: List[Dict], jason_ret
     # mutated in place.
     ob = {o: dict(death_row["owner_balances"][o]) for o in OWNER_BUCKETS}
 
-    # Finding 8 fix: Justin's own final-year RMD. The pre-death walk's
-    # RMD is always Jason-anchored (pooled_pretax, age, jason_rmd_start_age
-    # -- see run_owner_split_two_dimensional_projection), so it never
-    # independently checks whether JUSTIN's own age triggers HIS OWN RMD
-    # obligation against his own individually-owned pretax balance. When
-    # Justin is the deceased, force that obligation out of his pretax
-    # bucket into taxable before anything transfers to the survivor --
-    # only Justin's side needs this catch-up; Jason's own RMD obligation
-    # is always already satisfied by the Jason-anchored pooled RMD.
+    # Finding 8 fix: the DECEASED's own final-year RMD. The pre-death
+    # walk's RMD is always Jason-anchored (pooled_pretax, age,
+    # jason_rmd_start_age -- see run_owner_split_two_dimensional_projection)
+    # and drawn from the POOLED total via WITHDRAWAL_OWNER_ORDER (joint
+    # first) -- so even when the deceased IS Jason, the dollars actually
+    # withdrawn that year might have come entirely from JOINT's pretax,
+    # never touching Jason's own individually-owned account at all, even
+    # though an RMD is an obligation of the INDIVIDUAL account, not a
+    # poolable household total. Force whatever's left of the deceased's
+    # own obligation out of their own pretax bucket into taxable before
+    # anything transfers to the survivor.
     #
     # Independent review, 2026-09-08, fifth follow-up, finding 1 (P1):
-    # the ORIGINAL version of this catch-up computed Justin's full RMD
-    # against his END-of-death-year pretax balance (ob["justin"]["pretax"],
-    # already net of whatever the normal death-year draw/RMD had already
-    # taken) and forced that WHOLE amount out again -- double-withdrawing
-    # whenever the normal year's pooled RMD had already satisfied some or
-    # all of Justin's own obligation. Reproduced: both spouses 75,
-    # Justin's $1,000,000 IRA -- the normal year already withdraws
-    # $40,650 (pooled RMD, Jason also 75); the old catch-up then pulled
-    # ANOTHER $38,998 from the remaining ~$959,350 balance. Fixed:
-    # compute Justin's own TOTAL obligation against his STARTING-of-year
-    # balance, then only force the REMAINDER not already covered by
-    # whatever his own pretax was reduced by this year (ordinary draw or
-    # RMD, growth-adjusted so a nonzero post_ret doesn't mask the real
-    # draw amount).
-    if deceased == "justin":
-        justin_age_at_death = death_row["justin_age"]
-        justin_own_rmd_start_age = rmd_start_age(inputs["justin_age"])
-        prior_balances = (yearly[death_row_index - 1]["owner_balances"] if death_row_index > 0
-                           else walk["starting_buckets"])
-        justin_pretax_at_year_start = prior_balances["justin"]["pretax"]
-        justin_pretax_pregrowth_end = (ob["justin"]["pretax"] / (1 + post_ret)) if (1 + post_ret) != 0 else ob["justin"]["pretax"]
-        already_reduced_this_year = max(0.0, justin_pretax_at_year_start - justin_pretax_pregrowth_end)
-        justin_own_full_rmd = _rmd(justin_pretax_at_year_start, justin_age_at_death, justin_own_rmd_start_age)
-        justin_final_rmd = max(0.0, justin_own_full_rmd - already_reduced_this_year)
-        if justin_final_rmd > 0:
-            justin_final_rmd = min(justin_final_rmd, ob["justin"]["pretax"])
-            ob["justin"]["pretax"] -= justin_final_rmd
-            ob["justin"]["taxable"] += justin_final_rmd
+    # the ORIGINAL version of this catch-up computed the full RMD
+    # against the deceased's END-of-death-year pretax balance (already
+    # net of whatever the normal death-year draw/RMD had already taken)
+    # and forced that WHOLE amount out again -- double-withdrawing
+    # whenever the normal year's pooled RMD had already satisfied some
+    # or all of the obligation. Fixed: compute the deceased's own TOTAL
+    # obligation against their STARTING-of-year balance, then only force
+    # the REMAINDER not already covered by whatever their own pretax was
+    # reduced by this year (growth-adjusted so a nonzero post_ret doesn't
+    # mask the real draw amount).
+    #
+    # Independent review, 2026-09-08, sixth follow-up, finding 2 (P1):
+    # that fix still (a) only ever checked Justin, never Jason, even
+    # though the joint-drawn-first ordering above means Jason's own
+    # obligation can equally go unmet, and (b) moved the shortfall into
+    # taxable UNTAXED and OUTSIDE the year's own growth -- a real RMD
+    # is taxed like any other pretax distribution, and happening
+    # "inside" the death year means it should grow right along with
+    # everything else that year, not get bolted on after growth already
+    # ran. Reproduced exactly: Jason 61, Justin 75, Justin's $1,000,000
+    # IRA, $0 spending/growth -- the shortfall ($40,650.41) taxed at that
+    # year's own 10% rate (death_row's own pretax_tax_rate, $0 other
+    # income here) leaves $995,935, not $1,000,000; with 10% growth, the
+    # correctly-taxed-then-grown result is $1,095,528, not $1.1M. Fixed:
+    # generalized to whichever spouse is `deceased`, taxed at the SAME
+    # pretax_tax_rate the death row's own normal draw used, and applied
+    # PRE-growth (reversing/reapplying (1 + post_ret) around the
+    # adjustment) so it grows symmetrically with the rest of that year.
+    deceased_age_at_death = death_row[f"{deceased}_age"]
+    deceased_own_rmd_start_age = rmd_start_age(inputs[f"{deceased}_age"])
+    prior_balances = (yearly[death_row_index - 1]["owner_balances"] if death_row_index > 0
+                       else walk["starting_buckets"])
+    deceased_pretax_at_year_start = prior_balances[deceased]["pretax"]
+    deceased_pretax_pregrowth_end = (ob[deceased]["pretax"] / (1 + post_ret)) if (1 + post_ret) != 0 else ob[deceased]["pretax"]
+    already_reduced_this_year = max(0.0, deceased_pretax_at_year_start - deceased_pretax_pregrowth_end)
+    deceased_own_full_rmd = _rmd(deceased_pretax_at_year_start, deceased_age_at_death, deceased_own_rmd_start_age)
+    deceased_final_rmd_shortfall = max(0.0, deceased_own_full_rmd - already_reduced_this_year)
+    if deceased_final_rmd_shortfall > 0:
+        deceased_final_rmd_shortfall = min(deceased_final_rmd_shortfall, deceased_pretax_pregrowth_end)
+        death_year_pretax_tax_rate = death_row.get("pretax_tax_rate", 0.0)
+        after_tax_shortfall = deceased_final_rmd_shortfall * (1 - death_year_pretax_tax_rate)
+        taxable_pregrowth_end = (ob[deceased]["taxable"] / (1 + post_ret)) if (1 + post_ret) != 0 else ob[deceased]["taxable"]
+        new_pretax_pregrowth = deceased_pretax_pregrowth_end - deceased_final_rmd_shortfall
+        new_taxable_pregrowth = taxable_pregrowth_end + after_tax_shortfall
+        ob[deceased]["pretax"] = new_pretax_pregrowth * (1 + post_ret)
+        ob[deceased]["taxable"] = new_taxable_pregrowth * (1 + post_ret)
 
     # Ownership transfer at death (section 37.1-37.3, explicit scenario
     # assumptions, never inferred).
