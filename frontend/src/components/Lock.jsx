@@ -1,13 +1,15 @@
 import { useState, useEffect, useRef } from 'react'
 import axios from 'axios'
+import { biometricLabel } from '../utils/biometricLabel'
 
 /**
- * Passphrase/Touch ID lock screen — see backend/auth.py for the full
+ * Passphrase/biometric lock screen — see backend/auth.py for the full
  * design rationale. This isn't internet-facing security, just a "someone
- * else picks up this Mac" deterrent. Rendered by App.jsx in place of the
- * app shell until /api/auth/status reports authenticated:true.
+ * else picks up this computer" deterrent. Rendered by App.jsx in place of
+ * the app shell until /api/auth/status reports authenticated:true.
  */
 export default function Lock({ webauthnRegistered, onUnlock }) {
+  const bioLabel = biometricLabel()
   const [mode, setMode] = useState(webauthnRegistered ? 'touchid' : 'passphrase')
   const [passphrase, setPassphrase] = useState('')
   const [error, setError] = useState('')
@@ -39,7 +41,7 @@ export default function Lock({ webauthnRegistered, onUnlock }) {
       await axios.post('/api/auth/webauthn/login-verify', { credential: credential.toJSON() })
       onUnlock()
     } catch (e) {
-      setError('Touch ID didn’t work — try again, or use your passphrase.')
+      setError(`${bioLabel} didn’t work — try again, or use your passphrase.`)
     } finally {
       setBusy(false)
     }
@@ -83,12 +85,12 @@ export default function Lock({ webauthnRegistered, onUnlock }) {
       <div style={shellStyle}>
         <div className="card" style={cardStyle}>
           <div style={{ fontSize:32, marginBottom:12 }}>👆</div>
-          <div style={{ fontSize:16, fontWeight:600, marginBottom:8 }}>Enable Touch ID?</div>
+          <div style={{ fontSize:16, fontWeight:600, marginBottom:8 }}>Enable {bioLabel}?</div>
           <p style={{ fontSize:13, color:'var(--text2)', marginBottom:20, lineHeight:1.6 }}>
             Unlock faster next time without typing your passphrase.
           </p>
           <button className="btn-primary" onClick={setUpTouchId} disabled={busy} style={{ width:'100%', marginBottom:8 }}>
-            {busy ? 'Setting up…' : 'Enable Touch ID'}
+            {busy ? 'Setting up…' : `Enable ${bioLabel}`}
           </button>
           <button className="btn-secondary" onClick={onUnlock} style={{ width:'100%' }}>Skip for now</button>
         </div>
@@ -105,7 +107,7 @@ export default function Lock({ webauthnRegistered, onUnlock }) {
         {mode === 'touchid' ? (
           <>
             <button className="btn-primary" onClick={tryTouchId} disabled={busy} style={{ width:'100%', marginBottom:12 }}>
-              {busy ? 'Waiting for Touch ID…' : '👆 Unlock with Touch ID'}
+              {busy ? `Waiting for ${bioLabel}…` : `👆 Unlock with ${bioLabel}`}
             </button>
             <button
               onClick={() => { setMode('passphrase'); setError('') }}
@@ -133,7 +135,7 @@ export default function Lock({ webauthnRegistered, onUnlock }) {
                 onClick={() => { setMode('touchid'); setError('') }}
                 style={{ background:'none', border:'none', color:'var(--accent)', fontSize:12, cursor:'pointer', padding:0 }}
               >
-                Use Touch ID instead
+                Use {bioLabel} instead
               </button>
             )}
           </form>

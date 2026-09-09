@@ -1,15 +1,17 @@
 import { useState } from 'react'
 import axios from 'axios'
+import { biometricLabel } from '../utils/biometricLabel'
 
 /**
  * First-run gate — shown once, before any /api route other than
  * /api/auth/status and /api/auth/setup will respond (see backend's
  * auth.setup_required()). Forces a deliberate choice instead of the app
  * silently opening unlocked on a fresh clone: either set a passphrase now
- * (Touch ID can be added afterward from the Lock screen / Settings), or
- * explicitly skip, which is recorded in backend/.auth_disabled.
+ * (a biometric unlock can be added afterward from the Lock screen /
+ * Settings), or explicitly skip, which is recorded in backend/.auth_disabled.
  */
 export default function AuthSetup({ onDone }) {
+  const bioLabel = biometricLabel()
   const [passphrase, setPassphrase] = useState('')
   const [confirm, setConfirm] = useState('')
   const [error, setError] = useState('')
@@ -56,8 +58,8 @@ export default function AuthSetup({ onDone }) {
         <div style={{ fontSize:16, fontWeight:600, marginBottom:8 }}>Set up a lock for Personal CFO</div>
         <p style={{ fontSize:13, color:'var(--text2)', marginBottom:20, lineHeight:1.6 }}>
           This isn't internet-facing security — the app only ever listens on
-          127.0.0.1 — just a deterrent for anyone else who picks up this Mac
-          or glances at a screen share. You can add Touch ID afterward.
+          127.0.0.1 — just a deterrent for anyone else who picks up this
+          computer or glances at a screen share. You can add {bioLabel} afterward.
         </p>
 
         {!confirmSkip ? (
@@ -86,14 +88,14 @@ export default function AuthSetup({ onDone }) {
               onClick={() => setConfirmSkip(true)}
               style={{ background:'none', border:'none', color:'var(--text2)', fontSize:12, cursor:'pointer', padding:0 }}
             >
-              Skip — I'm the only one with access to this Mac
+              Skip — I'm the only one with access to this computer
             </button>
           </>
         ) : (
           <>
             <p style={{ fontSize:13, color:'var(--text2)', marginBottom:16, lineHeight:1.6 }}>
-              This leaves the app open to anyone who opens it on this Mac.
-              You can turn on a passphrase later from Settings.
+              This leaves the app open to anyone who opens it on this
+              computer. You can turn on a passphrase later from Settings.
             </p>
             <button className="btn-secondary" onClick={skip} disabled={busy} style={{ width:'100%', marginBottom:8 }}>
               {busy ? 'Skipping…' : 'Confirm — skip for now'}
