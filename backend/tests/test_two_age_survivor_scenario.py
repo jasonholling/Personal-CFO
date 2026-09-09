@@ -243,3 +243,141 @@ class TestSingleAgeModeUnaffected:
         r = run_survivor_scenario(sample_inputs, sample_accounts, ret_age=60, deceased="jason")
         assert "mode" not in r
         assert "jason_ret_age" not in r
+
+
+class TestPensionResumesForSurvivingJasonAfterHisOwnRetirement:
+    """Independent review, 2026-09-08, fourth follow-up, finding 2 (P1):
+    previously pension_annual was frozen at the death row's own
+    (possibly still-gated-to-$0) snapshot for the whole post-death
+    schedule. Justin dies at 61, BEFORE Jason's own retirement at 65 --
+    the pension must turn ON once Jason (the survivor) reaches his own
+    retirement age, not stay frozen at $0 forever. Under the old bug,
+    pension_annual == death_row["pension"] == 0 (Jason hadn't retired at
+    the death year) for every subsequent year too, so age 66's
+    ending_balance below would have stayed $0 forever instead of
+    reflecting the pension that actually starts at 65."""
+
+    def test_pension_starts_zero_then_turns_on_at_jasons_own_retirement(self):
+        inputs = base_inputs(jason_age=61, justin_age=61, retirement_income_today_dollars=0,
+                              pension_55=30000, pension_60=30000, pension_65=30000,
+                              retirement_end_age=67)
+        accounts = [TAXABLE(0, "joint")]
+        r = run_survivor_scenario(inputs, accounts, deceased="justin", death_age=61,
+                                   jason_ret_age=65, justin_ret_age=61)
+        rows_by_age = {row["age"]: row for row in r["schedule"]}
+        assert 62 in rows_by_age and 66 in rows_by_age
+        # Before Jason's own retirement (65): no pension yet, $0 need -> nothing swept in.
+        assert rows_by_age[62]["ending_balance"] == 0
+        # After Jason's own retirement (65): pension is now on, $0 need -> the
+        # surplus is swept into savings as it accumulates.
+        assert rows_by_age[66]["ending_balance"] > 0
+        # The reported headline figure reflects the FIRST post-death year
+        # (age 62, before Jason's own retirement) -- correctly $0, not a
+        # frozen guess about the whole future.
+        assert r["pension_annual"] == 0
+
+
+class TestSurvivorSocialSecurityRespectsTimingAndCola:
+    """Independent review, 2026-09-08, fourth follow-up, finding 3 (P1):
+    previously survivor_ss_annual was a single flat max(raw
+    jason_social_security, raw justin_social_security) input, ignoring
+    ss_timing (early vs delayed) and never compounding COLA from each
+    spouse's own claim age. Under the old bug this would have reported
+    the flat $30,000 raw early-claim input, never the selected $45,000
+    delayed benefit at all."""
+
+    def test_delayed_timing_and_cola_are_preserved_through_the_transition(self):
+        inputs = base_inputs(jason_age=61, justin_age=61,
+                              jason_social_security=30000, jason_ss_delayed=45000,
+                              justin_social_security=0,
+                              retirement_income_today_dollars=0, inflation_rate=0.03,
+                              retirement_end_age=70)
+        accounts = [TAXABLE(0, "joint")]
+        r = run_survivor_scenario(inputs, accounts, deceased="justin", death_age=67,
+                                   jason_ret_age=62, justin_ret_age=62, ss_timing="delayed")
+        # Jason claims at 67 (delayed timing) -- the survivor phase (starting age
+        # 68) continues that SAME $45,000-based trajectory with one more year of
+        # COLA: 45000 * 1.03 = 46350, never the flat $30,000 raw early input.
+        assert r["survivor_ss_annual"] == pytest.approx(46350, rel=1e-6)
+
+
+class TestPostDeathLifeEventsApplyToBothScheduleAndInsuranceCalc:
+    """Independent review, 2026-09-08, fourth follow-up, finding 5 (P1):
+    previously life_event_cash=0.0 was hardcoded in the post-death loop,
+    silently dropping any post-death expense or windfall from both the
+    schedule and _minimum_survivor_funding's insurance-shortfall calc.
+    Under the old bug this $100,000 windfall would never have shown up
+    -- ending_balance would have stayed $0 throughout."""
+
+    def test_a_post_death_windfall_shows_up_in_the_ending_balance(self):
+        inputs = base_inputs(jason_age=61, justin_age=61, retirement_income_today_dollars=0,
+                              retirement_end_age=65)
+        accounts = [TAXABLE(0, "joint")]
+        life_events = [{"event_year": 2028, "one_time_cash_delta": 100000,
+                         "monthly_cash_flow_delta": 0, "duration_months": 0}]
+        r = run_survivor_scenario(inputs, accounts, deceased="justin", death_age=61,
+                                   jason_ret_age=61, justin_ret_age=61, life_events=life_events)
+        assert r["schedule"][-1]["ending_balance"] == 100000
+
+
+class TestDeathBeforeFirstRetirementIsExplicitlyRejected:
+    """Independent review, 2026-09-08, fourth follow-up, finding 6 (P2):
+    previously a death requested before either spouse retired silently
+    snapped forward to the first available (post-retirement) row while
+    still reporting the originally-requested death_age unchanged."""
+
+    def test_death_before_phase2_start_is_rejected_not_silently_moved(self):
+        inputs = base_inputs(jason_age=55, justin_age=55, retirement_end_age=70)
+        accounts = [TAXABLE(100000, "joint")]
+        r = run_survivor_scenario(inputs, accounts, deceased="jason", death_age=58,
+                                   jason_ret_age=65, justin_ret_age=67)
+        assert r["has_data"] is False
+        assert r.get("error") == "death_before_first_retirement_unsupported"
+
+
+class TestJointTrustPretaxPreservesAccountType:
+    """Independent review, 2026-09-08, fourth follow-up, finding 7 (P2):
+    previously joint/trust contributions were folded ENTIRELY into
+    starting_other regardless of underlying account type, so a
+    transferred pretax dollar lost its RMD-triggering status. Mirrors
+    TestRealPostDeathRmdOnSurvivorsOwnAge above, but with a joint- and a
+    trust-owned IRA instead of a Jason-owned one -- under the old bug
+    required_minimum_distribution would have stayed $0 for every row."""
+
+    def test_joint_pretax_still_produces_rmds_after_transfer(self):
+        inputs = base_inputs(retirement_income_today_dollars=0, retirement_end_age=78)
+        accounts = [IRA(1000000, "joint")]
+        r = run_survivor_scenario(inputs, accounts, deceased="jason", death_age=61,
+                                   jason_ret_age=61, justin_ret_age=61)
+        assert r["schedule"][-1]["required_minimum_distribution"] > 0
+
+    def test_trust_pretax_still_produces_rmds_when_trust_is_available(self):
+        inputs = base_inputs(retirement_income_today_dollars=0, retirement_end_age=78)
+        accounts = [IRA(1000000, "trust")]
+        r = run_survivor_scenario(inputs, accounts, deceased="jason", death_age=61,
+                                   jason_ret_age=61, justin_ret_age=61,
+                                   trust_available_to_survivor=True)
+        assert r["schedule"][-1]["required_minimum_distribution"] > 0
+
+
+class TestDeceasedsFinalYearRmdIsSatisfied:
+    """Independent review, 2026-09-08, fourth follow-up, finding 8 (P2):
+    previously the deceased's own final-year RMD obligation was never
+    independently checked (the pre-death walk's RMD is always Jason-
+    anchored). Reproduced exactly per the review: Jason 61, Justin 75,
+    Justin's own $1,000,000 IRA -- this repository's own RMD table gives
+    _rmd(1000000, 75, 75) == 1000000/24.6 == $40,650.41, versus the old
+    bug's $0. Verified here via the starting_pretax_after_payout/
+    starting_other_after_payout diagnostic fields (added alongside this
+    fix) since the total starting_balance_after_payout is unaffected by
+    money moving between buckets within the same owner."""
+
+    def test_justins_own_final_rmd_moves_from_pretax_to_taxable_at_death(self):
+        inputs = base_inputs(jason_age=61, justin_age=75, retirement_income_today_dollars=0,
+                              retirement_end_age=76)
+        accounts = [IRA(1000000, "justin")]
+        r = run_survivor_scenario(inputs, accounts, deceased="justin", death_age=75,
+                                   jason_ret_age=61, justin_ret_age=61)
+        assert r["starting_balance_after_payout"] == 1000000  # total unaffected
+        assert r["starting_pretax_after_payout"] == pytest.approx(1000000 - 40650, abs=1)
+        assert r["starting_other_after_payout"] == pytest.approx(40650, abs=1)

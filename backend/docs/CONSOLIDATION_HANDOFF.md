@@ -89,6 +89,16 @@ a heatmap UI stay out of scope per the original instruction. Milestone
 for Survivor Scenario's existing `StressTestWhatIf.jsx` tab to a
 follow-up pass — not part of the approved design's own scope.
 
+**2026-09-08, fourth review round addendum (section 39):** the
+auditor's fourth-follow-up review of all three unmerged branches found
+8 fixable issues (1 in Roth Conversion, 7 in Survivor Scenario) plus
+two scope notes explicitly confirmed as retained limitations, not
+regressions (Tax Efficiency's flat-rate tax model; Survivor remaining
+API-only). All 8 are fixed, tested, and pushed — see section 39 for
+the full list. Still nothing merged to `main` beyond Milestone 1; the
+expected merge order is unchanged (Roth Conversion → Tax Efficiency →
+Survivor Scenario), pending the auditor's review of this round's fixes.
+
 ## Final status against Jason's 9-item follow-on task list
 
 All 9 items are resolved:

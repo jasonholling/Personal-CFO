@@ -1832,24 +1832,44 @@ def owner_split_starting_balances_two_age(inputs: Dict, accounts: List[Dict], ja
 WITHDRAWAL_OWNER_ORDER = ("joint", "jason", "justin", "trust")
 
 
-def _allocate_type_delta_across_owners(owner_balances_this_type: Dict[str, float], delta: float) -> Dict[str, float]:
+def _allocate_type_delta_across_owners(owner_balances_this_type: Dict[str, float], delta: float,
+                                        surplus_source_shares: Dict[str, float] = None) -> Dict[str, float]:
     """Splits a pooled per-type balance CHANGE (`delta`, already net of
     growth -- see run_owner_split_two_dimensional_projection's own
     reconciliation argument) across owner sub-balances of that same
     type, using WITHDRAWAL_OWNER_ORDER for a reduction (delta < 0, a
-    real withdrawal happened) and crediting a positive delta (a surplus/
+    real withdrawal happened) and, for a positive delta (a surplus/
     RMD-reinvestment inflow -- only ever possible for the taxable type,
-    per simulate_withdrawal_year's own contract) entirely to `joint`
-    (section 37.4: household-level inflows with no single natural owner
-    default to joint, the same convention owner_split_starting_
-    balances_two_age already established for pre-retirement inflows).
+    per simulate_withdrawal_year's own contract), crediting it by
+    `surplus_source_shares` (section 37.4: "transfers land in the SAME
+    owner-bucket the income source belongs to" -- e.g. Jason's own
+    pension surplus sweeps into Jason's own taxable bucket, not joint).
+    `surplus_source_shares` is a {"jason":.., "justin":.., "joint":..}
+    fraction-of-delta breakdown the caller derives from that year's own
+    income sources (pension+Jason's SS -> jason, Justin's SS/gap income
+    -> justin, unattributed life-event cash -> joint); omitted or falsy
+    (e.g. a pure RMD-reinvestment year with no cash-income surplus to
+    attribute) falls back to the original all-joint default, since
+    household-level inflows with no single natural owner still default
+    to joint, the same convention owner_split_starting_balances_two_age
+    already established for pre-retirement inflows.
     Returns {"jason": delta_j, "justin": delta_u, "joint": delta_o,
     "trust": delta_t} -- see WITHDRAWAL_OWNER_ORDER's own comment for
     why trust IS included in a pre-death reduction, unlike the separate
-    post-death survivor-availability question."""
+    post-death survivor-availability question. Fixed: independent
+    review, 2026-09-08, finding 4 (P1) -- every positive delta used to
+    go entirely to joint regardless of source, so e.g. Jason's own
+    pension surplus became joint money, violating section 37.4's own
+    stated rule (reproduced: disabling joint survivorship then left the
+    survivor $15,000 instead of $30,000 of what was actually Jason's own
+    pension surplus)."""
     result = {"jason": 0.0, "justin": 0.0, "joint": 0.0, "trust": 0.0}
     if delta > 0:
-        result["joint"] = delta
+        if surplus_source_shares:
+            for owner, share in surplus_source_shares.items():
+                result[owner] = delta * share
+        else:
+            result["joint"] = delta
         return result
     remaining_reduction = -delta
     for owner in WITHDRAWAL_OWNER_ORDER:
@@ -1890,9 +1910,11 @@ def run_owner_split_two_dimensional_projection(inputs: Dict, accounts: List[Dict
     against the POOLED total (summed across this function's own owner
     buckets each year) -- then allocates that single pooled result's
     per-type balance CHANGE across the owner buckets via
-    WITHDRAWAL_OWNER_ORDER (a real withdrawal) or to `joint` (a surplus/
-    RMD-reinvestment inflow), never recomputing the underlying tax/RMD/
-    draw math a second, independent way. Growth is applied per owner
+    WITHDRAWAL_OWNER_ORDER (a real withdrawal) or, for a surplus/RMD-
+    reinvestment inflow, by that year's own income-source proportions
+    (finding 4 fix, see _allocate_type_delta_across_owners's own
+    docstring) -- never recomputing the underlying tax/RMD/draw math a
+    second, independent way. Growth is applied per owner
     AFTER allocation, at the identical rate the pooled call already
     used -- linear, so summing the four owners' post-growth balances
     reproduces the pooled post-growth balance exactly.
@@ -1977,11 +1999,34 @@ def run_owner_split_two_dimensional_projection(inputs: Dict, accounts: List[Dict
             for t in ("pretax", "roth", "taxable", "hsa")
         }
 
+        # Surplus source shares (section 37.4, finding 4 fix) -- of any
+        # positive delta this year, attribute it proportionally to
+        # whichever income source produced it: Jason's own pension +
+        # his own SS credits Jason, Justin's own SS + still-working gap
+        # income credits Justin, unattributed life-event cash credits
+        # joint. Only meaningful when there's a real positive income
+        # basis to prorate against (a pure RMD-reinvestment year with
+        # $0 guaranteed/life-event income falls back to the all-joint
+        # default inside _allocate_type_delta_across_owners itself).
+        jason_income_this_year = year_pen + year_jss
+        justin_income_this_year = year_uss + still_working_income_this_year
+        joint_income_this_year = max(0.0, life_event_cash_this_year)
+        total_income_basis = jason_income_this_year + justin_income_this_year + joint_income_this_year
+        surplus_source_shares = (
+            {
+                "jason": jason_income_this_year / total_income_basis,
+                "justin": justin_income_this_year / total_income_basis,
+                "joint": joint_income_this_year / total_income_basis,
+                "trust": 0.0,
+            }
+            if total_income_basis > 1e-9 else None
+        )
+
         year_owner_closing = {}
         for t in ("pretax", "roth", "taxable", "hsa"):
             delta = pooled_closing_pregrowth[t] - pooled_opening[t]
             owner_balances_this_type = {o: buckets[o][t] for o in OWNER_BUCKETS}
-            allocation = _allocate_type_delta_across_owners(owner_balances_this_type, delta)
+            allocation = _allocate_type_delta_across_owners(owner_balances_this_type, delta, surplus_source_shares)
             for o in OWNER_BUCKETS:
                 pregrowth = buckets[o][t] + allocation.get(o, 0.0)
                 buckets[o][t] = max(0.0, pregrowth) * (1 + post_ret)

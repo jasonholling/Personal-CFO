@@ -123,3 +123,43 @@ class TestOwnerSplitReconcilesEveryYear:
         for row in split["yearly_detail"]:
             for owner in ("jason", "justin", "joint"):
                 assert sum(row["owner_balances"][owner].values()) == 0
+
+
+class TestSurplusCreditsItsOwnIncomeSourceNotAlwaysJoint:
+    """Independent review, 2026-09-08, fourth follow-up, finding 4 (P1):
+    every positive delta used to be credited entirely to joint
+    regardless of source, violating section 37.4's own stated rule
+    ("transfers land in the same owner-bucket the income source belongs
+    to"). Both spouses retired now, $0 spending need (isolates the
+    surplus), Jason's own $30,000 pension is the ONLY guaranteed income
+    -- the resulting surplus must credit JASON's own taxable bucket, not
+    joint. Under the old bug, owner_balances["joint"]["taxable"] would
+    have been $30,000 and jason's own $0."""
+
+    def test_pension_surplus_credits_the_pension_owner_not_joint(self):
+        inputs = {**BASE_INPUTS, "jason_age": 65, "justin_age": 65,
+                  "retirement_income_today_dollars": 0, "retirement_end_age": 66,
+                  "pension_55": 30000, "pension_60": 30000, "pension_65": 30000,
+                  "jason_social_security": 0, "justin_social_security": 0,
+                  "w2_salary": 0, "justin_w2_salary": 0, "annual_rsu_value": 0,
+                  "justin_annual_rsu_value": 0, "annual_hsa_contribution": 0}
+        accounts = [{"name": "Joint taxable", "account_type": "taxable", "owner": "joint", "balance": 0}]
+        split = run_owner_split_two_dimensional_projection(inputs, accounts, jason_ret_age=65, justin_ret_age=65)
+        first_year = split["yearly_detail"][0]
+        assert first_year["owner_balances"]["jason"]["taxable"] > 0
+        assert first_year["owner_balances"]["joint"]["taxable"] == 0
+
+    def test_justins_own_ss_surplus_credits_justin_not_joint(self):
+        """Mirror -- Justin's own SS is the only guaranteed income; the
+        surplus must credit Justin's own bucket."""
+        inputs = {**BASE_INPUTS, "jason_age": 65, "justin_age": 65,
+                  "retirement_income_today_dollars": 0, "retirement_end_age": 66,
+                  "pension_55": 0, "pension_60": 0, "pension_65": 0,
+                  "jason_social_security": 0, "justin_social_security": 20000, "justin_ss_age": 60,
+                  "w2_salary": 0, "justin_w2_salary": 0, "annual_rsu_value": 0,
+                  "justin_annual_rsu_value": 0, "annual_hsa_contribution": 0}
+        accounts = [{"name": "Joint taxable", "account_type": "taxable", "owner": "joint", "balance": 0}]
+        split = run_owner_split_two_dimensional_projection(inputs, accounts, jason_ret_age=65, justin_ret_age=65)
+        first_year = split["yearly_detail"][0]
+        assert first_year["owner_balances"]["justin"]["taxable"] > 0
+        assert first_year["owner_balances"]["joint"]["taxable"] == 0

@@ -3686,3 +3686,97 @@ milestone). Sensitive-data check passed.
 Branch: `codex/two-age-survivor-design`, pushed, **not merged** — per
 Jason's explicit instruction (auditor unavailable; get all four
 milestones built, review everything together once it's back).
+
+## 39. Two-age Roth Conversion + Survivor Scenario — fourth independent review round, fixes (2026-09-08, on `codex/two-age-roth-conversion` merged forward through `codex/two-age-tax-efficiency` into `codex/two-age-survivor-design`)
+
+Independent review of Roth Conversion (`d4ad975`), Tax Efficiency
+(`587c9a7`), and Survivor Scenario (`5ce8981`) found 8 numbered issues
+(6 P1, 2 P2) plus two scope notes explicitly flagged as retained
+limitations, not regressions (Tax Efficiency's flat-rate tax model and
+0%-success-on-exact-funding quirk; two-age Survivor remaining API-only)
+— no changes made for those two, matching the review's own framing.
+
+**Finding 1 (P1, Roth Conversion)** — `_max_conversion_for_tax_budget`
+treated the unused-federal-deduction "free zone" as costing $0 in
+TOTAL, but `_incremental_conversion_tax`'s own formula charges state
+tax on the ENTIRE conversion regardless of that federal offset. Fixed:
+the free zone's own state-tax cost is now greedily filled against the
+budget first, same pattern as the bracket walk. Reproduced: $0 cash,
+5% state tax, $1M pretax → now correctly returns $0 affordable (was
+$32,200, which previously drained Roth via `simulate_conversion`'s own
+`conversion_shortfall` fallback to pay the real $1,610 state-tax bill
+the affordability cap never budgeted for).
+
+**Findings 2–8 (all Survivor Scenario, `_run_survivor_scenario_two_age`
+in simulation_engine.py unless noted):**
+
+- **2 (P1)** — pension was frozen at the death row's own snapshot.
+  Fixed: computed PER YEAR in the post-death loop against the
+  survivor's own advancing age (`two_age_pension_for_year`) when Justin
+  is deceased; unconditional every year (Option A, unchanged) when
+  Jason is deceased.
+- **3 (P1)** — survivor Social Security was a flat
+  `max(raw jason_social_security, raw justin_social_security)` input,
+  ignoring `ss_timing` and COLA entirely. Fixed: computed PER YEAR the
+  same way the pre-death walk computes it (each spouse's own
+  `ss_timing`-selected, COLA-compounding benefit from their own claim
+  age), taking the higher of the two.
+- **4 (P1, projection_engine.py)** — `_allocate_type_delta_across_owners`
+  credited every positive delta (surplus/RMD-reinvestment) to `joint`
+  unconditionally, violating section 37.4's own "transfers land in the
+  same owner-bucket the income source belongs to" rule. Fixed: the
+  caller (`run_owner_split_two_dimensional_projection`) now computes
+  `surplus_source_shares` from that year's own income breakdown
+  (pension + Jason's SS → jason, Justin's SS + gap income → justin,
+  unattributed life-event cash → joint) and the allocator prorates by
+  it, falling back to all-joint only when there's no positive income
+  basis to attribute against (a pure RMD-reinvestment year).
+- **5 (P1)** — `life_event_cash=0.0` was hardcoded in the post-death
+  loop, dropping every post-death expense/windfall from both the
+  schedule and `_minimum_survivor_funding`'s insurance-shortfall calc.
+  Fixed: `post_events` built the same way the pre-death walk builds its
+  own `post_life_events`, applied via `_post_retirement_year_effects`
+  each year, netted into both `need`/`simulate_withdrawal_year`'s
+  `life_event_cash` AND `net_needs`.
+- **6 (P2)** — a death requested before either spouse retired silently
+  snapped forward to the first available (post-retirement) row while
+  still reporting the original requested `death_age`. Fixed: explicitly
+  rejected (`has_data: False`, `error: "death_before_first_retirement_unsupported"`)
+  when `death_jason_age < phase2_start_age`.
+- **7 (P2)** — joint/trust contributions were folded entirely into
+  `starting_other`, losing pretax/RMD status on transfer. Fixed: split
+  into `joint_pretax_contribution`/`joint_other_contribution` and
+  `trust_pretax_contribution`/`trust_other_contribution`, added
+  respectively into `starting_pretax`/`starting_other`.
+- **8 (P2)** — the pre-death walk's RMD is always Jason-anchored, so an
+  older Justin's own independent RMD obligation in his final year could
+  go unenforced. Fixed: when Justin is deceased, his own final-year RMD
+  (against his own age and his own individually-owned pretax balance)
+  is forced from pretax into taxable before the ownership transfer.
+  Reproduced exactly per the review: Jason 61, Justin 75, Justin's own
+  $1,000,000 IRA — `_rmd(1000000, 75, 75)` = $40,650.41 (was $0).
+
+New diagnostic return fields (additive, no existing field removed):
+`starting_pretax_after_payout`/`starting_other_after_payout` (so
+findings 7/8 are independently verifiable — the total
+`starting_balance_after_payout` is unchanged by money moving between
+buckets within the same owner). `survivor_ss_annual`/`pension_annual`
+now report the first post-death year's own computed value (previously
+a single frozen scalar for the whole schedule).
+
+New tests: `test_state_tax_still_applies_to_the_free_zone`
+(Roth Conversion); 7 new classes in `test_two_age_survivor_scenario.py`
+covering findings 2, 3, 5, 6, 7, 8, each reproducing the review's own
+numbers where given; 2 new tests in `test_owner_split_projection.py`
+covering finding 4 (pension surplus credits Jason, SS surplus credits
+Justin, neither credits joint).
+
+**Verified:** full backend suite passed, coverage back at/above the
+95% floor. Sensitive-data check passed.
+
+Branches: fix committed on `codex/two-age-roth-conversion`
+(finding 1), merged forward through `codex/two-age-tax-efficiency`
+into `codex/two-age-survivor-design` (findings 2–8), all pushed —
+**none merged to `main`** beyond Milestone 1, per Jason's standing
+instruction (auditor unavailable; get everything built and reviewed as
+a set).
