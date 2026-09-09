@@ -1517,6 +1517,19 @@ def _apply_whatif_overrides(inputs: dict, body: dict) -> dict:
         inputs["jason_social_security"] = inputs.get("jason_social_security", 0) * ss_mult
         inputs["jason_ss_delayed"]      = inputs.get("jason_ss_delayed", 0) * ss_mult
         inputs["justin_social_security"]= inputs.get("justin_social_security", 0) * ss_mult
+        # External audit review of commit 0c1a569, finding 3 (P1): the
+        # SS claiming-age 62-70 anchors (jason_ss_70/justin_ss_early/
+        # justin_ss_70, CALCULATION_CONTRACT.md section 44) didn't exist
+        # yet when ss_mult was first written and were never added here.
+        # A household with a saved claim age of 70 gets its benefit
+        # ENTIRELY from jason_ss_70 (ss_benefit_for_claim_age returns
+        # benefit_70 exactly at age>=70) -- leaving it unscaled meant
+        # the SS multiplier slider had NO effect on that household's
+        # What-If/Monte-Carlo/Stress-Test results at all. Scale all
+        # three the same way as the original two fields.
+        inputs["jason_ss_70"]     = inputs.get("jason_ss_70", 0) * ss_mult
+        inputs["justin_ss_early"] = inputs.get("justin_ss_early", 0) * ss_mult
+        inputs["justin_ss_70"]    = inputs.get("justin_ss_70", 0) * ss_mult
     return inputs
 
 @app.get("/api/simulation/monte-carlo")
@@ -1705,16 +1718,26 @@ def get_income_sources(ret_age: int = 60, ss_timing: str = "early", body: dict =
     # explicitly, since the Monte Carlo/Historical Stress tabs now offer
     # the full 55-67 range and any age outside the default 3 would
     # otherwise silently compute nothing, leaving this chart empty.
-    # This endpoint's own contract is the ss_timing early/delayed choice
-    # above. run_retirement_projection only applies a continuous claim
-    # age when jason_ss_claim_age/justin_ss_claim_age are passed as
-    # explicit keyword args (CALCULATION_CONTRACT.md section 44, ninth
-    # follow-up review) -- this call site never passes them, so the
-    # label lookup below always finds its early/delayed scenario
-    # regardless of what the household has set in Settings.
+    # External audit review of commit 0c1a569, finding 4 (P2): unlike
+    # get_retirement_sensitivity/get_income_sources's OTHER caller
+    # pages, THIS endpoint is Simulation.jsx's own companion chart to
+    # Monte Carlo (see Simulation.jsx's income-sources fetch) -- Monte
+    # Carlo's own simulation already honors a saved claim age via
+    # _ss_claim_ages, so leaving this chart on the legacy ss_timing
+    # toggle made them silently disagree: reproduced with Jason's saved
+    # claim age of 70, Monte Carlo correctly paid $0 SS at 67 while this
+    # chart showed $21,000 (the early/delayed toggle's own age-67
+    # figure). Now resolves the same claim age Monte Carlo uses and, if
+    # either spouse has one set, looks up the resulting "custom" label
+    # instead of the ss_timing-derived one -- matching
+    # run_retirement_projection's own documented "custom" scenario
+    # contract (CALCULATION_CONTRACT.md section 44).
     _proj_inputs = _apply_whatif_overrides(dict(inputs_row), body or {})
-    result = run_retirement_projection(_proj_inputs, accounts, ret_ages=[ret_age], life_events=life_events, surplus_allocations=surplus_allocations)
-    scenario = next((s for s in result["scenarios"] if s["label"] == f"age_{ret_age}_{ss_timing}"), None)
+    _jason_ss_claim_age, _justin_ss_claim_age = _ss_claim_ages(_proj_inputs)
+    result = run_retirement_projection(_proj_inputs, accounts, ret_ages=[ret_age], life_events=life_events, surplus_allocations=surplus_allocations,
+                                        jason_ss_claim_age=_jason_ss_claim_age, justin_ss_claim_age=_justin_ss_claim_age)
+    _label = f"age_{ret_age}_custom" if (_jason_ss_claim_age is not None or _justin_ss_claim_age is not None) else f"age_{ret_age}_{ss_timing}"
+    scenario = next((s for s in result["scenarios"] if s["label"] == _label), None)
     if not scenario: return {"error": "Scenario not found"}
     # Return simplified chart data
     chart = []

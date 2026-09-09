@@ -544,3 +544,120 @@ class TestNinthFollowUpReviewFindings:
         jason_ss_annual, jason_ss_age, _, _ = resolve_ss_benefits(inputs, "early", jason_ss_claim_age=75)
         assert jason_ss_annual == 40000
         assert jason_ss_age == 70
+
+
+class TestExternalAuditReviewOfCommit0c1a569:
+    """External audit review of frontend milestone 6 (commit 0c1a569),
+    six findings before merge. Findings 5 and 6 are frontend-only
+    (Settings.jsx/StressTestWhatIf.jsx wording and messaging); this
+    class covers the four backend findings (1-4)."""
+
+    def test_finding1_two_age_survivor_owner_walk_respects_the_resolved_claim_age(self):
+        """P1: run_owner_split_two_dimensional_projection now requires
+        jason_ss_claim_age/justin_ss_claim_age as explicit params (no
+        longer reads `inputs`) -- _run_survivor_scenario_two_age's own
+        pre-death call left them unset, so the pre-death portfolio
+        silently fell back to the legacy ss_timing="early" default
+        regardless of a saved claim age. Reproduced exactly: both
+        spouses 67, Jason claims at 70, Justin dies at 69, $1M
+        portfolio, zero spending/returns -- the bug credited 3 years
+        (67-69) of Jason's EARLY benefit he never actually claims."""
+        from simulation_engine import run_survivor_scenario
+        inputs = {
+            "jason_age": 67, "justin_age": 67, "inflation_rate": 0.0,
+            "expected_return_pre_retirement": 0.0, "expected_return_post_retirement": 0.0,
+            "retirement_income_today_dollars": 0,
+            "annual_hsa_contribution": 0, "annual_rsu_value": 0,
+            "jason_social_security": 21000, "jason_ss_delayed": 30000, "jason_ss_70": 37200,
+            "justin_social_security": 0,
+            "healthcare_pre_medicare": 0, "healthcare_post_medicare": 0,
+            "justin_w2_salary": 0, "justin_employee_401k_pct": 0, "justin_employer_401k_pct": 0,
+            "justin_annual_bonus_pct": 0, "justin_annual_rsu_value": 0,
+            "w2_salary": 0, "employee_401k_pct": 0, "employer_401k_pct": 0, "annual_bonus_pct": 0,
+            "pension_55": 0, "pension_60": 0, "pension_65": 0,
+            "retirement_end_age": 99,
+        }
+        accounts = [{"name": "Taxable", "account_type": "taxable", "owner": "joint", "balance": 1000000}]
+        r = run_survivor_scenario(inputs, accounts, ret_age=67, deceased="justin", death_age=69,
+                                   jason_ret_age=67, justin_ret_age=67, jason_ss_claim_age=70)
+        assert r["has_data"] is True
+        assert r["portfolio_at_death"] == 1000000
+
+    def test_finding2_zero_valued_anchor_fields_fall_back_to_fra_not_zero(self):
+        """P1: planning_inputs.jason_ss_70 defaults to REAL DEFAULT 0
+        (db.py), so it is ALWAYS present in an existing household's
+        row -- inputs.get("jason_ss_70", jason_ss_delayed) never falls
+        back, because the key is never actually missing, only
+        zero-valued. Enabling the slider with a real $30,000 FRA
+        benefit but an untouched 0 age-70 field used to interpolate
+        toward that $0 "anchor" (30000 at 67, 20000 at 68, 10000 at 69,
+        0 at 70) instead of falling back to the FRA figure."""
+        from projection_engine import resolve_ss_benefits
+        inputs = {
+            "jason_social_security": 30000,       # 62
+            "jason_ss_delayed": 30000,             # 67 (FRA)
+            "jason_ss_70": 0,                      # untouched -- must NOT be read as a real $0 anchor
+        }
+        for age, expected in [(67, 30000), (68, 30000), (69, 30000), (70, 30000)]:
+            annual, _, _, _ = resolve_ss_benefits(inputs, "early", jason_ss_claim_age=age)
+            assert annual == expected, f"age {age}: expected {expected}, got {annual}"
+
+    def test_finding2_zero_valued_justin_early_anchor_falls_back_to_fra(self):
+        """Same finding-2 fix, for Justin's justin_ss_early field."""
+        from projection_engine import resolve_ss_benefits
+        inputs = {
+            "justin_social_security": 15000,   # 67 (FRA)
+            "justin_ss_early": 0,              # untouched
+            "justin_ss_70": 15000,
+        }
+        _, _, annual, _ = resolve_ss_benefits(inputs, "early", justin_ss_claim_age=63)
+        assert annual == 15000  # not interpolated toward a fake $0 anchor at 62
+
+    def test_finding3_whatif_ss_multiplier_scales_the_new_anchor_fields_too(self):
+        """P1: _apply_whatif_overrides' ss_mult only ever scaled
+        jason_social_security/jason_ss_delayed/justin_social_security --
+        a household with a saved claim age of 70 gets its benefit
+        ENTIRELY from the (unscaled) jason_ss_70 anchor, so the SS
+        multiplier slider had NO effect on that household's results."""
+        from main import _apply_whatif_overrides
+        inputs = {
+            "expected_return_pre_retirement": 0.0, "expected_return_post_retirement": 0.0,
+            "inflation_rate": 0.0, "retirement_income_today_dollars": 0,
+            "jason_social_security": 21000, "jason_ss_delayed": 30000, "jason_ss_70": 37200,
+            "justin_social_security": 15000, "justin_ss_early": 10500, "justin_ss_70": 18600,
+        }
+        scaled = _apply_whatif_overrides(inputs, {"ss_mult": 0.0})
+        assert scaled["jason_ss_70"] == 0
+        assert scaled["justin_ss_early"] == 0
+        assert scaled["justin_ss_70"] == 0
+        scaled_half = _apply_whatif_overrides(inputs, {"ss_mult": 0.5})
+        assert scaled_half["jason_ss_70"] == pytest.approx(18600)
+        assert scaled_half["justin_ss_early"] == pytest.approx(5250)
+        assert scaled_half["justin_ss_70"] == pytest.approx(9300)
+
+    def test_finding4_income_sources_label_switches_to_custom_when_claim_age_saved(self, client, sample_inputs):
+        """P2: /api/retirement/income-sources (Simulation.jsx's own
+        companion chart to Monte Carlo) stayed on the legacy ss_timing
+        toggle even after a household saved a continuous claim age,
+        while Monte Carlo's own simulation already honored it --
+        reproduced: Jason claims at 70, Monte Carlo correctly pays $0
+        SS at 67 while the chart showed the early/delayed toggle's
+        $21,000 age-67 figure instead."""
+        inputs = {
+            **sample_inputs,
+            "jason_social_security": 21000, "jason_ss_delayed": 30000, "jason_ss_70": 37200,
+            "jason_ss_claim_age": 70,
+        }
+        r = client.put("/api/planning-inputs", json=inputs)
+        assert r.status_code == 200, r.text
+        r = client.post("/api/retirement/income-sources", json={"ret_age": 65, "ss_timing": "early"})
+        assert r.status_code == 200
+        body = r.json()
+        assert "error" not in body
+        assert body["label"] == "age_65_custom"
+        # At age 67 (before Jason's saved claim age of 70), Social
+        # Security in the chart must be $0, not the early/delayed
+        # toggle's $21,000 figure.
+        row_67 = next((row for row in body["chart"] if row["age"] == 67), None)
+        assert row_67 is not None
+        assert row_67["social_security"] == 0

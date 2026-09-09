@@ -48,10 +48,26 @@ const TextInput = ({ value, onChange, style={} }) => (
 // finding 1's 3-tier resolution: explicit override > saved claim age >
 // legacy ss_timing default), since no page currently sends a per-
 // request override of its own.
-const ClaimAgeSlider = ({ label, claimAge, onChange, benefit62, benefit67, benefit70, benefitType }) => {
+const ClaimAgeSlider = ({ label, claimAge, onChange, benefit62, benefit67, benefit70, benefitType, checkEarlyAnchor=false, scopeNote }) => {
   const enabled = claimAge != null
   const age = claimAge ?? SS_FRA_AGE
-  const computed = ssBenefitForClaimAge(benefit62 ?? 0, benefit67 ?? 0, benefit70 ?? 0, age, benefitType)
+  // External audit review of commit 0c1a569, finding 2 (P1): the new
+  // anchor fields default to $0 in the database, which used to get
+  // read as a REAL $0 anchor and interpolated straight down to nothing
+  // by age 70 (or, for Justin's age-62 field, straight up from
+  // nothing). A blank/0 anchor here means "not entered," not "$0
+  // benefit," so fall back to the FRA figure (same fallback the
+  // backend's resolve_ss_benefits now applies) and say so explicitly,
+  // instead of silently erasing the household's real FRA benefit.
+  // checkEarlyAnchor also flags the 62 field -- only Justin's spousal
+  // fields fall back this way; Jason's worker benefit62
+  // (jason_social_security) has always been required, no fallback.
+  const anchorMissingLate  = !benefit70
+  const anchorMissingEarly = checkEarlyAnchor && !benefit62
+  const anchorMissing = anchorMissingLate || anchorMissingEarly
+  const resolvedBenefit70 = benefit70 || benefit67
+  const resolvedBenefit62 = anchorMissingEarly ? benefit67 : benefit62
+  const computed = ssBenefitForClaimAge(resolvedBenefit62 ?? 0, benefit67 ?? 0, resolvedBenefit70 ?? 0, age, benefitType)
   return (
     <div style={{ padding:'10px 0', borderBottom:'1px solid var(--border)' }}>
       <label style={{ display:'flex', alignItems:'center', gap:8, fontSize:13, cursor:'pointer' }}>
@@ -63,6 +79,17 @@ const ClaimAgeSlider = ({ label, claimAge, onChange, benefit62, benefit67, benef
       </label>
       {enabled && (
         <div style={{ marginTop:10, paddingLeft:24 }}>
+          {scopeNote && (
+            <div style={{ fontSize:11, color:'var(--text3)', marginBottom:8 }}>ℹ {scopeNote}</div>
+          )}
+          {anchorMissing && (
+            <div style={{ padding:'8px 10px', background:'rgba(251,191,36,0.08)', borderRadius:6, marginBottom:8, fontSize:11, color:'var(--amber)' }}>
+              ⚠ {anchorMissingEarly && anchorMissingLate ? 'The age-62 and age-70 fields above are $0' :
+                 anchorMissingEarly ? 'The age-62 field above is $0' : 'The age-70 field above is $0'} — the slider
+              below is an ESTIMATE using your FRA benefit flat (no real anchor entered), not your real
+              SSA-statement figure. Fill in the field(s) above for an accurate number.
+            </div>
+          )}
           <div style={{ display:'flex', alignItems:'center', gap:12 }}>
             <input
               type="range"
@@ -76,7 +103,7 @@ const ClaimAgeSlider = ({ label, claimAge, onChange, benefit62, benefit67, benef
             <span style={{ fontSize:13, fontWeight:700, width:28, textAlign:'right' }}>{age}</span>
           </div>
           <div style={{ fontSize:12, color:'var(--text2)', marginTop:4 }}>
-            Benefit at {age}: <strong>${Math.round(computed).toLocaleString('en-US')}/yr</strong> (computed)
+            Benefit at {age}: <strong>${Math.round(computed).toLocaleString('en-US')}/yr</strong> {anchorMissing ? '(estimated)' : '(computed)'}
           </div>
         </div>
       )}
@@ -214,13 +241,24 @@ export default function Settings() {
         </Row>
         <Row label={`${p2}'s Annual RSU Value (gross)`} hint="0 if none this year"><NumInput value={form.justin_annual_rsu_value ?? 0} onChange={v => set('justin_annual_rsu_value', v)} prefix="$" /></Row>
         <Row label={`${p2}'s Annual Bonus`} hint="As % of salary"><NumInput value={form.justin_annual_bonus_pct ?? 0} onChange={v => set('justin_annual_bonus_pct', v)} pct suffix="%" /></Row>
-        <Row label={`${p2} Spousal SS at 67`} hint={`50% of ${p1}'s FRA benefit — or ${p2}'s own independent benefit, if entered directly`}>
+        <Row label={`${p2} Spousal SS at 67`} hint={`50% of ${p1}'s FRA benefit — or ${p2}'s own independent benefit at a flat single figure, if entered directly`}>
           <NumInput value={form.justin_social_security ?? 0} onChange={v => set('justin_social_security', v)} prefix="$" suffix="/yr" />
         </Row>
-        <Row label={`${p2} Spousal SS at 62`} hint="Real dollar figure from your SSA statement — used as the anchor for the claim-age slider below">
+        {/* External audit review of commit 0c1a569, finding 6 (P2): the
+            claim-age slider below always applies SSA's SPOUSAL-benefit
+            reduction/credit schedule (different rates than a worker's
+            own record -- CALCULATION_CONTRACT.md section 49, finding
+            4) no matter what kind of figure is entered into these
+            fields. The 67 field above still supports a flat,
+            single-age entry for Justin's own independent worker
+            benefit (no formula applied there), but the slider itself
+            does not yet support a worker-type benefit -- restricting
+            the wording here rather than silently computing the wrong
+            reduction for a worker record. */}
+        <Row label={`${p2} Spousal SS at 62`} hint="Real dollar figure from your SSA statement — only meaningful for a spousal benefit (see note below); used as the anchor for the claim-age slider">
           <NumInput value={form.justin_ss_early ?? 0} onChange={v => set('justin_ss_early', v)} prefix="$" suffix="/yr" />
         </Row>
-        <Row label={`${p2} Spousal SS at 70`} hint="Real dollar figure from your SSA statement">
+        <Row label={`${p2} Spousal SS at 70`} hint="Real dollar figure from your SSA statement — only meaningful for a spousal benefit (see note below)">
           <NumInput value={form.justin_ss_70 ?? 0} onChange={v => set('justin_ss_70', v)} prefix="$" suffix="/yr" />
         </Row>
         <ClaimAgeSlider
@@ -231,6 +269,8 @@ export default function Settings() {
           benefit67={form.justin_social_security}
           benefit70={form.justin_ss_70}
           benefitType="spousal"
+          checkEarlyAnchor
+          scopeNote={`This slider only supports ${p2} claiming a SPOUSAL benefit (50% of ${p1}'s FRA figure) — it always applies SSA's spousal reduction schedule, which differs from a worker's own record. If ${p2} has an independent work-record benefit instead, leave this off and use the Early/Delayed toggle on Retirement/Simulation pages, which applies your 67 figure above at face value with no formula.`}
         />
         <Row label={`${p2}'s Retirement Age`} hint={`0 = assume ${p2} retires the same year as ${p1} (the old default). Set a specific age for an independent retirement date — e.g. ${p2} keeps working/contributing past, or stops well before, whichever age you're viewing for ${p1}.`}>
           <NumInput value={form.justin_ret_age ?? 0} onChange={v => set('justin_ret_age', Math.max(0, Math.round(v)))} suffix="age" />

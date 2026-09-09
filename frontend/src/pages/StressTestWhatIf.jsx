@@ -205,6 +205,21 @@ export default function StressTestWhatIf({ onNavigate }) {
   const [jasonRetAge, setJasonRetAge] = useState(65)
   const [justinRetAge, setJustinRetAge] = useState(65)
 
+  // External audit review of commit 0c1a569, finding 5 (P2): once a
+  // spouse has a claim age saved in Settings, resolve_ss_claim_ages'
+  // 3-tier resolution (CALCULATION_CONTRACT.md section 49) makes that
+  // saved value win over the Early/Delayed buttons below on every page
+  // that reads it -- Monte Carlo and Historical Stress included. The
+  // buttons still render as active/clickable and the response still
+  // labels itself "early"/"delayed", so clicking them silently does
+  // nothing (verified: identical balances either way) with no
+  // indication why. Surface it explicitly instead of leaving an
+  // apparently-live control that's actually inert. Sourced from
+  // WhatIf.jsx's own onSettingsLoaded callback (below) rather than a
+  // second /api/planning-inputs fetch here -- WhatIf stays mounted on
+  // every tab already, so its one fetch is the single source.
+  const [hasCustomClaimAge, setHasCustomClaimAge] = useState(false)
+
   return (
     <div>
       <div style={{ marginBottom:28 }}>
@@ -257,7 +272,7 @@ export default function StressTestWhatIf({ onNavigate }) {
           claiming-age timing don't apply in two-age mode v1 (out of
           scope), so that selector is hidden while it's on. */}
       {tab !== 'whatif' && tab !== 'survivor' && !twoAgeMode && (
-        <div style={{ display:'flex', gap:24, marginBottom:28, flexWrap:'wrap', alignItems:'flex-end' }}>
+        <div style={{ display:'flex', gap:24, marginBottom:hasCustomClaimAge ? 8 : 28, flexWrap:'wrap', alignItems:'flex-end' }}>
           <div>
             <div className="label" style={{ marginBottom:8 }}>Retirement Age</div>
             <div style={{ display:'flex', flexWrap:'wrap', gap:6, maxWidth:420 }}>
@@ -270,7 +285,9 @@ export default function StressTestWhatIf({ onNavigate }) {
             </div>
           </div>
           <div>
-            <div className="label" style={{ marginBottom:8 }}>Social Security</div>
+            <div className="label" style={{ marginBottom:8 }}>
+              Social Security{hasCustomClaimAge ? ' (overridden by Settings)' : ''}
+            </div>
             <div style={{ display:'flex', gap:6 }}>
               {SS_OPTS.map(o => (
                 <button key={o.value}
@@ -280,6 +297,12 @@ export default function StressTestWhatIf({ onNavigate }) {
               ))}
             </div>
           </div>
+        </div>
+      )}
+      {tab !== 'whatif' && tab !== 'survivor' && !twoAgeMode && hasCustomClaimAge && (
+        <div style={{ padding:'8px 14px', background:'var(--bg3)', borderRadius:8, marginBottom:20, fontSize:12, color:'var(--text2)' }}>
+          ℹ These Early/Delayed buttons have no effect right now — a specific Social Security claim age is saved
+          in Settings and takes priority everywhere it's read. Change or clear it on the Settings page instead.
         </div>
       )}
       {tab !== 'whatif' && tab !== 'survivor' && twoAgeMode && (
@@ -314,7 +337,8 @@ export default function StressTestWhatIf({ onNavigate }) {
       )}
 
       <div hidden={tab !== 'whatif'}>
-        <WhatIf onNavigate={onNavigate} onAssumptionsChange={setWhatIfAssumptions} />
+        <WhatIf onNavigate={onNavigate} onAssumptionsChange={setWhatIfAssumptions}
+                onSettingsLoaded={d => setHasCustomClaimAge(d?.jason_ss_claim_age != null || d?.justin_ss_claim_age != null)} />
       </div>
       {tab === 'monte_carlo' && <MonteCarloSection retAge={retAge} ssTiming={ssTiming} overrides={whatIfAssumptions}
                                                      jasonRetAge={twoAgeMode ? jasonRetAge : null}

@@ -176,7 +176,23 @@ def resolve_ss_benefits(inputs: Dict, ss_timing: str = "early",
     jason_ss_early   = inputs.get("jason_social_security", JASON_SS_EARLY_DEFAULT)
     jason_ss_delayed = inputs.get("jason_ss_delayed", jason_ss_early * JASON_SS_DELAYED_RATIO)
     if jason_ss_claim_age is not None:
-        jason_ss_70 = inputs.get("jason_ss_70", jason_ss_delayed)
+        # External audit review of commit 0c1a569, finding 2 (P1): the
+        # planning_inputs.jason_ss_70/justin_ss_early/justin_ss_70
+        # columns default to REAL DEFAULT 0 (db.py), so the column is
+        # ALWAYS present in every household's row -- `inputs.get(key,
+        # fallback)` never falls back to the estimate, because the dict
+        # key is never actually MISSING, only zero-valued. Enabling
+        # Jason's claim-age slider with a real $30,000 FRA benefit but
+        # an untouched (0) age-70 field made ss_benefit_for_claim_age
+        # interpolate straight down toward that $0 "anchor": $30,000 at
+        # 67, $20,000 at 68, $10,000 at 69, $0 at 70 -- a household's
+        # real benefit silently erased rather than estimated. `or`
+        # (not `.get`'s default) treats a falsy stored 0 the same as a
+        # genuinely missing key, falling back to the same delayed-credit
+        # estimate `jason_ss_delayed` itself already uses when unset. A
+        # real SS benefit is never actually $0, so this never discards
+        # genuine household data.
+        jason_ss_70 = inputs.get("jason_ss_70") or jason_ss_delayed
         jason_ss_annual = ss_benefit_for_claim_age(jason_ss_early, jason_ss_delayed, jason_ss_70, jason_ss_claim_age,
                                                      benefit_type="worker")
         jason_ss_age = _clamp_claim_age(jason_ss_claim_age)
@@ -187,8 +203,10 @@ def resolve_ss_benefits(inputs: Dict, ss_timing: str = "early",
     justin_ss_annual = inputs.get("justin_social_security", JUSTIN_SPOUSAL_ANNUAL)
     justin_ss_age    = inputs.get("justin_ss_age", JUSTIN_SPOUSAL_AGE)
     if justin_ss_claim_age is not None:
-        justin_ss_62 = inputs.get("justin_ss_early", justin_ss_annual)
-        justin_ss_70 = inputs.get("justin_ss_70", justin_ss_annual)
+        # Same finding-2 fix as jason_ss_70 above, for Justin's two new
+        # anchor fields.
+        justin_ss_62 = inputs.get("justin_ss_early") or justin_ss_annual
+        justin_ss_70 = inputs.get("justin_ss_70") or justin_ss_annual
         justin_ss_annual = ss_benefit_for_claim_age(justin_ss_62, justin_ss_annual, justin_ss_70, justin_ss_claim_age,
                                                       benefit_type="spousal")
         justin_ss_age = _clamp_claim_age(justin_ss_claim_age)

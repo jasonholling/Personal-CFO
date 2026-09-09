@@ -4048,10 +4048,28 @@ def _run_survivor_scenario_two_age(inputs: Dict, accounts: List[Dict], jason_ret
     # extra RMD into `rmd` BEFORE the tax-rate estimate correctly moves
     # the marginal rate from 12% to 22% (was stuck at the stale
     # pre-addition rate) -- $991,057, not $995,122.
+    # External audit review of commit 0c1a569, finding 1 (P1):
+    # run_owner_split_two_dimensional_projection now takes
+    # jason_ss_claim_age/justin_ss_claim_age as EXPLICIT parameters only
+    # (CALCULATION_CONTRACT.md section 49, finding 1's architectural
+    # fix) -- it no longer reads them off `inputs` at all. This call
+    # left them unset, so the pre-death owner walk silently fell back to
+    # the legacy ss_timing early/delayed default regardless of what
+    # claim age the dispatcher had already resolved and injected into
+    # `inputs` above resolve_ss_benefits's own call a few lines down.
+    # Reproduced exactly: both spouses 67, Jason claims at 70, Justin
+    # dies at 69, $1M portfolio, zero spending/returns -- the pre-death
+    # walk credited three years (67-69) of Jason's EARLY benefit he
+    # never actually claims, reporting $1,063,000 at death instead of
+    # $1,000,000. Fixed by passing the same claim ages the post-death
+    # resolve_ss_benefits call below already reads off `inputs`.
+    _jason_ss_claim_age = inputs.get("jason_ss_claim_age")
+    _justin_ss_claim_age = inputs.get("justin_ss_claim_age")
     walk = run_owner_split_two_dimensional_projection(inputs, accounts, jason_ret_age, justin_ret_age,
                                                         ss_timing=ss_timing, salary_growth_pct=_salary_growth_pct,
                                                         life_events=life_events, surplus_allocations=surplus_allocations,
-                                                        death_jason_age=death_jason_age, deceased=deceased)
+                                                        death_jason_age=death_jason_age, deceased=deceased,
+                                                        jason_ss_claim_age=_jason_ss_claim_age, justin_ss_claim_age=_justin_ss_claim_age)
     yearly = walk["yearly_detail"]
 
     death_row_index = next((i for i, y in enumerate(yearly) if y["jason_age"] >= death_jason_age), None)
