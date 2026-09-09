@@ -40,6 +40,32 @@ class TestRunRmdPlanning:
         assert result["lifetime_rmd_total"] > result["first_rmd_amount"]
         assert len(result["schedule"]) > 0
 
+    def test_last_rmd_age_reflects_the_real_unsampled_schedule(self, sample_inputs, sample_accounts):
+        """Regression test (external audit follow-up, 2026-09-09):
+        RetirementTools.jsx's "Lifetime RMD Total (through age X)" label
+        used to hardcode 73 as the base and infer X from the SAMPLED
+        (every-other-year) schedule's length -- wrong for anyone whose
+        real first_rmd_age is 75, and structurally unreliable regardless
+        since lifetime_rmd_total sums the FULL schedule. last_rmd_age
+        must be the real last age in the (unsampled) schedule, at least
+        first_rmd_age itself, and independent of the schedule[::2]
+        sampling applied afterward."""
+        result = run_rmd_planning(sample_inputs, sample_accounts)
+        assert result["last_rmd_age"] >= result["first_rmd_age"]
+        # Sanity: the returned schedule is sampled every other year, so
+        # its own last entry's age is <= last_rmd_age (equal only when
+        # the real (unsampled) schedule happens to have an odd length).
+        assert result["schedule"][-1]["age"] <= result["last_rmd_age"]
+
+    def test_last_rmd_age_matches_75_start_for_a_1960plus_birth_year(self, sample_inputs, sample_accounts):
+        """The exact reproduction: a household young enough that
+        rmd_start_age() computes 75 (SECURE 2.0, birth year 1960+) must
+        see last_rmd_age start from 75, not the old hardcoded 73 base."""
+        inputs = {**sample_inputs, "jason_age": 40}  # birth year comfortably 1960+ for any near-term test run
+        result = run_rmd_planning(inputs, sample_accounts)
+        assert result["first_rmd_age"] == 75
+        assert result["last_rmd_age"] >= 75
+
     def test_bracket_jump_detection_with_large_balance(self, sample_inputs):
         accounts = [{"account_type": "401k", "balance": 5_000_000, "owner": "jason"}]
         inputs = {**sample_inputs, "pension_65": 0, "jason_social_security": 0, "justin_social_security": 0}

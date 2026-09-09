@@ -175,6 +175,18 @@ def run_rmd_planning(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_t
         "first_rmd_age": start_age,
         "first_rmd_amount": first_rmd_amount,
         "lifetime_rmd_total": round(cumulative_rmd),
+        # External audit follow-up, 2026-09-09: RetirementTools.jsx's own
+        # "Lifetime RMD Total (through age X)" label used to hardcode 73
+        # as the base and infer X from the SAMPLED schedule's length
+        # (73 + len*2-2) -- wrong twice over for anyone whose real
+        # first_rmd_age is 75 (SECURE 2.0 birth-year rule, already
+        # computed correctly right above and displayed two rows up on
+        # the same page), and structurally unreliable regardless, since
+        # lifetime_rmd_total sums the FULL year-by-year schedule while
+        # that arithmetic assumed a fixed stride through the sampled
+        # (every-other-year) one. Computed here directly off the real,
+        # unsampled schedule so the frontend never has to infer it.
+        "last_rmd_age": schedule[-1]["age"] if schedule else start_age,
         "bracket_jump": bracket_jump,
         "pre_rmd_bracket": pre_rmd_bracket,
         "first_rmd_bracket": first_rmd_bracket,

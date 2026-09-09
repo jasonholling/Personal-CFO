@@ -141,7 +141,7 @@ export default function RetirementTools() {
                 <div style={{ fontSize:14, marginTop:4, color: rmd.bracket_jump ? RED : GREEN, fontWeight:600 }}>{fpct(rmd.first_rmd_bracket)}</div>
               </div>
             </div>
-            <div className="label" style={{ marginBottom:8 }}>Lifetime RMD Total (through age {73 + (rmd.schedule?.length ? rmd.schedule.length*2 - 2 : 0)})</div>
+            <div className="label" style={{ marginBottom:8 }}>Lifetime RMD Total (through age {rmd.last_rmd_age})</div>
             <div style={{ fontSize:16, fontWeight:600, marginBottom:16 }}>{fmt(rmd.lifetime_rmd_total)}</div>
             {rmd.schedule?.length > 0 && (
               <div style={{ overflowX:'auto' }}>

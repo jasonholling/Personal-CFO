@@ -5314,3 +5314,55 @@ Backend suite 1373/1373 passed, 97.18% coverage. `npm test` 39/39,
 `npm run build` clean. `check_sensitive_data.py` clean.
 
 Branch: `main`.
+
+## 61. Codebase-wide sweep for the same hardcoded-field bug class — one more found (2026-09-09, on `main`)
+
+Following section 60's insurance-page fix, asked for a systematic
+sweep of the rest of the app for the same bug class: a value or status
+line presented as real data with no path for the household to ever
+change it. Checked every backend engine file's API response fields
+against `planning_inputs`/`Settings.jsx`/`db.py`, plus every
+status-heavy frontend page for unconditional claims.
+
+**One real instance found**, in `retirement_tools_engine.py`'s
+`run_rmd_planning` → `RetirementTools.jsx`'s "Lifetime RMD Total"
+label: `73 + (rmd.schedule?.length ? rmd.schedule.length*2 - 2 : 0)`.
+Two compounding problems, not one — hardcoded `73` as the base
+(ignoring `rmd.first_rmd_age`, the real SECURE-2.0-aware value already
+computed correctly and displayed two rows up on the same card), AND
+the arithmetic itself was structurally unreliable regardless: it
+inferred the end age from the length of the *sampled* (every-other-
+year) `schedule` array while `lifetime_rmd_total` sums the *full*,
+unsampled one — an assumed fixed stride through data that was already
+downsampled before reaching the frontend. Fixed by having the backend
+return the real value directly (`last_rmd_age`, computed off the
+unsampled schedule before slicing) rather than asking the frontend to
+infer it at all.
+
+Everything else checked came back clean: the rest of
+`projection_engine.py`, `retirement_tools_engine.py`'s other functions,
+`debt_engine.py`, `allocation_engine.py`, `net_worth_engine.py`,
+`estate_engine.py`, `rental_engine.py`, `cfo_briefing_engine.py`,
+`confidence_engine.py`, `life_event_engine.py`, `cash_flow_engine.py`,
+`annual_engine.py`, `quicken_importer.py`, `task_engine.py`, and
+`report_generator.py` — every dollar figure, status flag, or
+recommendation string traces back to real `accounts`/`inputs`/`kids`/
+`cash_flow` data at call time. The hardcoded constants present
+throughout (tax brackets, RMD table, standard deduction, Roth
+phase-out, QCD limits, estate exemption, emergency-fund thresholds,
+concentration thresholds, the Omaha LTC benchmark, the age-based
+glide-path formula) are documented, dated tax-law/market-reference
+assumptions, correctly left alone. `Estate.jsx`, `Risk.jsx`,
+`Insurance.jsx` (post-section-60), `TaxPlanning.jsx`, and Dashboard's
+CFO Briefing/Plan Setup cards all condition their status text on real
+values already.
+
+New regression tests in `TestRunRmdPlanning`: `last_rmd_age >=
+first_rmd_age` and consistent with the real (unsampled) schedule; a
+household young enough to hit the 75-start SECURE 2.0 rule sees
+`last_rmd_age` reflect 75, not the old hardcoded 73 base.
+
+Backend suite 1375/1375 passed, 97.18% coverage. `npm test` 39/39,
+`npm run build` clean. `check_sensitive_data.py` clean.
+
+Branch: `main`.
