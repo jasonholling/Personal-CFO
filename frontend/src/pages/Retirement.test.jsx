@@ -3,7 +3,7 @@ import { createRoot } from 'react-dom/client'
 import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest'
 import axios from 'axios'
 import Retirement from './Retirement'
-import { setRetAge, setSsTiming } from '../utils/scenario'
+import { setRetAge, setSsTiming, setJasonSsClaimAge } from '../utils/scenario'
 
 // Milestone 1 (2026-09-09, "Add 'Save this scenario' to the relevant
 // planning results") + Milestone 2 (2026-09-09, "Explain every major
@@ -71,6 +71,7 @@ beforeEach(() => {
   localStorage.clear()
   setRetAge(60)
   setSsTiming('early')
+  setJasonSsClaimAge(null)
   axios.get.mockImplementation(url => {
     if (url === '/api/projections/retirement') return Promise.resolve({ data: projectionsResponse })
     if (url === '/api/planning-inputs') return Promise.resolve({ data: {} })
@@ -140,6 +141,48 @@ describe('Retirement Projection — Save this scenario (Milestone 1)', () => {
     await click('Save this scenario')
     await flush()
     expect(axios.post).not.toHaveBeenCalled()
+  })
+
+  it('an earlier, slower request cannot overwrite a later, faster one (out-of-order response guard)', async () => {
+    // Review finding (2026-09-09): nothing previously stopped a slow
+    // response for the FIRST fetch (no claim-age override) from resolving
+    // after a fast response for a SECOND fetch (override just turned on)
+    // -- setData would then apply the stale first response last, leaving
+    // `data` (and therefore both the KPI cards and Save's payload) out of
+    // sync with the claim age actually selected on screen.
+    let resolveSlow
+    const slowResponse = new Promise(resolve => { resolveSlow = resolve })
+    const responseNoOverride = { scenarios: [
+      { ...scenario('age_60_early'), portfolio_at_retirement: 111111 },
+      scenario('age_60_delayed'),
+    ], resolved_assumptions: resolvedAssumptions }
+    const responseWithOverride = { scenarios: [
+      { ...scenario('age_60_custom'), portfolio_at_retirement: 222222 },
+    ], resolved_assumptions: resolvedAssumptions }
+
+    axios.get.mockImplementation((url, config) => {
+      if (url === '/api/planning-inputs') return Promise.resolve({ data: {} })
+      if (url !== '/api/projections/retirement') return Promise.resolve({ data: [] })
+      if (config?.params?.jason_ss_claim_age === 70) {
+        return Promise.resolve({ data: responseWithOverride }) // fast, resolves immediately
+      }
+      return slowResponse.then(() => ({ data: responseNoOverride })) // slow, resolves only when told to
+    })
+
+    await act(async () => root.render(<Retirement onNavigate={() => {}} />))
+    await flush() // first (slow) request is in flight, not yet resolved
+
+    await act(async () => { setJasonSsClaimAge(70) }) // second (fast) request fires and resolves
+    await flush()
+    // portfolio_at_retirement renders via fmtK ($XXXK for sub-$1M figures).
+    expect(container.textContent).toContain('$222K')
+
+    await act(async () => { resolveSlow() }) // the stale first request finally resolves
+    await flush()
+    // Must still show the fast/current response -- the stale one must
+    // not have overwritten it just because it resolved later.
+    expect(container.textContent).toContain('$222K')
+    expect(container.textContent).not.toContain('$111K')
   })
 })
 
