@@ -8,6 +8,7 @@ import { useSsAnchors } from '../hooks/useSsAnchors'
 import { nearestOf } from '../utils/scenario'
 import { isPrivacyMode, MASK_CURRENCY } from '../utils/privacy'
 import SecondEarnerNote from '../components/SecondEarnerNote'
+import ActiveScenarioBanner from '../components/ActiveScenarioBanner'
 import ClaimAgeSlider from '../components/ClaimAgeSlider'
 
 const NAVY = '#5C7CE0' // was #1B3A6B — nearly the same luminance as the dark card background, effectively invisible
@@ -119,6 +120,8 @@ export default function Retirement({ onNavigate }) {
         <p className="section-sub" style={{ margin:0 }}>Three scenarios · Toggle SS timing · Modeled to age {s.retirement_end_age}</p>
       </div>
 
+      <ActiveScenarioBanner />
+
       {/* Scenario selector */}
       <div style={{ display:'flex', gap:24, marginBottom:24, alignItems:'flex-start', flexWrap:'wrap' }}>
         <div>
@@ -168,9 +171,15 @@ export default function Retirement({ onNavigate }) {
           pages, this one's own claim age does NOT read from Settings
           automatically -- it's only reflected here once this slider is
           turned on. */}
-      <div className="card" style={{ marginBottom:24, padding:'16px 20px' }}>
-        <div className="label" style={{ marginBottom:8 }}>Custom Social Security Claim Age (62-70)</div>
-        <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:24 }}>
+      {/* Milestone 3 (progressive disclosure, 2026-09-09): collapsed by
+          default via <details> -- this is an ADVANCED, optional override
+          most visits never touch (the Take at 62/Wait until 67 toggle
+          above covers the common case). Stays open automatically once
+          either slider is actually on, so an active override is never
+          hidden. */}
+      <details className="card" style={{ marginBottom:24, padding:'16px 20px' }} open={jasonSsClaimAge != null || justinSsClaimAge != null}>
+        <summary style={{ cursor:'pointer', fontSize:13, fontWeight:600, padding:'4px 0', marginBottom:4 }}>Custom Social Security Claim Age (62-70)</summary>
+        <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:24, marginTop:8 }}>
           <ClaimAgeSlider
             label={`${person1Name}'s claim age`}
             claimAge={jasonSsClaimAge}
@@ -203,7 +212,7 @@ export default function Retirement({ onNavigate }) {
             on above.
           </div>
         )}
-      </div>
+      </details>
 
       {/* KPI row */}
       <div className="grid-4" style={{ marginBottom:24 }}>

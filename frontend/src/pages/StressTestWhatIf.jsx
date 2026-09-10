@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useRef } from 'react'
 import axios from 'axios'
 import { useScenario } from '../hooks/useScenario'
 import { usePersonNames } from '../hooks/usePersonNames'
@@ -9,6 +9,7 @@ import WhatIf from './WhatIf'
 import { MonteCarloSection, StressTestSection, RET_AGES, SS_OPTS } from './Simulation'
 import SecondEarnerNote from '../components/SecondEarnerNote'
 import ClaimAgeSlider from '../components/ClaimAgeSlider'
+import ActiveScenarioBanner from '../components/ActiveScenarioBanner'
 
 const fmt = (n) => isPrivacyMode() ? MASK_CURRENCY : (n == null ? '—' : new Intl.NumberFormat('en-US', { style:'currency', currency:'USD', maximumFractionDigits:0 }).format(n))
 const GREEN = '#34d399'
@@ -38,6 +39,17 @@ function SurvivorScenarioSection({ retAge, jasonSsClaimAge, justinSsClaimAge, se
   const [needFactor, setNeedFactor] = useState(75)
   const [result, setResult] = useState(null)
   const [loading, setLoading] = useState(false)
+  // Milestone 3 (stale-result audit, 2026-09-09): this section had
+  // neither of the two patterns MonteCarloSection/StressTestSection
+  // already use (see their own comments) -- a slow response could
+  // overwrite a newer selection's result (genRef), and changing an
+  // input after a completed run gave no indication the result on
+  // screen no longer matches (lastRunSnapshotRef/clearReason). Same
+  // fix, adapted to this section's own fields (deceased/deathAge/
+  // needFactor instead of retAge/ssTiming/overrides).
+  const genRef = useRef(0)
+  const lastRunSnapshotRef = useRef(null)
+  const [clearReason, setClearReason] = useState(null)
 
   useEffect(() => {
     axios.get('/api/planning-inputs').then(r => {
@@ -45,6 +57,23 @@ function SurvivorScenarioSection({ retAge, jasonSsClaimAge, justinSsClaimAge, se
       setAges({ jasonAge: d.jason_age, justinAge: d.justin_age })
     }).catch(() => {})
   }, [])
+
+  useEffect(() => {
+    const snapshot = { retAge, deceased, deathAge, needFactor, jasonSsClaimAge, justinSsClaimAge }
+    const prev = lastRunSnapshotRef.current
+    if (prev) {
+      if (prev.deceased !== snapshot.deceased) setClearReason(`changed who died from ${prev.deceased === 'jason' ? person1Name : person2Name} to ${snapshot.deceased === 'jason' ? person1Name : person2Name}`)
+      else if (prev.retAge !== snapshot.retAge) setClearReason(`retirement age changed from ${prev.retAge} to ${snapshot.retAge}`)
+      else if (prev.deathAge !== snapshot.deathAge) setClearReason(`death age changed from ${prev.deathAge} to ${snapshot.deathAge}`)
+      else if (prev.needFactor !== snapshot.needFactor) setClearReason(`survivor need changed from ${prev.needFactor}% to ${snapshot.needFactor}%`)
+      else if (prev.jasonSsClaimAge !== snapshot.jasonSsClaimAge) setClearReason(`${person1Name}'s SS claim age changed from ${prev.jasonSsClaimAge ?? 'off'} to ${snapshot.jasonSsClaimAge ?? 'off'}`)
+      else if (prev.justinSsClaimAge !== snapshot.justinSsClaimAge) setClearReason(`${person2Name}'s SS claim age changed from ${prev.justinSsClaimAge ?? 'off'} to ${snapshot.justinSsClaimAge ?? 'off'}`)
+      else setClearReason(null)
+    }
+    genRef.current++
+    setResult(null)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [retAge, deceased, deathAge, needFactor, jasonSsClaimAge, justinSsClaimAge])
 
   // "10 years into retirement" default, computed the same way the
   // backend's own default does (timeline_engine.build_timeline +
@@ -70,6 +99,7 @@ function SurvivorScenarioSection({ retAge, jasonSsClaimAge, justinSsClaimAge, se
   }, [ages, retAge, deceased, deathAgeTouched])
 
   const run = () => {
+    const gen = ++genRef.current
     setLoading(true)
     axios.get('/api/simulation/survivor-scenario', {
       params: {
@@ -81,7 +111,15 @@ function SurvivorScenarioSection({ retAge, jasonSsClaimAge, justinSsClaimAge, se
         ...(jasonSsClaimAge  != null ? { jason_ss_claim_age: jasonSsClaimAge } : {}),
         ...(justinSsClaimAge != null ? { justin_ss_claim_age: justinSsClaimAge } : {}),
       },
-    }).then(r => setResult(r.data)).finally(() => setLoading(false))
+    }).then(r => {
+      if (gen !== genRef.current) return // stale — selection changed while this request was in flight
+      lastRunSnapshotRef.current = { retAge, deceased, deathAge, needFactor, jasonSsClaimAge, justinSsClaimAge }
+      setResult(r.data)
+      setLoading(false)
+    }).catch(() => {
+      if (gen !== genRef.current) return
+      setLoading(false)
+    })
   }
 
   return (
@@ -94,9 +132,11 @@ function SurvivorScenarioSection({ retAge, jasonSsClaimAge, justinSsClaimAge, se
         captured here.
       </div>
 
-      <div className="card" style={{ marginBottom:24 }}>
-        <div className="label" style={{ marginBottom:8 }}>Custom Social Security Claim Age (62-70)</div>
-        <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:24, marginBottom:16 }}>
+      {/* Milestone 3 (progressive disclosure, 2026-09-09): collapsed by
+          default -- see Retirement.jsx's identical comment. */}
+      <details className="card" style={{ marginBottom:24 }} open={jasonSsClaimAge != null || justinSsClaimAge != null}>
+        <summary style={{ cursor:'pointer', fontSize:13, fontWeight:600, padding:'4px 0', marginBottom:4 }}>Custom Social Security Claim Age (62-70)</summary>
+        <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:24, marginTop:8, marginBottom:16 }}>
           <ClaimAgeSlider
             label={`${person1Name}'s claim age`}
             claimAge={jasonSsClaimAge}
@@ -121,7 +161,7 @@ function SurvivorScenarioSection({ retAge, jasonSsClaimAge, justinSsClaimAge, se
             compact
           />
         </div>
-      </div>
+      </details>
 
       <div className="card" style={{ marginBottom:24 }}>
         <div className="grid-3" style={{ marginBottom:12 }}>
@@ -142,6 +182,11 @@ function SurvivorScenarioSection({ retAge, jasonSsClaimAge, justinSsClaimAge, se
           </div>
         </div>
         <button className="btn-primary" onClick={run} disabled={loading}>{loading ? 'Calculating…' : 'Run Scenario'}</button>
+        {!result && clearReason && (
+          <div style={{ fontSize:12, color:'var(--text3)', marginTop:12 }}>
+            Cleared the previous result — {clearReason}. Run again to see the updated numbers.
+          </div>
+        )}
       </div>
 
       {result?.has_data && (
@@ -321,6 +366,8 @@ export default function StressTestWhatIf({ onNavigate }) {
         <p className="section-sub">Pressure-test your plan against custom assumptions, randomized markets, and historical crashes</p>
       </div>
 
+      <ActiveScenarioBanner savedJasonClaimAge={savedClaimAges.jason} savedJustinClaimAge={savedClaimAges.justin} />
+
       {/* Tab switcher */}
       <div style={{ display:'flex', gap:4, marginBottom:24, borderBottom:'1px solid var(--border)', paddingBottom:0 }}>
         {TABS.map(t => (
@@ -478,17 +525,22 @@ export default function StressTestWhatIf({ onNavigate }) {
           Retirement Ages, then SS Claim Ages, then What-If (optional),
           then Run, matching the order the reviewer laid out rather than
           claim age appearing before the ages it's claimed alongside. */}
+      {/* Milestone 3 (progressive disclosure, 2026-09-09): collapsed by
+          default -- see Retirement.jsx's identical comment. Also stays
+          open when the What-If Builder's SS multiplier is active, same
+          reasoning: an in-effect override shouldn't be hidden. */}
       {(tab === 'monte_carlo' || tab === 'stress') && (
-        <div className="card" style={{ marginBottom:20, padding:'16px 20px' }}>
-          <div className="label" style={{ marginBottom:8 }}>
+        <details className="card" style={{ marginBottom:20, padding:'16px 20px' }}
+          open={jasonSsClaimAge != null || justinSsClaimAge != null || (whatIfAssumptions?.ss_mult != null && whatIfAssumptions.ss_mult !== 1)}>
+          <summary style={{ cursor:'pointer', fontSize:13, fontWeight:600, padding:'4px 0', marginBottom:4 }}>
             Custom Social Security Claim Age (62-70)
             {whatIfAssumptions?.ss_mult != null && whatIfAssumptions.ss_mult !== 1 && (
-              <span style={{ fontWeight:400, color:'var(--text3)', textTransform:'none', letterSpacing:'normal' }}>
+              <span style={{ fontWeight:400, color:'var(--text3)' }}>
                 {' '}— previews below reflect the What-If Builder's {Math.round(whatIfAssumptions.ss_mult * 100)}% SS multiplier
               </span>
             )}
-          </div>
-          <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:24 }}>
+          </summary>
+          <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:24, marginTop:8 }}>
             {/* External audit review, 2026-09-09: this preview used to
                 read raw Settings anchors even though the simulation
                 these sliders feed applies the What-If Builder's own SS
@@ -525,7 +577,7 @@ export default function StressTestWhatIf({ onNavigate }) {
               compact
             />
           </div>
-        </div>
+        </details>
       )}
 
       <div hidden={tab !== 'whatif'}>

@@ -5466,3 +5466,216 @@ Backend suite 1386/1386 passed, 97.19% coverage. `npm test` 39/39,
 `npm run build` clean. `check_sensitive_data.py` clean.
 
 Branch: `main`.
+
+## 63. Milestone 3, first slice: navigation map + duplication fix (2026-09-09, on `codex/milestone-3-navigation`)
+
+Backlog brief's Milestone 3 goal: reorganize the app around Household
+→ Plan → Compare → Protect → Review instead of the existing topic-based
+groups (WEALTH/RETIREMENT/EDUCATION & KIDS/PROTECTION/ESTATE &
+PLANNING), with an explicit requirement to propose the map and get it
+approved before restructuring any UI. Proposed the map (below), user
+approved ("ok i'm game") before any code changed.
+
+**Approved map:**
+- Dashboard and Annual Report stay pinned outside the 5 groups (an
+  entry point and a report aren't themselves one of the 5 activities).
+- **Household**: Accounts, Net Worth, Debt Payoff, Monthly Cash Flow,
+  Planning Inputs, Backup & Restore.
+- **Plan**: Retirement Projection, Roth Conversion, Tax Planning,
+  Retirement Tools, Education, Kids, Goals & Funding, Assign Surplus,
+  Life-Event Planning.
+- **Compare**: Compare Scenarios (new — Side by Side + Sensitivity,
+  moved out of Retirement Projection's own tabs), Stress Test &
+  What-If, Saved Scenarios.
+- **Protect**: Insurance, Risk Management, Protection Scorecard,
+  Estate Planning.
+- **Review**: Action Tracker, Annual Review Checklist, Review &
+  Decision Rules (renamed from "CFO Operating System").
+
+**Two real fixes fell out of drafting the map, not just relabeling.**
+Enumerating every page's actual content (required to place it
+correctly) surfaced a genuine duplication: PlanOperatingSystem.jsx
+("CFO Operating System") had its OWN estate-document tracker calling
+the same `/api/estate-documents` endpoint Estate.jsx uses, but with a
+disjoint `document_type` key set ("Will"/"Revocable trust"/etc. vs.
+Estate.jsx's "trust"/"wills"/...) and a disjoint status vocabulary
+(`not_started`/`in_progress`/`complete` vs.
+`executed`/`verify`/`outdated`/`pending`) -- two independent,
+never-reconciled checklists both claiming to answer "is our estate
+plan current," for a household using both pages. This had ALREADY
+caused a real regression earlier the same day: section 62's status-
+vocabulary "fix" (correcting the endpoint to Estate.jsx's vocabulary
+only) would have 400'd every save from PlanOperatingSystem, since it
+was never checked against that second caller. Fixed immediately
+(accept the union — see section 62's own follow-up commit `ade65d0`)
+before this milestone's work began.
+
+This milestone resolves it properly: Estate Planning becomes the
+single canonical place for document + beneficiary tracking (it
+already had the richer UI -- tax exposure, beneficiaries, action
+items). PlanOperatingSystem.jsx's estate-document section is removed
+entirely, replaced with a link into Estate Planning. Its other,
+genuinely distinct content (assumption presets/review history,
+financial runway, planning calendar) stays, renamed "Review &
+Decision Rules" to fit the Review group.
+
+**Implementation, no calculation changes:**
+- New `Compare.jsx`: hosts Side by Side + Sensitivity as tabs,
+  unchanged components, just a different parent. Extracted from
+  `RetirementProjection.jsx`, which now only tabs Overview + Two-Age
+  Scenario.
+- `App.jsx`'s `NAV` array restructured into the 5 groups above;
+  `pages` map updated with the new `compare` entry.
+- `PlanOperatingSystem.jsx` rewritten (was a single minified line) to
+  remove the `DOCS`/estate-document block and its `updateDoc`/`docs`
+  state, add an `onNavigate('estate')` link, reformatted to this
+  codebase's normal multi-line style since it was already being
+  substantially edited.
+
+**Verified:** `npm run build` clean, `npm test` 39/39 (no existing
+test covered `App.jsx`'s nav directly, so this doesn't newly prove the
+restructuring itself — see limitations below). No backend files
+touched; backend suite unaffected, not re-run for this commit.
+
+**Explicitly NOT done in this slice** (Milestone 3's other acceptance
+criteria, staged as follow-up work rather than attempted all at once):
+one clearly identified "active scenario" indicator across Plan/
+Compare tools; progressive disclosure for advanced controls; a clear
+visual distinction between saved household defaults, temporary
+scenario overrides, and historical snapshots; preserving completed
+results/drafts when navigating between related views; stale-result
+detection + an explicit recalculate action when an assumption changes;
+the exhaustive acceptance journeys the brief specifies (new vs.
+existing household, two earners, unequal ages, 0/5 kids, failed
+requests, unsaved-changes navigation, keyboard operation, actual
+browser behavior — not yet run, since the Chrome connection needed for
+a live pass wasn't available when this slice was verified). A live
+browser walkthrough of the new nav itself is also still owed before
+this is considered fully checked, despite the build/unit-test evidence
+above.
+
+Branch: `codex/milestone-3-navigation`, pushed, not merged — per the
+backlog brief's own instruction not to merge or start the next
+milestone without approval.
+
+## 64. Milestone 3, second slice: visible active-scenario indicator (2026-09-09, on `codex/milestone-3-navigation`)
+
+Milestone 3 acceptance criterion: "establish one clearly identified
+active scenario across relevant tools." The underlying state already
+existed and already carried across pages — `useScenario()`
+(`utils/scenario.js`) shares `retAge`/`ssTiming`/
+`jasonSsClaimAge`/`justinSsClaimAge` via a module-level store +
+localStorage, so picking "Retire at 58" on one page already carried
+over to the next. What was missing was ever telling the user so — each
+page showed its own controls with no indication they were the SAME
+choice, not a fresh per-page default.
+
+New `components/ActiveScenarioBanner.jsx`: a compact, consistent strip
+("Active scenario: Retire at X · SS \<timing\>") mounted at the top of
+every page that reads `useScenario()` for something the user would
+recognize as "the plan I'm looking at": `Retirement.jsx` (Overview),
+`RetirementSensitivity.jsx`, `RothConversion.jsx`,
+`StressTestWhatIf.jsx`. `SideBySide.jsx` and `SavedScenarios.jsx`
+intentionally excluded — the former sweeps every age at once (no
+single "active" age to highlight), the latter is about viewing saved
+snapshots, not the live scenario.
+
+Distinguishes a temporary override from a saved Settings default only
+where that distinction actually exists in the data model: SS claim
+age. `jasonSsClaimAge`/`justinSsClaimAge` are page-local overrides on
+top of whatever's saved in Settings (section 54's 3-tier resolution);
+when either differs from the saved value, the banner calls it out
+explicitly ("— this session only, not saved"). `retAge`/`ssTiming`
+have no separate "Settings default" to contrast against — the shared
+scenario value IS the persistent choice already, so it's labeled
+"Active scenario" rather than an invented override of something that
+doesn't exist.
+
+Self-caught before it shipped: the banner's own `savedJasonClaimAge`/
+`savedJustinClaimAge` fetch (needed for the override-vs-default check)
+duplicated a fetch `StressTestWhatIf.jsx` already makes for
+`AssumptionsUsed` — caught immediately by
+`ScenarioFlow.test.jsx`'s own call-count assertion (`toHaveLength(1)`
+on `/api/planning-inputs` calls), the same test class that caught an
+identical mistake earlier this session (section 57's Survivor-Scenario
+eager-mount revert). Fixed by accepting optional
+`savedJasonClaimAge`/`savedJustinClaimAge` props — a page that's
+already fetched the value passes it through instead of the banner
+redundantly fetching its own copy; pages that haven't (Retirement/
+RothConversion/RetirementSensitivity) leave the props unset and the
+banner fetches for itself.
+
+**Verified:** `npm run build` clean, `npm test` 39/39 (including the
+regression this caught and fixed). No backend changes. **Still not
+verified live in a browser** — Chrome's extension connection wasn't
+available across two attempts this session; the banner's actual
+rendering/wording across the 4 pages is unconfirmed beyond build +
+unit tests.
+
+**Still explicitly open from Milestone 3's acceptance criteria**:
+progressive disclosure for advanced controls; preserving completed
+results/drafts when navigating between top-level pages (App.jsx fully
+unmounts a page on every nav switch — pre-existing behavior, not
+introduced by this milestone, but making it match "preserve drafts
+between related views" properly would mean lifting page state up or
+extending the mounted-but-hidden pattern App-wide, a larger
+architecture decision not taken here); a stale-result/recalculate
+audit of Roth Conversion and any other explicit-run tool beyond the
+Monte Carlo/Stress Test pattern already built; and the brief's full
+acceptance-journey testing (two earners, 0/5 kids, keyboard operation,
+actual browser behavior).
+
+Branch: `codex/milestone-3-navigation`, pushed, not merged.
+
+## 65. Milestone 3, third slice: progressive disclosure + Survivor Scenario stale-result audit (2026-09-09, on `codex/milestone-3-navigation`)
+
+Two more Milestone 3 acceptance criteria closed this slice.
+
+**Progressive disclosure.** The "Custom Social Security Claim Age
+(62-70)" card appears on 4 pages (`Retirement.jsx`,
+`RothConversion.jsx`, `StressTestWhatIf.jsx` ×2 — the Survivor
+Scenario tab and the Monte Carlo/Stress tab) as an always-expanded
+card, even though it's an advanced, optional override most visits
+never touch (the Early/Delayed toggle already covers the common case).
+All 4 wrapped in a native `<details>`, matching this codebase's
+existing pattern (`Simulation.jsx`'s "More tools" section) instead of
+introducing new state — collapsed by default, but `open` automatically
+whenever either slider (or, for the Monte Carlo/Stress copy, the
+What-If Builder's SS multiplier) is actually active, so an in-effect
+override is never hidden behind a click.
+
+**Survivor Scenario stale-result audit.** Checked every explicit-run
+tool for the `genRef`/`lastRunSnapshotRef` stale-response-guard and
+clear-previous-result-notice pattern Monte Carlo/Stress Tests already
+have (sections 55-56). Roth Conversion/Retirement/Sensitivity don't
+need it — they auto-recompute on every input change via `useEffect`,
+so there's no explicit "Run" step and therefore nothing to go stale.
+Survivor Scenario (`StressTestWhatIf.jsx`'s `SurvivorScenarioSection`)
+DOES have an explicit "Run Scenario" button and had NEITHER pattern:
+a slow response could silently overwrite a newer selection's result,
+and changing deceased/death age/survivor-need-% or a claim age after
+a completed run gave no indication the result on screen no longer
+matched. Both added, adapted to this section's own fields (deceased/
+deathAge/needFactor instead of retAge/ssTiming/overrides) rather than
+literally sharing `describeAssumptionChange` (different field
+semantics; same pattern, separate implementation).
+
+New tests in `SurvivorScenario.test.jsx`: a slow response resolving
+after the deceased-spouse selection changed must not render under the
+new selection; changing an input after a completed run must show
+"Cleared the previous result — changed who died...".
+
+**Verified:** `npm run build` clean, `npm test` 41/41 (39 existing +
+2 new). No backend changes. Live browser verification of the
+`<details>` collapse/expand behavior and the new stale notices is
+still owed — same Chrome-connection gap as sections 63-64.
+
+**Still explicitly open from Milestone 3**: cross-page result/draft
+preservation (deliberately skipped per user decision — documented as
+a known limitation, not attempted, since it's a larger architecture
+change than fits this branch); the brief's full acceptance-journey
+testing (two earners, unequal ages, 0/5 kids, failed requests,
+unsaved-changes navigation, keyboard operation, actual browser
+behavior).
+
+Branch: `codex/milestone-3-navigation`, pushed, not merged.

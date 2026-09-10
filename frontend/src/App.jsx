@@ -6,6 +6,7 @@ import WelcomeModal from './components/WelcomeModal'
 import Dashboard from './pages/Dashboard'
 import Accounts from './pages/Accounts'
 import RetirementProjection from './pages/RetirementProjection'
+import Compare from './pages/Compare'
 import StressTestWhatIf from './pages/StressTestWhatIf'
 import Education from './pages/Education'
 import Kids from './pages/Kids'
@@ -33,49 +34,60 @@ import PlanOperatingSystem from './pages/PlanOperatingSystem'
 import { usePrivacyMode } from './hooks/usePrivacyMode'
 import './App.css'
 
-// RETIREMENT used to have 9 top-level tabs; 5 of them (Retirement, Side by
-// Side, Age Sensitivity, What-If Builder, Retirement Sim) were all the same
-// base projection viewed different ways. Consolidated into 2 tabbed pages
-// (RetirementProjection, StressTestWhatIf) — the other 4 (Roth Conversion,
-// Tax Planning, Retirement Tools, Allocation & Fees) are genuinely distinct
-// financial questions, not just different views, so they stayed separate.
+// Milestone 3 (navigation consolidation, 2026-09-09): restructured from
+// topic-based groups (WEALTH/RETIREMENT/EDUCATION & KIDS/PROTECTION/
+// ESTATE & PLANNING) into activity-based groups (Household/Plan/
+// Compare/Protect/Review), approved via a navigation-map proposal
+// before any code changed (see CALCULATION_CONTRACT.md's Milestone 3
+// section for the full map and the reasoning per page). Two concrete
+// changes fell out of drafting that map, not just relabeling:
+//   - Side by Side and Sensitivity moved out of RetirementProjection's
+//     own tabs into a new Compare.jsx page (both are comparison views,
+//     not plan-building) -- no calculation change, same components.
+//   - PlanOperatingSystem.jsx's estate-document tracker (a second,
+//     disconnected copy of what Estate.jsx already tracked, under
+//     different keys) was removed in favor of Estate Planning being
+//     the single canonical place -- see that file's own comment.
+// Dashboard and Annual Report stay pinned outside the 5 groups (an
+// entry point and a report aren't themselves one of the 5 activities).
 const NAV = [
-  { group:'WEALTH' },
   { id:'dashboard',  label:'Dashboard',      icon:'◈' },
+  { group:'HOUSEHOLD' },
   { id:'accounts',   label:'Accounts',       icon:'⊞' },
   { id:'networth',   label:'Net Worth',      icon:'◬' },
   { id:'debt',       label:'Debt Payoff',    icon:'⊝' },
   { id:'cashflow',   label:'Monthly Cash Flow', icon:'≋' },
-  { id:'goals',      label:'Goals & Funding', icon:'◇' },
-  { id:'surplus',    label:'Assign Surplus', icon:'+' },
-  { id:'annualplan', label:'Action Tracker', icon:'✓' },
-  { id:'annualreview', label:'Annual Review Checklist', icon:'↻' },
-  { group:'RETIREMENT' },
+  { id:'settings',   label:'Planning Inputs',icon:'≡' },
+  { id:'backup', label:'Backup & Restore', icon:'⇩' },
+  { group:'PLAN' },
   { id:'retirement', label:'Retirement Projection', icon:'◎' },
-  { id:'stresstest',  label:'Stress Test & What-If', icon:'⊘' },
-  { id:'scenarios', label:'Saved Scenarios', icon:'◫' },
-  { id:'lifeevents', label:'Life-Event Planning', icon:'◇' },
-  { id:'operating', label:'CFO Operating System', icon:'◉' },
   { id:'roth',       label:'Roth Conversion', icon:'⟳' },
   { id:'tax',        label:'Tax Planning',   icon:'⊛' },
   { id:'rettools',   label:'Retirement Tools', icon:'⊚' },
+  { id:'education',  label:'Education',      icon:'◇' },
+  { id:'kids',       label:'Kids',           icon:'◉' },
+  { id:'goals',      label:'Goals & Funding', icon:'◇' },
+  { id:'surplus',    label:'Assign Surplus', icon:'+' },
+  { id:'lifeevents', label:'Life-Event Planning', icon:'◇' },
   // 'allocation' (Concentration Risk) intentionally not in the nav —
   // with Asset Allocation/Rebalancing and Investment Fee Audit already
   // hidden as not worth showing without real per-account data, the one
   // remaining section (concentration risk) wasn't judged worthwhile
   // either. Route/import/page component all still present below, so
   // this is a one-line re-enable if that changes.
-  { group:'EDUCATION & KIDS' },
-  { id:'education',  label:'Education',      icon:'◇' },
-  { id:'kids',       label:'Kids',           icon:'◉' },
-  { group:'PROTECTION' },
+  { group:'COMPARE' },
+  { id:'compare',    label:'Compare Scenarios', icon:'◫' },
+  { id:'stresstest',  label:'Stress Test & What-If', icon:'⊘' },
+  { id:'scenarios', label:'Saved Scenarios', icon:'◫' },
+  { group:'PROTECT' },
   { id:'insurance',  label:'Insurance',      icon:'⊕' },
   { id:'risk',       label:'Risk Management',icon:'⊗' },
   { id:'protection', label:'Protection Scorecard',icon:'✓' },
-  { group:'ESTATE & PLANNING' },
   { id:'estate',     label:'Estate Planning',icon:'⊙' },
-  { id:'settings',   label:'Planning Inputs',icon:'≡' },
-  { id:'backup', label:'Backup & Restore', icon:'⇩' },
+  { group:'REVIEW' },
+  { id:'annualplan', label:'Action Tracker', icon:'✓' },
+  { id:'annualreview', label:'Annual Review Checklist', icon:'↻' },
+  { id:'operating', label:'Review & Decision Rules', icon:'◉' },
 ]
 
 export default function App() {
@@ -109,7 +121,7 @@ export default function App() {
   }
 
   const pages = {
-    dashboard:Dashboard, accounts:Accounts, retirement:RetirementProjection, stresstest:StressTestWhatIf, scenarios:SavedScenarios, lifeevents:LifeEvents, operating:PlanOperatingSystem,
+    dashboard:Dashboard, accounts:Accounts, retirement:RetirementProjection, compare:Compare, stresstest:StressTestWhatIf, scenarios:SavedScenarios, lifeevents:LifeEvents, operating:PlanOperatingSystem,
     education:Education, kids:Kids, insurance:Insurance,
     risk:Risk, estate:Estate, settings:Settings, backup:BackupRestore,
     tax:TaxPlanning, report:Report, networth:NetWorth, roth:RothConversion, debt:Debt,
@@ -175,7 +187,11 @@ export default function App() {
         )}
         <nav className="sidebar-nav">
           {NAV.map((n, i) => n.group ? (
-            <div key={i} style={{ marginTop: i===0 ? 4 : 14, marginBottom:2 }}>
+            // Dashboard now sits at index 0 (pinned above the 5 groups,
+            // not itself one of them), so the FIRST group header is
+            // index 1, not 0 -- tighter top margin there, same as
+            // before Dashboard was pulled out of the group list.
+            <div key={i} style={{ marginTop: i===1 ? 4 : 14, marginBottom:2 }}>
               <div style={{ fontSize:9, fontWeight:700, letterSpacing:'0.1em', color:'var(--text3)', padding:'0 16px', textTransform:'uppercase' }}>{n.group}</div>
               <div style={{ height:1, background:'var(--border)', margin:'4px 12px 2px' }} />
             </div>

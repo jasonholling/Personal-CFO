@@ -1,25 +1,23 @@
 import { useState } from 'react'
 import Retirement from './Retirement'
-import SideBySide from './SideBySide'
-import RetirementSensitivity from './RetirementSensitivity'
 import TwoAgeScenario from './TwoAgeScenario'
 
-// Combines Retirement + Side by Side + Age Sensitivity under one nav entry —
-// these were 3 separate top-level tabs, but they're all the same base
-// retirement projection viewed 3 different ways (single-scenario detail,
-// side-by-side comparison, continuous age slider), with no extra
-// user-adjustable assumptions beyond retirement age / SS timing (shared via
-// useScenario). Part of the RETIREMENT nav consolidation alongside
-// Stress Test & What-If.
+// Milestone 3 (navigation consolidation, 2026-09-09): Side by Side and
+// Sensitivity moved OUT of this page's own tabs into the new Compare.jsx
+// page (Compare nav group) -- both are inherently comparison views (one
+// retirement age vs. another), not a "build the plan" activity, and
+// belong with Stress Test & What-If/Saved Scenarios instead of here. No
+// calculation change: SideBySide.jsx/RetirementSensitivity.jsx moved
+// unchanged, only which parent renders them changed. See
+// CALCULATION_CONTRACT.md's Milestone 3 section for the full navigation
+// map this was approved against.
 const TABS = [
   { id:'overview',    label:'Overview' },
-  { id:'sidebyside',  label:'Side by Side' },
-  { id:'sensitivity', label:'Sensitivity' },
   // Two-Age Scenario is a deliberately separate, additive tool (backend/
-  // docs/TWO_DIMENSIONAL_RETIREMENT_DESIGN.md section 7) -- the other 3
-  // tabs above all still model a single household retirement date. Kept
-  // as its own tab rather than folded in, so the two models stay
-  // visibly distinct instead of quietly merged.
+  // docs/TWO_DIMENSIONAL_RETIREMENT_DESIGN.md section 7) -- Overview
+  // still models a single household retirement date. Kept as its own
+  // tab rather than folded in, so the two models stay visibly distinct
+  // instead of quietly merged.
   { id:'twoage',      label:'Two-Age Scenario' },
 ]
 
@@ -49,8 +47,6 @@ export default function RetirementProjection({ onNavigate }) {
       </div>
 
       {tab === 'overview'    && <Retirement onNavigate={onNavigate} />}
-      {tab === 'sidebyside'  && <SideBySide onNavigate={onNavigate} />}
-      {tab === 'sensitivity' && <RetirementSensitivity onNavigate={onNavigate} />}
       {tab === 'twoage'      && <TwoAgeScenario />}
     </div>
   )

@@ -4,6 +4,7 @@ import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, ReferenceL
 import { usePersonNames } from '../hooks/usePersonNames'
 import { useScenario } from '../hooks/useScenario'
 import { isPrivacyMode, MASK_CURRENCY } from '../utils/privacy'
+import ActiveScenarioBanner from '../components/ActiveScenarioBanner'
 
 const fmt  = (n) => isPrivacyMode() ? MASK_CURRENCY : (n == null ? '—' : new Intl.NumberFormat('en-US', { style:'currency', currency:'USD', maximumFractionDigits:0 }).format(n))
 const fmtK = (n) => {
@@ -77,6 +78,8 @@ export default function RetirementSensitivity({ onNavigate }) {
       <div style={{ marginBottom:28 }}>
         <p className="section-sub" style={{ margin:0 }}>Drag the slider to see how every retirement age from 55 to 67 changes your outcomes — SS at 62</p>
       </div>
+
+      <ActiveScenarioBanner />
 
       {/* Slider */}
       <div className="card" style={{ marginBottom:24 }}>
