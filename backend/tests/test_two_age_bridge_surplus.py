@@ -22,6 +22,7 @@ import time
 
 import pytest
 
+import simulation_engine
 from projection_engine import (
     run_two_dimensional_retirement_projection,
     run_owner_split_two_dimensional_projection,
@@ -141,33 +142,62 @@ class TestTwoAgeBridgeSurplusCore:
             assert y["bridge_income"] == expected_bridge
             assert y["draw"] == 0  # bridge exceeds spending at every year of this inflation rate
 
-    def test_both_retirement_orders_jason_first_vs_justin_first(self):
-        """Bridge income only ever applies during JASON's own bridge
-        phase (need_for_year's own jason_ret_age==55 gate) -- confirm
-        the surplus fix behaves identically regardless of which spouse
-        is later_retiree, since that's an orthogonal axis from which
-        spouse the bridge job belongs to."""
-        # Jason retires first (55), Justin later (58) -- Justin becomes
-        # the still-working spouse during Jason's bridge phase.
+    def test_bridge_is_jason_specific_when_jason_retires_first(self):
+        """Bridge income is Jason's OWN individual income -- the gate is
+        literally `jason_ret_age == 55` inside need_for_year, unrelated
+        to who is later_retiree. Jason retires first here (55), Justin
+        later (58) and still working -- confirm the bridge surplus is
+        credited on top of, and distinct from, Justin's own gap-income
+        offset (an exact three-way sum: opening + bridge surplus +
+        Justin's gap income, not two of the three silently substituting
+        for each other)."""
         jason_first = base_inputs(jason_age=53, justin_age=53, retirement_income_today_dollars=100000, retirement_end_age=59,
                                    bridge_income_55=150000, bridge_years_55=1, justin_w2_salary=50000)
         r1 = run_two_dimensional_retirement_projection(jason_first, TAXABLE(500000), jason_ret_age=55, justin_ret_age=58)
         assert r1["later_retiree"] == "justin"
         y0 = r1["yearly_detail"][0]
         assert y0["bridge_income"] == 150000
+        assert y0["still_working_spouse_income"] > 0  # Justin's own gap income, a SEPARATE offset
         assert y0["portfolio_balance"] == 500000 + (150000 - 100000) + y0["still_working_spouse_income"]
 
-        # Justin retires first (55), Jason later (58) -- jason_ret_age
-        # must still be 55 for the bridge gate (it's keyed to Jason
-        # specifically, confirmed by need_for_year's own condition), but
-        # Justin being the earlier retiree of the pair changes
-        # later_retiree/phase framing without touching bridge eligibility.
-        justin_first_same_bridge = base_inputs(jason_age=53, justin_age=53, retirement_income_today_dollars=100000, retirement_end_age=56,
-                                                bridge_income_55=150000, bridge_years_55=1)
-        r2 = run_two_dimensional_retirement_projection(justin_first_same_bridge, TAXABLE(500000), jason_ret_age=55, justin_ret_age=55)
+        # Same household with bridge income zeroed out: the gap-income
+        # contribution alone must be byte-identical, proving the bridge
+        # term above isn't silently reusing or duplicating that number.
+        no_bridge = base_inputs(jason_age=53, justin_age=53, retirement_income_today_dollars=100000, retirement_end_age=59,
+                                 justin_w2_salary=50000)
+        r1b = run_two_dimensional_retirement_projection(no_bridge, TAXABLE(500000), jason_ret_age=55, justin_ret_age=58)
+        y0_no_bridge = r1b["yearly_detail"][0]
+        assert y0_no_bridge["bridge_income"] == 0
+        assert y0_no_bridge["still_working_spouse_income"] == y0["still_working_spouse_income"]
+        assert y0["portfolio_balance"] - y0_no_bridge["portfolio_balance"] == 150000  # isolates the bridge's own contribution
+
+    def test_bridge_does_not_apply_when_justin_retires_first(self):
+        """The mirror case: Justin retires first (55), Jason retires
+        LATER (58) and is the one still working. The bridge gate
+        (`jason_ret_age == 55`) is NOT satisfied here (jason_ret_age is
+        58), so bridge_income must be exactly zero every year, and the
+        only income offset present during Justin's early-retirement
+        phase must be Jason's own gap income -- exercising the
+        later-retiree income path the bridge-specific test above does
+        not reach, and confirming bridge eligibility isn't accidentally
+        keyed off "whoever retires first" instead of Jason specifically."""
+        justin_first = base_inputs(jason_age=53, justin_age=53, retirement_income_today_dollars=100000, retirement_end_age=59,
+                                    bridge_income_55=150000, bridge_years_55=1, w2_salary=40000)
+        r2 = run_two_dimensional_retirement_projection(justin_first, TAXABLE(500000), jason_ret_age=58, justin_ret_age=55)
+        assert r2["later_retiree"] == "jason"
+        for y in r2["yearly_detail"]:
+            assert y["bridge_income"] == 0
         y0b = r2["yearly_detail"][0]
-        assert y0b["bridge_income"] == 150000
-        assert y0b["portfolio_balance"] == 550000
+        assert y0b["still_working_spouse_income"] > 0  # Jason's own gap income, the later-retiree path
+        assert y0b["portfolio_balance"] == 500000 - 100000 + y0b["still_working_spouse_income"]
+
+        # Same household with jason_ret_age flipped to 55 (bridge-
+        # eligible) but otherwise identical -- confirms the zero above is
+        # really the gate, not some other unrelated zeroing.
+        jason_bridge_eligible = base_inputs(jason_age=53, justin_age=53, retirement_income_today_dollars=100000, retirement_end_age=59,
+                                             bridge_income_55=150000, bridge_years_55=1)
+        r2b = run_two_dimensional_retirement_projection(jason_bridge_eligible, TAXABLE(500000), jason_ret_age=55, justin_ret_age=55)
+        assert r2b["yearly_detail"][0]["bridge_income"] == 150000
 
     def test_bridge_surplus_combined_with_pension_and_life_event(self):
         """Bridge overshoot stacked with pension AND a one-time life
@@ -201,16 +231,21 @@ class TestTwoAgeBridgeSurplusCore:
 
 
 class TestTwoAgeBridgeSurplusOtherConsumers:
-    """Spot-checks confirming each of the other 6 call sites correctly
-    sweeps a bridge surplus via its OWN existing surplus-handling
-    mechanism -- not a re-derivation of run_two_dimensional_retirement_
-    projection's own logic."""
+    """Exact-value checks (not floor/success-rate thresholds a broken
+    bridge path could still pass) confirming each of the other 6 call
+    sites sweeps a bridge surplus via its OWN existing surplus-handling
+    mechanism, exactly once, with the correct (untaxed, pension-parity)
+    tax-rate assumption and owner attribution -- not a re-derivation of
+    run_two_dimensional_retirement_projection's own logic."""
 
     def test_owner_split_projection_credits_surplus_to_jason(self):
         """run_owner_split_two_dimensional_projection: bridge income is
         Jason's own individual income (the bridge phase is keyed to his
         retirement specifically) -- confirms the surplus is attributed to
-        the "jason" owner bucket, not lost or misattributed to joint."""
+        the "jason" owner bucket, not lost or misattributed to joint, AND
+        that a zero-bridge household lands at the byte-identical
+        no-bridge figure (isolating the bridge's own $150,000
+        contribution exactly, not a coincidental match)."""
         inputs = base_inputs(retirement_income_today_dollars=100000, retirement_end_age=56,
                               bridge_income_55=150000, bridge_years_55=1)
         accounts = [{"name": "Brokerage", "account_type": "taxable", "owner": "jason", "balance": 500000}]
@@ -222,61 +257,121 @@ class TestTwoAgeBridgeSurplusOtherConsumers:
         assert y0["owner_balances"]["justin"]["taxable"] == 0
         assert y0["owner_balances"]["joint"]["taxable"] == 0
 
-    def test_monte_carlo_two_age_reflects_bridge_surplus(self):
-        """run_monte_carlo (two-age dispatch): a household whose bridge
-        income comfortably exceeds spending, with zero market volatility
-        forced via PORT_STD-irrelevant zero return assumptions, should
-        show 100% success and a rising (not flat/declining) portfolio
-        trajectory in early years -- deterministic given the fixed
-        seed(42) every Monte Carlo call resets to."""
+        no_bridge_inputs = base_inputs(retirement_income_today_dollars=100000, retirement_end_age=56)
+        no_bridge_result = run_owner_split_two_dimensional_projection(no_bridge_inputs, accounts, jason_ret_age=55, justin_ret_age=55)
+        y0_no_bridge = no_bridge_result["yearly_detail"][0]
+        assert y0_no_bridge["bridge_income"] == 0
+        assert y0_no_bridge["owner_balances"]["jason"]["taxable"] == 400000  # 500000 - 100000 spending, no surplus
+        assert y0["owner_balances"]["jason"]["taxable"] - y0_no_bridge["owner_balances"]["jason"]["taxable"] == 150000
+
+    def test_monte_carlo_two_age_reflects_bridge_surplus(self, monkeypatch):
+        """run_monte_carlo (two-age dispatch): forcing PORT_STD to 0
+        makes every one of the 1000 trials identical (random.gauss(mu,
+        0) == mu), so median_final_balance becomes an EXACT, hand-
+        computable figure -- $500,000 opening + ($150,000 bridge -
+        $100,000 spending) surplus, swept via simulate_withdrawal_year's
+        existing mechanism = $550,000 precisely. A broken/ignored bridge
+        path would land at $400,000 (spending drawn with no offset) or
+        some other wrong number, not $550,000 -- unlike a bare
+        success_rate==100.0 check, which an already-fully-funded
+        household could satisfy regardless of whether bridge income was
+        ever counted."""
+        monkeypatch.setattr(simulation_engine, "PORT_STD", 0.0)
         inputs = base_inputs(retirement_income_today_dollars=100000, retirement_end_age=56,
                               bridge_income_55=150000, bridge_years_55=1)
         result = run_monte_carlo(inputs, TAXABLE(500000), jason_ret_age=55, justin_ret_age=55)
         assert result["success_rate"] == 100.0
+        assert result["median_final_balance"] == 550000
+
+        no_bridge_inputs = base_inputs(retirement_income_today_dollars=100000, retirement_end_age=56)
+        no_bridge_result = run_monte_carlo(no_bridge_inputs, TAXABLE(500000), jason_ret_age=55, justin_ret_age=55)
+        assert no_bridge_result["median_final_balance"] == 400000  # zero-bridge parity, unaffected by the fix
+        assert result["median_final_balance"] - no_bridge_result["median_final_balance"] == 150000
 
     def test_stress_tests_two_age_reflects_bridge_surplus(self):
-        # Historical stress scenarios apply real (sometimes negative)
-        # market returns, so an absolute floor isn't a valid check here
-        # -- instead compare against an identical household with no
-        # bridge income: every scenario's final balance must be HIGHER
-        # with the bridge surplus credited than without it, by exactly
-        # the $50,000 surplus (0% return years would show this
-        # directly; nonzero-return years compound it, so use >=).
+        # "base" (post_ret every year, no historical override, no
+        # randomness) is fully deterministic -- assert its exact value,
+        # the same hand-computable $550,000 figure as Monte Carlo above,
+        # rather than a floor a broken bridge path could still clear.
         bridge_inputs = base_inputs(retirement_income_today_dollars=100000, retirement_end_age=56,
                                      bridge_income_55=150000, bridge_years_55=1)
         no_bridge_inputs = base_inputs(retirement_income_today_dollars=100000, retirement_end_age=56)
         with_bridge = run_stress_tests(bridge_inputs, TAXABLE(500000), jason_ret_age=55, justin_ret_age=55)
         without_bridge = run_stress_tests(no_bridge_inputs, TAXABLE(500000), jason_ret_age=55, justin_ret_age=55)
+
+        assert with_bridge["scenarios"]["base"]["final_balance"] == 550000
+        assert without_bridge["scenarios"]["base"]["final_balance"] == 400000
+
+        # Every remaining scenario applies real (sometimes negative)
+        # historical returns to the SAME return path in both the
+        # with-bridge and no-bridge runs, so a strict improvement (not
+        # just >=, which a completely-ignored bridge could also satisfy
+        # via equality) is required in each one: extra guaranteed income
+        # that's never withdrawn can only ever help, never hurt or leave
+        # a well-funded household unchanged.
+        strict_improvements = 0
         for name, scenario in with_bridge["scenarios"].items():
-            assert scenario["final_balance"] >= without_bridge["scenarios"][name]["final_balance"]
+            no_bridge_balance = without_bridge["scenarios"][name]["final_balance"]
+            assert scenario["final_balance"] > no_bridge_balance, f"scenario {name!r} did not improve with bridge income"
+            strict_improvements += 1
+        assert strict_improvements == len(with_bridge["scenarios"])
 
     def test_roth_conversion_two_age_with_and_without_conversions_both_credit_surplus(self):
         """_run_roth_conversion_analysis_two_age has TWO call sites
         (with-conversions schedule, no-conversions baseline) -- both
         must credit the same bridge surplus, or the "without
         conversions" comparison would itself be biased by an
-        inconsistency between the two paths."""
+        inconsistency between the two paths. Zero pretax balance forces
+        optimal_conversion to 0 every year (nothing to convert), which
+        isolates the surplus-sweep arithmetic from conversion-tax
+        arithmetic entirely, making taxable_after an EXACT figure."""
         inputs = base_inputs(retirement_income_today_dollars=100000, retirement_end_age=75,
                               bridge_income_55=150000, bridge_years_55=1)
-        accounts = [{"name": "401k", "account_type": "401k", "owner": "jason", "balance": 300000},
-                    {"name": "Brokerage", "account_type": "taxable", "owner": "joint", "balance": 500000}]
+        accounts = [{"name": "Brokerage", "account_type": "taxable", "owner": "joint", "balance": 500000}]
         result = run_roth_conversion_analysis(inputs, accounts, jason_ret_age=55, justin_ret_age=55)
-        assert result["schedule"][0]["taxable_balance"] >= 500000  # with-conversions path credited the surplus (or converted it away, never lost)
-        # pretax_at_rmd_age_no_conversion existing without erroring, and
-        # the schedule not reporting unmet_need in year 0, both indicate
-        # the no-conversion baseline loop didn't silently discard the
-        # bridge surplus either (it would show as a funding shortfall
-        # relative to reality if it had).
+        assert result["schedule"][0]["optimal_conversion"] == 0  # nothing to convert -- pure surplus-sweep math below
+        assert result["schedule"][0]["taxable_after"] == 550000  # 500000 + (150000 bridge - 100000 spending), untaxed like pension
         assert result["schedule"][0]["unmet_need"] == 0
+        assert result["pretax_at_rmd_age_no_conversion"] == 0
 
-    def test_tax_efficiency_two_age_reflects_bridge_surplus(self):
+        no_bridge_inputs = base_inputs(retirement_income_today_dollars=100000, retirement_end_age=75)
+        no_bridge_result = run_roth_conversion_analysis(no_bridge_inputs, accounts, jason_ret_age=55, justin_ret_age=55)
+        assert no_bridge_result["schedule"][0]["taxable_after"] == 400000  # 500000 - 100000, zero-bridge parity
+        assert result["schedule"][0]["taxable_after"] - no_bridge_result["schedule"][0]["taxable_after"] == 150000
+
+    def test_tax_efficiency_two_age_reflects_bridge_surplus(self, monkeypatch):
+        """Same PORT_STD==0 determinism trick as Monte Carlo. With the
+        bridge surplus alone covering spending, no strategy ever needs
+        to draw from any bucket (net_need clamps to 0 after
+        _cash_available_offsets_need's surplus credit), so ALL THREE
+        draw-order policies converge on the identical, exact
+        $550,000 figure and pay zero lifetime tax -- a strategy-specific
+        floor/threshold check couldn't distinguish "bridge correctly
+        swept" from "bridge ignored but happens to still clear the
+        bar," an exact equality with a zero-bridge comparison can."""
+        monkeypatch.setattr(simulation_engine, "PORT_STD", 0.0)
         inputs = base_inputs(retirement_income_today_dollars=100000, retirement_end_age=56,
                               bridge_income_55=150000, bridge_years_55=1)
+        no_bridge_inputs = base_inputs(retirement_income_today_dollars=100000, retirement_end_age=56)
         result = run_tax_efficiency_simulation(inputs, TAXABLE(500000), jason_ret_age=55, justin_ret_age=55)
+        no_bridge_result = run_tax_efficiency_simulation(no_bridge_inputs, TAXABLE(500000), jason_ret_age=55, justin_ret_age=55)
+        # Zero-bridge parity figures differ by strategy: "taxable_first"/
+        # "roth_first" draw the $100,000 need from taxable and gross up
+        # for the flat TAX_TAXABLE rate (500000 - 100000/(1-0.15) =
+        # 382353); "optimal" applies its own capital-gains-aware cost-
+        # basis assumption instead, landing at 399806. Both are legitimate,
+        # PRE-EXISTING per-strategy tax treatments unrelated to bridge
+        # income -- confirmed independently (without this fix, without
+        # PORT_STD patched) so the bridge fix isn't blamed for a
+        # difference that already existed between strategies.
+        no_bridge_expected = {"taxable_first": 382353, "roth_first": 382353, "optimal": 399806}
         for strategy_key in ("taxable_first", "roth_first", "optimal"):
             strategy = result["strategies"][strategy_key]
-            assert strategy["median_final_balance"] >= 500000
+            no_bridge_strategy = no_bridge_result["strategies"][strategy_key]
+            assert strategy["median_final_balance"] == 550000
             assert strategy["success_rate"] == 100.0
+            assert strategy["median_lifetime_tax"] == 0  # surplus swept untaxed, like pension -- no draw needed at all
+            assert no_bridge_strategy["median_final_balance"] == no_bridge_expected[strategy_key]
 
 
 class TestSingleAgeVsTwoAgeBridgeParity:
