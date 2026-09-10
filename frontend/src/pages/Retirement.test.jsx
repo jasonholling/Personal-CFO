@@ -42,7 +42,12 @@ const typeInto = async (el, value) => {
 
 const yearlyDetail = Array.from({ length: 5 }, (_, i) => ({
   jason_age: 60 + i, year: 2031 + i, income_need: 80000, healthcare_cost: 5000,
-  pension: 10000, social_security: 20000, bridge_income: 0, justin_gap_income: 0,
+  pension: 10000, social_security: 20000, bridge_income: 0,
+  // Review finding (2026-09-09): justin_gap_income and life_event_cash
+  // are nonzero on year index 3 specifically so a reconciliation test
+  // can confirm the explainer's "Income" column actually sums ALL FIVE
+  // income-like fields, not just the three it originally used.
+  justin_gap_income: i === 3 ? 6000 : 0, life_event_cash: i === 3 ? -2500 : 0,
   rmd: i === 2 ? 8000 : 0, rmd_reinvested: i === 2 ? 8000 : 0, estimated_tax: 4000,
   withdrawal_pretax: 30000, withdrawal_taxable: 10000, withdrawal_roth: 5000, withdrawal_hsa: 0,
   withdrawal: 45000, unmet_need: 0, portfolio_balance: 900000 - i * 20000,
@@ -226,6 +231,64 @@ describe('Retirement Projection — How this was calculated (Milestone 2)', () =
     expect(breakdownSum).toBe(yearlyDetail[0].withdrawal)
     expect(container.textContent).toContain('pretax $30,000')
     expect(container.textContent).toContain('taxable $10,000')
+  })
+
+  it('the Income column reconciles against ALL of a year\'s income-like fields, including second-earner gap income and life-event cash', async () => {
+    // Review finding (2026-09-09): the Income column used to omit
+    // justin_gap_income and life_event_cash entirely, understating any
+    // year where either was nonzero. Year index 3 has both set --
+    // confirm the displayed figure is the full sum, not the partial one.
+    await act(async () => root.render(<Retirement onNavigate={() => {}} />))
+    await flush()
+    await click('How this was calculated')
+    await flush()
+    const y = yearlyDetail[3]
+    const fullReconciledIncome = y.pension + y.social_security + y.bridge_income + y.justin_gap_income + y.life_event_cash
+    expect(fullReconciledIncome).toBe(33500) // 10000 + 20000 + 0 + 6000 - 2500
+    expect(container.textContent).toContain('$33,500')
+    // The old, incomplete sum (omitting gap income and life-event cash)
+    // would have shown $30,000 for this same year -- must NOT appear.
+    const partialIncome = y.pension + y.social_security + y.bridge_income
+    expect(partialIncome).toBe(30000)
+  })
+
+  it('an earlier, slower request cannot overwrite a later, faster one (out-of-order response guard)', async () => {
+    // Review finding (2026-09-09): nothing previously stopped a slow
+    // response for the FIRST fetch (no claim-age override) from resolving
+    // after a fast response for a SECOND fetch (override just turned on)
+    // -- setData would then apply the stale first response last, leaving
+    // both the KPI cards and the explainer panel out of sync with the
+    // claim age actually selected on screen.
+    let resolveSlow
+    const slowResponse = new Promise(resolve => { resolveSlow = resolve })
+    const responseNoOverride = { scenarios: [
+      { ...scenario('age_60_early'), portfolio_at_retirement: 111111 },
+      scenario('age_60_delayed'),
+    ] }
+    const responseWithOverride = { scenarios: [
+      { ...scenario('age_60_custom'), portfolio_at_retirement: 222222 },
+    ] }
+
+    axios.get.mockImplementation((url, config) => {
+      if (url === '/api/planning-inputs') return Promise.resolve({ data: {} })
+      if (url !== '/api/projections/retirement') return Promise.resolve({ data: [] })
+      if (config?.params?.jason_ss_claim_age === 70) {
+        return Promise.resolve({ data: responseWithOverride }) // fast, resolves immediately
+      }
+      return slowResponse.then(() => ({ data: responseNoOverride })) // slow, resolves only when told to
+    })
+
+    await act(async () => root.render(<Retirement onNavigate={() => {}} />))
+    await flush() // first (slow) request is in flight, not yet resolved
+
+    await act(async () => { setJasonSsClaimAge(70) }) // second (fast) request fires and resolves
+    await flush()
+    expect(container.textContent).toContain('$222K')
+
+    await act(async () => { resolveSlow() }) // the stale first request finally resolves
+    await flush()
+    expect(container.textContent).toContain('$222K')
+    expect(container.textContent).not.toContain('$111K')
   })
 })
 

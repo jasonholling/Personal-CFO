@@ -6054,3 +6054,67 @@ This branch exists for combined review/testing only. Approval to merge
 either Milestone 1 or Milestone 2 into `main` still needs to happen on
 their own branches (or this integration branch, if that's the preferred
 path) — not implied by this section.
+
+## 71. Two review findings: out-of-order response guard, incomplete income column (2026-09-09, brought in from `codex/milestone-1-saved-scenarios` + `codex/milestone-2-explainability`)
+
+Renumbered from 70 (both branches independently used that number,
+same numbering collision described in section 70's own opening note)
+during this integration merge.
+
+Independent review flagged two real defects, fixed here (and identically
+on `codex/milestone-1-saved-scenarios`, since both branches share the
+same `Retirement.jsx` fetch effect and both were independently
+vulnerable):
+
+**Out-of-order response guard.** The page's `/api/projections/retirement`
+fetch had no guard against a slower earlier request resolving after a
+faster later one — rapidly toggling a claim-age slider could leave
+`data` holding a projection computed for a PREVIOUS selection while the
+slider itself showed the CURRENT one, with nothing visibly wrong to
+signal it. On Milestone 1's branch this is consequential, not just a
+visual flash: saving during that window would persist the stale result
+while claiming (via the same `jasonSsClaimAge`/`justinSsClaimAge` state
+the save payload reads) to be the current selection. Fixed with the same
+`genRef` generation-counter guard already established for this exact bug
+class in `StressTestWhatIf.jsx`'s `SurvivorScenarioSection` (section 65)
+— increment a ref on every new request, discard any response whose
+generation doesn't match the current one on arrival.
+
+**Incomplete income column.** `explainerFlows`' `income` field summed
+only `pension + social_security + bridge_income`, omitting
+`justin_gap_income` (second-earner income during the gap phase) and
+`life_event_cash` (a one-time inflow like an asset sale, or a negative
+one-time cost) — both guaranteed-income-like flows the backend itself
+already nets against spending need before any bucket is touched. Any
+year with either nonzero understated total income. Fixed by summing all
+five fields.
+
+**Verified**:
+- New test simulates a slow first request (no override) and a fast
+  second request (override applied) resolving out of order, confirms
+  the fast/current response wins regardless of resolution order — on
+  both this branch and Milestone 1's.
+- New test uses a fixture year with both `justin_gap_income` and a
+  negative `life_event_cash` set, confirms the displayed Income figure
+  is the full 5-field sum ($33,500), not the previous 3-field partial
+  sum ($30,000) — a genuine annual-reconciliation check for the income
+  side specifically, not just the carry-forward/withdrawal-breakdown
+  self-consistency checks sections 68–69 already had.
+- Full frontend suite: 9 files, 51 tests. Backend untouched (both fixes
+  are frontend-only) — sensitive-data check clean.
+
+**No calculation changes** — both fixes are frontend bugs in how
+already-returned data is fetched/summed; nothing in
+`projection_engine.py` changed.
+
+**Still not a full annual reconciliation** (the honest remaining gap):
+these tests confirm the Income column's own arithmetic is complete and
+confirm carry-forward/withdrawal-breakdown identities hold — they do
+NOT prove `income + withdrawal - spending - taxes` nets to the balance
+change shown, since that would require either re-deriving the engine's
+own funding-order logic (risking the "recreate formulas in the
+frontend" this component exists to avoid) or cross-checking against a
+real backend-computed reference case rather than a hand-built fixture.
+Listed as unbuilt, not silently claimed complete.
+
+Branch: `codex/milestone-1-2-integration`.

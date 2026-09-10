@@ -77,12 +77,13 @@ export default function Retirement({ onNavigate }) {
   // resolving AFTER a later, faster one and overwriting it with stale
   // data via setData -- the UI would then show numbers for the CURRENT
   // claim ages while `data` actually held a projection computed for a
-  // PREVIOUS selection. Milestone 1's "Save this scenario" makes this
-  // consequential rather than just a visual flash: saving during that
-  // window would persist the stale result while claiming (via
-  // jasonSsClaimAge/justinSsClaimAge, which the save payload also reads)
-  // to be the current selection. Same genRef guard pattern already
-  // established for exactly this class of bug in StressTestWhatIf.jsx's
+  // PREVIOUS selection: both the KPI cards and the explainer below, plus
+  // Milestone 1's "Save this scenario" (consequential rather than just a
+  // visual flash there -- saving during that window would persist the
+  // stale result while claiming, via the same jasonSsClaimAge/
+  // justinSsClaimAge state the save payload reads, to be the current
+  // selection). Same genRef guard pattern already established for
+  // exactly this bug class in StressTestWhatIf.jsx's
   // SurvivorScenarioSection (CALCULATION_CONTRACT.md section 65).
   const genRef = useRef(0)
   useEffect(() => {
@@ -178,7 +179,17 @@ export default function Retirement({ onNavigate }) {
   const explainerFlows = s.yearly_detail.map((y, i) => ({
     year: y.year, jasonAge: y.jason_age,
     opening: i === 0 ? s.portfolio_at_retirement : s.yearly_detail[i - 1].portfolio_balance,
-    income: y.pension + y.social_security + y.bridge_income,
+    // Review finding (2026-09-09): this used to omit justin_gap_income
+    // (second-earner income during the gap phase) and life_event_cash
+    // (a one-time inflow like an asset sale, or a negative one-time
+    // cost) -- both are guaranteed-income-like flows the backend itself
+    // already nets against spending need BEFORE any bucket is touched
+    // (see run_retirement_projection's own life-event-cash handling,
+    // CALCULATION_CONTRACT.md's withdrawal-waterfall migration note) --
+    // leaving them out understated total income for any year either one
+    // was nonzero, which is most years for a household with either a
+    // working second spouse or a planned asset sale.
+    income: y.pension + y.social_security + y.bridge_income + y.justin_gap_income + y.life_event_cash,
     spending: y.income_need,
     taxes: y.estimated_tax,
     withdrawal: y.withdrawal,
