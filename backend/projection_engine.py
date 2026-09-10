@@ -24,6 +24,15 @@ COLLEGE_COST_INFLATION = 0.04
 COLLEGE_YEARS          = 4
 UNL_CURRENT_ANNUAL     = 0  # fallback only — read from inputs at runtime
 
+# Milestone 1 (saved scenarios, 2026-09-09): a saved scenario needs to say
+# what produced its numbers, not just when it was saved. Bump this string
+# any time a change here, in simulation_engine.py, or annual_engine.py
+# changes what a given set of inputs produces -- a saved scenario whose
+# calculation_version doesn't match the running engine's is stale by
+# definition, independent of whether the household's inputs also changed.
+# Comment-only/refactor changes that don't alter output do NOT need a bump.
+CALCULATION_ENGINE_VERSION = "1"
+
 # 529 contributions are assumed to stop once you hit this age — no more
 # earned income funding them after retirement. Matches the "Retire 60"
 # scenario used as the default assumption elsewhere in the app.

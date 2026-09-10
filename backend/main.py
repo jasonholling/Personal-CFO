@@ -6,7 +6,7 @@ from typing import Optional, List, Dict
 import sqlite3
 import json
 from datetime import datetime
-from projection_engine import run_retirement_projection, run_education_projection
+from projection_engine import run_retirement_projection, run_education_projection, CALCULATION_ENGINE_VERSION
 from task_engine import sync_auto_tasks
 from cfo_briefing_engine import build_cfo_briefing
 from cash_flow_engine import summarize_cash_flow
@@ -223,6 +223,21 @@ class ScenarioSave(BaseModel):
     # 2026-09-07, finding #15). Matches the "early"/"delayed" vocabulary
     # used everywhere else (SS_OPTS in Simulation.jsx, utils/scenario.js).
     ss_timing: str = "early"
+    # Milestone 1 (2026-09-09): optional explicit claim-age overrides, the
+    # same 3-tier concept as everywhere else in the app (CALCULATION_CONTRACT
+    # section 54) — when a caller has one active (e.g. the Retirement page's
+    # useScenario() state), pass it through so the saved scenario's
+    # resolved assumptions match what was actually on screen, not just the
+    # early/delayed pair every scenario always had.
+    jason_ss_claim_age: Optional[int] = None
+    justin_ss_claim_age: Optional[int] = None
+    # Optional — only meaningful for a scenario saved from a stochastic
+    # result (Monte Carlo). Not required for the point-in-time projection
+    # this endpoint runs itself; present so a future Monte Carlo "save this
+    # scenario" call site can pass through what actually produced its
+    # numbers, per Milestone 1's reproducibility requirement.
+    seed: Optional[int] = None
+    trial_count: Optional[int] = None
 
 class LifeEvent(BaseModel):
     name: str
@@ -563,42 +578,142 @@ def save_surplus_allocation(goal: str, allocation: SurplusAllocation):
     conn.close()
     return dict(row)
 
+def _capture_resolved_assumptions(conn, ss_timing, jason_ss_claim_age=None, justin_ss_claim_age=None,
+                                   seed=None, trial_count=None) -> dict:
+    """Milestone 1: 'resolved assumptions actually used by the
+    calculation—not merely visible controls or selected overrides.' A
+    saved scenario needs enough here to be re-run byte-for-byte later, so
+    this captures the full rows a projection actually reads from, not a
+    hand-picked subset that will inevitably drift out of sync with the
+    engine as new inputs get added.
+    """
+    inputs = dict(conn.execute("SELECT * FROM planning_inputs WHERE id=1").fetchone())
+    accounts = [dict(r) for r in conn.execute("SELECT * FROM accounts").fetchall()]
+    kids = [dict(r) for r in conn.execute("SELECT * FROM kids ORDER BY display_order").fetchall()]
+    life_events = _get_active_life_events(conn)
+    surplus_allocations = _get_relevant_surplus_allocations(conn)
+    return {
+        "planning_inputs": inputs,
+        "accounts": accounts,
+        "kids": kids,
+        "life_events": life_events,
+        "surplus_allocations": surplus_allocations,
+        "ss_timing": ss_timing,
+        "jason_ss_claim_age": jason_ss_claim_age,
+        "justin_ss_claim_age": justin_ss_claim_age,
+        "seed": seed,
+        "trial_count": trial_count,
+    }
+
 @app.get("/api/saved-scenarios")
 def get_saved_scenarios():
     conn=get_db(); rows=conn.execute("SELECT * FROM saved_scenarios ORDER BY created_at DESC").fetchall(); conn.close()
     # assumptions_json is nullable (rows saved before finding #15's fix
     # won't have one) — surface it as `assumptions` when present so the
     # frontend can show what actually produced this scenario's numbers.
+    # is_legacy (Milestone 1): true for every row saved before this
+    # migration — those only ever captured retirement_age + ss_timing, so
+    # the frontend must not present them as fully reproducible.
     return [{**dict(r), "summary":json.loads(r["summary_json"]),
-             "assumptions": json.loads(r["assumptions_json"]) if r["assumptions_json"] else None} for r in rows]
+             "assumptions": json.loads(r["assumptions_json"]) if r["assumptions_json"] else None,
+             "is_legacy": bool(r["is_legacy"])} for r in rows]
+
+@app.get("/api/saved-scenarios/{scenario_id}")
+def get_saved_scenario(scenario_id: int):
+    conn=get_db(); row=conn.execute("SELECT * FROM saved_scenarios WHERE id=?", (scenario_id,)).fetchone(); conn.close()
+    if not row: raise HTTPException(status_code=404, detail="Saved scenario not found")
+    return {**dict(row), "summary":json.loads(row["summary_json"]),
+            "assumptions": json.loads(row["assumptions_json"]) if row["assumptions_json"] else None,
+            "is_legacy": bool(row["is_legacy"])}
 
 @app.post("/api/saved-scenarios")
 def save_scenario(body: ScenarioSave):
     if not body.name.strip() or body.retirement_age < 50 or body.retirement_age > 75: raise HTTPException(status_code=400,detail="Enter a name and retirement age from 50 to 75")
     if body.ss_timing not in ("early","delayed"): raise HTTPException(status_code=400,detail="ss_timing must be 'early' or 'delayed'")
-    conn=get_db(); inputs=conn.execute("SELECT * FROM planning_inputs WHERE id=1").fetchone(); accounts=[dict(r) for r in conn.execute("SELECT * FROM accounts").fetchall()]
-    if not inputs: conn.close(); raise HTTPException(status_code=400,detail="Planning inputs not set")
-    life_events=_get_active_life_events(conn)
-    surplus_allocations=_get_relevant_surplus_allocations(conn)
+    conn=get_db()
+    # Milestone 1: a plain save used to overwrite any existing row with the
+    # same name (ON CONFLICT DO UPDATE), silently destroying whatever had
+    # been saved there before. A saved scenario is now insert-only — saving
+    # under a name that's already taken is rejected so the user picks a
+    # distinct name; recalculating an existing scenario against current
+    # data goes through POST /api/saved-scenarios/{id}/recalculate instead,
+    # which explicitly creates a new revision and never touches the original.
+    existing = conn.execute("SELECT id FROM saved_scenarios WHERE name=?", (body.name.strip(),)).fetchone()
+    if existing:
+        conn.close()
+        raise HTTPException(status_code=409, detail="A saved scenario with this name already exists. Choose a different name, or use Recalculate on the existing one.")
+    assumptions = _capture_resolved_assumptions(conn, body.ss_timing, body.jason_ss_claim_age, body.justin_ss_claim_age, body.seed, body.trial_count)
+    if not assumptions["planning_inputs"]: conn.close(); raise HTTPException(status_code=400,detail="Planning inputs not set")
     # Used to hardcode "early" here regardless of body.ss_timing, so a
     # scenario saved while "SS at 67" was selected everywhere else in the
     # app was silently projected as if early claiming had been chosen
     # instead (external audit 2026-09-07, finding #15).
-    # This endpoint's own contract requires a binary early/delayed choice
-    # (validated above). run_retirement_projection only applies a
-    # continuous claim age when jason_ss_claim_age/justin_ss_claim_age
-    # are passed as explicit keyword args (CALCULATION_CONTRACT.md
-    # section 44, ninth follow-up review) -- since this call site never
-    # passes them, it always gets the normal early+delayed pair
-    # regardless of what a household has saved in Settings, so no
-    # stripping of the inputs row is needed.
-    result=run_retirement_projection(dict(inputs),accounts,ret_ages=[body.retirement_age],life_events=life_events,surplus_allocations=surplus_allocations); scenario=next((s for s in result["scenarios"] if s["ss_timing"]==body.ss_timing),None)
+    # run_retirement_projection only applies a continuous claim age when
+    # jason_ss_claim_age/justin_ss_claim_age are passed as explicit keyword
+    # args (CALCULATION_CONTRACT.md section 44, ninth follow-up review) —
+    # pass through whatever override was active when the user hit Save, so
+    # the saved numbers match what was actually on screen.
+    result=run_retirement_projection(assumptions["planning_inputs"],assumptions["accounts"],ret_ages=[body.retirement_age],
+                                      life_events=assumptions["life_events"],surplus_allocations=assumptions["surplus_allocations"],
+                                      jason_ss_claim_age=body.jason_ss_claim_age,justin_ss_claim_age=body.justin_ss_claim_age)
+    # A jason_ss_claim_age override collapses run_retirement_projection's
+    # scenario set down to a single "custom"-labeled entry instead of the
+    # usual early/delayed pair (see the jason_ss_options branch in
+    # projection_engine.py) — look that up instead of body.ss_timing
+    # whenever an override is active, or this always returns None.
+    wanted_label = "custom" if body.jason_ss_claim_age is not None else body.ss_timing
+    scenario=next((s for s in result["scenarios"] if s["ss_timing"]==wanted_label),None)
     summary={k:scenario[k] for k in ("retirement_age","percent_funded","portfolio_at_retirement","projected_surplus","on_track")}
-    # assumptions_json only snapshots retirement_age + ss_timing — see the
-    # comment on init_saved_scenarios_table() in db.py for why What-If
-    # Builder overrides aren't captured here too.
-    assumptions=json.dumps({"retirement_age":body.retirement_age,"ss_timing":body.ss_timing})
-    conn.execute("INSERT INTO saved_scenarios (name,retirement_age,ss_timing,summary_json,assumptions_json) VALUES (?,?,?,?,?) ON CONFLICT(name) DO UPDATE SET retirement_age=excluded.retirement_age,ss_timing=excluded.ss_timing,summary_json=excluded.summary_json,assumptions_json=excluded.assumptions_json,created_at=datetime('now')",(body.name.strip(),body.retirement_age,body.ss_timing,json.dumps(summary),assumptions));conn.commit();conn.close();return summary
+    cur = conn.execute(
+        "INSERT INTO saved_scenarios (name,retirement_age,ss_timing,summary_json,assumptions_json,schema_version,calculation_version,seed,trial_count,revision_of,revision_number,is_legacy) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+        (body.name.strip(),body.retirement_age,body.ss_timing,json.dumps(summary),json.dumps(assumptions),
+         2,CALCULATION_ENGINE_VERSION,body.seed,body.trial_count,None,1,0))
+    conn.commit(); new_id = cur.lastrowid; conn.close()
+    return {**summary, "id": new_id}
+
+@app.post("/api/saved-scenarios/{scenario_id}/recalculate")
+def recalculate_saved_scenario(scenario_id: int):
+    """Milestone 1: 'an explicit Recalculate with current data action that
+    creates a new revision and preserves the original.' Re-runs the exact
+    same retirement_age/ss_timing/claim-age choices the original scenario
+    used, but against whatever planning_inputs/accounts/kids/life_events/
+    surplus_allocations are current right now — then inserts a NEW row
+    linked back to the original via revision_of. The original row is never
+    modified, so it stays exactly what it always was: the plan as it stood
+    when it was first saved.
+    """
+    conn=get_db(); original=conn.execute("SELECT * FROM saved_scenarios WHERE id=?", (scenario_id,)).fetchone()
+    if not original: conn.close(); raise HTTPException(status_code=404, detail="Saved scenario not found")
+    old_assumptions = json.loads(original["assumptions_json"]) if original["assumptions_json"] else {}
+    jason_claim = old_assumptions.get("jason_ss_claim_age")
+    justin_claim = old_assumptions.get("justin_ss_claim_age")
+    seed = old_assumptions.get("seed")
+    trial_count = old_assumptions.get("trial_count")
+    assumptions = _capture_resolved_assumptions(conn, original["ss_timing"], jason_claim, justin_claim, seed, trial_count)
+    if not assumptions["planning_inputs"]: conn.close(); raise HTTPException(status_code=400,detail="Planning inputs not set")
+    result=run_retirement_projection(assumptions["planning_inputs"],assumptions["accounts"],ret_ages=[original["retirement_age"]],
+                                      life_events=assumptions["life_events"],surplus_allocations=assumptions["surplus_allocations"],
+                                      jason_ss_claim_age=jason_claim,justin_ss_claim_age=justin_claim)
+    wanted_label = "custom" if jason_claim is not None else original["ss_timing"]
+    scenario=next((s for s in result["scenarios"] if s["ss_timing"]==wanted_label),None)
+    summary={k:scenario[k] for k in ("retirement_age","percent_funded","portfolio_at_retirement","projected_surplus","on_track")}
+    # Lineage root: if the original itself was already a revision, link the
+    # new row to THAT chain's root (original["revision_of"]), not to the
+    # immediate parent — keeps every revision of a scenario grouped under
+    # one root no matter how many times it's been recalculated.
+    root_id = original["revision_of"] if original["revision_of"] else original["id"]
+    latest_revision = conn.execute(
+        "SELECT MAX(revision_number) AS n FROM saved_scenarios WHERE id=? OR revision_of=?", (root_id, root_id)
+    ).fetchone()["n"] or 1
+    new_name = f"{original['name']} (recalculated, rev {latest_revision + 1})"
+    cur = conn.execute(
+        "INSERT INTO saved_scenarios (name,retirement_age,ss_timing,summary_json,assumptions_json,schema_version,calculation_version,seed,trial_count,revision_of,revision_number,is_legacy) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+        (new_name,original["retirement_age"],original["ss_timing"],json.dumps(summary),json.dumps(assumptions),
+         2,CALCULATION_ENGINE_VERSION,seed,trial_count,root_id,latest_revision + 1,0))
+    conn.commit(); new_id = cur.lastrowid; conn.close()
+    return {**summary, "id": new_id, "revision_of": root_id, "revision_number": latest_revision + 1}
 
 @app.get("/api/plan-confidence")
 def get_plan_confidence():

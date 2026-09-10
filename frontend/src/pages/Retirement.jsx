@@ -43,6 +43,15 @@ export default function Retirement({ onNavigate }) {
   const [data, setData]         = useState(null)
   const [loading, setLoading]   = useState(true)
   const [error, setError]       = useState(null)
+  // Milestone 1 (2026-09-09): "Add 'Save this scenario' to the relevant
+  // planning results so users save the result they are viewing." This is
+  // the primary retirement-projection result -- the save payload below
+  // carries whatever claim-age override is actually active on screen
+  // right now, same values the KPI cards below are computed from, not a
+  // separate hand-entered copy of them.
+  const [saveName, setSaveName]     = useState('')
+  const [saveStatus, setSaveStatus] = useState('idle') // idle | saving | error
+  const [saveMessage, setSaveMessage] = useState(null)
   const {
     retAge: sharedRetAge, ssTiming, setRetAge, setSsTiming,
     jasonSsClaimAge, justinSsClaimAge, setJasonSsClaimAge, setJustinSsClaimAge,
@@ -114,6 +123,21 @@ export default function Retirement({ onNavigate }) {
   const lastYear = s.yearly_detail.findIndex(y => y.portfolio_balance === 0)
   const portfolioLasts = lastYear === -1 ? `Beyond age ${s.retirement_end_age}` : `Until ${person1Name} age ${s.yearly_detail[lastYear]?.jason_age}`
 
+  const saveThisScenario = async () => {
+    if (!saveName.trim()) return
+    setSaveStatus('saving'); setSaveMessage(null)
+    try {
+      await axios.post('/api/saved-scenarios', {
+        name: saveName.trim(), retirement_age: retAge, ss_timing: ssTiming,
+        jason_ss_claim_age: jasonSsClaimAge, justin_ss_claim_age: justinSsClaimAge,
+      })
+      setSaveStatus('idle'); setSaveName(''); setSaveMessage({ ok: true, text: 'Saved.' })
+    } catch (e) {
+      setSaveStatus('error')
+      setSaveMessage({ ok: false, text: e.response?.data?.detail || 'Could not save this scenario.' })
+    }
+  }
+
   return (
     <div>
       <div style={{ marginBottom:28 }}>
@@ -121,6 +145,23 @@ export default function Retirement({ onNavigate }) {
       </div>
 
       <ActiveScenarioBanner />
+
+      <div className="card" style={{ marginBottom:24, display:'flex', gap:10, alignItems:'center', flexWrap:'wrap' }}>
+        <span className="label" style={{ marginRight:4 }}>Save this scenario</span>
+        <input
+          value={saveName} onChange={e => setSaveName(e.target.value)}
+          placeholder="e.g. Retire at 62 with delayed SS" style={{ minWidth:240 }}
+        />
+        <button className="btn-secondary" disabled={saveStatus === 'saving'} onClick={saveThisScenario}>
+          {saveStatus === 'saving' ? 'Saving…' : 'Save this scenario'}
+        </button>
+        {saveMessage && (
+          <span style={{ fontSize:12, color: saveMessage.ok ? 'var(--green)' : 'var(--amber)' }}>{saveMessage.text}</span>
+        )}
+        <span style={{ fontSize:11, color:'var(--text3)', marginLeft:'auto' }}>
+          Captures retire-at-{retAge} · SS {ssTiming}{jasonSsClaimAge != null ? ` · ${person1Name} claims at ${jasonSsClaimAge}` : ''}{justinSsClaimAge != null ? ` · ${person2Name} claims at ${justinSsClaimAge}` : ''} exactly as shown below
+        </span>
+      </div>
 
       {/* Scenario selector */}
       <div style={{ display:'flex', gap:24, marginBottom:24, alignItems:'flex-start', flexWrap:'wrap' }}>

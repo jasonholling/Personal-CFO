@@ -5679,3 +5679,123 @@ unsaved-changes navigation, keyboard operation, actual browser
 behavior).
 
 Branch: `codex/milestone-3-navigation`, pushed, not merged.
+
+## 66. Milestone 3 closeout + Milestone 1, first slice: reproducible saved scenarios (2026-09-09, on `codex/milestone-1-saved-scenarios`)
+
+**Milestone 3 closeout.** The Chrome-connection gap noted at the end of
+section 65 closed once the browser extension reconnected: keyboard
+operability was verified live — Tab reaches the claim-age `<summary>`
+(visible focus ring), `Enter` expands it, `Tab`+`Space` operates the
+checkbox inside and reveals the slider, all native with no custom JS.
+Two-earner/unequal-age/0-5-children journeys were re-scoped rather than
+live-walked against the real household: the brief requires preserving
+real data and using synthetic fixtures for those variations, and the
+real household here is single-earner with 2 kids — not a stand-in for
+either case. Verified instead by code inspection that none of the three
+new/changed components (`ActiveScenarioBanner`, `Compare`, the `<details>`
+wrappers) branch on earner count or kids count at all, so household-shape
+variation is exercised by the underlying pages' own pre-existing coverage,
+unchanged by this milestone. Failed-request handling verified by code
+(`ActiveScenarioBanner`'s fetch has a silent `.catch(() => {})`, no crash)
+rather than by killing the live backend against real data. Backend
+1386 passed at 97.19% coverage, frontend 41 passed, sensitive-data check
+clean — all against the actual merge commit. **Merged to `main` at
+`a75258d`** after explicit user approval ("merge").
+
+**Milestone 1** ("Complete, reproducible saved scenarios") starts here.
+Prior state: `POST /api/saved-scenarios` only ever captured
+`retirement_age` + `ss_timing` into `assumptions_json`, and re-saving
+under an existing name silently overwrote the row (`INSERT ... ON
+CONFLICT(name) DO UPDATE`) — exactly the "changing something can
+silently change a saved snapshot" failure mode Milestone 1's acceptance
+criteria rule out, just self-inflicted at save time instead of by a
+later Settings edit.
+
+Changes:
+- `CALCULATION_ENGINE_VERSION` constant added to `projection_engine.py`
+  — bump it whenever a change to `projection_engine.py`/
+  `simulation_engine.py`/`annual_engine.py` changes what a given set of
+  inputs produces, independent of whether the household's own inputs
+  also changed. Stored on every new saved scenario as
+  `calculation_version`.
+- `saved_scenarios` schema gains `schema_version`, `calculation_version`,
+  `seed`, `trial_count`, `revision_of`, `revision_number`, `is_legacy`
+  (ALTER TABLE ADD COLUMN, same idiom as every prior migration in
+  `db.py`). Existing rows get `schema_version=1`/`is_legacy=1` via
+  column DEFAULT — they aren't retroactively given assumptions that were
+  never captured; the migration only labels what's already true of them.
+- `_capture_resolved_assumptions()`: a saved scenario's `assumptions_json`
+  now holds the actual `planning_inputs` row, `accounts`, `kids`,
+  `life_events`, and `surplus_allocations` used by the projection — not a
+  hand-picked subset that drifts out of sync as new inputs get added —
+  plus `ss_timing`, both claim-age overrides, and optional `seed`/
+  `trial_count` for a future stochastic (Monte Carlo) save.
+- `POST /api/saved-scenarios` is now insert-only: saving over an existing
+  name 409s ("choose a different name, or use Recalculate") instead of
+  overwriting. Added `jason_ss_claim_age`/`justin_ss_claim_age` to
+  `ScenarioSave` so a scenario saved with a claim-age override in effect
+  is actually reproducible — required fixing the scenario-lookup itself
+  too, since a `jason_ss_claim_age` override collapses
+  `run_retirement_projection`'s scenario set to a single `"custom"`-labeled
+  entry instead of the early/delayed pair (see `jason_ss_options` in
+  `projection_engine.py`); looking up `body.ss_timing` directly against
+  that set returns nothing and 500s — caught by a new test before it
+  shipped, fixed by checking for the override first.
+- `POST /api/saved-scenarios/{id}/recalculate` (new): re-runs the
+  original's exact retirement age / SS choice against *current*
+  household data, inserts a new row linked via `revision_of` (pointing at
+  the lineage root, so recalculating a revision doesn't create a new
+  chain), and never modifies the original row. Verified by test that the
+  original's own `summary_json` is byte-identical after a recalculation
+  that used genuinely different account balances.
+- `GET /api/saved-scenarios/{id}` (new): single-scenario fetch, 404 on
+  missing id — used by the reopen/recalculate flow.
+- Frontend `SavedScenarios.jsx` rewritten (was a single minified line):
+  inline 409 error surfaced instead of silently failing, a `LEGACY` badge
+  on pre-migration rows, a "Recalculate with current data" button per
+  scenario, and a lightweight two-scenario compare panel (checkbox-select
+  two → outcome diff + differing `planning_inputs` fields) satisfying
+  "support comparison of saved scenarios" without a full diff framework.
+- `Retirement.jsx` gains a "Save this scenario" card right under
+  `ActiveScenarioBanner` — the one page whose result this milestone wires
+  up first, since it's already the same `run_retirement_projection` call
+  the save endpoint itself makes. Posts exactly the claim-age overrides
+  currently active on screen, not a separate hand-entered copy.
+
+**Verified**: 13 new/rewritten backend tests (insert-only 409, legacy
+flagging via a hand-inserted pre-migration row, revision creation +
+lineage linkage, recalculation reflecting changed account data while the
+original stays untouched, single-scenario 404, claim-age override
+capture) — all passing alongside the full existing suite. Frontend: 5 new
+`SavedScenarios.test.jsx` tests (legacy badge exclusivity, save payload,
+409 surfaced inline, Recalculate posts to the right endpoint and reloads,
+compare panel renders both outcome and assumption diffs) + 3 new
+`Retirement.test.jsx` tests (save payload matches on-screen assumptions,
+409 surfaced, no request sent with an empty name) — full frontend suite
+green (9 files, 49 tests). Full backend suite run separately against this
+branch (see completion report for the count).
+
+**No calculation changes** — `run_retirement_projection` itself is
+untouched; only what gets captured/stored around it changed.
+
+**Explicitly out of scope for this slice** (left for a follow-up slice or
+noted as a known limitation, not silently dropped):
+- "Save this scenario" was added to the Retirement Projection *overview*
+  result only — Monte Carlo, Roth Conversion, and the other "major
+  results" Milestone 2 will also cover don't have it yet.
+- The `seed`/`trial_count` fields exist on the schema and in
+  `ScenarioSave`/`_capture_resolved_assumptions`, but nothing currently
+  saved is a stochastic (Monte Carlo) result, so they're written as
+  `null` on every save so far — wiring a Monte Carlo "save this scenario"
+  call site through them is unbuilt.
+- Comparison is two-scenario-at-a-time via checkboxes, not an N-way
+  comparison view.
+- Backup/restore was not given a dedicated new test for the added
+  columns — `_BACKUP_TABLES` dumps/restores `saved_scenarios` generically
+  by `SELECT *`/dict, so the existing backup/restore tests already
+  exercise the new columns incidentally, but no test asserts on them
+  specifically.
+
+Branch: `codex/milestone-1-saved-scenarios`, branched from `main` at
+`a75258d` (post-Milestone-3-merge). Not yet pushed — pending the full
+backend suite run against this commit.
