@@ -127,33 +127,40 @@ export default function Retirement({ onNavigate }) {
   const lastYear = s.yearly_detail.findIndex(y => y.portfolio_balance === 0)
   const portfolioLasts = lastYear === -1 ? `Beyond age ${s.retirement_end_age}` : `Until ${person1Name} age ${s.yearly_detail[lastYear]?.jason_age}`
 
-  // Milestone 2 acceptance follow-up (2026-09-10): "distinguish gross
-  // household spending from income offsets and remaining portfolio
-  // need... do not count an income offset both as income and as a
-  // reduction in displayed spending." The previous version added
+  // Milestone 2 acceptance follow-up (2026-09-10, corrected same-day per
+  // review finding P2): "distinguish gross household spending from
+  // income offsets and remaining portfolio need... do not count an
+  // income offset both as income and as a reduction in displayed
+  // spending." Two rounds of this bug: the ORIGINAL version added
   // bridge_income/justin_gap_income into "income" while ALSO displaying
-  // `income_need` (already net of those same two, plus
-  // life_event_monthly_adjustment, per run_retirement_projection's own
-  // subtraction — see projection_engine.py) as "spending", double-
-  // counting both. Now sourced from three backend fields added
-  // specifically to make this distinction possible without re-deriving
-  // it here: gross_spending_need (the target BEFORE the two generic
-  // offsets below — bridge income, ret_age==55 only, is already
-  // correctly netted into it by the backend's own branch logic,
-  // including its max(0, ...) clamp, and is intentionally NOT re-added
-  // here), incomeOffsets (every guaranteed/gap/one-time source that
-  // reduces what's left to fund), and remaining_portfolio_need (what's
-  // actually left after every offset — verified by
-  // TestAnnualReconciliationAgainstRealBackendOutput to equal
-  // grossSpending - incomeOffsets exactly, using real backend output,
-  // not a fixture assumption). `growth` and `transfers` are likewise new
-  // fields sourced directly from the engine's own per-year ledger
-  // (annual_engine.AnnualResult) rather than left undisclosed.
+  // `income_need` (already net of both) as "spending" -- double-
+  // counting. The FIRST fix stopped double-counting justin_gap_income
+  // but excluded bridge_income from "income" entirely on the theory it
+  // was already correctly part of "gross spending" -- it wasn't:
+  // gross_spending_need for a bridge-active year was ALSO net of bridge
+  // income (the backend captured it post-subtraction), so bridge income
+  // was counted NOWHERE -- a $100,000 target with $35,000 bridge income
+  // showed gross spending of $65,000, not $100,000, hiding the $35,000
+  // and understating actual spending even though the portfolio
+  // withdrawal itself was correct. Fixed at the source
+  // (projection_engine.py now captures gross_spending_need BEFORE the
+  // bridge subtraction, not reconstructed here by adding bridge income
+  // back after the fact -- that reconstruction would itself be wrong
+  // whenever bridge income exceeds the target, since year_need is
+  // floored at 0 by the backend's own max(0, ...) clamp before this
+  // page ever sees it). bridge_income now belongs in incomeOffsets,
+  // alongside every other guaranteed/gap/one-time source that reduces
+  // what's left to fund — verified against real backend output by
+  // TestAnnualReconciliationAgainstRealBackendOutput's new $100,000/
+  // $35,000/$65,000 reference case (bridge income, no other flows).
+  // `growth` and `transfers` are likewise sourced directly from the
+  // engine's own per-year ledger (annual_engine.AnnualResult) rather
+  // than left undisclosed.
   const explainerFlows = s.yearly_detail.map((y, i) => ({
     year: y.year, jasonAge: y.jason_age,
     opening: i === 0 ? s.portfolio_at_retirement : s.yearly_detail[i - 1].portfolio_balance,
     grossSpending: y.gross_spending_need,
-    incomeOffsets: y.pension + y.social_security + y.justin_gap_income + y.life_event_cash + y.life_event_monthly_adjustment,
+    incomeOffsets: y.pension + y.social_security + y.bridge_income + y.justin_gap_income + y.life_event_cash + y.life_event_monthly_adjustment,
     remainingNeed: y.remaining_portfolio_need,
     taxes: y.estimated_tax,
     withdrawal: y.withdrawal,

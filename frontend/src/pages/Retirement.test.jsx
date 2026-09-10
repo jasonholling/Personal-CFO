@@ -39,14 +39,20 @@ const click = async text => {
 const yearlyDetail = Array.from({ length: 5 }, (_, i) => ({
   jason_age: 60 + i, year: 2031 + i, healthcare_cost: 5000,
   gross_spending_need: 80000,
-  pension: 10000, social_security: 20000, bridge_income: 0,
+  pension: 10000, social_security: 20000,
+  // bridge_income is nonzero on year index 4 specifically (review
+  // finding P2, 2026-09-10): gross_spending_need is captured BEFORE the
+  // bridge subtraction now, so bridge income is a real offset like
+  // every other one -- confirms the frontend wiring includes it, not
+  // just the backend field's own value.
+  bridge_income: i === 4 ? 35000 : 0,
   // justin_gap_income and life_event_cash are nonzero on year index 3
   // specifically so a reconciliation test can confirm the offsets are
   // counted exactly once (in "Income offsets"), not also silently baked
   // into a lower "Gross spending" or double-subtracted from need.
   justin_gap_income: i === 3 ? 6000 : 0, life_event_cash: i === 3 ? -2500 : 0,
   life_event_monthly_adjustment: 0,
-  remaining_portfolio_need: i === 3 ? 46500 : 50000,
+  remaining_portfolio_need: i === 4 ? 15000 : (i === 3 ? 46500 : 50000),
   rmd: i === 2 ? 8000 : 0, rmd_reinvested: i === 2 ? 8000 : 0, estimated_tax: 4000,
   withdrawal_pretax: 30000, withdrawal_taxable: 10000, withdrawal_roth: 5000, withdrawal_hsa: 0,
   withdrawal: 45000, growth: 42000 - i * 1000, unmet_need: 0, portfolio_balance: 900000 - i * 20000,
@@ -139,8 +145,8 @@ describe('Retirement Projection — How this was calculated (Milestone 2)', () =
     await click('How this was calculated')
     await flush()
     const y = yearlyDetail[3]
-    const incomeOffsets = y.pension + y.social_security + y.justin_gap_income + y.life_event_cash + y.life_event_monthly_adjustment
-    expect(incomeOffsets).toBe(33500) // 10000 + 20000 + 6000 - 2500 + 0
+    const incomeOffsets = y.pension + y.social_security + y.bridge_income + y.justin_gap_income + y.life_event_cash + y.life_event_monthly_adjustment
+    expect(incomeOffsets).toBe(33500) // 10000 + 20000 + 0 + 6000 - 2500 + 0
     expect(y.gross_spending_need - incomeOffsets).toBe(y.remaining_portfolio_need) // 80000 - 33500 = 46500
     expect(container.textContent).toContain('$33,500')
     expect(container.textContent).toContain('$46,500')
@@ -150,6 +156,28 @@ describe('Retirement Projection — How this was calculated (Milestone 2)', () =
     // in the dollar-basis line above the table (income_first_year), so
     // the count is at least one-per-row, not exactly one-per-row.
     expect(container.textContent.match(/\$80,000/g).length).toBeGreaterThanOrEqual(yearlyDetail.length)
+  })
+
+  it('bridge income counts as an income offset, not silently excluded from gross spending', async () => {
+    // Review finding P2 (2026-09-10): the first fix stopped double-
+    // counting justin_gap_income but left bridge_income out of BOTH
+    // "gross spending" (captured post-subtraction on the backend) and
+    // "income offsets" -- a $100,000 target with $35,000 bridge income
+    // showed $65,000 gross spending, hiding the bridge income entirely.
+    // Year index 4 exercises this: gross spending stays $80,000 (never
+    // reduced by bridge), bridge income appears as a $65,000 offset
+    // total (pension + SS + bridge = 10000+20000+35000), remaining need
+    // is $15,000.
+    await act(async () => root.render(<Retirement onNavigate={() => {}} />))
+    await flush()
+    await click('How this was calculated')
+    await flush()
+    const y = yearlyDetail[4]
+    const incomeOffsets = y.pension + y.social_security + y.bridge_income + y.justin_gap_income + y.life_event_cash + y.life_event_monthly_adjustment
+    expect(incomeOffsets).toBe(65000)
+    expect(y.gross_spending_need - incomeOffsets).toBe(y.remaining_portfolio_need) // 80000 - 65000 = 15000
+    expect(container.textContent).toContain('$65,000')
+    expect(container.textContent).toContain('$15,000')
   })
 
   it('an earlier, slower request cannot overwrite a later, faster one (out-of-order response guard)', async () => {

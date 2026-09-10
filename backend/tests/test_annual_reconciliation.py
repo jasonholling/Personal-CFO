@@ -161,12 +161,16 @@ class TestAnnualReconciliationAgainstRealBackendOutput:
 
     def test_gross_spending_minus_income_offsets_equals_remaining_portfolio_need(self, monkeypatch):
         """The specific double-counting the review flagged: an income
-        offset (justin_gap_income, life_event_monthly_adjustment,
-        pension, social_security, life_event_cash) must reduce
-        remaining_portfolio_need by exactly its own value relative to
-        gross_spending_need -- not be countable as both income AND
-        already-baked into a lower displayed spending figure with no
-        accounting for where it went."""
+        offset (bridge income, justin_gap_income,
+        life_event_monthly_adjustment, pension, social_security,
+        life_event_cash) must reduce remaining_portfolio_need by exactly
+        its own value relative to gross_spending_need -- not be
+        countable as both income AND already-baked into a lower
+        displayed spending figure with no accounting for where it went.
+        bridge_income is included here (review finding P2, 2026-09-10):
+        gross_spending_need is now captured BEFORE the bridge
+        subtraction, so bridge income is a real offset like every other
+        one, not already-invisible inside a lower "gross" figure."""
         result, _ = _run_with_spy(
             monkeypatch, dict(BASE_INPUTS), [dict(a) for a in BASE_ACCOUNTS],
             ret_ages=[55], life_events=RICH_LIFE_EVENTS,
@@ -174,7 +178,7 @@ class TestAnnualReconciliationAgainstRealBackendOutput:
         yearly = next(s for s in result["scenarios"] if s["ss_timing"] == "early")["yearly_detail"]
         checked_a_nonzero_offset_year = False
         for y in yearly:
-            income_offsets = (y["life_event_monthly_adjustment"] + y["justin_gap_income"]
+            income_offsets = (y["life_event_monthly_adjustment"] + y["justin_gap_income"] + y["bridge_income"]
                                + y["pension"] + y["social_security"] + y["life_event_cash"])
             reconstructed = y["gross_spending_need"] - income_offsets
             # Each field independently rounded to the nearest dollar, so
@@ -214,3 +218,49 @@ class TestAnnualReconciliationAgainstRealBackendOutput:
 
         discrepancies = [(y["jason_age"], r.reconcile()) for y, r in zip(yearly, captured) if r.reconcile() is not None]
         assert discrepancies == [], f"Ledger did not reconcile during/after depletion: {discrepancies}"
+
+    def test_bridge_income_reference_case_matches_independent_reproduction(self, monkeypatch):
+        """Review finding P2 (2026-09-10): an exact, independently
+        reproduced household -- $100,000 annual spending, $35,000 bridge
+        income, no other income/taxes/growth -- exists specifically
+        because the earlier version of gross_spending_need silently
+        excluded bridge income from "gross spending" for bridge-active
+        years (it captured the value AFTER bridge was already subtracted).
+        The portfolio withdrawal was already correct; only the
+        explanation was wrong. Locks in the exact numbers from that
+        reproduction so this can't regress silently."""
+        bridge_inputs = {
+            **BASE_INPUTS,
+            "jason_age": 55, "justin_age": 55,  # already at ret_age -> no pre-retirement growth/inflation to account for
+            "retirement_income_today_dollars": 100000,
+            "bridge_income_55": 35000, "bridge_years_55": 1, "kids_years_at_home_55": 0, "kids_annual_cost": 0,
+            "inflation_rate": 0, "expected_return_pre_retirement": 0, "expected_return_post_retirement": 0,
+            "state_income_tax_rate": 0,
+            "pension_55": 0, "pension_60": 0, "pension_65": 0,
+            "jason_social_security": 0, "jason_ss_delayed": 0, "justin_social_security": 0,
+            "justin_w2_salary": 0, "justin_ret_age": 0,
+            "healthcare_pre_medicare": 0, "healthcare_post_medicare": 0,
+        }
+        bridge_accounts = [
+            {"id": 1, "name": "Brokerage", "account_type": "taxable", "owner": "joint", "balance": 500000},
+        ]
+        result, captured = _run_with_spy(
+            monkeypatch, bridge_inputs, bridge_accounts, ret_ages=[55], life_events=[],
+        )
+        yearly = next(s for s in result["scenarios"] if s["ss_timing"] == "early")["yearly_detail"]
+        y0 = yearly[0]
+
+        assert y0["gross_spending_need"] == 100000
+        income_offsets = (y0["pension"] + y0["social_security"] + y0["bridge_income"]
+                           + y0["justin_gap_income"] + y0["life_event_cash"] + y0["life_event_monthly_adjustment"])
+        assert income_offsets == 35000
+        assert y0["remaining_portfolio_need"] == 65000
+        assert y0["gross_spending_need"] - income_offsets == y0["remaining_portfolio_need"]
+        # The portfolio draw itself was never wrong -- only the
+        # explanation of it. Taxable-only draws are untaxed in this
+        # model (CALCULATION_CONTRACT.md 3.1), so withdrawal == remaining
+        # need exactly with no growth/tax in play.
+        assert y0["withdrawal"] == 65000
+        assert y0["estimated_tax"] == 0
+        assert y0["growth"] == 0
+        assert captured[0].reconcile() is None

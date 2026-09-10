@@ -1126,6 +1126,7 @@ def run_retirement_projection(inputs: Dict, accounts: List[Dict], ret_ages: List
                 justin_age_this_year = income.justin_age
 
                 # Income need this year (includes healthcare, phased for age 55)
+                bridge_this_year = 0
                 if ret_age == 55:
                     kids_still_home = yr < kids_years
                     bridge_active   = yr < bridge_years
@@ -1134,7 +1135,19 @@ def run_retirement_projection(inputs: Dict, accounts: List[Dict], ret_ages: List
                         healthcare_this_year = 0
                         kids_cost = kids_annual_cost_at_ret * ((1 + inflation) ** yr)
                         bridge    = bridge_income_at_ret    * ((1 + inflation) ** yr)
-                        year_need = max(0, income_at_ret * ((1 + inflation) ** yr) + kids_cost - bridge)
+                        bridge_this_year = bridge
+                        # Milestone 2 reconciliation follow-up (2026-09-10,
+                        # review finding P2): gross_target is the
+                        # household's real spending target BEFORE bridge
+                        # income offsets it -- captured here, at the
+                        # source, rather than reconstructed later by
+                        # adding bridge_income back into the clamped
+                        # year_need, which silently produces the wrong
+                        # answer whenever bridge income exceeds the
+                        # target (max(0, ...) below would have already
+                        # floored the value being added back to).
+                        gross_target = income_at_ret * ((1 + inflation) ** yr) + kids_cost
+                        year_need = max(0, gross_target - bridge)
                     elif kids_still_home and age < 65:
                         # Phase 2: retired, kids home, family healthcare
                         healthcare_this_year = healthcare_kids_at_ret
@@ -1153,22 +1166,28 @@ def run_retirement_projection(inputs: Dict, accounts: List[Dict], ret_ages: List
                     healthcare_inflated  = income.healthcare
                     year_need = income_at_ret * ((1 + inflation) ** yr) + healthcare_inflated
 
-                # Milestone 2 reconciliation follow-up (2026-09-10): the
+                # Milestone 2 reconciliation follow-up (2026-09-10,
+                # corrected same-day per review finding P2): the
                 # household's actual spending target for the year, before
-                # the two generic offsets applied just below (recurring
-                # life-event delta, second-earner gap income). Bridge
-                # income is already correctly netted into year_need above
-                # by the branch logic itself (including its max(0, ...)
-                # clamp when bridge income exceeds the target) -- it is
-                # NOT a separate thing to add back here, unlike the two
-                # offsets below, which are applied uniformly via a plain
-                # `-=` regardless of ret_age and so can be safely undone
-                # by addition. Exposed as its own field so a caller
-                # (Milestone 2's explainer) can show "gross household
-                # spending" without re-deriving it via addition of other
-                # already-returned fields, which risks getting this
-                # exact clamp-interaction case wrong.
-                gross_spending_need = year_need
+                # ANY income offset -- bridge income included. The first
+                # version of this field used the post-bridge, post-clamp
+                # year_need for bridge-active years, which silently
+                # excluded bridge income from "gross spending" entirely
+                # (a $100,000 target with $35,000 bridge income showed
+                # gross spending of $65,000, not $100,000 -- the
+                # portfolio withdrawal was correct, but the explanation
+                # hid the bridge income and understated actual spending).
+                # gross_target (bridge-active years only) is the pre-
+                # bridge, pre-clamp figure captured directly above, at
+                # the source -- not reconstructed after the fact by
+                # adding bridge_income back into a value that may have
+                # already been floored to 0 by max(0, ...), which would
+                # silently produce the wrong answer whenever bridge
+                # income exceeds the target. Every other branch has no
+                # bridge concept, so year_need (already the gross target,
+                # before the two offsets applied just below) is correct
+                # unchanged.
+                gross_spending_need = gross_target if (ret_age == 55 and bridge_active) else year_need
 
                 # Life events landing in the withdrawal phase — generic
                 # across every ret_age, not just 55. A recurring monthly

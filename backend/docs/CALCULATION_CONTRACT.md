@@ -5964,3 +5964,51 @@ tax", a stronger whole-of-plan identity beyond the per-year one this
 section verifies). Not attempted here — listed, not silently claimed.
 
 Branch: `codex/milestone-2-explainability`. Pending push.
+
+## 72. Review finding P2: bridge income still excluded from gross spending (2026-09-10, on `codex/milestone-2-explainability`)
+
+Independent reproduction, exact numbers: $100,000 annual spending,
+$35,000 bridge income, no other income/taxes/growth. Section 71's fix
+captured `gross_spending_need` from `year_need` AFTER the bridge
+subtraction for `ret_age==55` bridge-active years — so bridge income was
+excluded from BOTH "gross spending" ($65,000 shown instead of $100,000)
+AND "income offsets" ($0 shown instead of $35,000). The portfolio
+withdrawal itself was always correct (`remaining_portfolio_need` =
+$65,000, matching the real draw) — only the explanation was wrong, and
+section 71's own reconciliation tests didn't catch it because they check
+that the engine's ledger balances against ITSELF, which it does
+regardless of how a value is labeled — "the engine balancing its own
+ledger does not independently validate the meaning of the displayed
+fields," per the review.
+
+Fix: `gross_spending_need` for bridge-active years is now captured from
+`gross_target` — the target BEFORE bridge income is subtracted, computed
+and captured directly at the source in `projection_engine.py`, not
+reconstructed afterward by adding `bridge_income` back into a value that
+may already have been floored to 0 by the branch's own `max(0, ...)`
+clamp (an addition-after-clamp reconstruction would silently produce the
+wrong answer whenever bridge income exceeds the target — the review's
+own explicit warning). `bridge_income` now belongs in `Retirement.jsx`'s
+`incomeOffsets`, alongside every other guaranteed/gap/one-time source.
+
+**Verified**: new backend test `test_bridge_income_reference_case_
+matches_independent_reproduction` locks in the review's exact numbers —
+$100,000 gross spending, $35,000 income offsets, $65,000 remaining
+need, $65,000 withdrawal, $0 tax, $0 growth — against the real engine
+output for an independently-constructed household (already-retired at
+55, single bridge year, zero inflation/growth/tax, single taxable
+account). The existing rich-household reconciliation test was updated
+to include `bridge_income` in its own offset sum (it previously omitted
+it too, matching the bug). New frontend test exercises a bridge-income
+year and confirms the same numbers render. Full backend suite: 1392
+passed, 97.19% coverage (181 pre-existing `test_projection_engine.py`
+tests unchanged — `year_need` itself, the value actually used for
+withdrawal, was never touched, only where `gross_spending_need` is
+captured from). Full frontend suite: 9 files, 53 tests. Sensitive-data
+check clean.
+
+**No calculation changes** — `year_need` (and therefore every existing
+returned field, including the withdrawal amount) is byte-for-byte
+unchanged; only `gross_spending_need`'s capture point moved.
+
+Branch: `codex/milestone-2-explainability`. Pending push.
