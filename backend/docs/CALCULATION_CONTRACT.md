@@ -6005,3 +6005,52 @@ expected value (as opposed to internal self-consistency checks like the
 carry-forward/breakdown-sum tests above) is still unbuilt.
 
 Branch: `codex/milestone-2-explainability`. Pending push.
+
+## 70. Integration: Milestone 1 + Milestone 2 merged and tested together (2026-09-09, on `codex/milestone-1-2-integration`)
+
+Both milestones branch from the same `main` commit (`a75258d`) and both
+modify `Retirement.jsx` — per the review instruction, this branch merges
+`codex/milestone-1-saved-scenarios` and `codex/milestone-2-explainability`
+together (neither merged to `main`; this is a combined-testing branch
+only) to confirm they actually work side by side, not just independently.
+
+Conflicts were structural, not logical — Milestone 1 added
+`saveThisScenario()` + the "Save this scenario" card, Milestone 2 added
+`explainerFlows`/`explainerAssumptions` + the `CalculationExplainer`
+panel, both inserted at the same point in the same render function.
+Resolved by keeping both: the explainer panel renders first, the save
+card right below it. `Retirement.test.jsx` (an add/add conflict — both
+branches created this file independently) was hand-merged into one file
+covering both milestones' tests plus a new integration describe block.
+`CALCULATION_CONTRACT.md` had a numbering collision (both branches used
+section 66/67 independently) — resolved by renumbering Milestone 2's
+sections to 68/69, no content conflict.
+
+**"Verify the saved scenario and explanation refer to the same displayed
+calculation"** — this was the specific thing to prove, not just assume
+from reading the source. Two new integration tests:
+- Expands the explainer panel, reads its displayed year-0 opening
+  balance ($900,000, sourced from `s.portfolio_at_retirement`), then
+  saves the scenario and confirms the POST payload's
+  `summary.portfolio_at_retirement` is the *same* $900,000 — both
+  features are reading the same `s` object, not two independently
+  fetched or computed copies that happen to agree by coincidence.
+- Changes the shared retirement age to one with no matching scenario in
+  the fixture and confirms BOTH features disappear together (the page's
+  own "No data for this scenario" fallback), rather than one silently
+  continuing to show stale data while the other blanks — proving they're
+  gated by the same `s` lookup, not independent state that could
+  diverge.
+
+**Verified**: full frontend suite 10 files, 62 tests (52 from Milestone
+1 + the shared `CalculationExplainer`/integration tests, no regressions
+from either branch's own suite). Full backend suite and sensitive-data
+check run against this merge commit (counts in the completion report).
+
+**No calculation changes** — this is a merge of two already-verified
+no-calculation-change branches; nothing new was computed differently.
+
+This branch exists for combined review/testing only. Approval to merge
+either Milestone 1 or Milestone 2 into `main` still needs to happen on
+their own branches (or this integration branch, if that's the preferred
+path) — not implied by this section.
