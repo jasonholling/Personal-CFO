@@ -1162,6 +1162,23 @@ def run_retirement_projection(inputs: Dict, accounts: List[Dict], ret_ages: List
                     healthcare_inflated  = income.healthcare
                     year_need = income_at_ret * ((1 + inflation) ** yr) + healthcare_inflated
 
+                # Milestone 2 reconciliation follow-up (2026-09-10): the
+                # household's actual spending target for the year, before
+                # the two generic offsets applied just below (recurring
+                # life-event delta, second-earner gap income). Bridge
+                # income is already correctly netted into year_need above
+                # by the branch logic itself (including its max(0, ...)
+                # clamp when bridge income exceeds the target) -- it is
+                # NOT a separate thing to add back here, unlike the two
+                # offsets below, which are applied uniformly via a plain
+                # `-=` regardless of ret_age and so can be safely undone
+                # by addition. Exposed as its own field so a caller
+                # (Milestone 2's explainer) can show "gross household
+                # spending" without re-deriving it via addition of other
+                # already-returned fields, which risks getting this
+                # exact clamp-interaction case wrong.
+                gross_spending_need = year_need
+
                 # Life events landing in the withdrawal phase — generic
                 # across every ret_age, not just 55. A recurring monthly
                 # delta adjusts this year's need directly (positive delta
@@ -1265,11 +1282,36 @@ def run_retirement_projection(inputs: Dict, accounts: List[Dict], ret_ages: List
 
                 total_portfolio = pretax + roth + taxable + hsa
 
+                # Milestone 2 reconciliation follow-up (2026-09-10): both
+                # read straight off year_result's own already-computed
+                # fields (AnnualResult.external_income/.spending_need,
+                # annual_engine.py) rather than re-derived — remaining_
+                # portfolio_need is the exact `remaining` value
+                # simulate_withdrawal_year computed internally before
+                # drawing from any bucket (spending_need minus guaranteed
+                # income minus life-event cash); growth is the sum of the
+                # same per-bucket growth dict .reconcile() itself checks
+                # against, previously computed but discarded here.
+                remaining_portfolio_need = year_result.spending_need - year_result.external_income
+                growth_total = sum(year_result.growth.values())
+
                 yearly.append({
                     "jason_age":        age,
                     "justin_age":       timeline.justin_age_at(age),
                     "year":             calendar_year,
                     "income_need":      round(year_need),
+                    # gross_spending_need/remaining_portfolio_need
+                    # (Milestone 2 reconciliation follow-up, 2026-09-10):
+                    # distinguishes the household's total spending target
+                    # for the year from what's actually left to fund from
+                    # guaranteed income/life-event cash/the portfolio,
+                    # after every income offset has been applied —
+                    # gross_spending_need - (life_event_monthly_adjustment
+                    # + justin_gap_income + pension + social_security +
+                    # life_event_cash) == remaining_portfolio_need exactly
+                    # (verified by TestAnnualReconciliation).
+                    "gross_spending_need":      round(gross_spending_need),
+                    "remaining_portfolio_need": round(remaining_portfolio_need),
                     "healthcare_cost":   round(healthcare_inflated),
                     "pension":          round(year_pen),
                     "social_security":  round(year_jss + year_uss),
@@ -1288,6 +1330,17 @@ def run_retirement_projection(inputs: Dict, accounts: List[Dict], ret_ages: List
                     "withdrawal_roth":  round(withdrawal_roth),
                     "withdrawal_hsa":   round(withdrawal_hsa),
                     "withdrawal":       round(total_withdrawal),
+                    # growth (Milestone 2 reconciliation follow-up): sum
+                    # of the per-bucket growth AnnualResult.reconcile()
+                    # already checks against internally — previously
+                    # computed and immediately discarded by this loop, so
+                    # the explainer had no choice but to disclose growth
+                    # as unavailable. Per-bucket detail (pretax/roth/
+                    # taxable/hsa) is NOT surfaced here — only the total —
+                    # since no existing consumer has asked for the
+                    # per-bucket breakdown and the total is what the
+                    # reconciliation identity needs.
+                    "growth":           round(growth_total),
                     "unmet_need":       round(unmet_need),
                     "pretax_balance":   round(pretax),
                     "roth_balance":     round(roth),

@@ -176,25 +176,40 @@ export default function Retirement({ onNavigate }) {
   // displayed calculation because they both read off one shared variable,
   // not two independently-fetched copies. See ScenarioFlow.test.jsx's
   // (Retirement.test.jsx here) integration test for the assertion.
+  //
+  // Milestone 2 acceptance follow-up (2026-09-10): "distinguish gross
+  // household spending from income offsets and remaining portfolio
+  // need... do not count an income offset both as income and as a
+  // reduction in displayed spending." The previous version added
+  // bridge_income/justin_gap_income into "income" while ALSO displaying
+  // `income_need` (already net of those same two, plus
+  // life_event_monthly_adjustment, per run_retirement_projection's own
+  // subtraction — see projection_engine.py) as "spending", double-
+  // counting both. Now sourced from three backend fields added
+  // specifically to make this distinction possible without re-deriving
+  // it here: gross_spending_need (the target BEFORE the two generic
+  // offsets below — bridge income, ret_age==55 only, is already
+  // correctly netted into it by the backend's own branch logic,
+  // including its max(0, ...) clamp, and is intentionally NOT re-added
+  // here), incomeOffsets (every guaranteed/gap/one-time source that
+  // reduces what's left to fund), and remaining_portfolio_need (what's
+  // actually left after every offset — verified by
+  // TestAnnualReconciliationAgainstRealBackendOutput to equal
+  // grossSpending - incomeOffsets exactly, using real backend output,
+  // not a fixture assumption). `growth` and `transfers` are likewise new
+  // fields sourced directly from the engine's own per-year ledger
+  // (annual_engine.AnnualResult) rather than left undisclosed.
   const explainerFlows = s.yearly_detail.map((y, i) => ({
     year: y.year, jasonAge: y.jason_age,
     opening: i === 0 ? s.portfolio_at_retirement : s.yearly_detail[i - 1].portfolio_balance,
-    // Review finding (2026-09-09): this used to omit justin_gap_income
-    // (second-earner income during the gap phase) and life_event_cash
-    // (a one-time inflow like an asset sale, or a negative one-time
-    // cost) -- both are guaranteed-income-like flows the backend itself
-    // already nets against spending need BEFORE any bucket is touched
-    // (see run_retirement_projection's own life-event-cash handling,
-    // CALCULATION_CONTRACT.md's withdrawal-waterfall migration note) --
-    // leaving them out understated total income for any year either one
-    // was nonzero, which is most years for a household with either a
-    // working second spouse or a planned asset sale.
-    income: y.pension + y.social_security + y.bridge_income + y.justin_gap_income + y.life_event_cash,
-    spending: y.income_need,
+    grossSpending: y.gross_spending_need,
+    incomeOffsets: y.pension + y.social_security + y.justin_gap_income + y.life_event_cash + y.life_event_monthly_adjustment,
+    remainingNeed: y.remaining_portfolio_need,
     taxes: y.estimated_tax,
     withdrawal: y.withdrawal,
     withdrawalBreakdown: { pretax: y.withdrawal_pretax, taxable: y.withdrawal_taxable, roth: y.withdrawal_roth, hsa: y.withdrawal_hsa },
     transfers: y.rmd_reinvested,
+    growth: y.growth,
     unmetNeed: y.unmet_need,
     closing: y.portfolio_balance,
   }))
