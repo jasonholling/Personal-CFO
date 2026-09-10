@@ -1,0 +1,152 @@
+import { isPrivacyMode, MASK_CURRENCY } from '../utils/privacy'
+
+// Milestone 2 (2026-09-09, "Explain every major result"), corrected
+// 2026-09-10 per acceptance review: a shared "How this was calculated"
+// panel. Every value shown here is read straight off the calculation's
+// own returned data (a projection's yearly_detail rows, a scenario's
+// summary fields) -- nothing here recomputes tax, withdrawal, or growth
+// formulas; it only labels, sums, and carries forward numbers the engine
+// already produced, so this can never disagree with the number it's
+// explaining.
+//
+// Reused across whichever result pages adopt it (Retirement Projection
+// first; Monte Carlo/Roth Conversion/Insurance are follow-up slices --
+// see CALCULATION_CONTRACT.md's "explicitly out of scope").
+const fmt = n => isPrivacyMode() ? MASK_CURRENCY : new Intl.NumberFormat('en-US', {
+  style: 'currency', currency: 'USD', maximumFractionDigits: 0,
+}).format(n || 0)
+
+/**
+ * assumptions: array of [label, value] pairs, already formatted strings —
+ *   the caller decides what's relevant for its own result, this component
+ *   doesn't guess.
+ * dollarBasis: { todayValue, futureValue, label } — e.g. spending goal
+ *   shown both in today's dollars and the inflated first-retirement-year
+ *   figure, so "today's $ vs future $" is explicit rather than implied by
+ *   which single number happens to be on screen.
+ * flows: array of { year, jasonAge, opening, grossSpending, incomeOffsets,
+ *   remainingNeed, taxes, withdrawal, withdrawalBreakdown, transfers,
+ *   growth, unmetNeed, closing } — one row per already-computed
+ *   projection year.
+ *   - grossSpending: the household's total spending target for the year,
+ *     BEFORE any income offset. NOT the same as "withdrawal" — most of
+ *     it is usually covered by guaranteed income, not the portfolio.
+ *   - incomeOffsets: every guaranteed/gap/one-time income source that
+ *     reduces what's actually left to fund (pension, Social Security,
+ *     working-spouse gap income, life-event cash) — each one counted
+ *     EXACTLY ONCE, here, not also baked silently into a lower
+ *     grossSpending figure.
+ *   - remainingNeed: grossSpending - incomeOffsets — what's actually left
+ *     to fund from guaranteed income already spent (it isn't — see
+ *     above) and the portfolio. Should always reconcile to
+ *     grossSpending - incomeOffsets exactly (verified against real
+ *     backend output by TestAnnualReconciliationAgainstRealBackendOutput,
+ *     not just displayed here on faith).
+ *   - withdrawalBreakdown: optional { pretax, taxable, roth, hsa } for
+ *     "distinguish gross withdrawals..." without re-deriving it.
+ *   - transfers: optional — an internal bucket-to-bucket movement that
+ *     doesn't change total portfolio value (e.g. an RMD forced out of
+ *     pretax and reinvested into taxable), distinct from a withdrawal
+ *     that actually funds spending.
+ *   - growth: investment growth actually applied this year, summed
+ *     across every account bucket — read directly from the engine's own
+ *     per-year ledger (annual_engine.AnnualResult.growth), not derived
+ *     by subtracting the other columns from each other.
+ * notes: array of strings — "explain intentional differences between
+ *   tools" free text, e.g. why this tool's number differs from another
+ *   page's for what looks like the same question.
+ */
+export default function CalculationExplainer({ assumptions = [], dollarBasis, flows = [], notes = [], calcDate }) {
+  return (
+    <details className="card" style={{ marginBottom: 24, padding: '16px 20px' }}>
+      <summary style={{ cursor: 'pointer', fontWeight: 600 }}>How this was calculated</summary>
+      <div style={{ marginTop: 16 }}>
+        {calcDate && (
+          <div style={{ fontSize: 11, color: 'var(--text3)', marginBottom: 12 }}>
+            Calculated {calcDate} against your current planning inputs and account balances.
+          </div>
+        )}
+        {assumptions.length > 0 && (
+          <>
+            <div className="label" style={{ marginBottom: 6, fontSize: 11 }}>Assumptions used</div>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px 20px', fontSize: 13, marginBottom: 16 }}>
+              {assumptions.map(([label, value]) => (
+                <span key={label}><span style={{ color: 'var(--text2)' }}>{label}:</span> {value}</span>
+              ))}
+            </div>
+          </>
+        )}
+        {dollarBasis && (
+          <div style={{ fontSize: 12, color: 'var(--text2)', marginBottom: 16 }}>
+            {dollarBasis.label}: {fmt(dollarBasis.todayValue)} in today's dollars → {fmt(dollarBasis.futureValue)} in the year it's actually spent, after inflation.
+          </div>
+        )}
+        {flows.length > 0 && (
+          <>
+            <div className="label" style={{ marginBottom: 6, fontSize: 11 }}>Annual flows (first {Math.min(flows.length, 10)} years shown)</div>
+            <div style={{ fontSize: 11, color: 'var(--text3)', marginBottom: 8 }}>
+              Gross spending is the household's full target before any income offset — most years, most of it is
+              covered by guaranteed income, not the portfolio. Each income offset is counted once, here, never also
+              folded silently into a lower gross-spending figure.
+            </div>
+            <div style={{ overflowX: 'auto' }}>
+              <table style={{ width: '100%', fontSize: 12, borderCollapse: 'collapse', minWidth: 860 }}>
+                <thead>
+                  <tr style={{ borderBottom: '1px solid var(--border2)', textAlign: 'right' }}>
+                    <th style={{ textAlign: 'left', padding: '4px 6px' }}>Year</th>
+                    <th style={{ padding: '4px 6px' }}>Opening</th>
+                    <th style={{ padding: '4px 6px' }}>Gross spending</th>
+                    <th style={{ padding: '4px 6px' }}>Income offsets</th>
+                    <th style={{ padding: '4px 6px' }}>Remaining need</th>
+                    <th style={{ padding: '4px 6px' }}>Taxes</th>
+                    <th style={{ padding: '4px 6px' }}>Withdrawal</th>
+                    <th style={{ padding: '4px 6px' }}>Transfers</th>
+                    <th style={{ padding: '4px 6px' }}>Growth</th>
+                    <th style={{ padding: '4px 6px' }}>Unmet need</th>
+                    <th style={{ padding: '4px 6px' }}>Closing</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {flows.slice(0, 10).map(f => (
+                    <tr key={f.year} style={{ borderBottom: '1px solid var(--border)' }}>
+                      <td style={{ padding: '4px 6px' }}>{f.year}{f.jasonAge != null ? ` (age ${f.jasonAge})` : ''}</td>
+                      <td style={{ padding: '4px 6px', textAlign: 'right' }}>{fmt(f.opening)}</td>
+                      <td style={{ padding: '4px 6px', textAlign: 'right' }}>{fmt(f.grossSpending)}</td>
+                      <td style={{ padding: '4px 6px', textAlign: 'right', color: 'var(--green)' }}>{fmt(f.incomeOffsets)}</td>
+                      <td style={{ padding: '4px 6px', textAlign: 'right' }}>{fmt(f.remainingNeed)}</td>
+                      <td style={{ padding: '4px 6px', textAlign: 'right' }}>{fmt(f.taxes)}</td>
+                      <td style={{ padding: '4px 6px', textAlign: 'right' }}>
+                        {fmt(f.withdrawal)}
+                        {f.withdrawalBreakdown && (
+                          <div style={{ fontSize: 10, color: 'var(--text3)' }}>
+                            pretax {fmt(f.withdrawalBreakdown.pretax)} · taxable {fmt(f.withdrawalBreakdown.taxable)} · roth {fmt(f.withdrawalBreakdown.roth)} · hsa {fmt(f.withdrawalBreakdown.hsa)}
+                          </div>
+                        )}
+                      </td>
+                      <td style={{ padding: '4px 6px', textAlign: 'right', color: 'var(--text3)' }}>
+                        {f.transfers ? fmt(f.transfers) : '—'}
+                      </td>
+                      <td style={{ padding: '4px 6px', textAlign: 'right', color: 'var(--green)' }}>{fmt(f.growth)}</td>
+                      <td style={{ padding: '4px 6px', textAlign: 'right', color: f.unmetNeed > 0 ? 'var(--red)' : 'var(--text3)' }}>{fmt(f.unmetNeed)}</td>
+                      <td style={{ padding: '4px 6px', textAlign: 'right', fontWeight: 600 }}>{fmt(f.closing)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <div style={{ fontSize: 11, color: 'var(--text3)', marginTop: 8 }}>
+              ℹ "Transfers" covers internal bucket-to-bucket movements (like an RMD forced out and reinvested) that
+              don't themselves fund spending. "Growth" is applied per account bucket after that year's withdrawals
+              and transfers, then summed here.
+            </div>
+          </>
+        )}
+        {notes.length > 0 && (
+          <div style={{ marginTop: 16, fontSize: 12, color: 'var(--text3)' }}>
+            {notes.map((n, i) => <div key={i} style={{ marginBottom: 4 }}>ℹ {n}</div>)}
+          </div>
+        )}
+      </div>
+    </details>
+  )
+}

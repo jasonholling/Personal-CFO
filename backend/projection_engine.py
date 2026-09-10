@@ -24,6 +24,15 @@ COLLEGE_COST_INFLATION = 0.04
 COLLEGE_YEARS          = 4
 UNL_CURRENT_ANNUAL     = 0  # fallback only — read from inputs at runtime
 
+# Milestone 1 (saved scenarios, 2026-09-09): a saved scenario needs to say
+# what produced its numbers, not just when it was saved. Bump this string
+# any time a change here, in simulation_engine.py, or annual_engine.py
+# changes what a given set of inputs produces -- a saved scenario whose
+# calculation_version doesn't match the running engine's is stale by
+# definition, independent of whether the household's inputs also changed.
+# Comment-only/refactor changes that don't alter output do NOT need a bump.
+CALCULATION_ENGINE_VERSION = "1"
+
 # 529 contributions are assumed to stop once you hit this age — no more
 # earned income funding them after retirement. Matches the "Retire 60"
 # scenario used as the default assumption elsewhere in the app.
@@ -1126,6 +1135,7 @@ def run_retirement_projection(inputs: Dict, accounts: List[Dict], ret_ages: List
                 justin_age_this_year = income.justin_age
 
                 # Income need this year (includes healthcare, phased for age 55)
+                bridge_this_year = 0
                 if ret_age == 55:
                     kids_still_home = yr < kids_years
                     bridge_active   = yr < bridge_years
@@ -1134,7 +1144,34 @@ def run_retirement_projection(inputs: Dict, accounts: List[Dict], ret_ages: List
                         healthcare_this_year = 0
                         kids_cost = kids_annual_cost_at_ret * ((1 + inflation) ** yr)
                         bridge    = bridge_income_at_ret    * ((1 + inflation) ** yr)
-                        year_need = max(0, income_at_ret * ((1 + inflation) ** yr) + kids_cost - bridge)
+                        bridge_this_year = bridge
+                        # Milestone 2 reconciliation follow-up (2026-09-10,
+                        # review finding P1, boundary case): bridge income
+                        # is no longer subtracted from year_need at all --
+                        # it used to be netted in here via
+                        # `max(0, target - bridge)`, which silently
+                        # discarded any surplus once bridge exceeded the
+                        # target (spending_need floored at 0, and the
+                        # excess bridge dollars were never passed to
+                        # simulate_withdrawal_year in ANY form, so they
+                        # vanished from the ledger entirely -- not
+                        # withdrawn, not saved, not reported anywhere).
+                        # Reproduced: $500,000 taxable, $100,000 spending,
+                        # $150,000 bridge income, zero tax/growth --
+                        # ending balance was $500,000 (the $50,000 surplus
+                        # gone) instead of the correct $550,000. Bridge
+                        # income now flows into `fixed_income` below
+                        # instead (see its own comment), alongside
+                        # pension/SS, so the shared engine's own existing
+                        # surplus-sweep logic (`cash_available >=
+                        # spending_need` -> surplus swept into taxable,
+                        # annual_engine.simulate_withdrawal_year's own
+                        # documented contract) handles bridge income
+                        # exceeding spending exactly like it already
+                        # handles any other guaranteed-income overshoot --
+                        # not a new, bridge-specific rule.
+                        gross_target = income_at_ret * ((1 + inflation) ** yr) + kids_cost
+                        year_need = gross_target
                     elif kids_still_home and age < 65:
                         # Phase 2: retired, kids home, family healthcare
                         healthcare_this_year = healthcare_kids_at_ret
@@ -1152,6 +1189,16 @@ def run_retirement_projection(inputs: Dict, accounts: List[Dict], ret_ages: List
                 else:
                     healthcare_inflated  = income.healthcare
                     year_need = income_at_ret * ((1 + inflation) ** yr) + healthcare_inflated
+
+                # Milestone 2 reconciliation follow-up (2026-09-10): the
+                # household's actual spending target for the year, before
+                # ANY income offset -- bridge income included. Bridge
+                # income no longer participates in year_need's own
+                # computation at all (see the review finding P1 comment
+                # above), so year_need IS the gross target uniformly
+                # across every branch now -- no per-branch special case
+                # needed here anymore.
+                gross_spending_need = year_need
 
                 # Life events landing in the withdrawal phase — generic
                 # across every ret_age, not just 55. A recurring monthly
@@ -1177,11 +1224,18 @@ def run_retirement_projection(inputs: Dict, accounts: List[Dict], ret_ages: List
                 # deliberate, consumer-specific policy this consolidation
                 # preserves rather than folding into the shared builder
                 # (see annual_inputs.py's module docstring). Social
-                # Security is the shared builder's output.
+                # Security is the shared builder's output. bridge_this_year
+                # (review finding P1, 2026-09-10) joins pension/SS here
+                # instead of being netted into year_need -- it's real
+                # guaranteed income for the year same as they are, and
+                # this is what lets simulate_withdrawal_year's own
+                # surplus-sweep logic see and save any bridge income left
+                # over after spending is covered, instead of silently
+                # discarding it.
                 year_pen = pension_annual
                 year_jss = income.jason_ss
                 year_uss = income.justin_ss
-                fixed_income = year_pen + year_jss + year_uss
+                fixed_income = year_pen + year_jss + year_uss + bridge_this_year
 
                 # RMD on pre-tax bucket
                 rmd = _rmd(pretax, age, jason_rmd_start_age)
@@ -1256,11 +1310,36 @@ def run_retirement_projection(inputs: Dict, accounts: List[Dict], ret_ages: List
 
                 total_portfolio = pretax + roth + taxable + hsa
 
+                # Milestone 2 reconciliation follow-up (2026-09-10): both
+                # read straight off year_result's own already-computed
+                # fields (AnnualResult.external_income/.spending_need,
+                # annual_engine.py) rather than re-derived — remaining_
+                # portfolio_need is the exact `remaining` value
+                # simulate_withdrawal_year computed internally before
+                # drawing from any bucket (spending_need minus guaranteed
+                # income minus life-event cash); growth is the sum of the
+                # same per-bucket growth dict .reconcile() itself checks
+                # against, previously computed but discarded here.
+                remaining_portfolio_need = year_result.spending_need - year_result.external_income
+                growth_total = sum(year_result.growth.values())
+
                 yearly.append({
                     "jason_age":        age,
                     "justin_age":       timeline.justin_age_at(age),
                     "year":             calendar_year,
                     "income_need":      round(year_need),
+                    # gross_spending_need/remaining_portfolio_need
+                    # (Milestone 2 reconciliation follow-up, 2026-09-10):
+                    # distinguishes the household's total spending target
+                    # for the year from what's actually left to fund from
+                    # guaranteed income/life-event cash/the portfolio,
+                    # after every income offset has been applied —
+                    # gross_spending_need - (life_event_monthly_adjustment
+                    # + justin_gap_income + pension + social_security +
+                    # life_event_cash) == remaining_portfolio_need exactly
+                    # (verified by TestAnnualReconciliation).
+                    "gross_spending_need":      round(gross_spending_need),
+                    "remaining_portfolio_need": round(remaining_portfolio_need),
                     "healthcare_cost":   round(healthcare_inflated),
                     "pension":          round(year_pen),
                     "social_security":  round(year_jss + year_uss),
@@ -1279,6 +1358,17 @@ def run_retirement_projection(inputs: Dict, accounts: List[Dict], ret_ages: List
                     "withdrawal_roth":  round(withdrawal_roth),
                     "withdrawal_hsa":   round(withdrawal_hsa),
                     "withdrawal":       round(total_withdrawal),
+                    # growth (Milestone 2 reconciliation follow-up): sum
+                    # of the per-bucket growth AnnualResult.reconcile()
+                    # already checks against internally — previously
+                    # computed and immediately discarded by this loop, so
+                    # the explainer had no choice but to disclose growth
+                    # as unavailable. Per-bucket detail (pretax/roth/
+                    # taxable/hsa) is NOT surfaced here — only the total —
+                    # since no existing consumer has asked for the
+                    # per-bucket breakdown and the total is what the
+                    # reconciliation identity needs.
+                    "growth":           round(growth_total),
                     "unmet_need":       round(unmet_need),
                     "pretax_balance":   round(pretax),
                     "roth_balance":     round(roth),
@@ -1289,11 +1379,25 @@ def run_retirement_projection(inputs: Dict, accounts: List[Dict], ret_ages: List
 
             # Discount the same beginning-of-year cash flows shown in the
             # table, including events and withdrawal taxes, to retirement.
+            #
+            # bridge_income (review finding P1, 2026-09-10): now that
+            # bridge income no longer nets into income_need at all (it
+            # flows into fixed_income/guaranteed_income for the actual
+            # withdrawal call instead -- see the year_need comment
+            # above), it must be added here explicitly, same as pension/
+            # social_security, or the scenario-level percent_funded/
+            # projected_surplus/on_track figures would overstate
+            # cap_needed_from_assets by the FULL bridge amount every
+            # bridge-active year with no offsetting credit -- not just in
+            # the bridge-exceeds-spending edge case, in EVERY bridge-
+            # active year, since income_need is now always the un-netted
+            # gross target rather than the previously bridge-reduced
+            # figure.
             total_cap_need = sum(
                 (max(0, y["income_need"]) + y["estimated_tax"] + max(0, -y["life_event_cash"]))
                 / ((1 + post_ret) ** yr) for yr, y in enumerate(yearly))
             total_cap_income = sum(
-                (y["pension"] + y["social_security"] + max(0, y["life_event_cash"]) + max(0, -y["income_need"]))
+                (y["pension"] + y["social_security"] + y["bridge_income"] + max(0, y["life_event_cash"]) + max(0, -y["income_need"]))
                 / ((1 + post_ret) ** yr) for yr, y in enumerate(yearly))
             cap_needed_from_assets = max(0, total_cap_need - total_cap_income)
             surplus = portfolio_at_ret + total_cap_income - total_cap_need
@@ -1457,7 +1561,21 @@ def two_age_spending_need_fn(inputs: Dict, income_today: float, inflation: float
                 healthcare_this_year = 0
                 kids_cost = kids_annual_cost_at_start * cum
                 bridge    = bridge_income_at_start    * cum
-                year_need = max(0, income_at_start * cum + kids_cost - bridge)
+                # Two-age bridge-surplus fix (2026-09-10, follow-up to
+                # the single-age fix -- CALCULATION_CONTRACT.md section
+                # 73's own "check other consumers" finding): year_need no
+                # longer nets bridge income at all, matching the
+                # single-age fix exactly. The old `max(0, target -
+                # bridge)` clamp discarded any bridge surplus before any
+                # caller's own simulate_withdrawal_year call ever saw it
+                # -- not withdrawn, not saved, not reported anywhere.
+                # bridge_income_this_year (the raw, unclamped amount) was
+                # already returned correctly even before this fix; the
+                # bug was entirely in year_need's own netting plus every
+                # caller discarding the returned value instead of adding
+                # it to their own guaranteed_income. See each caller's
+                # own comment for how it's now wired in.
+                year_need = income_at_start * cum + kids_cost
                 bridge_income_this_year = bridge
             elif kids_still_home and age < 65:
                 healthcare_this_year = healthcare_kids_at_start
@@ -1752,7 +1870,15 @@ def run_two_dimensional_retirement_projection(inputs: Dict, accounts: List[Dict]
         year_jss = jason_ss_annual * ((1 + inflation) ** max(0, age - jason_ss_age)) if age >= jason_ss_age else 0.0
         year_uss = (justin_ss_annual * ((1 + inflation) ** max(0, justin_age_this_year - justin_ss_age))
                     if justin_age_this_year >= justin_ss_age else 0.0)
-        fixed_income = year_pen + year_jss + year_uss
+        # Two-age bridge-surplus fix (2026-09-10): bridge_income_this_year
+        # joins pension/SS here instead of being discarded -- previously
+        # this call site captured the return value but only used it to
+        # populate the reported "bridge_income" field below, never
+        # feeding it to simulate_withdrawal_year in any form, so any
+        # bridge income above spending vanished (not withdrawn, not
+        # saved, not reported). Same fix as single-age
+        # run_retirement_projection (CALCULATION_CONTRACT.md section 73).
+        fixed_income = year_pen + year_jss + year_uss + bridge_income_this_year
 
         rmd = _rmd(pretax, age, jason_rmd_start_age)
         taxable_income_est = max(0, year_pen + (year_jss + year_uss) * 0.85 + rmd - _STD_DED)
@@ -2219,7 +2345,7 @@ def run_owner_split_two_dimensional_projection(inputs: Dict, accounts: List[Dict
         calendar_year = timeline.calendar_year(yr)
         justin_age_this_year = timeline.justin_age_at(age)
 
-        year_need, _healthcare_inflated, _bridge_income = need_for_year(age, yr)
+        year_need, _healthcare_inflated, bridge_income_this_year = need_for_year(age, yr)
         life_event_cash_this_year, life_event_monthly_this_year = _post_retirement_year_effects(post_life_events, calendar_year)
         year_need -= life_event_monthly_this_year
         still_working_income_this_year = justin_gap_income_for_year(
@@ -2230,7 +2356,17 @@ def run_owner_split_two_dimensional_projection(inputs: Dict, accounts: List[Dict
         year_jss = jason_ss_annual * ((1 + inflation) ** max(0, age - jason_ss_age)) if age >= jason_ss_age else 0.0
         year_uss = (justin_ss_annual * ((1 + inflation) ** max(0, justin_age_this_year - justin_ss_age))
                     if justin_age_this_year >= justin_ss_age else 0.0)
-        fixed_income = year_pen + year_jss + year_uss
+        # Two-age bridge-surplus fix (2026-09-10): bridge_income_this_year
+        # joins pension/SS here (pooled call) and, below, "jason"'s own
+        # owner_cash bucket specifically -- bridge_income_55 only ever
+        # applies during JASON's own bridge-job phase (need_for_year's
+        # own `jason_ret_age == 55` gate), so it's unambiguously his
+        # individual income, same reasoning as pension_annual/jason_ss
+        # already being attributed to "jason" a few lines below. Was
+        # previously discarded entirely (captured as `_bridge_income`,
+        # never used) -- any bridge income above spending vanished from
+        # both the pooled total AND the owner-split attribution.
+        fixed_income = year_pen + year_jss + year_uss + bridge_income_this_year
 
         pooled_pretax = sum(buckets[o]["pretax"] for o in OWNER_BUCKETS)
         rmd = _rmd(pooled_pretax, age, jason_rmd_start_age)
@@ -2351,8 +2487,12 @@ def run_owner_split_two_dimensional_projection(inputs: Dict, accounts: List[Dict
         }
         jason_gap_this_year  = still_working_income_this_year if timeline.later_retiree == "jason" else 0.0
         justin_gap_this_year = still_working_income_this_year if timeline.later_retiree == "justin" else 0.0
+        # bridge_income_this_year (2026-09-10 fix) is Jason's own bridge-
+        # job income (see the fixed_income comment above) -- attributed
+        # here so an owner-split view correctly credits a bridge surplus
+        # to Jason specifically, not silently to nobody.
         owner_cash = {
-            "jason":  year_pen + year_jss + jason_gap_this_year + owner_pretax_aftertax["jason"],
+            "jason":  year_pen + year_jss + jason_gap_this_year + bridge_income_this_year + owner_pretax_aftertax["jason"],
             "justin": year_uss + justin_gap_this_year + owner_pretax_aftertax["justin"],
             "joint":  life_event_cash_this_year + life_event_monthly_this_year + owner_pretax_aftertax["joint"],
             "trust":  owner_pretax_aftertax["trust"],
@@ -2392,6 +2532,11 @@ def run_owner_split_two_dimensional_projection(inputs: Dict, accounts: List[Dict
             "jason_age": age, "justin_age": justin_age_this_year, "year": calendar_year,
             "phase": "phase2" if timeline.in_phase2(age) else "phase3",
             "pension": round(year_pen), "social_security": round(year_jss + year_uss),
+            # bridge_income (2026-09-10 fix): reported here for the first
+            # time -- previously computed, attributed to nobody, and
+            # discarded, matching run_two_dimensional_retirement_
+            # projection's own existing field of the same name.
+            "bridge_income": round(bridge_income_this_year),
             "rmd": round(rmd), "unmet_need": round(year_result.unmet_need),
             "portfolio_balance": round(sum(buckets[o][t] for o in OWNER_BUCKETS for t in ("pretax", "roth", "taxable", "hsa"))),
             "owner_balances": {o: {t: round(buckets[o][t]) for t in ("pretax", "roth", "taxable", "hsa")} for o in OWNER_BUCKETS},

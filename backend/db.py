@@ -574,6 +574,30 @@ def init_saved_scenarios_table():
         conn.execute("ALTER TABLE saved_scenarios ADD COLUMN ss_timing TEXT NOT NULL DEFAULT 'early'")
     if "assumptions_json" not in saved_scenarios_cols:
         conn.execute("ALTER TABLE saved_scenarios ADD COLUMN assumptions_json TEXT")
+    # Milestone 1 (2026-09-09): a plain save only ever overwrote the row for
+    # its name (INSERT ... ON CONFLICT(name) DO UPDATE) -- there was no way
+    # to recalculate against current data without destroying the original,
+    # and assumptions_json only ever covered retirement_age + ss_timing, not
+    # the full resolved inputs a reproduction needs. New columns below don't
+    # touch existing rows' meaning -- they just weren't tracked before.
+    # schema_version/is_legacy default to the "before this migration" state
+    # (1 / legacy) on ALTER, since that's true of every row that already
+    # exists; save_scenario() passes explicit values for both on every new
+    # INSERT going forward, so DEFAULT only ever applies to old rows.
+    if "schema_version" not in saved_scenarios_cols:
+        conn.execute("ALTER TABLE saved_scenarios ADD COLUMN schema_version INTEGER NOT NULL DEFAULT 1")
+    if "calculation_version" not in saved_scenarios_cols:
+        conn.execute("ALTER TABLE saved_scenarios ADD COLUMN calculation_version TEXT")
+    if "seed" not in saved_scenarios_cols:
+        conn.execute("ALTER TABLE saved_scenarios ADD COLUMN seed INTEGER")
+    if "trial_count" not in saved_scenarios_cols:
+        conn.execute("ALTER TABLE saved_scenarios ADD COLUMN trial_count INTEGER")
+    if "revision_of" not in saved_scenarios_cols:
+        conn.execute("ALTER TABLE saved_scenarios ADD COLUMN revision_of INTEGER")
+    if "revision_number" not in saved_scenarios_cols:
+        conn.execute("ALTER TABLE saved_scenarios ADD COLUMN revision_number INTEGER NOT NULL DEFAULT 1")
+    if "is_legacy" not in saved_scenarios_cols:
+        conn.execute("ALTER TABLE saved_scenarios ADD COLUMN is_legacy INTEGER NOT NULL DEFAULT 1")
     conn.commit(); conn.close()
 init_saved_scenarios_table()
 

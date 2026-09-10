@@ -340,19 +340,30 @@ class TestAge55BridgeAndKidsRulesPreserved:
         bridge_years=5, so the bridge branch wasn't even entered) --
         old (buggy) income_need: $80,000 * 1.03**5 = $92,742, with no
         bridge offset applied at all. Correct: no elapsed years yet, so
-        the $80,000 base is untouched by inflation, bridge income is
-        still active, and it fully applies -- year 1 need (net of
-        bridge, same field convention run_retirement_projection's own
-        equivalent row already uses for a bridge year) is $50,000."""
+        the $80,000 base is untouched by inflation and bridge income is
+        still active.
+
+        income_need's own convention changed 2026-09-10 (two-age bridge-
+        surplus fix, CALCULATION_CONTRACT.md section 73's follow-up):
+        it's now the GROSS spending target, matching single-age
+        run_retirement_projection's own income_need field after its own
+        identical fix -- bridge income above spending used to vanish
+        silently (the old `max(0, target - bridge)` clamp discarded any
+        surplus before the withdrawal engine ever saw it), fixed by no
+        longer netting bridge into the need at all and instead flowing
+        it into guaranteed_income, where the shared engine's existing
+        surplus-sweep logic handles it correctly. "draw" (informational,
+        not the actual withdrawal) still nets bridge via fixed_income
+        and is unchanged at $50,000."""
         inputs = base_inputs(jason_age=60, justin_age=60, inflation_rate=0.03, retirement_end_age=63,
                               bridge_income_55=30000, bridge_years_55=5)
         result = run_two_dimensional_retirement_projection(inputs, TAXABLE(500000), jason_ret_age=55, justin_ret_age=55)
         yearly = result["yearly_detail"]
         assert result["phase2_start_age"] == 60  # effective start -- this year, not the fictional 55
         assert yearly[0]["bridge_income"] == 30000  # still active -- not yet expired
-        assert yearly[0]["income_need"] == 50000    # net of the still-active bridge offset
-        assert yearly[0]["draw"] == 50000
-        old_buggy_income_need = 92742  # matches the independent review's own reported old value (bridge NOT applied)
+        assert yearly[0]["income_need"] == 80000    # gross spending target -- bridge no longer netted into it
+        assert yearly[0]["draw"] == 50000           # draw still correctly nets bridge via fixed_income
+        old_buggy_income_need = 92742  # matches the independent review's own reported old value (5 years' inflation wrongly applied)
         assert yearly[0]["income_need"] != old_buggy_income_need
 
 

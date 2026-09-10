@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import axios from 'axios'
 import TaskPanel from '../components/TaskPanel'
 import { BarChart, Bar, AreaChart, Area, XAxis, YAxis, Tooltip, Legend, ResponsiveContainer } from 'recharts'
@@ -10,6 +10,7 @@ import { isPrivacyMode, MASK_CURRENCY } from '../utils/privacy'
 import SecondEarnerNote from '../components/SecondEarnerNote'
 import ActiveScenarioBanner from '../components/ActiveScenarioBanner'
 import ClaimAgeSlider from '../components/ClaimAgeSlider'
+import CalculationExplainer from '../components/CalculationExplainer'
 
 const NAVY = '#5C7CE0' // was #1B3A6B — nearly the same luminance as the dark card background, effectively invisible
 
@@ -43,6 +44,15 @@ export default function Retirement({ onNavigate }) {
   const [data, setData]         = useState(null)
   const [loading, setLoading]   = useState(true)
   const [error, setError]       = useState(null)
+  // Milestone 1 (2026-09-09): "Add 'Save this scenario' to the relevant
+  // planning results so users save the result they are viewing." This is
+  // the primary retirement-projection result -- the save payload below
+  // carries whatever claim-age override is actually active on screen
+  // right now, same values the KPI cards below are computed from, not a
+  // separate hand-entered copy of them.
+  const [saveName, setSaveName]     = useState('')
+  const [saveStatus, setSaveStatus] = useState('idle') // idle | saving | error
+  const [saveMessage, setSaveMessage] = useState(null)
   const {
     retAge: sharedRetAge, ssTiming, setRetAge, setSsTiming,
     jasonSsClaimAge, justinSsClaimAge, setJasonSsClaimAge, setJustinSsClaimAge,
@@ -61,14 +71,30 @@ export default function Retirement({ onNavigate }) {
   // see a custom claim age reflected here -- it's a genuine, explicit
   // per-request override, not a read of the Settings value.
 
+  // Out-of-order response guard (2026-09-09, review finding): rapidly
+  // toggling the claim-age sliders fires a new GET on every change:
+  // nothing here previously stopped an earlier, slower request from
+  // resolving AFTER a later, faster one and overwriting it with stale
+  // data via setData -- the UI would then show numbers for the CURRENT
+  // claim ages while `data` actually held a projection computed for a
+  // PREVIOUS selection: both the KPI cards and the explainer below, plus
+  // Milestone 1's "Save this scenario" (consequential rather than just a
+  // visual flash there -- saving during that window would persist the
+  // stale result while claiming, via the same jasonSsClaimAge/
+  // justinSsClaimAge state the save payload reads, to be the current
+  // selection). Same genRef guard pattern already established for
+  // exactly this bug class in StressTestWhatIf.jsx's
+  // SurvivorScenarioSection (CALCULATION_CONTRACT.md section 65).
+  const genRef = useRef(0)
   useEffect(() => {
     const params = {}
     if (jasonSsClaimAge  != null) params.jason_ss_claim_age  = jasonSsClaimAge
     if (justinSsClaimAge != null) params.justin_ss_claim_age = justinSsClaimAge
+    const gen = ++genRef.current
     setLoading(true)
     axios.get('/api/projections/retirement', { params })
-      .then(r => { setData(r.data); setLoading(false) })
-      .catch(e => { setError(e.response?.data?.detail || 'Could not load projections'); setLoading(false) })
+      .then(r => { if (gen !== genRef.current) return; setData(r.data); setLoading(false) })
+      .catch(e => { if (gen !== genRef.current) return; setError(e.response?.data?.detail || 'Could not load projections'); setLoading(false) })
   }, [jasonSsClaimAge, justinSsClaimAge])
 
   if (loading) return <div className="loading">Running projections...</div>
@@ -114,6 +140,94 @@ export default function Retirement({ onNavigate }) {
   const lastYear = s.yearly_detail.findIndex(y => y.portfolio_balance === 0)
   const portfolioLasts = lastYear === -1 ? `Beyond age ${s.retirement_end_age}` : `Until ${person1Name} age ${s.yearly_detail[lastYear]?.jason_age}`
 
+  const saveThisScenario = async () => {
+    if (!saveName.trim()) return
+    setSaveStatus('saving'); setSaveMessage(null)
+    try {
+      // Milestone 1 acceptance follow-up (2026-09-09): "must not silently
+      // rerun against different current Settings." `s` and
+      // `data.resolved_assumptions` are exactly what THIS page rendered
+      // from THIS GET response -- sending them verbatim means the backend
+      // stores the plan actually on screen, not whatever Settings/accounts
+      // happen to say at the moment Save is clicked (which could have
+      // drifted if the household edited Settings in another tab first).
+      await axios.post('/api/saved-scenarios', {
+        name: saveName.trim(), retirement_age: retAge, ss_timing: ssTiming,
+        jason_ss_claim_age: jasonSsClaimAge, justin_ss_claim_age: justinSsClaimAge,
+        summary: s, household_data: data.resolved_assumptions,
+      })
+      setSaveStatus('idle'); setSaveName(''); setSaveMessage({ ok: true, text: 'Saved.' })
+    } catch (e) {
+      setSaveStatus('error')
+      setSaveMessage({ ok: false, text: e.response?.data?.detail || 'Could not save this scenario.' })
+    }
+  }
+
+  // Milestone 2 (2026-09-09, "Explain every major result"): every value
+  // fed to CalculationExplainer below is read straight from `s` / the
+  // per-year rows already returned by /api/projections/retirement --
+  // opening balance is the only derived value, and it's just a carry-
+  // forward of the previous row's own closing balance (or
+  // portfolio_at_retirement for year 0), not a recomputed formula.
+  //
+  // Integration note (2026-09-09, codex/milestone-1-2-integration): this
+  // is the SAME `s` object saveThisScenario() above sends as `summary` --
+  // the explainer and the save button are provably describing the same
+  // displayed calculation because they both read off one shared variable,
+  // not two independently-fetched copies. See ScenarioFlow.test.jsx's
+  // (Retirement.test.jsx here) integration test for the assertion.
+  //
+  // Milestone 2 acceptance follow-up (2026-09-10, corrected same-day per
+  // review finding P2): "distinguish gross household spending from
+  // income offsets and remaining portfolio need... do not count an
+  // income offset both as income and as a reduction in displayed
+  // spending." Two rounds of this bug: the ORIGINAL version added
+  // bridge_income/justin_gap_income into "income" while ALSO displaying
+  // `income_need` (already net of both) as "spending" -- double-
+  // counting. The FIRST fix stopped double-counting justin_gap_income
+  // but excluded bridge_income from "income" entirely on the theory it
+  // was already correctly part of "gross spending" -- it wasn't:
+  // gross_spending_need for a bridge-active year was ALSO net of bridge
+  // income (the backend captured it post-subtraction), so bridge income
+  // was counted NOWHERE -- a $100,000 target with $35,000 bridge income
+  // showed gross spending of $65,000, not $100,000, hiding the $35,000
+  // and understating actual spending even though the portfolio
+  // withdrawal itself was correct. Fixed at the source
+  // (projection_engine.py now captures gross_spending_need BEFORE the
+  // bridge subtraction, not reconstructed here by adding bridge income
+  // back after the fact -- that reconstruction would itself be wrong
+  // whenever bridge income exceeds the target, since year_need is
+  // floored at 0 by the backend's own max(0, ...) clamp before this
+  // page ever sees it). bridge_income now belongs in incomeOffsets,
+  // alongside every other guaranteed/gap/one-time source that reduces
+  // what's left to fund — verified against real backend output by
+  // TestAnnualReconciliationAgainstRealBackendOutput's new $100,000/
+  // $35,000/$65,000 reference case (bridge income, no other flows).
+  // `growth` and `transfers` are likewise sourced directly from the
+  // engine's own per-year ledger (annual_engine.AnnualResult) rather
+  // than left undisclosed.
+  const explainerFlows = s.yearly_detail.map((y, i) => ({
+    year: y.year, jasonAge: y.jason_age,
+    opening: i === 0 ? s.portfolio_at_retirement : s.yearly_detail[i - 1].portfolio_balance,
+    grossSpending: y.gross_spending_need,
+    incomeOffsets: y.pension + y.social_security + y.bridge_income + y.justin_gap_income + y.life_event_cash + y.life_event_monthly_adjustment,
+    remainingNeed: y.remaining_portfolio_need,
+    taxes: y.estimated_tax,
+    withdrawal: y.withdrawal,
+    withdrawalBreakdown: { pretax: y.withdrawal_pretax, taxable: y.withdrawal_taxable, roth: y.withdrawal_roth, hsa: y.withdrawal_hsa },
+    transfers: y.rmd_reinvested,
+    growth: y.growth,
+    unmetNeed: y.unmet_need,
+    closing: y.portfolio_balance,
+  }))
+  const explainerAssumptions = [
+    ['Retirement age', `${retAge}`],
+    ['Social Security', jasonSsClaimAge != null ? `custom claim age ${jasonSsClaimAge}` : (ssTiming === 'delayed' ? 'wait until 67' : 'take at 62')],
+    [`${person2Name}'s SS`, justinSsClaimAge != null ? `custom claim age ${justinSsClaimAge}` : 'spousal, tied to the toggle above'],
+    ['Modeled through age', `${s.retirement_end_age}`],
+    ['State tax rate on distributions', `${((s.state_income_tax_rate || 0) * 100).toFixed(1)}%`],
+  ]
+
   return (
     <div>
       <div style={{ marginBottom:28 }}>
@@ -121,6 +235,33 @@ export default function Retirement({ onNavigate }) {
       </div>
 
       <ActiveScenarioBanner />
+
+      <CalculationExplainer
+        calcDate={new Date().toLocaleDateString()}
+        assumptions={explainerAssumptions}
+        dollarBasis={{ label: 'First-year retirement income need', todayValue: s.income_today_dollars, futureValue: s.income_first_year }}
+        flows={explainerFlows}
+        notes={[
+          "Monte Carlo, Stress Test, and this page can show different funded percentages for what looks like the same household — each runs its own return sequence/assumptions set, not a shared single number. See each page's own methodology if two figures disagree.",
+        ]}
+      />
+
+      <div className="card" style={{ marginBottom:24, display:'flex', gap:10, alignItems:'center', flexWrap:'wrap' }}>
+        <span className="label" style={{ marginRight:4 }}>Save this scenario</span>
+        <input
+          value={saveName} onChange={e => setSaveName(e.target.value)}
+          placeholder="e.g. Retire at 62 with delayed SS" style={{ minWidth:240 }}
+        />
+        <button className="btn-secondary" disabled={saveStatus === 'saving'} onClick={saveThisScenario}>
+          {saveStatus === 'saving' ? 'Saving…' : 'Save this scenario'}
+        </button>
+        {saveMessage && (
+          <span style={{ fontSize:12, color: saveMessage.ok ? 'var(--green)' : 'var(--amber)' }}>{saveMessage.text}</span>
+        )}
+        <span style={{ fontSize:11, color:'var(--text3)', marginLeft:'auto' }}>
+          Captures retire-at-{retAge} · SS {ssTiming}{jasonSsClaimAge != null ? ` · ${person1Name} claims at ${jasonSsClaimAge}` : ''}{justinSsClaimAge != null ? ` · ${person2Name} claims at ${justinSsClaimAge}` : ''} exactly as shown below
+        </span>
+      </div>
 
       {/* Scenario selector */}
       <div style={{ display:'flex', gap:24, marginBottom:24, alignItems:'flex-start', flexWrap:'wrap' }}>

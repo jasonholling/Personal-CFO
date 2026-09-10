@@ -5679,3 +5679,998 @@ unsaved-changes navigation, keyboard operation, actual browser
 behavior).
 
 Branch: `codex/milestone-3-navigation`, pushed, not merged.
+
+## 66. Milestone 3 closeout + Milestone 1, first slice: reproducible saved scenarios (2026-09-09, on `codex/milestone-1-saved-scenarios`)
+
+**Milestone 3 closeout.** The Chrome-connection gap noted at the end of
+section 65 closed once the browser extension reconnected: keyboard
+operability was verified live — Tab reaches the claim-age `<summary>`
+(visible focus ring), `Enter` expands it, `Tab`+`Space` operates the
+checkbox inside and reveals the slider, all native with no custom JS.
+Two-earner/unequal-age/0-5-children journeys were re-scoped rather than
+live-walked against the real household: the brief requires preserving
+real data and using synthetic fixtures for those variations, and the
+real household here is single-earner with 2 kids — not a stand-in for
+either case. Verified instead by code inspection that none of the three
+new/changed components (`ActiveScenarioBanner`, `Compare`, the `<details>`
+wrappers) branch on earner count or kids count at all, so household-shape
+variation is exercised by the underlying pages' own pre-existing coverage,
+unchanged by this milestone. Failed-request handling verified by code
+(`ActiveScenarioBanner`'s fetch has a silent `.catch(() => {})`, no crash)
+rather than by killing the live backend against real data. Backend
+1386 passed at 97.19% coverage, frontend 41 passed, sensitive-data check
+clean — all against the actual merge commit. **Merged to `main` at
+`a75258d`** after explicit user approval ("merge").
+
+**Milestone 1** ("Complete, reproducible saved scenarios") starts here.
+Prior state: `POST /api/saved-scenarios` only ever captured
+`retirement_age` + `ss_timing` into `assumptions_json`, and re-saving
+under an existing name silently overwrote the row (`INSERT ... ON
+CONFLICT(name) DO UPDATE`) — exactly the "changing something can
+silently change a saved snapshot" failure mode Milestone 1's acceptance
+criteria rule out, just self-inflicted at save time instead of by a
+later Settings edit.
+
+Changes:
+- `CALCULATION_ENGINE_VERSION` constant added to `projection_engine.py`
+  — bump it whenever a change to `projection_engine.py`/
+  `simulation_engine.py`/`annual_engine.py` changes what a given set of
+  inputs produces, independent of whether the household's own inputs
+  also changed. Stored on every new saved scenario as
+  `calculation_version`.
+- `saved_scenarios` schema gains `schema_version`, `calculation_version`,
+  `seed`, `trial_count`, `revision_of`, `revision_number`, `is_legacy`
+  (ALTER TABLE ADD COLUMN, same idiom as every prior migration in
+  `db.py`). Existing rows get `schema_version=1`/`is_legacy=1` via
+  column DEFAULT — they aren't retroactively given assumptions that were
+  never captured; the migration only labels what's already true of them.
+- `_capture_resolved_assumptions()`: a saved scenario's `assumptions_json`
+  now holds the actual `planning_inputs` row, `accounts`, `kids`,
+  `life_events`, and `surplus_allocations` used by the projection — not a
+  hand-picked subset that drifts out of sync as new inputs get added —
+  plus `ss_timing`, both claim-age overrides, and optional `seed`/
+  `trial_count` for a future stochastic (Monte Carlo) save.
+- `POST /api/saved-scenarios` is now insert-only: saving over an existing
+  name 409s ("choose a different name, or use Recalculate") instead of
+  overwriting. Added `jason_ss_claim_age`/`justin_ss_claim_age` to
+  `ScenarioSave` so a scenario saved with a claim-age override in effect
+  is actually reproducible — required fixing the scenario-lookup itself
+  too, since a `jason_ss_claim_age` override collapses
+  `run_retirement_projection`'s scenario set to a single `"custom"`-labeled
+  entry instead of the early/delayed pair (see `jason_ss_options` in
+  `projection_engine.py`); looking up `body.ss_timing` directly against
+  that set returns nothing and 500s — caught by a new test before it
+  shipped, fixed by checking for the override first.
+- `POST /api/saved-scenarios/{id}/recalculate` (new): re-runs the
+  original's exact retirement age / SS choice against *current*
+  household data, inserts a new row linked via `revision_of` (pointing at
+  the lineage root, so recalculating a revision doesn't create a new
+  chain), and never modifies the original row. Verified by test that the
+  original's own `summary_json` is byte-identical after a recalculation
+  that used genuinely different account balances.
+- `GET /api/saved-scenarios/{id}` (new): single-scenario fetch, 404 on
+  missing id — used by the reopen/recalculate flow.
+- Frontend `SavedScenarios.jsx` rewritten (was a single minified line):
+  inline 409 error surfaced instead of silently failing, a `LEGACY` badge
+  on pre-migration rows, a "Recalculate with current data" button per
+  scenario, and a lightweight two-scenario compare panel (checkbox-select
+  two → outcome diff + differing `planning_inputs` fields) satisfying
+  "support comparison of saved scenarios" without a full diff framework.
+- `Retirement.jsx` gains a "Save this scenario" card right under
+  `ActiveScenarioBanner` — the one page whose result this milestone wires
+  up first, since it's already the same `run_retirement_projection` call
+  the save endpoint itself makes. Posts exactly the claim-age overrides
+  currently active on screen, not a separate hand-entered copy.
+
+**Verified**: 13 new/rewritten backend tests (insert-only 409, legacy
+flagging via a hand-inserted pre-migration row, revision creation +
+lineage linkage, recalculation reflecting changed account data while the
+original stays untouched, single-scenario 404, claim-age override
+capture) — all passing alongside the full existing suite. Frontend: 5 new
+`SavedScenarios.test.jsx` tests (legacy badge exclusivity, save payload,
+409 surfaced inline, Recalculate posts to the right endpoint and reloads,
+compare panel renders both outcome and assumption diffs) + 3 new
+`Retirement.test.jsx` tests (save payload matches on-screen assumptions,
+409 surfaced, no request sent with an empty name) — full frontend suite
+green (9 files, 49 tests). Full backend suite run separately against this
+branch (see completion report for the count).
+
+**No calculation changes** — `run_retirement_projection` itself is
+untouched; only what gets captured/stored around it changed.
+
+**Explicitly out of scope for this slice** (left for a follow-up slice or
+noted as a known limitation, not silently dropped):
+- "Save this scenario" was added to the Retirement Projection *overview*
+  result only — Monte Carlo, Roth Conversion, and the other "major
+  results" Milestone 2 will also cover don't have it yet.
+- The `seed`/`trial_count` fields exist on the schema and in
+  `ScenarioSave`/`_capture_resolved_assumptions`, but nothing currently
+  saved is a stochastic (Monte Carlo) result, so they're written as
+  `null` on every save so far — wiring a Monte Carlo "save this scenario"
+  call site through them is unbuilt.
+- Comparison is two-scenario-at-a-time via checkboxes, not an N-way
+  comparison view.
+- Backup/restore was not given a dedicated new test for the added
+  columns — `_BACKUP_TABLES` dumps/restores `saved_scenarios` generically
+  by `SELECT *`/dict, so the existing backup/restore tests already
+  exercise the new columns incidentally, but no test asserts on them
+  specifically.
+
+Branch: `codex/milestone-1-saved-scenarios`, branched from `main` at
+`a75258d` (post-Milestone-3-merge). Not yet pushed — pending the full
+backend suite run against this commit.
+
+## 67. Milestone 1 acceptance follow-up: pin saves to the displayed result, not a re-read (2026-09-09, on `codex/milestone-1-saved-scenarios`)
+
+Independent review of section 66's first slice found a real gap before
+any code changed: `save_scenario()` re-read `planning_inputs`/`accounts`
+fresh from the database at save time and recomputed
+`run_retirement_projection` itself, rather than storing what the caller
+had actually displayed. If Settings changed in the gap between a page
+loading its result and the user clicking "Save this scenario," the saved
+summary would reflect the LATER state, not the plan the user evaluated —
+exactly the "silently rerun against different current Settings" failure
+this milestone's acceptance criteria call out by name.
+
+Fix:
+- `GET /api/projections/retirement` now also returns
+  `resolved_assumptions` — the exact `planning_inputs`/`accounts`/`kids`/
+  `life_events`/`surplus_allocations` bundle it used to compute THIS
+  response (refactored into `_capture_household_data_bundle()`, shared
+  with the save path).
+- `Retirement.jsx` holds that bundle in `data.resolved_assumptions` and,
+  on save, sends it back verbatim as `household_data`, along with the
+  currently-displayed scenario object `s` as `summary`.
+- `POST /api/saved-scenarios` now stores `summary`/`household_data`
+  VERBATIM when both are present — no recompute, no second database
+  read. `_capture_resolved_assumptions()` gained an optional
+  `household_data` param for this. Omitting both still falls back to the
+  original recompute-from-current-DB path, for callers with no live
+  displayed result to pin to (`SavedScenarios.jsx`'s own "create by
+  parameters" form, which never fetched a projection of its own).
+- `SavedScenarios.jsx`: added a "View saved inputs" `<details>` per card
+  — the "reopening" view, reading only the row's own frozen
+  `assumptions_json`, explicitly labeled "frozen at save time," never a
+  fresh fetch. `CompareDiff` gained a "Changed scenario choices" table
+  (retirement age, SS timing, both claim-age overrides) ahead of the
+  existing "Changed household-data assumptions" (`planning_inputs`)
+  table — the acceptance criteria's "changed assumptions" covers both,
+  and the two were being conflated into one `planning_inputs`-only diff.
+
+**Verified**:
+- New backend test class `TestSavedScenariosPinnedToDisplayedResult`
+  (4 tests): `GET /api/projections/retirement` actually returns
+  `resolved_assumptions`; a pinned save stores an intentionally-impossible
+  summary verbatim (proving no recompute happens); a pinned save made
+  AFTER a Settings change still reflects the pre-change data it was
+  pinned to; the unpinned fallback path still works for the
+  parameters-only form.
+- New backend test class `TestSavedScenariosReopenAndCompareAndBackup`
+  (2 tests): reopening returns byte-identical summary/assumptions even
+  after Settings and accounts change post-save; backup/restore round-
+  trips a full scenario AND its recalculated revision (assumptions,
+  summary, `revision_of`, `revision_number`, `schema_version`,
+  `is_legacy` all preserved).
+- Frontend: `Retirement.test.jsx` gained a test asserting the exact
+  `household_data` sent on save deep-equals what the GET response
+  returned, and that Save triggers no second `/api/projections/retirement`
+  fetch. `SavedScenarios.test.jsx` gained tests for the reopen view
+  (frozen `jason_age` shown, labeled "frozen at save time") and the new
+  choice-diff table.
+- Full backend suite: 1400 passed, 97.22% coverage. Full frontend suite:
+  9 files, 52 tests. Sensitive-data check: clean (153 tracked files —
+  grew from 151 as this doc itself grows).
+
+**No calculation changes** — `run_retirement_projection` itself is
+untouched; this only changes what gets read/stored around it, and only
+for the save path specifically (the fallback recompute path's behavior
+is unchanged).
+
+**Explicitly out of scope for this follow-up** (still true from section
+66, restated so this section stands on its own):
+- "Save this scenario" only lives on the Retirement Projection overview.
+- `seed`/`trial_count` exist on the schema but nothing stochastic saves
+  through them yet — the Monte Carlo/Stress/Roth Conversion extension is
+  its own follow-up milestone slice, not started.
+- Comparison is two-at-a-time, not N-way.
+
+Branch: `codex/milestone-1-saved-scenarios`. Pending push.
+## 68. Milestone 2, first slice: "How this was calculated" for retirement funding (2026-09-09, on `codex/milestone-2-explainability`)
+
+Renumbered from this branch's own section 66 to 68 during the
+Milestone 1 + Milestone 2 integration merge (codex/milestone-1-2-integration)
+-- both branches independently used 66/67 since both started from the
+same main commit; no content conflict, just numbering.
+
+Milestone 2 ("Explain every major result") starts here, scoped to its
+first result: retirement funding (the Retirement Projection page's
+headline "% funded" and portfolio-at-retirement figures).
+
+- New shared component `CalculationExplainer.jsx` — a collapsible "How
+  this was calculated" panel taking already-computed data as props:
+  assumptions (label/value pairs, caller-supplied so each page picks
+  what's relevant to itself), a dollar-basis pair (today's $ vs the
+  actual future-dollar figure, so "distinguish today's dollars from
+  future dollars" is explicit rather than implied by whichever single
+  number happens to be on screen), a per-year annual-flows table
+  (opening balance, income, spending need, taxes, gross withdrawal with
+  its pretax/taxable/roth/hsa breakdown, unmet need, closing balance),
+  and free-text notes for explaining intentional cross-tool differences.
+  Every value is read straight from the calculation's own returned
+  data — the only derived value is "opening balance," and that's a
+  carry-forward of the previous row's own closing balance (or
+  `portfolio_at_retirement` for year 0), not a recomputed formula. This
+  satisfies the milestone's own "generate explanations from the
+  calculation's returned data; do not recreate formulas in the
+  frontend."
+- Wired into `Retirement.jsx`: assumptions include retirement age, both
+  SS claim-age/timing choices actually in effect (reusing the same
+  `jasonSsClaimAge`/`justinSsClaimAge`/`ssTiming` state
+  `ActiveScenarioBanner` already reads), modeled-through age, and the
+  state tax rate the projection itself used
+  (`s.state_income_tax_rate`) — not a second, independently-sourced
+  copy of any of these. Dollar basis pairs `income_today_dollars` against
+  `income_first_year`, both already returned per-scenario.
+- Privacy mode: `CalculationExplainer` uses the same
+  `isPrivacyMode()`/`MASK_CURRENCY` formatter as every other page — every
+  dollar figure inside the expanded panel masks, verified by a dedicated
+  test counting masked occurrences rather than trusting the pattern by
+  inspection alone.
+
+**Verified**: 4 new `CalculationExplainer.test.jsx` tests (assumptions +
+dollar-basis + flow rows render from props alone, withdrawal breakdown
+shown per bucket, privacy mode masks every figure including inside the
+expanded table, empty-props renders the collapsed shell only) + 1 new
+`Retirement.test.jsx` test (the panel expands and shows the scenario's
+own dollar-basis/flow figures, not a placeholder). Full frontend suite:
+9 files, 46 tests, green. Backend untouched by this slice — full backend
+suite and sensitive-data check still run against this commit per the
+brief's own completion requirements (see completion report for counts).
+
+**No calculation changes** — this slice only reads and displays
+already-returned data; nothing in `projection_engine.py` was touched.
+
+**Explicitly out of scope for this slice** (documented, not silently
+dropped):
+- Only the retirement-funding result has the explainer wired in.
+  Monte Carlo success, insurance shortfall, and Roth conversion benefit
+  — the milestone's other three "major results" — do not have it yet.
+  Monte Carlo in particular still needs its own specific treatment
+  ("distinguish trial outcomes from percentile summaries") that this
+  slice doesn't address at all.
+- "Independent reference cases cover surplus income, depletion, taxes,
+  retirement boundaries, and SS timing" (the milestone's acceptance
+  criteria) — this slice's tests confirm the panel displays what it's
+  given correctly, but don't independently re-derive a reference case
+  to confirm what it's given is itself correct; that reconciliation
+  work is unbuilt.
+- No calculation-date freshness indicator beyond `toLocaleDateString()`
+  at render time — no explicit "recalculated N minutes ago" or
+  staleness detection here (Milestone 3's stale-result pattern from
+  `StressTestWhatIf.jsx` wasn't ported over to this page in this slice).
+
+Branch: `codex/milestone-2-explainability`, branched from `main` at
+`a75258d`. Not yet pushed — pending the full backend suite run against
+this commit.
+
+## 69. Milestone 2 acceptance follow-up: reconcile flows, identify unavailable fields explicitly (2026-09-09, on `codex/milestone-2-explainability`)
+
+Independent review asked to "verify the explanation reconciles opening
+balances, income, spending, taxes, transfers, growth, closing balances,
+and unmet need" and to "identify unavailable fields explicitly." The
+first slice's flows table had opening/income/spending/taxes/withdrawal/
+unmetNeed/closing but no `transfers` column, and silently omitted growth
+rather than saying why.
+
+Fix:
+- Added a `transfers` column to `CalculationExplainer`'s flows table,
+  fed from `yearly_detail`'s own `rmd_reinvested` — an internal
+  bucket-to-bucket movement (an RMD forced out of pretax and reinvested
+  into taxable) that doesn't itself fund spending, distinct from a
+  withdrawal.
+- Added a permanent disclosure line under the table: investment growth
+  isn't itemized per-year by this projection (the engine returns opening/
+  closing balances, not a separate per-year growth figure), so showing
+  one here would mean computing it from the other columns — exactly the
+  "recreate formulas in the frontend" this component exists to avoid.
+  Disclosed explicitly rather than silently leaving the column out.
+
+**Verified** (the "reconciles" half of the request — checking identities
+the already-returned data satisfies, not deriving new ones):
+- New test confirms one year's `closing` balance equals the next year's
+  `opening` balance end-to-end across the whole flows array (the
+  carry-forward identity `CalculationExplainer`'s only derived value
+  depends on), and that year 0's opening equals the scenario's own
+  `portfolio_at_retirement`.
+- New test confirms the withdrawal-bucket breakdown
+  (pretax+taxable+roth+hsa) sums to the same total shown as the gross
+  withdrawal figure, for real numbers from the fixture data.
+- New tests confirm the `transfers` column renders the fixture's nonzero
+  `rmd_reinvested` value, and that the growth-unavailable disclosure
+  renders every time the flows table does.
+- Full frontend suite: 9 files, 49 tests. Backend untouched by this
+  slice — full backend suite and sensitive-data check still run against
+  this commit per the brief's own completion requirements (counts in the
+  completion report).
+
+**No calculation changes** — this only adds a column sourced from data
+`yearly_detail` already returned, and a disclosure string; nothing in
+`projection_engine.py` changed.
+
+**Explicitly out of scope** (unchanged from section 66, restated):
+Monte Carlo/insurance/Roth Conversion don't have the explainer yet;
+Monte Carlo's own "trial vs. percentile" distinction is unaddressed;
+independent reference-case reconciliation against a hand-computed
+expected value (as opposed to internal self-consistency checks like the
+carry-forward/breakdown-sum tests above) is still unbuilt.
+
+Branch: `codex/milestone-2-explainability`. Pending push.
+
+## 70. Integration: Milestone 1 + Milestone 2 merged and tested together (2026-09-09, on `codex/milestone-1-2-integration`)
+
+Both milestones branch from the same `main` commit (`a75258d`) and both
+modify `Retirement.jsx` — per the review instruction, this branch merges
+`codex/milestone-1-saved-scenarios` and `codex/milestone-2-explainability`
+together (neither merged to `main`; this is a combined-testing branch
+only) to confirm they actually work side by side, not just independently.
+
+Conflicts were structural, not logical — Milestone 1 added
+`saveThisScenario()` + the "Save this scenario" card, Milestone 2 added
+`explainerFlows`/`explainerAssumptions` + the `CalculationExplainer`
+panel, both inserted at the same point in the same render function.
+Resolved by keeping both: the explainer panel renders first, the save
+card right below it. `Retirement.test.jsx` (an add/add conflict — both
+branches created this file independently) was hand-merged into one file
+covering both milestones' tests plus a new integration describe block.
+`CALCULATION_CONTRACT.md` had a numbering collision (both branches used
+section 66/67 independently) — resolved by renumbering Milestone 2's
+sections to 68/69, no content conflict.
+
+**"Verify the saved scenario and explanation refer to the same displayed
+calculation"** — this was the specific thing to prove, not just assume
+from reading the source. Two new integration tests:
+- Expands the explainer panel, reads its displayed year-0 opening
+  balance ($900,000, sourced from `s.portfolio_at_retirement`), then
+  saves the scenario and confirms the POST payload's
+  `summary.portfolio_at_retirement` is the *same* $900,000 — both
+  features are reading the same `s` object, not two independently
+  fetched or computed copies that happen to agree by coincidence.
+- Changes the shared retirement age to one with no matching scenario in
+  the fixture and confirms BOTH features disappear together (the page's
+  own "No data for this scenario" fallback), rather than one silently
+  continuing to show stale data while the other blanks — proving they're
+  gated by the same `s` lookup, not independent state that could
+  diverge.
+
+**Verified**: full frontend suite 10 files, 62 tests (52 from Milestone
+1 + the shared `CalculationExplainer`/integration tests, no regressions
+from either branch's own suite). Full backend suite and sensitive-data
+check run against this merge commit (counts in the completion report).
+
+**No calculation changes** — this is a merge of two already-verified
+no-calculation-change branches; nothing new was computed differently.
+
+This branch exists for combined review/testing only. Approval to merge
+either Milestone 1 or Milestone 2 into `main` still needs to happen on
+their own branches (or this integration branch, if that's the preferred
+path) — not implied by this section.
+
+## 71. Two review findings: out-of-order response guard, incomplete income column (2026-09-09, brought in from `codex/milestone-1-saved-scenarios` + `codex/milestone-2-explainability`)
+
+Renumbered from 70 (both branches independently used that number,
+same numbering collision described in section 70's own opening note)
+during this integration merge.
+
+Independent review flagged two real defects, fixed here (and identically
+on `codex/milestone-1-saved-scenarios`, since both branches share the
+same `Retirement.jsx` fetch effect and both were independently
+vulnerable):
+
+**Out-of-order response guard.** The page's `/api/projections/retirement`
+fetch had no guard against a slower earlier request resolving after a
+faster later one — rapidly toggling a claim-age slider could leave
+`data` holding a projection computed for a PREVIOUS selection while the
+slider itself showed the CURRENT one, with nothing visibly wrong to
+signal it. On Milestone 1's branch this is consequential, not just a
+visual flash: saving during that window would persist the stale result
+while claiming (via the same `jasonSsClaimAge`/`justinSsClaimAge` state
+the save payload reads) to be the current selection. Fixed with the same
+`genRef` generation-counter guard already established for this exact bug
+class in `StressTestWhatIf.jsx`'s `SurvivorScenarioSection` (section 65)
+— increment a ref on every new request, discard any response whose
+generation doesn't match the current one on arrival.
+
+**Incomplete income column.** `explainerFlows`' `income` field summed
+only `pension + social_security + bridge_income`, omitting
+`justin_gap_income` (second-earner income during the gap phase) and
+`life_event_cash` (a one-time inflow like an asset sale, or a negative
+one-time cost) — both guaranteed-income-like flows the backend itself
+already nets against spending need before any bucket is touched. Any
+year with either nonzero understated total income. Fixed by summing all
+five fields.
+
+**Verified**:
+- New test simulates a slow first request (no override) and a fast
+  second request (override applied) resolving out of order, confirms
+  the fast/current response wins regardless of resolution order — on
+  both this branch and Milestone 1's.
+- New test uses a fixture year with both `justin_gap_income` and a
+  negative `life_event_cash` set, confirms the displayed Income figure
+  is the full 5-field sum ($33,500), not the previous 3-field partial
+  sum ($30,000) — a genuine annual-reconciliation check for the income
+  side specifically, not just the carry-forward/withdrawal-breakdown
+  self-consistency checks sections 68–69 already had.
+- Full frontend suite: 9 files, 51 tests. Backend untouched (both fixes
+  are frontend-only) — sensitive-data check clean.
+
+**No calculation changes** — both fixes are frontend bugs in how
+already-returned data is fetched/summed; nothing in
+`projection_engine.py` changed.
+
+**Still not a full annual reconciliation** (the honest remaining gap):
+these tests confirm the Income column's own arithmetic is complete and
+confirm carry-forward/withdrawal-breakdown identities hold — they do
+NOT prove `income + withdrawal - spending - taxes` nets to the balance
+change shown, since that would require either re-deriving the engine's
+own funding-order logic (risking the "recreate formulas in the
+frontend" this component exists to avoid) or cross-checking against a
+real backend-computed reference case rather than a hand-built fixture.
+Listed as unbuilt, not silently claimed complete.
+
+## 71. Real annual reconciliation against actual backend output, and a double-counting fix (2026-09-10, brought in from `codex/milestone-2-explainability`)
+
+Independent review: the "not yet a full annual reconciliation" gap left
+open at the end of section 69 needed closing before either milestone
+merges, and a real bug was found in the process — an income offset
+(second-earner gap income, and for `ret_age==55` households, bridge
+income) was being counted BOTH as "income" in the explainer AND already
+netted into the displayed "spending" figure (`income_need`), which
+`run_retirement_projection` itself computes net of those two offsets
+(`year_need -= life_event_monthly_this_year`, `year_need -=
+income.justin_gap_income` — confirmed by reading the actual source, not
+assumed).
+
+**Backend**: three new fields added to `run_retirement_projection`'s
+`yearly_detail`, each a direct read of an already-computed value — no
+new arithmetic logic:
+- `gross_spending_need`: the year's spending target BEFORE the two
+  generic offsets (life-event monthly delta, second-earner gap income).
+  Bridge income (`ret_age==55` only) is intentionally NOT re-added here
+  — it's already correctly netted into the branch-specific formula,
+  including its `max(0, ...)` clamp, which a naive "add bridge_income
+  back" reconstruction in the frontend would get wrong whenever bridge
+  income exceeds the target.
+- `remaining_portfolio_need`: `year_result.spending_need -
+  year_result.external_income` — the exact `remaining` value
+  `annual_engine.simulate_withdrawal_year` already computes internally
+  before drawing from any bucket, now exposed instead of discarded.
+- `growth`: `sum(year_result.growth.values())` — the same per-bucket
+  growth dict `AnnualResult.reconcile()` already checks against
+  internally, previously computed and thrown away by this loop. The
+  explainer's growth column is no longer "disclosed as unavailable" —
+  it's a real number.
+
+**Frontend**: `CalculationExplainer`'s flows table now shows Gross
+spending / Income offsets / Remaining need as three distinct columns
+(previously "income" and "spending" conflated the two, is the exact bug
+described above). Income offsets = `pension + social_security +
+justin_gap_income + life_event_cash + life_event_monthly_adjustment` —
+deliberately excludes `bridge_income`, matching the backend's own
+`gross_spending_need` definition. Growth is now a real column.
+
+**Independently verified reconciliation** (new file
+`tests/test_annual_reconciliation.py`) — this is the part done
+differently from sections 68-69's fixture-only self-consistency checks:
+- Runs the ACTUAL `run_retirement_projection`, spying on the REAL
+  `annual_engine.simulate_withdrawal_year` calls it makes (patched at
+  `projection_engine`'s own name binding, since `from annual_engine
+  import simulate_withdrawal_year` means patching `annual_engine`'s copy
+  wouldn't affect `projection_engine`'s calls) to capture every actual
+  `AnnualResult`.
+- Asserts `AnnualResult.reconcile()` — the engine's own authoritative
+  per-year ledger check, already used once to catch a real bug before
+  any consumer was migrated onto this engine (see `annual_engine.py`'s
+  own docstring) — returns `None` for every single year of two full
+  synthetic households: a "rich" one engineered to exercise every flow
+  type the acceptance review listed (working-spouse wages + gap income,
+  bridge income, one-time positive/negative life events, recurring
+  positive/negative life events, RMD reinvestment, taxes, growth), and a
+  "poor" one engineered to deplete (confirms the ledger still balances
+  in years where `unmet_need > 0` and the portfolio has hit $0).
+- A coverage test explicitly asserts each of those flow types is
+  actually nonzero somewhere in the rich run — guards against the
+  reconciliation check passing vacuously because a flow type happened to
+  be zero for this particular household.
+- Confirms `gross_spending_need - income_offsets ==
+  remaining_portfolio_need` (within small rounding tolerance, since each
+  field is independently rounded) using the real run's own numbers, and
+  that the new `growth` field matches the captured `AnnualResult`'s own
+  growth dict exactly.
+- All 5 tests pass; 181 pre-existing `test_projection_engine.py` tests
+  continued to pass unchanged.
+
+**No calculation changes** — `run_retirement_projection`'s existing
+returned fields (`income_need`, `withdrawal`, `portfolio_balance`, etc.)
+are byte-for-byte unchanged; only new fields were added and a frontend
+double-counting bug was fixed (the frontend never affects any number
+`run_retirement_projection` itself returns).
+
+**Verified**: full backend suite 1391 passed at 97.19% coverage
+(2 fewer than section 67's backend-count baseline of 1386+5 expected —
+consistent with `test_annual_reconciliation.py`'s 5 new tests landing
+inside the count, not a regression). Full frontend suite 9 files, 52
+tests. Sensitive-data check clean.
+
+**Still explicitly open**: per-year reconciliation is now verified
+against real engine output, but no test yet reconciles the FULL
+multi-year lifecycle against an independently-computed reference total
+(e.g. "sum of every year's withdrawal + ending balance == starting
+balance + total lifetime income + total lifetime growth - total lifetime
+tax", a stronger whole-of-plan identity beyond the per-year one this
+section verifies). Not attempted here — listed, not silently claimed.
+
+## 72. Review finding P2: bridge income still excluded from gross spending (2026-09-10, brought in from `codex/milestone-2-explainability`)
+
+Independent reproduction, exact numbers: $100,000 annual spending,
+$35,000 bridge income, no other income/taxes/growth. Section 71's fix
+captured `gross_spending_need` from `year_need` AFTER the bridge
+subtraction for `ret_age==55` bridge-active years — so bridge income was
+excluded from BOTH "gross spending" ($65,000 shown instead of $100,000)
+AND "income offsets" ($0 shown instead of $35,000). The portfolio
+withdrawal itself was always correct (`remaining_portfolio_need` =
+$65,000, matching the real draw) — only the explanation was wrong, and
+section 71's own reconciliation tests didn't catch it because they check
+that the engine's ledger balances against ITSELF, which it does
+regardless of how a value is labeled — "the engine balancing its own
+ledger does not independently validate the meaning of the displayed
+fields," per the review.
+
+Fix: `gross_spending_need` for bridge-active years is now captured from
+`gross_target` — the target BEFORE bridge income is subtracted, computed
+and captured directly at the source in `projection_engine.py`, not
+reconstructed afterward by adding `bridge_income` back into a value that
+may already have been floored to 0 by the branch's own `max(0, ...)`
+clamp (an addition-after-clamp reconstruction would silently produce the
+wrong answer whenever bridge income exceeds the target — the review's
+own explicit warning). `bridge_income` now belongs in `Retirement.jsx`'s
+`incomeOffsets`, alongside every other guaranteed/gap/one-time source.
+
+**Verified**: new backend test `test_bridge_income_reference_case_
+matches_independent_reproduction` locks in the review's exact numbers —
+$100,000 gross spending, $35,000 income offsets, $65,000 remaining
+need, $65,000 withdrawal, $0 tax, $0 growth — against the real engine
+output for an independently-constructed household (already-retired at
+55, single bridge year, zero inflation/growth/tax, single taxable
+account). The existing rich-household reconciliation test was updated
+to include `bridge_income` in its own offset sum (it previously omitted
+it too, matching the bug). New frontend test exercises a bridge-income
+year and confirms the same numbers render. Full backend suite: 1392
+passed, 97.19% coverage (181 pre-existing `test_projection_engine.py`
+tests unchanged — `year_need` itself, the value actually used for
+withdrawal, was never touched, only where `gross_spending_need` is
+captured from). Full frontend suite: 9 files, 53 tests. Sensitive-data
+check clean.
+
+**No calculation changes** — `year_need` (and therefore every existing
+returned field, including the withdrawal amount) is byte-for-byte
+unchanged; only `gross_spending_need`'s capture point moved.
+
+## 73. Review finding P1 (boundary case): bridge income above spending was silently discarded (2026-09-10, brought in from `codex/milestone-2-explainability`)
+
+This one WAS a real calculation bug, not just a labeling bug like
+section 72 — and it predates any of this milestone's work. Reproduction:
+$500,000 taxable, $100,000 spending, $150,000 bridge income, zero tax/
+growth. The pre-existing `year_need = max(0, target - bridge)` clamp
+discarded the $50,000 surplus before `simulate_withdrawal_year` ever
+saw it — not withdrawn, not saved, not reported anywhere. Ending balance
+was $500,000 (unchanged) instead of the correct $550,000. Section 72's
+own reconciliation tests didn't catch this because they check that the
+engine's ledger balances against itself, which a consistently-lossy
+value still does.
+
+**Fix**: bridge income no longer participates in `year_need`'s
+computation at all — `year_need` is now always the unclamped gross
+target (further simplifying `gross_spending_need`'s capture to a single
+unconditional assignment, no bridge-active special case needed anymore).
+`bridge_this_year` now joins `year_pen`/`year_jss`/`year_uss` in
+`fixed_income`, the `guaranteed_income` argument to
+`simulate_withdrawal_year` — so the shared engine's own existing
+surplus-sweep logic (`cash_available >= spending_need` → surplus swept
+into taxable, already correct and tested for every other guaranteed-
+income source, per `annual_engine.py`'s own documented contract) handles
+bridge income exceeding spending the same way it already handles
+everything else. Not a new, bridge-specific rule.
+
+**A second bug found and fixed as a direct consequence**: the
+scenario-level `total_cap_need`/`total_cap_income` formulas (which
+compute `percent_funded`/`projected_surplus`/`on_track` — the actual
+headline numbers) never included `bridge_income` at all. Before this
+fix, that was masked because bridge income was implicitly reflected via
+a *reduced* `income_need` (the old netting). Once bridge stopped netting
+into `income_need`, `total_cap_need` would have overstated capitalized
+need by the FULL bridge amount for every bridge-active year — not just
+the overshoot case, every case — with no offsetting credit anywhere.
+Fixed by adding `y["bridge_income"]` to `total_cap_income` explicitly,
+symmetric with how `pension`/`social_security` are already there.
+
+**Verified**: new test class `TestBridgeIncomeSurplusSweep` (6 tests) —
+bridge below spending (restates section 72's own numbers with an
+explicit ending-balance check), bridge exactly equal to spending (zero
+draw, zero surplus — the boundary between the two directions), the
+review's own exact $500,000/$100,000/$150,000 reproduction (confirms
+$550,000 ending balance and that `remaining_portfolio_need` is
+legitimately negative, with the displayed identity still holding in
+that direction), the same overshoot combined with pension + a one-time
+life event + second-earner gap income simultaneously (confirms none of
+the offsets interfere or get double-counted), and a scenario-level
+`percent_funded`/`projected_surplus` comparison (with vs. without the
+bridge surplus, since asserting an absolute "on track" isn't meaningful
+for a household whose later, bridge-free years still have to self-fund
+— the relative comparison is the actual claim being verified: the
+surplus must make the household look strictly better, never worse or
+unchanged). All 181 pre-existing `test_projection_engine.py` tests
+continued to pass. Frontend: new test confirms a negative
+`remainingNeed` renders as a real negative currency figure, not blank
+or NaN. Full backend suite: 1397 passed, 97.19% coverage. Full frontend
+suite: 9 files, 54 tests. Sensitive-data check clean.
+
+**"Check other consumers for the same clamp before propagating a
+fix"** — checked, not fixed here, reported instead of silently expanding
+scope:
+
+The identical clamp pattern (`year_need = max(0, target - bridge)`)
+exists in `two_age_spending_need_fn` (`projection_engine.py`), the
+shared per-year-need factory for every TWO-AGE consumer. Confirmed by
+reading every one of its 7 call sites:
+- `run_two_dimensional_retirement_projection` (two-age Retirement
+  Projection) actually captures the returned `bridge_income_this_year`
+  — but only to report it in `yearly_detail`'s own `bridge_income`
+  field; it is NEVER added to that function's own `fixed_income`, so
+  the surplus is discarded exactly the same way, just one step later
+  than in the other six call sites.
+- The other 6 call sites (`run_owner_split_two_dimensional_projection`
+  and 5 sites across `simulation_engine.py` — two-age Monte Carlo,
+  two-age Stress Tests, two-age Tax Efficiency) discard the returned
+  value entirely, via an underscore-prefixed variable name
+  (`_bridge_income`/`_bridge_income_this_year`) at every one.
+
+So: the same bug exists, identically, in every two-age consumer that
+supports `ret_age==55` bridge income. NOT fixed in this commit — fixing
+it means touching `two_age_spending_need_fn` itself plus updating all 7
+call sites' own `fixed_income`/`guaranteed_income` assembly (and
+checking each one for its own version of the `total_cap_need`/
+`total_cap_income`-equivalent secondary bug found above), which is a
+materially larger, multi-file, multi-consumer change than this
+milestone's scope (the single-age Retirement Projection explainer).
+Reported here as a confirmed, precisely-located finding for a separate
+scoping decision — not silently deferred without a paper trail, and not
+silently fixed without review.
+
+Branch: `codex/milestone-1-2-integration`.
+
+## 74. Two-age bridge-surplus fix: extended to all 7 confirmed callers from section 73 (2026-09-10, on `codex/two-age-bridge-surplus-fix`, branched from `codex/milestone-1-2-integration` at `f2c4a5d`)
+
+Correctness follow-up, separate from Milestone 4's tax/ownership
+design (which stays design-only, untouched by this branch). Fixes the
+identical bug section 73 located but did not fix: every two-age
+consumer's `year_need = max(0, target - bridge)` clamp inside
+`two_age_spending_need_fn`'s `need_for_year` closure, which both
+mislabeled gross spending (netting bridge in before any "gross"
+figure was captured) and, in the boundary case where bridge income
+exceeds the spending target, silently discarded the excess before it
+ever reached any withdrawal/guaranteed-income parameter — not
+withdrawn, not saved, not reported.
+
+**Fix.** `need_for_year` no longer nets bridge income into `year_need`
+at all — it returns the gross target unchanged, exactly matching the
+single-age fix (section 73's own predecessor). `bridge_income_this_year`
+(already returned unclamped) is now actually consumed by all 7 call
+sites, each fed into that consumer's OWN pre-existing
+surplus-sweep-capable channel — no new bridge-specific balance
+adjustment was introduced anywhere:
+
+1. `run_two_dimensional_retirement_projection` (`projection_engine.py`)
+   — added to `fixed_income`, which flows into
+   `annual_engine.simulate_withdrawal_year`'s own surplus sweep via its
+   `guaranteed_income` parameter.
+2. `run_owner_split_two_dimensional_projection` (`projection_engine.py`)
+   — same `fixed_income` channel, PLUS added to the `owner_cash["jason"]`
+   bucket (the bridge job is Jason's own income; the gate
+   `jason_ret_age == 55` is keyed to him specifically), so the owner-split
+   ledger attributes the surplus correctly instead of losing it or
+   crediting it to `joint`.
+3. `_run_single_two_age` (`simulation_engine.py`, two-age Monte
+   Carlo/Stress single-trial loop) — added to `fixed`, same
+   `simulate_withdrawal_year` surplus sweep.
+4. `_household_spending_success_rate_two_age` (`simulation_engine.py`)
+   — added into `_swr_year_step`'s `event_monthly` argument, reusing
+   that function's own existing surplus logic
+   (`remaining = max(0, portfolio_draw - event_monthly) + ...`). A
+   stale comment here claiming bridge was "already netted internally"
+   was corrected.
+5 & 6. `_run_roth_conversion_analysis_two_age`'s two loops (with- and
+   without-conversions, `simulation_engine.py`) — added to `guaranteed`
+   in both, so the "without conversions" baseline isn't biased relative
+   to the with-conversions schedule by an inconsistency between the two
+   paths.
+7. `_run_tax_efficiency_simulation_two_age`'s `run_strategy` closure
+   (`simulation_engine.py`) — added to `guaranteed`, which feeds
+   `_cash_available_offsets_need`'s existing `(net_need, surplus_credit)`
+   return value; that helper itself was read, not modified — it was
+   already the reusable shared surplus-handling primitive for this
+   consumer.
+
+One pre-existing test needed updating after this fix:
+`test_two_dimensional_retirement.py::TestAge55BridgeAndKidsRulesPreserved
+::test_bridge_and_inflation_use_jasons_effective_start_not_the_raw_
+selected_age` asserted the OLD "income_need net of bridge" semantic
+(`== 50000`); updated to assert the new gross-target semantic
+(`== 80000`, matching single-age's own `income_need` convention), while
+confirming `draw` is unchanged at `== 50000` (still correctly nets
+bridge via `fixed_income`, just one step later in the pipeline).
+
+No frontend changes were needed: no two-age consumer's frontend
+display currently reads these fields directly (two-age Survivor
+Scenario and Monte Carlo/Stress/Roth/Tax-Efficiency views consume
+summary fields — `percent_funded`, `final_balance`,
+`median_final_balance`, etc. — not the per-year `bridge_income`/
+`income_need` breakdown the single-age explainer shows).
+
+**Independent test evidence** (`tests/test_two_age_bridge_surplus.py`,
+new file, 15 tests, all against real backend output — no mocking of
+the functions under test):
+- Exact review reproduction: $500,000 taxable / $100,000 spending /
+  $150,000 bridge / 0% tax / 0% growth → $550,000 ending assets
+  (`test_exact_review_reproduction_500k_100k_150k`).
+- Bridge below, equal to, and above spending
+  (`test_bridge_below_spending`, `test_bridge_equal_to_spending`, and
+  the reproduction case above for "above").
+- Bridge expiration: 2 years of bridge then reverts to full spending
+  from the portfolio; post-expiration balance matches a zero-bridge
+  household plus the two years' accumulated bridge income exactly
+  (`test_bridge_expiration_reverts_to_normal_spending`).
+- Inflation: bridge income and the spending target inflate on the same
+  compounding curve every year, keeping the surplus ratio consistent
+  (`test_bridge_with_inflation_reconciles_each_year`).
+- Both retirement orders (Jason first vs. Justin first) — bridge
+  eligibility stays keyed to Jason's own retirement regardless of which
+  spouse is `later_retiree`
+  (`test_both_retirement_orders_jason_first_vs_justin_first`).
+- Combined with pension AND a one-time life event in the same year, no
+  offset double-counted or lost
+  (`test_bridge_surplus_combined_with_pension_and_life_event`).
+- Zero-bridge regression guard: a household with no bridge income at
+  all produces byte-identical numbers to always-existing behavior
+  (`test_zero_bridge_household_unchanged`).
+- All 6 other consumers spot-checked via their OWN surplus mechanism:
+  owner-split attribution to Jason specifically
+  (`test_owner_split_projection_credits_surplus_to_jason`), Monte Carlo
+  (`test_monte_carlo_two_age_reflects_bridge_surplus`), Stress Tests —
+  compared against an identical no-bridge household per historical
+  scenario rather than an absolute floor, since real market returns
+  can still produce a loss in some years
+  (`test_stress_tests_two_age_reflects_bridge_surplus`), Roth
+  Conversion's both loops
+  (`test_roth_conversion_two_age_with_and_without_conversions_both_
+  credit_surplus`), Tax Efficiency
+  (`test_tax_efficiency_two_age_reflects_bridge_surplus`).
+- Single-age vs. two-age parity: an equivalent matched household
+  produces identical `bridge_income`, `gross_spending_need`/
+  `income_need`, and ending `portfolio_balance` across both engines
+  (`test_matched_household_produces_matching_surplus`).
+- Performance: two-age Monte Carlo (1000 trials/call) with bridge
+  income active runs within 3x + 1.0s of a zero-bridge run of the same
+  size — no order-of-magnitude regression from the one extra addition
+  per year, per trial
+  (`test_monte_carlo_two_age_runtime_unaffected_by_bridge`).
+
+Full backend suite (including this new file and the one updated
+pre-existing test): 1426 passed, 97.28% coverage (floor is 95%).
+Sensitive-data check: clean, 156 tracked files scanned.
+
+**Limitations.** Deterministic Monte Carlo/Stress confirmation here
+means fixed-seed(42), 0%-volatility-forcing inputs plus a
+no-bridge-vs.-bridge comparison for Stress Tests specifically — not a
+claim that every random trial or every historical scenario individually
+clears an absolute balance floor, since real historical returns can
+still produce a loss regardless of guaranteed income. Milestone 4's
+tax/ownership design remains untouched and design-only; this fix does
+not implement any part of it.
+
+Branch: `codex/two-age-bridge-surplus-fix`. Pushed for review, NOT
+merged into `codex/milestone-1-2-integration` or `main`.
+
+## 75. Section 74 review follow-up: strengthen cross-consumer regression evidence to fail-if-ignored (2026-09-10, on `codex/two-age-bridge-surplus-fix`)
+
+Independent review of section 74's commit found no new calculation
+defect in the implementation itself, but identified a real weakness in
+`test_two_age_bridge_surplus.py`'s cross-consumer evidence: several
+assertions could pass even if a given consumer still silently
+discarded bridge income entirely, because they checked a floor,
+`>=`, or a bare success/failure flag rather than an exact,
+bridge-sensitive value:
+
+- Stress Tests used `with_bridge >= without_bridge` per scenario --
+  equal values (i.e., bridge fully ignored) would satisfy `>=`.
+- Monte Carlo checked only `success_rate == 100.0` -- an
+  already-fully-funded household passes that regardless of whether
+  bridge income was ever counted.
+- Roth Conversion checked `taxable_balance >= $500,000` -- unrelated
+  conversion or growth behavior could satisfy that bound on its own.
+- Tax Efficiency checked final-balance/success-rate thresholds with the
+  same weakness.
+- The "both retirement orders" test never actually exercised Justin
+  retiring first with Jason still working (the later-retiree income
+  path bridge income does NOT reach), and its docstring didn't state
+  precisely that bridge eligibility is Jason-specific.
+
+**Fix: every cross-consumer test now asserts an exact bridge-vs-
+no-bridge figure, deterministic wherever the consumer allows it.**
+
+- **Monte Carlo and Tax Efficiency** (both run 1000 randomized
+  trials): `PORT_STD` is monkeypatched to `0.0` for the duration of
+  each test, making `random.gauss(mu, 0) == mu` for every trial --
+  every trial becomes identical, so `median_final_balance` is an
+  exact, hand-computable figure ($550,000 with a $150,000 bridge
+  covering a $100,000 spend against a $500,000 opening balance, 0%
+  return) rather than a threshold a broken bridge path could still
+  clear. Each test also runs the byte-identical household with
+  `bridge_income_55=0` and asserts the exact no-bridge figure AND the
+  exact delta between the two, so the fix's own contribution is
+  isolated rather than assumed. Tax Efficiency's per-strategy
+  no-bridge figures differ by strategy ("taxable_first"/"roth_first"
+  gross up a $100,000 taxable draw for the flat 15% `TAX_TAXABLE`
+  rate to $382,353; "optimal" uses its own capital-gains-aware
+  cost-basis assumption, landing at $399,806) -- both are legitimate,
+  pre-existing per-strategy tax treatments confirmed independently of
+  this fix, not something the bridge fix introduced or should paper
+  over with a single shared formula.
+- **Stress Tests**: the "base" scenario (`post_ret` every year, no
+  historical override, no randomness) is fully deterministic --
+  asserted at the same exact $550,000/$400,000 (with/without bridge)
+  figures. Every OTHER (historical) scenario now requires a STRICT
+  improvement (`>`, not `>=`) over an identical no-bridge household run
+  through the same scenario, with a count assertion confirming every
+  single scenario in the result set was actually checked (not a subset
+  silently skipped).
+- **Roth Conversion**: the accounts fixture was changed to zero pretax
+  balance, forcing `optimal_conversion == 0` every year (nothing to
+  convert) -- this isolates the surplus-sweep arithmetic from
+  conversion-tax arithmetic entirely, making `taxable_after` an exact,
+  hand-computable figure ($550,000 with bridge, $400,000 without, a
+  precise $150,000 delta -- bridge income flows through untaxed, at
+  tax-rate parity with pension/SS, not gross-up-taxed like a taxable
+  draw would be).
+- **Owner-split**: added the same zero-bridge comparison (`$400,000`
+  exact) and an isolated $150,000 delta on `owner_balances["jason"]
+  ["taxable"]` specifically, not just an absolute figure for the
+  bridge-active case alone.
+- **Retirement-order test split in two and renamed** to state the
+  bridge's Jason-specific eligibility accurately:
+  `test_bridge_is_jason_specific_when_jason_retires_first` (Jason
+  first, Justin still working -- bridge applies, isolated via an exact
+  zero-bridge comparison against Justin's own unchanged gap-income
+  contribution) and a NEW test,
+  `test_bridge_does_not_apply_when_justin_retires_first` (Justin first,
+  JASON still working and later -- exercises the later-retiree income
+  path the first test never reached; confirms `bridge_income == 0`
+  every year despite `bridge_income_55` being configured, since the
+  gate is `jason_ret_age == 55` specifically, then flips
+  `jason_ret_age` back to 55 on an otherwise-identical household to
+  confirm the zero really is the gate and not some unrelated zeroing).
+
+**Mutation-test sanity check** (not part of the committed suite --
+a one-time verification of the verification): the exact section-74
+source diff was reverted in place (`git apply -R`) and the full
+strengthened `test_two_age_bridge_surplus.py` was re-run against the
+now-reintroduced bug. 12 of 16 tests failed, including all 5
+"other consumer" tests the review specifically flagged (Monte Carlo:
+`500000 == 550000` failed; Stress: same; Roth: same; Tax Efficiency:
+same; owner-split: `KeyError: 'bridge_income'` against the pre-fix
+yearly_detail shape). The fix was then reapplied (`git apply`) and the
+full strengthened suite re-confirmed green before committing. This
+directly demonstrates the tests now fail if bridge income is ignored,
+rather than merely being consistent with a codebase that already
+includes the fix.
+
+Full backend suite re-run after these test changes: 1427 passed,
+97.28% coverage. Sensitive-data check: clean, 157 tracked files
+scanned.
+
+Branch: `codex/two-age-bridge-surplus-fix`. Pushed for review, still
+NOT merged into `codex/milestone-1-2-integration` or `main`. Milestone
+4 remains untouched.
+
+## 76. Sibling fix: the identical clamp survived in single-age _run_single (Monte Carlo/Stress Tests), found by review (2026-09-10, on `codex/two-age-bridge-surplus-fix`)
+
+Independent review of sections 74/75 found a SIBLING bug of the exact
+same shape, in a function neither section touched: `simulation_engine.
+py`'s single-age `_run_single` -- shared by single-age `run_monte_carlo`
+and `run_stress_tests` -- still had the OLD clamp, `year_need = max(0,
+income_at_ret*cum_inf + kids_cost*cum_inf - bridge_income*cum_inf)`,
+and never added bridge income to its own `fixed` (guaranteed_income).
+Section 73 only fixed `run_retirement_projection` (the deterministic
+projection); this Monte Carlo/Stress Tests trial loop is a separate
+function in the same file that was never touched by that fix or by
+sections 74/75's two-age follow-up.
+
+**Fix, identical pattern to every prior fix in this family:** the
+bridge-active branch no longer nets bridge income into `year_need` --
+it returns the gross target unchanged. A new `bridge_this_year`
+variable is set in every branch of the `ret_age == 55` conditional
+(the raw bridge amount when active, `0.0` in every other branch,
+including the non-55 `else`), then added to `fixed` alongside
+`year_pen`/`year_jss`/`year_uss`, feeding `simulate_withdrawal_year`'s
+own existing surplus-sweep behavior -- no new bridge-specific
+adjustment introduced.
+
+**Test evidence** (`TestSingleAgeBridgeSurplusSibling`,
+`test_two_age_bridge_surplus.py`, 4 new tests, same PORT_STD==0
+determinism technique sections 74/75 established for Monte Carlo/Tax
+Efficiency):
+- `test_single_age_monte_carlo_exact_bridge_surplus`: exact $550,000
+  with a $150,000 bridge against $500,000/$100,000, exact $400,000
+  zero-bridge parity, exact $150,000 delta.
+- `test_single_age_stress_tests_exact_and_strict_bridge_surplus`: the
+  deterministic "base" scenario asserted exactly; every other
+  (historical-override) scenario requires a strict improvement over an
+  identical no-bridge household, with a count assertion confirming
+  every scenario was checked. Uses an 11-year horizon and a larger
+  balance/smaller spend (rather than the other tests' 1-year, $500K/
+  $100K shape) -- see the "pre-existing, out of scope" findings below,
+  both of which this specific scenario shape was chosen to avoid.
+- `test_single_age_zero_bridge_household_unchanged`: regression guard,
+  exact figures for a household with no bridge configured at all, both
+  Monte Carlo and Stress Tests.
+- `test_single_age_bridge_surplus_matches_two_age_sibling`: single-age
+  and two-age Monte Carlo land on the exact same $550,000 for a matched
+  household -- confirms the sibling fix produces the same number as
+  section 74's fix, not merely an internally self-consistent one.
+
+**Mutation-test sanity check**, same method as section 75: this
+section's own source diff was reverted in place and the 4 new tests
+re-run -- 3 of 4 failed (`500000 == 550000`,
+`4900000 == 5040000`), the 4th (zero-bridge parity) correctly still
+passed since it exercises no bridge income at all. Fix reapplied and
+the full strengthened suite reconfirmed green before committing.
+
+**Two pre-existing bugs found in `run_stress_tests` (single-age) while
+writing these tests -- confirmed independent of bridge income, NOT
+fixed here, out of scope for this fix:**
+
+1. `seq_returns = [overrides.get(yr, normal_returns[max(0,
+   yr-len(overrides))]) for yr in range(retire_yrs)]` (the
+   `early_sequence` scenario) evaluates `normal_returns[...]` as an
+   eager `dict.get` default argument on EVERY iteration, even when
+   `overrides` already has that key. With a horizon at or below an
+   override table's length (e.g. a 1-year horizon against
+   `early_sequence`'s 8-year table), `normal_returns` is empty and this
+   raises `IndexError`, unconditionally -- reproduced independently
+   with `bridge_income_55=0`. The two-age copy of this same scenario
+   was already fixed for this exact issue (its own "Lazy branch, not
+   dict.get's eager default arg" comment); the single-age original
+   never was. Worked around in the new tests via an 11-year horizon
+   (longer than every override table); not fixed in source.
+2. Single-age `run_stress_tests` never calls `random.seed()` (unlike
+   single-age `run_monte_carlo`, which does), so the `early_sequence`
+   scenario's random-filled tail years are not reproducible between
+   calls -- its result depends on whatever global RNG state happens to
+   exist at call time. Reproduced: two back-to-back calls (with and
+   without bridge income, holding everything else fixed) produced an
+   `early_sequence` final balance that was LOWER with bridge income
+   than without it, purely from RNG-state drift, not from any real
+   miscalculation. Worked around in the new tests via the same
+   PORT_STD-monkeypatch determinism trick used elsewhere in this file
+   (`random.gauss(mu, 0) == mu` regardless of RNG state); not fixed in
+   source.
+
+Both are reported here as confirmed, precisely-located findings for a
+separate scoping decision -- not silently fixed beyond this fix's
+requested scope, and not silently left undocumented either.
+
+Full backend suite re-run after this fix: 1431 passed, 97.30%
+coverage. Sensitive-data check: clean, 157 tracked files scanned.
+
+Branch: `codex/two-age-bridge-surplus-fix`. Pushed for review, still
+NOT merged into `codex/milestone-1-2-integration` or `main`. Milestone
+4 remains untouched.
