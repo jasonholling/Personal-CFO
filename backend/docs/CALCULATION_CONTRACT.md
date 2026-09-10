@@ -5466,3 +5466,94 @@ Backend suite 1386/1386 passed, 97.19% coverage. `npm test` 39/39,
 `npm run build` clean. `check_sensitive_data.py` clean.
 
 Branch: `main`.
+
+## 63. Milestone 3, first slice: navigation map + duplication fix (2026-09-09, on `codex/milestone-3-navigation`)
+
+Backlog brief's Milestone 3 goal: reorganize the app around Household
+→ Plan → Compare → Protect → Review instead of the existing topic-based
+groups (WEALTH/RETIREMENT/EDUCATION & KIDS/PROTECTION/ESTATE &
+PLANNING), with an explicit requirement to propose the map and get it
+approved before restructuring any UI. Proposed the map (below), user
+approved ("ok i'm game") before any code changed.
+
+**Approved map:**
+- Dashboard and Annual Report stay pinned outside the 5 groups (an
+  entry point and a report aren't themselves one of the 5 activities).
+- **Household**: Accounts, Net Worth, Debt Payoff, Monthly Cash Flow,
+  Planning Inputs, Backup & Restore.
+- **Plan**: Retirement Projection, Roth Conversion, Tax Planning,
+  Retirement Tools, Education, Kids, Goals & Funding, Assign Surplus,
+  Life-Event Planning.
+- **Compare**: Compare Scenarios (new — Side by Side + Sensitivity,
+  moved out of Retirement Projection's own tabs), Stress Test &
+  What-If, Saved Scenarios.
+- **Protect**: Insurance, Risk Management, Protection Scorecard,
+  Estate Planning.
+- **Review**: Action Tracker, Annual Review Checklist, Review &
+  Decision Rules (renamed from "CFO Operating System").
+
+**Two real fixes fell out of drafting the map, not just relabeling.**
+Enumerating every page's actual content (required to place it
+correctly) surfaced a genuine duplication: PlanOperatingSystem.jsx
+("CFO Operating System") had its OWN estate-document tracker calling
+the same `/api/estate-documents` endpoint Estate.jsx uses, but with a
+disjoint `document_type` key set ("Will"/"Revocable trust"/etc. vs.
+Estate.jsx's "trust"/"wills"/...) and a disjoint status vocabulary
+(`not_started`/`in_progress`/`complete` vs.
+`executed`/`verify`/`outdated`/`pending`) -- two independent,
+never-reconciled checklists both claiming to answer "is our estate
+plan current," for a household using both pages. This had ALREADY
+caused a real regression earlier the same day: section 62's status-
+vocabulary "fix" (correcting the endpoint to Estate.jsx's vocabulary
+only) would have 400'd every save from PlanOperatingSystem, since it
+was never checked against that second caller. Fixed immediately
+(accept the union — see section 62's own follow-up commit `ade65d0`)
+before this milestone's work began.
+
+This milestone resolves it properly: Estate Planning becomes the
+single canonical place for document + beneficiary tracking (it
+already had the richer UI -- tax exposure, beneficiaries, action
+items). PlanOperatingSystem.jsx's estate-document section is removed
+entirely, replaced with a link into Estate Planning. Its other,
+genuinely distinct content (assumption presets/review history,
+financial runway, planning calendar) stays, renamed "Review &
+Decision Rules" to fit the Review group.
+
+**Implementation, no calculation changes:**
+- New `Compare.jsx`: hosts Side by Side + Sensitivity as tabs,
+  unchanged components, just a different parent. Extracted from
+  `RetirementProjection.jsx`, which now only tabs Overview + Two-Age
+  Scenario.
+- `App.jsx`'s `NAV` array restructured into the 5 groups above;
+  `pages` map updated with the new `compare` entry.
+- `PlanOperatingSystem.jsx` rewritten (was a single minified line) to
+  remove the `DOCS`/estate-document block and its `updateDoc`/`docs`
+  state, add an `onNavigate('estate')` link, reformatted to this
+  codebase's normal multi-line style since it was already being
+  substantially edited.
+
+**Verified:** `npm run build` clean, `npm test` 39/39 (no existing
+test covered `App.jsx`'s nav directly, so this doesn't newly prove the
+restructuring itself — see limitations below). No backend files
+touched; backend suite unaffected, not re-run for this commit.
+
+**Explicitly NOT done in this slice** (Milestone 3's other acceptance
+criteria, staged as follow-up work rather than attempted all at once):
+one clearly identified "active scenario" indicator across Plan/
+Compare tools; progressive disclosure for advanced controls; a clear
+visual distinction between saved household defaults, temporary
+scenario overrides, and historical snapshots; preserving completed
+results/drafts when navigating between related views; stale-result
+detection + an explicit recalculate action when an assumption changes;
+the exhaustive acceptance journeys the brief specifies (new vs.
+existing household, two earners, unequal ages, 0/5 kids, failed
+requests, unsaved-changes navigation, keyboard operation, actual
+browser behavior — not yet run, since the Chrome connection needed for
+a live pass wasn't available when this slice was verified). A live
+browser walkthrough of the new nav itself is also still owed before
+this is considered fully checked, despite the build/unit-test evidence
+above.
+
+Branch: `codex/milestone-3-navigation`, pushed, not merged — per the
+backlog brief's own instruction not to merge or start the next
+milestone without approval.
