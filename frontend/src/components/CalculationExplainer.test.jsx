@@ -96,4 +96,23 @@ describe('CalculationExplainer', () => {
     expect(container.textContent).not.toContain('Assumptions used')
     expect(container.textContent).not.toContain('Annual flows')
   })
+
+  it('renders a negative remaining need (income exceeding spending) as a real negative figure, not blank or NaN', async () => {
+    // Review finding P1 boundary case (2026-09-10): bridge income above
+    // spending makes remaining_portfolio_need legitimately negative --
+    // confirm the explainer displays that correctly rather than
+    // crashing or silently blanking it.
+    const surplusFlow = [{
+      year: 2031, jasonAge: 55, opening: 500000, grossSpending: 100000,
+      incomeOffsets: 150000, remainingNeed: -50000, taxes: 0, withdrawal: 0,
+      withdrawalBreakdown: { pretax: 0, taxable: 0, roth: 0, hsa: 0 },
+      transfers: 0, growth: 0, unmetNeed: 0, closing: 550000,
+    }]
+    await act(async () => root.render(<CalculationExplainer flows={surplusFlow} />))
+    expect(container.textContent).toContain('$100,000')
+    expect(container.textContent).toContain('$150,000')
+    expect(container.textContent).toContain('-$50,000')
+    expect(container.textContent).toContain('$550,000')
+    expect(container.textContent).not.toContain('NaN')
+  })
 })
