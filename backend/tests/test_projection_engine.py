@@ -2092,3 +2092,62 @@ class TestRunInsuranceAnalysis:
         inputs = {**sample_inputs, "kid1_age": 17, "kid2_age": 17, "unl_annual_cost": 20000}
         edu = run_education_projection(inputs, sample_accounts, kids=kids_from_inputs(inputs))
         assert all(goal["years_to_college"] == 1 for goal in edu["goals"])
+
+    def test_justin_life_kids_is_excluded_from_justins_own_coverage(self, sample_inputs, sample_accounts):
+        """Regression test (external audit, 2026-09-09, P1):
+        justin_life_kids is the kids' OWN dependent life coverage
+        (Settings labels it "Employer dependent (<kids> combined)") --
+        payable if a CHILD dies, not additional coverage on Justin's
+        own life. It was being summed into justin_current_coverage
+        anyway, inflating what "if Justin dies, is there enough
+        coverage" is actually answering. With every adult coverage
+        field at 0 and justin_life_kids set, current_coverage must
+        stay 0, matching jason's own coverage sum (which never
+        included any kids-related field)."""
+        configured = {
+            **sample_inputs,
+            "justin_life_ul": 0, "justin_life_whole": 0, "person2_life_employer": 0,
+            "justin_life_term": 0, "justin_life_kids": 50000,
+        }
+        result = run_insurance_analysis(configured, sample_accounts, kids=kids_from_inputs(configured))
+        assert result["justin"]["current_coverage"] == 0
+
+    def test_shortfall_never_reports_on_track_with_a_hidden_tolerance(self, sample_inputs, sample_accounts):
+        """Regression test (external audit, 2026-09-09, P1): on_track
+        used to accept up to a $100,000 real shortfall for Justin --
+        the frontend takes Math.abs(surplus_gap) and labels it
+        "Surplus" whenever on_track is true, so a genuine $50,000
+        shortfall with zero coverage rendered as a GREEN "Surplus
+        $50,000." Any accepted shortfall must remain visibly a
+        shortfall: on_track must exactly match the sign of surplus_gap,
+        with no tolerance band, same as jason's side already had."""
+        configured = {**sample_inputs, "mortgage_balance": 50000}
+        accounts = [a for a in sample_accounts if a["account_type"] != "mortgage"] + [
+            {"id": 99, "name": "Mortgage", "account_type": "mortgage", "owner": "joint", "balance": 50000, "institution": "", "notes": ""},
+        ]
+        result = run_insurance_analysis(configured, accounts, kids=[])
+        assert result["justin"]["surplus_gap"] == -50000
+        assert result["justin"]["on_track"] is False
+
+    def test_insurance_college_funding_agrees_with_education_projection(self, sample_inputs):
+        """Regression test (external audit, 2026-09-09, P2): this used
+        to compare a simple lump-sum FV projection against total
+        4-year cost, instead of the actual year-by-year drawdown
+        simulation Education/Kids use -- which keeps crediting
+        investment growth WHILE tuition is paid out each year, not
+        just up to the day college starts. Reproduced: a kid already
+        at 18 with $40,000 in a 529, $10,000/yr cost, no further
+        contributions. Education correctly shows $0 gap (the balance
+        outgrows the drawdown); the old Insurance formula invented a
+        ~$2,465 gap that was never real."""
+        from projection_engine import run_education_projection
+        accounts = [
+            {"id": 1, "name": "Kid 529", "account_type": "529", "owner": "kid_1", "balance": 40000, "institution": "", "notes": ""},
+        ]
+        configured = {**sample_inputs, "unl_annual_cost": 10000}
+        kids = [{"id": 1, "name": "Kid", "age": 18, "monthly_529": 0}]
+        edu = run_education_projection(configured, accounts, kids=kids)
+        assert edu["goals"][0]["funding_gap"] == 0
+
+        ins = run_insurance_analysis(configured, accounts, kids=kids)
+        assert ins["jason"]["college_funding"] == 0

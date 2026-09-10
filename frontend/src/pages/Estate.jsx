@@ -6,8 +6,12 @@ import { isPrivacyMode, MASK_CURRENCY } from '../utils/privacy'
 
 const fmt = (n) => isPrivacyMode() ? MASK_CURRENCY : (n == null ? '—' : new Intl.NumberFormat('en-US',{style:'currency',currency:'USD',maximumFractionDigits:0}).format(n))
 
-// Seed templates only — every real value (dates, statuses, beneficiaries) is
-// edited in place and persisted to localStorage per-browser, never to source.
+// Seed templates only — display shape (labels, which accounts exist)
+// regenerates from personNames/kids on every load; every real value
+// (dates, statuses, beneficiaries) is edited in place and persisted to
+// the estate_documents/estate_beneficiaries tables (external audit
+// follow-up, 2026-09-09 — previously localStorage-only, never backed
+// up), never hardcoded to source.
 const documentDefaults = (n) => [
   { id:'trust',    label:'Joint Revocable Living Trust',   date:'', status:'verify' },
   { id:'wills',    label:`Wills (${n.person1Name} & ${n.person2Name})`, date:'', status:'verify' },
@@ -21,9 +25,9 @@ const documentDefaults = (n) => [
 // -- generalized to however many kids currently exist (0-5), joined
 // with "&" the same way Education.jsx's namesList does. These are seed
 // TEMPLATES only (see module comment above) -- once a household edits
-// a row, it's persisted to localStorage and this function is never
-// called again for that row, so an existing saved estate plan is
-// unaffected by kids being added/removed/renamed later.
+// a row, the real value is saved server-side keyed by the row's stable
+// id, and this template only ever supplies the label/existence of that
+// row, never overwrites an already-saved primary/contingent value.
 const kidsEqually = (kids) => {
   if (kids.length === 0) return ''
   if (kids.length === 1) return kids[0].name
@@ -56,24 +60,42 @@ const StatusBadge = ({ status }) => {
 export default function Estate() {
   const personNames = usePersonNames()
   const { kids, loading: kidsLoading } = useKids()
-  const [docs,  setDocs]  = useState(() => {
-    try { return JSON.parse(localStorage.getItem('estate_docs') || 'null') || documentDefaults(personNames) } catch { return documentDefaults(personNames) }
-  })
-  const [benes, setBenes] = useState(() => {
-    try { return JSON.parse(localStorage.getItem('estate_benes') || 'null') || accountDefaults(personNames, []) } catch { return accountDefaults(personNames, []) }
-  })
+  const [docs,  setDocs]  = useState(null)
+  const [benes, setBenes] = useState(null)
+  const [dataLoading, setDataLoading] = useState(true)
 
-  // useKids() fetches asynchronously, so on first render (no
-  // localStorage yet) the lazy initializer above ran before `kids`
-  // arrived, producing a template with zero kid-Roth rows even for a
-  // household that has kids. Once kids finishes loading, regenerate the
-  // defaults -- but only if nothing's been saved yet (a household that
-  // already edited/saved their beneficiary list must never have it
-  // silently regenerated out from under them).
+  // External audit follow-up, 2026-09-09 (P1): docs/benes used to be
+  // seeded from localStorage (or, on first-ever load, straight from
+  // the templates below) and saved back to localStorage only -- never
+  // a real database table, so a fresh browser or a restored backup
+  // lost every edited document date/status/beneficiary designation.
+  // Both are now backed by real tables (estate_documents -- which
+  // already existed with a working API, just never called from here --
+  // and the new estate_beneficiaries). Templates still generate the
+  // DISPLAY shape (label text, which accounts exist -- regenerates
+  // automatically as kids are added/renamed), then saved values from
+  // the server are merged on top by stable key (document_type /
+  // account_key), same "id stays stable, display text stays live"
+  // split Settings.jsx's KidsSection already uses elsewhere.
   useEffect(() => {
     if (kidsLoading) return
-    if (localStorage.getItem('estate_benes')) return
-    setBenes(accountDefaults(personNames, kids))
+    let cancelled = false
+    Promise.all([
+      axios.get('/api/estate-documents').then(r => r.data).catch(() => []),
+      axios.get('/api/estate-beneficiaries').then(r => r.data).catch(() => []),
+    ]).then(([savedDocs, savedBenes]) => {
+      if (cancelled) return
+      setDocs(documentDefaults(personNames).map(d => {
+        const saved = savedDocs.find(s => s.document_type === d.id)
+        return saved ? { ...d, date: saved.reviewed_on || '', status: saved.status || d.status } : d
+      }))
+      setBenes(accountDefaults(personNames, kids).map(b => {
+        const saved = savedBenes.find(s => s.account_key === b.id)
+        return saved ? { ...b, primary: saved.primary_beneficiary ?? b.primary, contingent: saved.contingent_beneficiary ?? b.contingent } : b
+      }))
+      setDataLoading(false)
+    })
+    return () => { cancelled = true }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [kidsLoading])
   const [tasks, setTasks] = useState([
@@ -83,6 +105,7 @@ export default function Estate() {
     { id:4, text:'Verify accounts and real estate titled in the trust', done:false },
   ])
   const [saved, setSaved] = useState(false)
+  const [saving, setSaving] = useState(false)
   const [editDoc, setEditDoc]   = useState(null)
   const [editBene, setEditBene] = useState(null)
   const [taxExposure, setTaxExposure] = useState(null)
@@ -91,15 +114,28 @@ export default function Estate() {
     axios.get('/api/estate/tax-exposure').then(r => setTaxExposure(r.data)).catch(() => {})
   }, [])
 
-  const save = () => {
-    localStorage.setItem('estate_docs',  JSON.stringify(docs))
-    localStorage.setItem('estate_benes', JSON.stringify(benes))
-    setSaved(true)
-    setTimeout(() => setSaved(false), 2000)
+  const save = async () => {
+    setSaving(true)
+    try {
+      await Promise.all([
+        ...docs.map(d => axios.put(`/api/estate-documents/${encodeURIComponent(d.id)}`, {
+          document_type: d.id, status: d.status, reviewed_on: d.date || null,
+        })),
+        ...benes.map(b => axios.put(`/api/estate-beneficiaries/${encodeURIComponent(b.id)}`, {
+          account_key: b.id, primary_beneficiary: b.primary, contingent_beneficiary: b.contingent,
+        })),
+      ])
+      setSaved(true)
+      setTimeout(() => setSaved(false), 2000)
+    } finally {
+      setSaving(false)
+    }
   }
 
   const updateDoc = (id, field, val) => setDocs(d => d.map(x => x.id===id ? {...x, [field]:val} : x))
   const updateBene = (id, field, val) => setBenes(b => b.map(x => x.id===id ? {...x, [field]:val} : x))
+
+  if (dataLoading || !docs || !benes) return <div className="loading">Loading estate plan...</div>
 
   // Check if any doc is older than 5 years
   const needsReview = docs.some(d => {
@@ -117,7 +153,7 @@ export default function Estate() {
           <h1 className="section-title">Estate Planning</h1>
           <p className="section-sub">Documents, beneficiaries, and action items</p>
         </div>
-        <button className="btn-primary" onClick={save}>{saved ? '✓ Saved' : 'Save Changes'}</button>
+        <button className="btn-primary" onClick={save} disabled={saving}>{saved ? '✓ Saved' : saving ? 'Saving…' : 'Save Changes'}</button>
       </div>
 
       {needsReview && (
@@ -203,7 +239,7 @@ export default function Estate() {
       {/* Beneficiaries */}
       <div className="card" style={{ marginBottom:20 }}>
         <div style={{ fontWeight:700, fontSize:14, marginBottom:4, paddingBottom:10, borderBottom:'1px solid var(--border)' }}>Beneficiary Designations</div>
-        <div style={{ fontSize:12, color:'var(--text3)', marginBottom:16 }}>Click any field to edit. Changes are saved locally on your Mac.</div>
+        <div style={{ fontSize:12, color:'var(--text3)', marginBottom:16 }}>Click any field to edit, then Save Changes above — included in Backup &amp; Restore.</div>
         <table style={{ width:'100%', borderCollapse:'collapse', fontSize:12 }}>
           <thead>
             <tr style={{ borderBottom:'2px solid var(--border)' }}>

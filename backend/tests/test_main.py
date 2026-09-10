@@ -1623,16 +1623,76 @@ class TestCfoOperatingSystem:
         assert "retirement_impact" in event  # isolated overlay estimate still computed
 
     def test_estate_documents_and_assumption_review(self, client):
-        document = {"document_type":"Will","status":"complete","reviewed_on":"2026-01-01","next_review_on":"2027-01-01","location_hint":"Home safe","notes":""}
+        # Status vocabulary corrected 2026-09-09 (external audit
+        # follow-up, P1): this endpoint originally validated against
+        # not_started/in_progress/complete, which never matched
+        # Estate.jsx's own UI (executed/verify/outdated/pending) --
+        # built before ever being wired to the frontend.
+        document = {"document_type":"Will","status":"executed","reviewed_on":"2026-01-01","next_review_on":"2027-01-01","location_hint":"Home safe","notes":""}
         assert client.put("/api/estate-documents/Will", json=document).status_code == 200
         documents = client.get("/api/estate-documents")
         assert documents.status_code == 200
-        assert documents.json()[0]["status"] == "complete"
+        assert documents.json()[0]["status"] == "executed"
         created = client.post("/api/assumption-reviews", json={"label":"Base","assumptions":{"inflation_rate":.025}})
         assert created.status_code == 200
         reviews = client.get("/api/assumption-reviews")
         assert reviews.status_code == 200
         assert reviews.json()[0]["assumptions"]["inflation_rate"] == .025
+
+    def test_estate_document_rejects_old_removed_status_vocabulary(self, client):
+        """The vocabulary this endpoint validated against before the fix
+        above (not_started/in_progress/complete) must now be rejected --
+        confirms the fix actually changed the accepted set rather than
+        just widening it to accept everything."""
+        document = {"document_type":"Will","status":"complete"}
+        assert client.put("/api/estate-documents/Will", json=document).status_code == 400
+
+    def test_estate_beneficiaries_crud(self, client):
+        """Regression test (external audit, 2026-09-09, P1): beneficiary
+        designations used to be localStorage-only in Estate.jsx, never
+        backed by any table -- a fresh browser or a restored backup
+        lost them entirely. Now a real table + API, same pattern as
+        estate-documents just above."""
+        assert client.get("/api/estate-beneficiaries").json() == []
+        bene = {"account_key": "person1roth", "primary_beneficiary": "Sam", "contingent_beneficiary": "Kids equally"}
+        r = client.put("/api/estate-beneficiaries/person1roth", json=bene)
+        assert r.status_code == 200
+        listed = client.get("/api/estate-beneficiaries").json()
+        assert len(listed) == 1
+        assert listed[0]["primary_beneficiary"] == "Sam"
+
+        # Upsert: saving again under the same key updates, not duplicates.
+        client.put("/api/estate-beneficiaries/person1roth", json={
+            "account_key": "person1roth", "primary_beneficiary": "Sam Updated", "contingent_beneficiary": "Kids equally",
+        })
+        listed = client.get("/api/estate-beneficiaries").json()
+        assert len(listed) == 1
+        assert listed[0]["primary_beneficiary"] == "Sam Updated"
+
+    def test_estate_beneficiary_rejects_mismatched_key(self, client):
+        bene = {"account_key": "other", "primary_beneficiary": "Sam"}
+        assert client.put("/api/estate-beneficiaries/person1roth", json=bene).status_code == 400
+
+    def test_backup_export_includes_estate_records_and_restore_round_trips_them(self, client):
+        """Regression test (external audit, 2026-09-09, P1): both
+        estate_documents and estate_beneficiaries must be part of the
+        backed-up data model, and a restore must bring back their
+        AT-BACKUP-TIME values (proving the tables actually round-trip,
+        not just get included empty)."""
+        client.put("/api/estate-documents/Will", json={"document_type": "Will", "status": "executed"})
+        client.put("/api/estate-beneficiaries/person1roth", json={"account_key": "person1roth", "primary_beneficiary": "Sam"})
+        payload = client.get("/api/backup/export").json()
+        assert "estate_documents" in payload["tables"]
+        assert "estate_beneficiaries" in payload["tables"]
+
+        client.put("/api/estate-documents/Will", json={"document_type": "Will", "status": "outdated"})
+        client.put("/api/estate-beneficiaries/person1roth", json={"account_key": "person1roth", "primary_beneficiary": "Changed"})
+
+        r = client.post("/api/backup/restore", params={"confirm": "true"},
+                         files={"file": ("b.json", json.dumps(payload), "application/json")})
+        assert r.status_code == 200, r.text
+        assert client.get("/api/estate-documents").json()[0]["status"] == "executed"
+        assert client.get("/api/estate-beneficiaries").json()[0]["primary_beneficiary"] == "Sam"
 
     def test_calendar_export_contains_open_tasks(self, client):
         assert client.post("/api/tasks/sync").status_code == 200

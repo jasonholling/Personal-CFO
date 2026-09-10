@@ -28,7 +28,12 @@ app = FastAPI(title="Personal CFO API")
 # silently restoring every table except kids and leaving whatever kids
 # existed before the restore untouched -- which would have looked like
 # a successful restore while actually leaving that one table stale.
-_BACKUP_TABLES = ("accounts", "planning_inputs", "insurance_policies", "property_policies", "snapshots", "tasks", "cash_flow_items", "surplus_allocations", "saved_scenarios", "life_events", "estate_documents", "assumption_reviews", "kids")
+# "estate_beneficiaries" added 2026-09-09 (external audit follow-up, P1)
+# -- Estate.jsx's beneficiary-designation table was localStorage-only
+# from the start; now backed by a real table (see its own schema
+# comment in db.py), same "predates this line -> rejected, not silently
+# incomplete" behavior as kids above applies to it too.
+_BACKUP_TABLES = ("accounts", "planning_inputs", "insurance_policies", "property_policies", "snapshots", "tasks", "cash_flow_items", "surplus_allocations", "saved_scenarios", "life_events", "estate_documents", "estate_beneficiaries", "assumption_reviews", "kids")
 
 app.add_middleware(
     CORSMiddleware,
@@ -236,11 +241,24 @@ class LifeEvent(BaseModel):
 
 class EstateDocument(BaseModel):
     document_type: str
-    status: str = "not_started"
+    status: str = "verify"
     reviewed_on: Optional[str] = None
     next_review_on: Optional[str] = None
     location_hint: Optional[str] = None
     notes: Optional[str] = None
+
+# External audit follow-up, 2026-09-09 (P1) — the beneficiary-designation
+# side of Estate.jsx (account -> primary/contingent beneficiary) was
+# localStorage-only, never backed by any table, so a fresh browser or a
+# restored backup lost those records entirely (a Backup export only ever
+# covers real database tables). account_key is the same kind of stable,
+# non-display identifier as document_type above (e.g. "kid_7roth", not
+# the kid's renameable display name) -- see Estate.jsx's own comment on
+# why beneficiary rows must survive a kid rename.
+class EstateBeneficiary(BaseModel):
+    account_key: str
+    primary_beneficiary: Optional[str] = None
+    contingent_beneficiary: Optional[str] = None
 
 class AssumptionReview(BaseModel):
     label: str = "Assumption review"
@@ -809,10 +827,33 @@ def get_estate_documents():
 
 @app.put("/api/estate-documents/{document_type}")
 def save_estate_document(document_type: str, body: EstateDocument):
-    if document_type != body.document_type or not document_type.strip() or body.status not in {"not_started", "in_progress", "complete"}:
+    # Status vocabulary corrected 2026-09-09: this endpoint originally
+    # validated against not_started/in_progress/complete, a set that
+    # never actually matched Estate.jsx's own UI (StatusBadge and its
+    # <select> have always offered executed/verify/outdated/pending) --
+    # this endpoint was built before ever being wired to the frontend,
+    # so the mismatch went unnoticed. Corrected to the real vocabulary.
+    if document_type != body.document_type or not document_type.strip() or body.status not in {"executed", "verify", "outdated", "pending"}:
         raise HTTPException(status_code=400, detail="Invalid estate-document status")
     conn = get_db()
     conn.execute("INSERT INTO estate_documents (document_type,status,reviewed_on,next_review_on,location_hint,notes,updated_at) VALUES (?,?,?,?,?,?,datetime('now')) ON CONFLICT(document_type) DO UPDATE SET status=excluded.status,reviewed_on=excluded.reviewed_on,next_review_on=excluded.next_review_on,location_hint=excluded.location_hint,notes=excluded.notes,updated_at=datetime('now')", (body.document_type,body.status,body.reviewed_on,body.next_review_on,body.location_hint,body.notes))
+    conn.commit(); conn.close(); return body
+
+@app.get("/api/estate-beneficiaries")
+def get_estate_beneficiaries():
+    conn = get_db(); rows = [dict(r) for r in conn.execute("SELECT * FROM estate_beneficiaries ORDER BY account_key").fetchall()]; conn.close()
+    return rows
+
+@app.put("/api/estate-beneficiaries/{account_key}")
+def save_estate_beneficiary(account_key: str, body: EstateBeneficiary):
+    if account_key != body.account_key or not account_key.strip():
+        raise HTTPException(status_code=400, detail="Invalid estate-beneficiary account key")
+    conn = get_db()
+    conn.execute(
+        "INSERT INTO estate_beneficiaries (account_key,primary_beneficiary,contingent_beneficiary,updated_at) VALUES (?,?,?,datetime('now')) "
+        "ON CONFLICT(account_key) DO UPDATE SET primary_beneficiary=excluded.primary_beneficiary,contingent_beneficiary=excluded.contingent_beneficiary,updated_at=datetime('now')",
+        (body.account_key, body.primary_beneficiary, body.contingent_beneficiary)
+    )
     conn.commit(); conn.close(); return body
 
 @app.get("/api/assumption-reviews")

@@ -240,3 +240,93 @@ class TestMigrateLegacyKids:
         assert len(kids) == 1
         assert kids[0]["name"] == "Already Real"
         conn.close()
+
+
+class TestRepairDanglingLegacyEducationGoals:
+    """External audit follow-up, 2026-09-09 (P2): migrate_legacy_kids'
+    own goal-key remap only runs while its kids_migrated guard hasn't
+    fired yet -- a database whose kids were already migrated BEFORE
+    that remap code existed keeps a dangling "Education funding -
+    Abby"/"Cooper" row forever. repair_dangling_legacy_education_goals
+    is the separately-versioned, separately-guarded fix."""
+
+    def _already_migrated_with_dangling_goal(self, conn, name="Riley", monthly=500):
+        """Simulates the exact stuck state: kids already migrated (so
+        migrate_legacy_kids's own remap is unreachable), plus a legacy-
+        keyed surplus_allocations row that predates the remap fix."""
+        conn.execute("UPDATE planning_inputs SET kids_migrated=1, kid1_name=? WHERE id=1", (name,))
+        cur = conn.execute("INSERT INTO kids (name, age, monthly_529, display_order) VALUES (?,?,?,?)",
+                            (name, 12, 150, 0))
+        conn.execute("INSERT INTO surplus_allocations (goal, monthly_amount) VALUES (?,?)",
+                     ("Education funding - Abby", monthly))
+        conn.commit()
+        return cur.lastrowid
+
+    def test_repairs_a_dangling_goal_left_by_an_already_migrated_database(self, temp_db):
+        conn = db_module.get_db()
+        # Reset the repair's own flag too -- temp_db's setup already
+        # ran this once against an all-default install (nothing to do).
+        conn.execute("UPDATE planning_inputs SET legacy_surplus_goal_repair_done=0 WHERE id=1")
+        kid_id = self._already_migrated_with_dangling_goal(conn)
+
+        db_module.repair_dangling_legacy_education_goals(conn)
+
+        goals = {r["goal"]: r["monthly_amount"] for r in conn.execute("SELECT * FROM surplus_allocations").fetchall()}
+        assert "Education funding - Abby" not in goals
+        assert goals[f"Education funding - kid_{kid_id}"] == 500
+        conn.close()
+
+    def test_leaves_the_row_alone_when_the_kid_was_renamed_since_migrating(self, temp_db):
+        """The exact "reliable identity mapping" guarantee: if the name
+        no longer matches, this must NOT guess via row order -- it must
+        leave the dangling row alone rather than risk remapping to the
+        wrong kid."""
+        conn = db_module.get_db()
+        conn.execute("UPDATE planning_inputs SET legacy_surplus_goal_repair_done=0 WHERE id=1")
+        self._already_migrated_with_dangling_goal(conn, name="Riley")
+        # Household renamed the kid after migrating -- kid1_name still
+        # says "Riley" (never cleared), but the real kids row is now
+        # "Riley B."
+        conn.execute("UPDATE kids SET name=? WHERE name=?", ("Riley B.", "Riley"))
+        conn.commit()
+
+        db_module.repair_dangling_legacy_education_goals(conn)
+
+        goals = {r["goal"] for r in conn.execute("SELECT goal FROM surplus_allocations").fetchall()}
+        assert "Education funding - Abby" in goals  # left alone, not guessed
+        conn.close()
+
+    def test_does_not_clobber_an_allocation_already_made_under_the_new_key(self, temp_db):
+        """A household that noticed the $0 and manually re-entered the
+        allocation under the new key must not have that overwritten by
+        the stale legacy-keyed value."""
+        conn = db_module.get_db()
+        conn.execute("UPDATE planning_inputs SET legacy_surplus_goal_repair_done=0 WHERE id=1")
+        kid_id = self._already_migrated_with_dangling_goal(conn, monthly=500)
+        conn.execute("INSERT INTO surplus_allocations (goal, monthly_amount) VALUES (?,?)",
+                     (f"Education funding - kid_{kid_id}", 999))
+        conn.commit()
+
+        db_module.repair_dangling_legacy_education_goals(conn)
+
+        goals = {r["goal"]: r["monthly_amount"] for r in conn.execute("SELECT * FROM surplus_allocations").fetchall()}
+        assert goals[f"Education funding - kid_{kid_id}"] == 999  # untouched
+        assert "Education funding - Abby" in goals  # left dangling, not silently dropped either
+
+    def test_is_a_one_time_repair(self, temp_db):
+        conn = db_module.get_db()
+        conn.execute("UPDATE planning_inputs SET legacy_surplus_goal_repair_done=0 WHERE id=1")
+        self._already_migrated_with_dangling_goal(conn)
+        db_module.repair_dangling_legacy_education_goals(conn)
+
+        # Simulate a later manual re-creation of the legacy-keyed row
+        # (shouldn't happen in practice, but the guard must be based on
+        # the flag, not "does a legacy row currently exist").
+        conn.execute("INSERT INTO surplus_allocations (goal, monthly_amount) VALUES (?,?)",
+                     ("Education funding - Abby", 250))
+        conn.commit()
+        db_module.repair_dangling_legacy_education_goals(conn)
+
+        goals = {r["goal"]: r["monthly_amount"] for r in conn.execute("SELECT * FROM surplus_allocations").fetchall()}
+        assert goals["Education funding - Abby"] == 250  # untouched the second time
+        conn.close()

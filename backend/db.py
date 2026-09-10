@@ -338,6 +338,7 @@ def init_kids_table():
     """)
     conn.commit()
     migrate_legacy_kids(conn)
+    repair_dangling_legacy_education_goals(conn)
     conn.close()
 
 def migrate_legacy_kids(conn):
@@ -452,6 +453,76 @@ def migrate_legacy_kids(conn):
     conn.execute("UPDATE planning_inputs SET kids_migrated=1 WHERE id=1")
     conn.commit()
 
+
+def repair_dangling_legacy_education_goals(conn):
+    """Independently versioned repair (external audit, 2026-09-09, P2)
+    for a real gap in migrate_legacy_kids above: its own goal-key remap
+    (the "surplus_allocations SET goal=..." block just above) is only
+    reachable while migrate_legacy_kids's OWN one-time kids_migrated
+    guard hasn't fired yet. A household whose kids were already
+    migrated (kids_migrated=1) BEFORE that remap code existed -- i.e.
+    ran the first version of this migration, back when it only remapped
+    account owners -- would keep a dangling "Education funding - Abby"/
+    "Cooper" surplus_allocations row forever: migrate_legacy_kids
+    returns immediately on every later call and never runs its body
+    again, so that row's $/mo would never reach any projection.
+
+    Runs unconditionally, on its OWN separate flag
+    (legacy_surplus_goal_repair_done) and its OWN separate guard, so it
+    reaches a database in exactly that stuck state regardless of
+    whatever migrate_legacy_kids already did or didn't do.
+
+    Identity mapping: matches by NAME against planning_inputs' own
+    still-present kid1_name/kid2_name columns (migrate_legacy_kids
+    never clears them). This is "reliable" in the specific sense asked
+    for -- it either correctly identifies today's kids-table row for
+    that legacy slot (the household hasn't renamed that kid since
+    migrating), or explicitly leaves the dangling row alone (the name
+    no longer matches anything). It deliberately does NOT fall back to
+    guessing by row id/creation order, which could confidently remap to
+    the WRONG kid instead of just failing to find the right one.
+    """
+    tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+    if not {"planning_inputs", "kids", "surplus_allocations"} <= tables:
+        return
+
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(planning_inputs)").fetchall()]
+    if "legacy_surplus_goal_repair_done" not in cols:
+        conn.execute("ALTER TABLE planning_inputs ADD COLUMN legacy_surplus_goal_repair_done INTEGER DEFAULT 0")
+        conn.commit()
+
+    inputs_row = conn.execute("SELECT * FROM planning_inputs WHERE id=1").fetchone()
+    if not inputs_row:
+        return
+    inputs = dict(inputs_row)
+    if inputs.get("legacy_surplus_goal_repair_done"):
+        return
+
+    legacy_pairs = [
+        ("kid1_name", "Education funding - Abby"),
+        ("kid2_name", "Education funding - Cooper"),
+    ]
+    for name_col, legacy_goal in legacy_pairs:
+        name = inputs.get(name_col)
+        if not name:
+            continue
+        if not conn.execute("SELECT 1 FROM surplus_allocations WHERE goal=?", (legacy_goal,)).fetchone():
+            continue  # nothing dangling under this legacy key
+        kid_row = conn.execute("SELECT id FROM kids WHERE name=?", (name,)).fetchone()
+        if not kid_row:
+            continue  # can't reliably identify which current kid this was -- leave it rather than guess
+        new_goal = f"Education funding - kid_{kid_row['id']}"
+        # Don't clobber a real allocation the household already made
+        # under the new key (e.g. they noticed the $0 and re-entered it
+        # manually) -- only migrate if nothing exists there yet.
+        if conn.execute("SELECT 1 FROM surplus_allocations WHERE goal=?", (new_goal,)).fetchone():
+            continue
+        conn.execute("UPDATE surplus_allocations SET goal=? WHERE goal=?", (new_goal, legacy_goal))
+
+    conn.execute("UPDATE planning_inputs SET legacy_surplus_goal_repair_done=1 WHERE id=1")
+    conn.commit()
+
+
 init_kids_table()
 
 def init_surplus_allocation_table():
@@ -559,6 +630,23 @@ def init_cfo_operating_tables():
             updated_at TEXT DEFAULT (datetime('now'))
         );
         CREATE UNIQUE INDEX IF NOT EXISTS idx_estate_documents_type ON estate_documents(document_type);
+        -- External audit follow-up, 2026-09-09 (P1): Estate.jsx's
+        -- beneficiary-designation table (account -> primary/contingent
+        -- beneficiary) was localStorage-only from the start, never
+        -- backed by any table -- unlike estate_documents just above,
+        -- which HAD a real table + API the whole time but the frontend
+        -- never actually called it either. Both are now wired up
+        -- (main.py's /api/estate-beneficiaries, Estate.jsx) and in
+        -- _BACKUP_TABLES, so a fresh browser or a restored backup
+        -- recovers these records instead of losing them.
+        CREATE TABLE IF NOT EXISTS estate_beneficiaries (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            account_key TEXT NOT NULL,
+            primary_beneficiary TEXT,
+            contingent_beneficiary TEXT,
+            updated_at TEXT DEFAULT (datetime('now'))
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_estate_beneficiaries_key ON estate_beneficiaries(account_key);
         CREATE TABLE IF NOT EXISTS assumption_reviews (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             label TEXT NOT NULL,

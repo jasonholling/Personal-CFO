@@ -5350,7 +5350,7 @@ recommendation string traces back to real `accounts`/`inputs`/`kids`/
 `cash_flow` data at call time. The hardcoded constants present
 throughout (tax brackets, RMD table, standard deduction, Roth
 phase-out, QCD limits, estate exemption, emergency-fund thresholds,
-concentration thresholds, the Omaha LTC benchmark, the age-based
+concentration thresholds, the local-market LTC cost benchmark, the age-based
 glide-path formula) are documented, dated tax-law/market-reference
 assumptions, correctly left alone. `Estate.jsx`, `Risk.jsx`,
 `Insurance.jsx` (post-section-60), `TaxPlanning.jsx`, and Dashboard's
@@ -5363,6 +5363,103 @@ household young enough to hit the 75-start SECURE 2.0 rule sees
 `last_rmd_age` reflect 75, not the old hardcoded 73 base.
 
 Backend suite 1375/1375 passed, 97.18% coverage. `npm test` 39/39,
+`npm run build` clean. `check_sensitive_data.py` clean.
+
+Branch: `main`.
+
+## 62. Independent audit: 3 P1 + 2 P2 findings on Insurance/Estate/migration (2026-09-09, on `main`)
+
+An independent audit of recent work (sections 59-61) reported five
+findings. All five verified against the actual code and fixed.
+
+**P1 — an insurance shortfall displayed as a green surplus.**
+`justin`'s `on_track` carried a hidden $100,000 tolerance
+(`justin_surplus >= -100000`, "within $100k is acceptable since Jason
+keeps earning"), while `Insurance.jsx` takes `Math.abs(surplus_gap)`
+and labels it "Surplus" whenever `on_track` is true — a genuine
+$50,000 shortfall with zero coverage rendered as a **green "Surplus
+$50,000."** Fixed on both ends: the tolerance is gone
+(`justin_surplus >= 0`, matching Jason's side, which never had one),
+and the frontend no longer trusts a separate boolean at all — both
+rows now derive their label/color directly from `surplus_gap`'s own
+sign, so display can never disagree with the number it's showing
+regardless of what a backend field does in the future. Bonus: this
+also silently fixes the same wrong "ON TRACK" claim in the PDF annual
+report (`report_generator.py` reads the identical `on_track` field).
+
+**P1 — child-dependent coverage inflated Justin's own coverage.**
+`justin_life_kids` (Settings: "Employer dependent (\<kids\> combined)")
+— money payable if a **child** dies — was summed into
+`justin_current_coverage`, the figure answering "if Justin dies, is
+there enough coverage to replace him." Removed from that sum; those
+are separate insured lives, same principle `jason_current_coverage`
+already followed (it only ever summed Jason's own policies).
+
+**P1 — Estate records were outside the app's backup.** Both halves of
+Estate.jsx were localStorage-only, never backed by a database table:
+the beneficiary-designation table had no backend table at all (new
+`estate_beneficiaries`, mirroring `estate_documents`'s own shape), and
+`estate_documents` — which already had a full table + working API —
+had simply never been called from Estate.jsx, so it sat unused the
+whole time. Wiring it up surfaced a second latent bug: the existing
+endpoint validated `status` against `not_started`/`in_progress`/
+`complete`, a vocabulary that never matched Estate.jsx's own UI
+(`executed`/`verify`/`outdated`/`pending`) — built before ever being
+connected to the frontend it was meant to serve. Both tables added to
+`_BACKUP_TABLES`. Estate.jsx rewritten to fetch-merge-render (matching
+every other data page's convention) instead of synchronous
+localStorage lazy-init; seed templates still regenerate display shape
+live (labels, which kid-Roth rows exist) while real edited values
+persist server-side by stable key, so a kid rename still updates the
+label without touching the saved beneficiary designation.
+
+**P2 — Insurance and Education disagreed on college funding.**
+`run_insurance_analysis`'s own `total_529_gap` used a simplified
+lump-sum FV-vs-total-cost comparison instead of the actual year-by-year
+drawdown simulation (`_project_college_drawdown`) Education/Kids
+already share. Reproduced exactly: an 18-year-old with $40,000 in a
+529, $10,000/yr cost, no contributions — Education correctly shows $0
+gap (growth outpaces the drawdown); the old formula compared a static
+$40,000 against ~$42,466 of total cost and invented a $2,465 gap that
+was never real. Now shares the identical helpers
+(`_project_529_saving_phase` + `_project_college_drawdown`,
+`track_unclamped=True`), so this figure can't disagree with what
+Education/Kids show for the same kid.
+
+**P2 — the surplus migration repair skipped already-migrated
+databases.** Section 59's `migrate_legacy_kids` goal-key remap (added
+in section 60's `dcf10cb`) is itself only reachable while
+`migrate_legacy_kids`'s own `kids_migrated` guard hasn't fired yet — a
+database that migrated kids BEFORE that remap code existed keeps a
+dangling `"Education funding - Abby"/"Cooper"` row forever.
+`repair_dangling_legacy_education_goals` is a separately versioned fix
+(own `legacy_surplus_goal_repair_done` flag, own guard), called
+unconditionally alongside `migrate_legacy_kids` so it reaches a
+database in exactly that stuck state regardless of what the other
+function already did. Identity mapping matches by NAME against
+`planning_inputs`' still-present `kid1_name`/`kid2_name` columns —
+reliable in the specific sense asked for: it either correctly
+identifies today's `kids` row for that legacy slot, or (if the kid was
+renamed since migrating) explicitly leaves the row alone rather than
+guessing by row order/id, which could confidently remap to the WRONG
+kid. Confirmed via direct read-only query that the real `cfo.db` has
+no dangling row (nothing to repair there), but the gap was real for
+any database in that intermediate state.
+
+**P2 — main itself failed the sensitive-data check.** Section 61's own
+prose ("the Omaha LTC benchmark") tripped the `Omaha` denylist entry —
+a verification/wording issue in a doc I wrote, not a credential leak;
+the `omaha_daily_cost_low/high` field *names* in code are lowercase and
+never matched. Reworded to "the local-market LTC cost benchmark."
+
+New regression tests: `TestRunInsuranceAnalysis` (kids-coverage
+exclusion, shortfall-stays-a-shortfall, insurance/education parity),
+`TestRepairDanglingLegacyEducationGoals` (repair + reliable-mapping +
+no-clobber + one-time-only, 4 tests), `test_main.py` (estate-documents
+status-vocabulary rejection, estate-beneficiaries CRUD + upsert +
+mismatched-key rejection, backup round-trip for both estate tables).
+
+Backend suite 1386/1386 passed, 97.19% coverage. `npm test` 39/39,
 `npm run build` clean. `check_sensitive_data.py` clean.
 
 Branch: `main`.

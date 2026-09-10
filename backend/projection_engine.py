@@ -2916,15 +2916,35 @@ def run_insurance_analysis(inputs: Dict, accounts: List[Dict], kids: List[Dict] 
     # Generalized (kids-variable-count) from two fixed abby/cooper
     # variables to a sum over however many kids currently exist — 0
     # kids means 0 gap, same as Education/Kids show 0 goals.
+    # External audit follow-up, 2026-09-09 (P2): this used to compare a
+    # simple lump-sum FV projection against total 4-year cost, instead
+    # of running the actual year-by-year drawdown simulation Education/
+    # Kids use (_project_college_drawdown) -- which keeps crediting
+    # investment growth WHILE tuition is being paid out each year, not
+    # just up to the day college starts. Reproduced: a kid already at
+    # 18 with $40,000 in a 529, $10,000/yr cost, no further
+    # contributions -- Education correctly shows $0 gap (the balance
+    # keeps growing faster than it's drawn down), but this simplified
+    # formula compared the static $40,000 against ~$42,466 of total
+    # 4-year cost and invented a $2,465 gap that was never real. Now
+    # shares the identical helpers (_project_529_saving_phase +
+    # _project_college_drawdown, track_unclamped=True) so this figure
+    # can never disagree with what Education/Kids already show for the
+    # same kid.
     unl_base      = inputs.get("unl_annual_cost", UNL_CURRENT_ANNUAL)
+    years_until_parent_retires = max(0, PARENT_RETIREMENT_AGE_ASSUMPTION - jason_age)
     total_529_gap = 0.0
     for kid in kids:
         owner = f"{KID_OWNER_PREFIX}{kid['id']}"
         balance_529 = sum(a["balance"] for a in accounts if a["account_type"]=="529" and a["owner"]==owner)
+        monthly_529 = float(kid.get("monthly_529", 0) or 0)
         years_to_college = max(0, 18 - kid.get("age", 0))
-        proj_529 = _fv(balance_529, 0.07, years_to_college) + _fv_annuity_monthly(float(kid.get("monthly_529", 0) or 0), 0.07, years_to_college)
-        cost = sum(unl_base*((1+COLLEGE_COST_INFLATION)**(years_to_college+yr)) for yr in range(4))
-        total_529_gap += max(0, cost - proj_529)
+        projected_529, contribution_years = _project_529_saving_phase(
+            balance_529, monthly_529, years_to_college, years_until_parent_retires, 0.07)
+        _yearly, worst_deficit, _years_out = _project_college_drawdown(
+            projected_529, monthly_529, 0.07, unl_base, years_to_college, contribution_years,
+            track_unclamped=True)
+        total_529_gap += -worst_deficit if worst_deficit < 0 else 0.0
 
     justin_years_to_ret = max(0, (60 - (jason_age - justin_age)) - justin_age)
     income_at_ret       = income_today * ((1+inflation)**justin_years_to_ret)
@@ -2945,9 +2965,18 @@ def run_insurance_analysis(inputs: Dict, accounts: List[Dict], kids: List[Dict] 
     jason_surplus        = jason_current_coverage - jason_total_need
 
     justin_total_need    = total_debt + total_529_gap
+    # External audit follow-up, 2026-09-09 (P1): justin_life_kids is the
+    # kids' OWN dependent life coverage (Settings labels it "Employer
+    # dependent (<kids> combined)") -- money payable if a CHILD dies,
+    # not additional coverage on Justin's own life. It was being summed
+    # into justin_current_coverage anyway, inflating what this section
+    # is actually answering ("if Justin dies, is there enough coverage
+    # to replace him"). Removed from the sum; those are separate
+    # insured lives and must stay separate, per the same principle
+    # jason_current_coverage already follows (it only ever summed
+    # Jason's own basic/supplemental/term policies).
     justin_current_coverage = (inputs.get("justin_life_ul", 0) + inputs.get("justin_life_whole", 0)
-                                + inputs.get("person2_life_employer", 0) + inputs.get("justin_life_term", 0)
-                                + inputs.get("justin_life_kids", 0))
+                                + inputs.get("person2_life_employer", 0) + inputs.get("justin_life_term", 0))
     justin_surplus       = justin_current_coverage - justin_total_need
 
     primary_key  = inputs.get("primary_residence_key", "")
@@ -2971,7 +3000,17 @@ def run_insurance_analysis(inputs: Dict, accounts: List[Dict], kids: List[Dict] 
                    "current_coverage": jason_current_coverage, "surplus_gap": round(jason_surplus), "on_track": jason_surplus >= 0},
         "justin": {"total_need": round(justin_total_need), "debt_payoff": round(total_debt),
                    "college_funding": round(total_529_gap), "income_replacement": 0,
-                   "current_coverage": justin_current_coverage, "surplus_gap": round(justin_surplus), "on_track": justin_surplus >= -100000},  # within $100k is acceptable since Jason keeps earning
+                   # External audit follow-up, 2026-09-09 (P1): this used
+                   # to accept up to a $100,000 real shortfall as
+                   # "on_track" (Jason keeps earning, the reasoning went)
+                   # -- but the frontend (Insurance.jsx) takes
+                   # Math.abs(surplus_gap) and labels it "Surplus"
+                   # whenever on_track is true, so a genuine $50,000
+                   # shortfall with zero coverage rendered as a GREEN
+                   # "Surplus $50,000." Any accepted shortfall must stay
+                   # visibly a shortfall -- on_track now means exactly
+                   # what it says, same threshold as Jason's.
+                   "current_coverage": justin_current_coverage, "surplus_gap": round(justin_surplus), "on_track": justin_surplus >= 0},
         # rental_insured/disability_funded_by/disability_to_age/
         # ltc_premium_annual (2026-09-09) -- these used to be hardcoded
         # (0, "Employer group policy", 65, 369) regardless of what was

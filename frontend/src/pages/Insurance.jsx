@@ -86,10 +86,19 @@ export default function Insurance({ onNavigate }) {
           <Row label="Total Need" value={fmt(jason.total_need)} highlight="var(--text)" />
           <Row label="Current Coverage" value={fmt(jason.current_coverage)} sub={`All ${person1Name} policies combined`} highlight="var(--accent)" />
           <div style={{ height:1, background:'var(--border)', margin:'8px 0' }} />
+          {/* External audit follow-up, 2026-09-09 (P1): this row used to
+              trust the backend's separate on_track boolean for both the
+              label AND the color, while displaying Math.abs(surplus_gap)
+              -- on_track carried its own $100,000 tolerance (Justin's
+              side, since removed), so a real shortfall inside that
+              tolerance rendered as a GREEN "Surplus." Derived directly
+              from surplus_gap's own sign now, so this can never disagree
+              with the number it's showing regardless of what threshold
+              a backend field might use in the future. */}
           <Row
-            label={jason.on_track ? "Surplus" : "Gap"}
+            label={jason.surplus_gap >= 0 ? "Surplus" : "Gap"}
             value={fmt(Math.abs(jason.surplus_gap))}
-            highlight={jason.on_track ? 'var(--green)' : 'var(--red)'}
+            highlight={jason.surplus_gap >= 0 ? 'var(--green)' : 'var(--red)'}
           />
         </div>
 
@@ -107,9 +116,9 @@ export default function Insurance({ onNavigate }) {
           <Row label="Current Coverage" value={fmt(justin.current_coverage)} sub={`All ${person2Name} policies combined`} highlight="var(--accent)" />
           <div style={{ height:1, background:'var(--border)', margin:'8px 0' }} />
           <Row
-            label={justin.on_track ? "Surplus" : "Gap"}
+            label={justin.surplus_gap >= 0 ? "Surplus" : "Gap"}
             value={fmt(Math.abs(justin.surplus_gap))}
-            highlight={justin.on_track ? 'var(--green)' : 'var(--red)'}
+            highlight={justin.surplus_gap >= 0 ? 'var(--green)' : 'var(--red)'}
           />
         </div>
       </div>
