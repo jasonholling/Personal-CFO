@@ -8,6 +8,7 @@ import { useSsAnchors } from '../hooks/useSsAnchors'
 import { nearestOf } from '../utils/scenario'
 import { isPrivacyMode, MASK_CURRENCY } from '../utils/privacy'
 import SecondEarnerNote from '../components/SecondEarnerNote'
+import ActiveScenarioBanner from '../components/ActiveScenarioBanner'
 import ClaimAgeSlider from '../components/ClaimAgeSlider'
 
 const NAVY = '#5C7CE0' // was #1B3A6B — nearly the same luminance as the dark card background, effectively invisible
@@ -118,6 +119,8 @@ export default function Retirement({ onNavigate }) {
       <div style={{ marginBottom:28 }}>
         <p className="section-sub" style={{ margin:0 }}>Three scenarios · Toggle SS timing · Modeled to age {s.retirement_end_age}</p>
       </div>
+
+      <ActiveScenarioBanner />
 
       {/* Scenario selector */}
       <div style={{ display:'flex', gap:24, marginBottom:24, alignItems:'flex-start', flexWrap:'wrap' }}>

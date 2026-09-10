@@ -5557,3 +5557,72 @@ above.
 Branch: `codex/milestone-3-navigation`, pushed, not merged — per the
 backlog brief's own instruction not to merge or start the next
 milestone without approval.
+
+## 64. Milestone 3, second slice: visible active-scenario indicator (2026-09-09, on `codex/milestone-3-navigation`)
+
+Milestone 3 acceptance criterion: "establish one clearly identified
+active scenario across relevant tools." The underlying state already
+existed and already carried across pages — `useScenario()`
+(`utils/scenario.js`) shares `retAge`/`ssTiming`/
+`jasonSsClaimAge`/`justinSsClaimAge` via a module-level store +
+localStorage, so picking "Retire at 58" on one page already carried
+over to the next. What was missing was ever telling the user so — each
+page showed its own controls with no indication they were the SAME
+choice, not a fresh per-page default.
+
+New `components/ActiveScenarioBanner.jsx`: a compact, consistent strip
+("Active scenario: Retire at X · SS \<timing\>") mounted at the top of
+every page that reads `useScenario()` for something the user would
+recognize as "the plan I'm looking at": `Retirement.jsx` (Overview),
+`RetirementSensitivity.jsx`, `RothConversion.jsx`,
+`StressTestWhatIf.jsx`. `SideBySide.jsx` and `SavedScenarios.jsx`
+intentionally excluded — the former sweeps every age at once (no
+single "active" age to highlight), the latter is about viewing saved
+snapshots, not the live scenario.
+
+Distinguishes a temporary override from a saved Settings default only
+where that distinction actually exists in the data model: SS claim
+age. `jasonSsClaimAge`/`justinSsClaimAge` are page-local overrides on
+top of whatever's saved in Settings (section 54's 3-tier resolution);
+when either differs from the saved value, the banner calls it out
+explicitly ("— this session only, not saved"). `retAge`/`ssTiming`
+have no separate "Settings default" to contrast against — the shared
+scenario value IS the persistent choice already, so it's labeled
+"Active scenario" rather than an invented override of something that
+doesn't exist.
+
+Self-caught before it shipped: the banner's own `savedJasonClaimAge`/
+`savedJustinClaimAge` fetch (needed for the override-vs-default check)
+duplicated a fetch `StressTestWhatIf.jsx` already makes for
+`AssumptionsUsed` — caught immediately by
+`ScenarioFlow.test.jsx`'s own call-count assertion (`toHaveLength(1)`
+on `/api/planning-inputs` calls), the same test class that caught an
+identical mistake earlier this session (section 57's Survivor-Scenario
+eager-mount revert). Fixed by accepting optional
+`savedJasonClaimAge`/`savedJustinClaimAge` props — a page that's
+already fetched the value passes it through instead of the banner
+redundantly fetching its own copy; pages that haven't (Retirement/
+RothConversion/RetirementSensitivity) leave the props unset and the
+banner fetches for itself.
+
+**Verified:** `npm run build` clean, `npm test` 39/39 (including the
+regression this caught and fixed). No backend changes. **Still not
+verified live in a browser** — Chrome's extension connection wasn't
+available across two attempts this session; the banner's actual
+rendering/wording across the 4 pages is unconfirmed beyond build +
+unit tests.
+
+**Still explicitly open from Milestone 3's acceptance criteria**:
+progressive disclosure for advanced controls; preserving completed
+results/drafts when navigating between top-level pages (App.jsx fully
+unmounts a page on every nav switch — pre-existing behavior, not
+introduced by this milestone, but making it match "preserve drafts
+between related views" properly would mean lifting page state up or
+extending the mounted-but-hidden pattern App-wide, a larger
+architecture decision not taken here); a stale-result/recalculate
+audit of Roth Conversion and any other explicit-run tool beyond the
+Monte Carlo/Stress Test pattern already built; and the brief's full
+acceptance-journey testing (two earners, 0/5 kids, keyboard operation,
+actual browser behavior).
+
+Branch: `codex/milestone-3-navigation`, pushed, not merged.

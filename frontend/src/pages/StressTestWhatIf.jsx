@@ -9,6 +9,7 @@ import WhatIf from './WhatIf'
 import { MonteCarloSection, StressTestSection, RET_AGES, SS_OPTS } from './Simulation'
 import SecondEarnerNote from '../components/SecondEarnerNote'
 import ClaimAgeSlider from '../components/ClaimAgeSlider'
+import ActiveScenarioBanner from '../components/ActiveScenarioBanner'
 
 const fmt = (n) => isPrivacyMode() ? MASK_CURRENCY : (n == null ? '—' : new Intl.NumberFormat('en-US', { style:'currency', currency:'USD', maximumFractionDigits:0 }).format(n))
 const GREEN = '#34d399'
@@ -320,6 +321,8 @@ export default function StressTestWhatIf({ onNavigate }) {
         <h1 className="section-title">Stress Test & What-If</h1>
         <p className="section-sub">Pressure-test your plan against custom assumptions, randomized markets, and historical crashes</p>
       </div>
+
+      <ActiveScenarioBanner savedJasonClaimAge={savedClaimAges.jason} savedJustinClaimAge={savedClaimAges.justin} />
 
       {/* Tab switcher */}
       <div style={{ display:'flex', gap:4, marginBottom:24, borderBottom:'1px solid var(--border)', paddingBottom:0 }}>

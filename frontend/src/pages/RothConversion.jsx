@@ -10,6 +10,7 @@ import { useSsAnchors } from '../hooks/useSsAnchors'
 import { TWO_AGE_MIN, TWO_AGE_MAX, clampTwoAge, parseTwoAgeInput } from '../utils/scenario'
 import SecondEarnerNote from '../components/SecondEarnerNote'
 import ClaimAgeSlider from '../components/ClaimAgeSlider'
+import ActiveScenarioBanner from '../components/ActiveScenarioBanner'
 
 const fmt  = (n) => isPrivacyMode() ? MASK_CURRENCY : (n == null ? '—' : new Intl.NumberFormat('en-US',{style:'currency',currency:'USD',maximumFractionDigits:0}).format(n))
 const fmtK = (n) => isPrivacyMode() ? MASK_CURRENCY : (n == null ? '—' : Math.abs(n)>=1000000?`$${(n/1000000).toFixed(2)}M`:`$${(n/1000).toFixed(0)}K`)
@@ -130,6 +131,8 @@ export default function RothConversion() {
         <h1 className="section-title">Roth Conversion Ladder</h1>
         <p className="section-sub">Optimal pre-tax to Roth conversions before RMDs start at 73 — computed from your real balances and Settings, no re-entry</p>
       </div>
+
+      <ActiveScenarioBanner />
 
       {/* Why this matters callout */}
       <div style={{ padding:'14px 16px', background:'rgba(79,156,249,0.06)', border:'1px solid rgba(79,156,249,0.2)', borderRadius:8, marginBottom:24, fontSize:13 }}>
