@@ -700,6 +700,31 @@ class TestSimulationEndpoints:
         assert "error" not in body
         assert len(body["chart"]) > 0
 
+    def test_income_sources_splits_gross_rmd_from_discretionary_withdrawal(self, client, sample_inputs, sample_accounts):
+        """Auditor review (2026-09-10): a household's first RMD year
+        showed a dramatic jump in this chart's single "Portfolio Draw"
+        band, which conflates the full forced RMD (much of which is
+        reinvested, not spent, in years the RMD outstrips actual need)
+        with genuinely discretionary withdrawals — indistinguishable in
+        the old payload. This endpoint now returns rmd/rmd_reinvested/
+        withdrawal_pretax (already computed by yearly_detail, not
+        re-derived here) plus a discretionary_withdrawal field, so the
+        chart can stack the two components separately instead of one
+        conflated total. discretionary_withdrawal + rmd must reproduce
+        the original combined portfolio_draw exactly, every year — the
+        split is additive, not a different number."""
+        inputs = {**sample_inputs, "jason_age": 40}  # born 1986 => RMDs start at 75
+        self._seed(client, inputs, sample_accounts)
+        r = client.get("/api/retirement/income-sources?ret_age=60&ss_timing=early")
+        assert r.status_code == 200
+        chart = r.json()["chart"]
+        rmd_years = [y for y in chart if y["rmd"] > 0]
+        assert rmd_years  # the household's balances must actually trigger at least one RMD year
+        for y in chart:
+            assert "rmd" in y and "rmd_reinvested" in y and "withdrawal_pretax" in y
+            assert y["discretionary_withdrawal"] >= 0
+            assert y["discretionary_withdrawal"] + y["rmd"] == y["portfolio_draw"]
+
     def test_whatif(self, client, sample_inputs, sample_accounts):
         self._seed(client, sample_inputs, sample_accounts)
         r = client.post("/api/projections/whatif", json={"salary_growth_pct": 0.03})

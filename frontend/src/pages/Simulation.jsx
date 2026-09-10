@@ -197,6 +197,43 @@ const CustomTooltip = ({ active, payload, label, person1Name }) => {
   )
 }
 
+// Custom tooltip for the Income Sources by Year chart (as opposed to
+// CustomTooltip's generic per-series rendering above) — reads the raw
+// data row directly rather than only the two rendered Area series
+// (rmd/discretionary_withdrawal), so it can also surface rmd_reinvested
+// and withdrawal_pretax, which aren't chart series themselves. Auditor
+// review (2026-09-10): a large forced RMD year and a large genuinely-
+// discretionary withdrawal year looked visually identical in the old
+// single "Portfolio Draw" band — this makes the split, and the amount
+// of the RMD that's immediately reinvested rather than spent, explicit.
+const IncomeSourcesTooltip = ({ active, payload, label, person1Name }) => {
+  if (!active || !payload?.length) return null
+  const row = payload[0]?.payload
+  if (!row) return null
+  return (
+    <div style={{ background:'var(--bg3)', border:'1px solid var(--border2)', borderRadius:8, padding:'10px 14px', fontSize:11 }}>
+      <div style={{ fontWeight:600, marginBottom:6 }}>{person1Name} Age {label}</div>
+      {row.pension > 0 && <div style={{ color:NAVY, marginBottom:2 }}>Pension: {fmtK(row.pension)}</div>}
+      {row.social_security > 0 && <div style={{ color:'#2E7D8C', marginBottom:2 }}>Social Security: {fmtK(row.social_security)}</div>}
+      {row.bridge_income > 0 && <div style={{ color:'#34d399', marginBottom:2 }}>Bridge Job: {fmtK(row.bridge_income)}</div>}
+      {row.discretionary_withdrawal > 0 && (
+        <div style={{ color:'#f97316', marginBottom:2 }}>Discretionary withdrawal: {fmtK(row.discretionary_withdrawal)}</div>
+      )}
+      {row.rmd > 0 && (
+        <div style={{ color:'#c2410c', marginBottom:2 }}>RMD (gross, forced by law): {fmtK(row.rmd)}</div>
+      )}
+      {row.rmd_reinvested > 0 && (
+        <div style={{ color:'var(--text3)', marginBottom:2, paddingLeft:10 }}>
+          ↳ of which reinvested, not spent: {fmtK(row.rmd_reinvested)}
+        </div>
+      )}
+      <div style={{ borderTop:'1px solid var(--border2)', marginTop:6, paddingTop:6, fontWeight:600 }}>
+        Total gross cash flow this year: {fmtK(row.pension + row.social_security + row.bridge_income + row.portfolio_draw)}
+      </div>
+    </div>
+  )
+}
+
 // ── Monte Carlo section ───────────────────────────────────────────────────────
 // `overrides`: the What-If Builder's current modified assumptions (see
 // StressTestWhatIf.jsx), or null/undefined when running standalone (e.g.
@@ -502,24 +539,25 @@ export function MonteCarloSection({ retAge, ssTiming, overrides, jasonRetAge, ju
       {/* Income sources stacked chart */}
       {incSrc && (
         <div className="card" style={{ marginTop:24 }}>
-          <div className="label" style={{ marginBottom:4 }}>Income Sources by Year</div>
+          <div className="label" style={{ marginBottom:4 }}>Income Sources by Year — Gross Cash Flows</div>
           <div style={{ fontSize:12, color:'var(--text2)', marginBottom:16 }}>
-            What covers your spending each year — pension, SS, bridge job, and portfolio draw
+            What covers your spending each year — pension, SS, bridge job, and portfolio withdrawal.
+            Figures are GROSS cash flows, not net spending: once RMDs start (age 73 or 75, by birth
+            year), the amount shown includes the full forced distribution even in years most of it
+            is immediately reinvested rather than spent — see "RMD (forced)" vs. "Discretionary
+            withdrawal" below and the reinvested amount in each year's tooltip.
           </div>
           <ResponsiveContainer width="100%" height={280}>
             <AreaChart data={incSrc.chart} margin={{ top:0, right:0, bottom:0, left:10 }}>
               <XAxis dataKey="age" tick={{ fill:'var(--text3)', fontSize:11 }} axisLine={false} tickLine={false} />
               <YAxis tickFormatter={fmtK} tick={{ fill:'var(--text3)', fontSize:11 }} axisLine={false} tickLine={false} width={60} />
-              <Tooltip
-                contentStyle={{ background:'var(--bg3)', border:'1px solid var(--border2)', borderRadius:8, fontSize:11 }}
-                formatter={(v, n) => [fmt(v), n]}
-                labelFormatter={l => `${person1Name} Age ${l}`}
-              />
+              <Tooltip content={<IncomeSourcesTooltip person1Name={person1Name} />} />
               <Legend wrapperStyle={{ fontSize:11, paddingTop:8 }} />
               <Area type="monotone" dataKey="pension"         stackId="1" name="Pension"        stroke={NAVY} fill={NAVY} fillOpacity={0.8} />
               <Area type="monotone" dataKey="social_security" stackId="1" name="Social Security" stroke="#2E7D8C" fill="#2E7D8C" fillOpacity={0.8} />
               <Area type="monotone" dataKey="bridge_income"   stackId="1" name="Bridge Job"     stroke="#34d399" fill="#34d399" fillOpacity={0.8} />
-              <Area type="monotone" dataKey="portfolio_draw"  stackId="1" name="Portfolio Draw"  stroke="#f97316" fill="#f97316" fillOpacity={0.8} />
+              <Area type="monotone" dataKey="discretionary_withdrawal" stackId="1" name="Discretionary Withdrawal" stroke="#f97316" fill="#f97316" fillOpacity={0.8} />
+              <Area type="monotone" dataKey="rmd"              stackId="1" name="RMD (Forced)"   stroke="#c2410c" fill="#c2410c" fillOpacity={0.8} />
             </AreaChart>
           </ResponsiveContainer>
         </div>
