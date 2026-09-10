@@ -9,6 +9,15 @@ actual current implementation (`projection_engine.py`,
 `simulation_engine.py`, `annual_engine.py`), not from assumptions about
 what it does.
 
+**Revised 2026-09-10** per independent review: the original version
+(section headings below reflect the revision) mainly proposed exposing
+ownership data and standardizing tax output fields without achieving
+consistent tax calculations across consumers, and didn't distinguish
+between work that's risk-free by construction and work that would need
+its own verification or its own approval before touching a household's
+actual numbers. Section 4 explains the three-category split this
+revision organizes everything else around.
+
 ## 1. Goal, restated
 
 "Equivalent household assumptions produce consistent treatment across
@@ -83,6 +92,42 @@ per-consumer.
   different capital-gains treatment from EACH OTHER, not just from the
   other consumers) — inventoried here for completeness, not new.
 
+**Single-age vs. two-age tax-model divergence — checked directly, none
+found.** Revision note (2026-09-10, independent review): the original
+version of this proposal didn't check this explicitly. Read the actual
+two-age implementations of the three consumers that have both a
+single-age and a two-age form:
+- `_run_tax_efficiency_simulation_two_age`: its own docstring states it
+  "has never had bracket-aware or marginal-rate-aware taxation" and
+  reuses the identical flat-rate model — confirmed consistent with
+  single-age Tax Efficiency by design, not coincidence.
+- `_run_roth_conversion_analysis_two_age`: reads `state_income_tax_rate`
+  and calls the same `_pretax_marginal_tax_rate`/marginal-bracket
+  pattern single-age Roth Conversion uses, at the same call sites
+  (`base_taxable`/`room_in_22` bracket-capacity math included) — a
+  comment at this call site explicitly notes still-working income is
+  folded into the spending-need offset "in either direction -- exactly
+  the existing single-axis" behavior, i.e. deliberately mirrored, not
+  independently reimplemented and hoped to match.
+- `run_owner_split_two_dimensional_projection` (two-age Retirement
+  Projection/Survivor Scenario's underlying walk): uses the identical
+  `min(0.90, _marginal_rate(...) + max(0, state_income_tax_rate))`
+  pattern found in single-age `run_retirement_projection` — same
+  formula, independently confirmed at each of the three call sites in
+  `projection_engine.py`.
+
+So: no currently-existing single-age/two-age tax-model gap was found.
+What IS real, and is exactly what makes "no gap today" fragile rather
+than reassuring: this identical formula is typed out independently at
+6+ call sites across `projection_engine.py` and `simulation_engine.py`,
+not called from one shared function. A past real bug (Roth Conversion's
+`base_taxable` once omitting gross wages from bracket capacity, fixed
+per CALCULATION_CONTRACT.md section 32) lived in exactly one of these
+copies while the others were unaffected — proof duplication is how a
+single-age/two-age (or any-consumer/any-other-consumer) divergence
+actually gets introduced in this codebase, even though none currently
+exists. See category 2 below.
+
 ## 3. Inventory: account ownership across every consumer
 
 **The default, everywhere except one deliberately-scoped exception**:
@@ -148,162 +193,255 @@ it, and unavailable to every other tool. The gap isn't "can this be
 computed correctly" (it already is) — it's "is it generalized,
 exposed, and consistent across tools."
 
-## 4. Proposed shared annual tax contract
+## 4. Revision note (2026-09-10): three categories, not one undifferentiated slice list
 
-A `TaxContract` (name is a placeholder) that every tax-computing
-consumer reads from instead of each independently assembling its own
-rate:
+Independent review of the first version of this proposal: it "mainly
+exposes ownership data and standardizes tax output fields... does not
+yet achieve consistent tax calculations across consumers" — true, and
+the first version didn't say so clearly enough. The work in sections
+5-7 below splits into three categories with genuinely different risk
+profiles, and conflating them was the actual problem, not any one
+slice's content:
 
-- **Inputs**: gross wage/bonus/RSU income (pre-retirement), 401k/IRA
-  pretax contributions (reduce taxable wages), pretax withdrawal amount,
-  RMD amount, taxable-bucket gain amount, pension income, SS taxable
-  portion, filing status (NEW — doesn't exist today), state tax rate
-  (already exists, just needs to move into this shared shape).
-- **Output**: `{federal_marginal_rate, state_rate, effective_pretax_rate,
-  effective_taxable_rate, total_tax_owed}` — same shape every consumer
-  reads, whether it came from the marginal-bracket path or (for Tax
-  Efficiency, unchanged) the flat-rate path. The MODEL CHOICE stays
-  per-consumer and explicit (item 1 of section 2's table); the OUTPUT
-  SHAPE becomes uniform so a future explainer panel (Milestone 2) can
-  render "how this was taxed" identically regardless of which model
-  produced it.
-- **Withholding vs. liability**: out of scope for this contract's v1 —
-  documented as unsupported (section 2 above), surfaced in the UI as an
-  explicit "this shows estimated tax owed, not a withholding schedule"
-  note wherever a tax figure appears, rather than silently implying
-  precision that doesn't exist.
+1. **Visibility improvements that preserve existing calculations** —
+   zero risk to any currently-returned number, by construction (each
+   one is exposing or repackaging a value already computed, never
+   computing a new one). "Preserve existing results" applies without
+   qualification here.
+2. **Actual tax-policy consolidation** — collapsing the 6+ duplicated
+   copies of the marginal-bracket-rate formula (section 2's revision
+   note) into one shared function. This is NOT risk-free the way
+   category 1 is: consolidating duplicated code is exactly how a
+   currently-hidden divergence between two copies would surface — and
+   section 2 already found zero current divergence across every copy
+   checked, but "checked by reading the code" is not the same
+   confidence level as "checked by an equivalence test." Every
+   consumer's existing numbers must be verified equal before-and-after
+   consolidation, not assumed equal because the source read the same.
+   "Preserve existing results" applies here CONDITIONALLY: only where
+   verification confirms the policies were already equivalent — if
+   consolidation surfaces a real pre-existing divergence between two
+   consumers (not found yet, but not ruled out by inspection alone
+   either), that is a bug to fix and document with a before/after
+   example per the brief's own instruction, not something to preserve
+   by keeping the old, divergent, unconsolidated code paths.
+3. **Owner-specific obligations that can legitimately change household
+   totals** — genuinely new calculations (per-person RMDs, inherited-
+   account tax treatment) that do NOT exist today in any form, pooled
+   or owner-split. These are not preservable by definition — there is
+   no existing "true" total to preserve, and implementing them WILL
+   change a household's total RMD or survivor-scenario tax figure
+   relative to today's aggregate/Jason-anchored approximation, for any
+   household where the two spouses' ages actually differ. Explicitly
+   NOT bundled with categories 1-2's "no behavior change" framing.
 
-## 5. Proposed owner-attributed account model
+## 5. Category 1 — visibility improvements (preserve existing calculations, unconditionally)
 
 The correct, tested machinery already exists
-(`run_owner_split_two_dimensional_projection`) — this is a generalization
-and exposure proposal, not a new withdrawal architecture:
+(`run_owner_split_two_dimensional_projection`) — these slices expose or
+repackage it, computing nothing new:
 
-- **Generalize the entry point.** Make the owner-split walk callable by
-  any consumer, not hardcoded to two-age Survivor Scenario's dispatch
-  path. Its by-construction reconciliation approach (run the pooled
-  calculation once, allocate the resulting deltas across owners via
-  `WITHDRAWAL_OWNER_ORDER`, apply growth per-owner after allocation) is
-  the right architecture to keep — extending it to other consumers
-  means removing whatever assumptions currently couple it specifically
-  to the two-age Survivor Scenario call site (e.g. its handling of
-  `death_jason_age`/`deceased`, which a consumer with no death event has
-  no use for), not replacing the allocation approach itself.
-- **Expose it to the frontend.** Today `yearly_detail`'s owner-split
-  `{owner: {"pretax":.., "roth":.., "taxable":.., "hsa":..}}` shape is
-  computed and then only read internally by the death-walk dispatch —
-  it never reaches an API response. Surfacing it (even just for
-  two-age Survivor Scenario first, where it already exists) is the
-  actual "does Justin's 401k run out before Jason's Roth IRA" answer
-  users would see.
-- **RMDs**: RMDs are per-person, by law (each spouse's own pretax
-  accounts have their own RMD schedule). The owner-split walk
-  documented above keeps RMD aggregate/Jason-anchored today
-  ("per-spouse RMDs during normal both-alive operation are explicitly
-  out of scope per section 37.4" — an existing, documented limitation,
-  not new). Making RMDs genuinely per-person is real remaining scope,
-  layered on top of owner-attributed balances rather than a
-  prerequisite for them (the balances are already owner-attributed;
-  the RMD calculation itself isn't yet).
-- **Transfers/survivor transitions**: when one spouse dies, their
-  pretax/taxable/roth balances transfer to the survivor (with real tax
-  consequences — inherited IRA rules, a filing-status change from
-  joint to single) that NONE of today's Survivor Scenario math
-  attempts, pooled or owner-split — the existing owner-split walk
-  reports balances up to death but doesn't model the inheritance
-  transaction itself. Flagged as unsupported.
-- **Migration**: the owner-split walk already reads the existing
-  `owner` column with no invented ownership, exactly per the
-  milestone's own instruction. A household whose accounts are all
-  `owner='joint'` gets the exact same pooled behavior as before opting
-  in; this is additive, not a forced migration, and already proven
-  true by the existing reconciliation tests.
+- **Expose the owner-split walk's output.** Today `yearly_detail`'s
+  owner-split `{owner: {"pretax":.., "roth":.., "taxable":..,
+  "hsa":..}}` shape is computed and then only read internally by the
+  death-walk dispatch — it never reaches an API response. Returning it
+  (Slice 1 below) lets the frontend render "Jason's balance vs
+  Justin's" for the one consumer where the math already exists, with
+  zero change to any currently-returned field.
+- **Uniform tax-output shape.** A `{federal_marginal_rate, state_rate,
+  effective_pretax_rate, effective_taxable_rate, total_tax_owed}` shape
+  every consumer's tax computation populates — the MODEL CHOICE stays
+  per-consumer and unchanged (marginal-bracket vs. Tax Efficiency's
+  flat rate, per section 2's table); only the OUTPUT SHAPE becomes
+  uniform, so a future explainer panel can render "how this was taxed"
+  identically regardless of which model produced the number. This is
+  repackaging an already-computed number into a shared shape — not
+  consolidating the computation itself (that's category 2).
+- **Disclosure of existing limitations in the UI** (section 8): stating
+  in the UI that Tax Efficiency uses a flat rate, or that this shows an
+  annual-liability estimate rather than a withholding schedule, changes
+  no number — it's pure visibility.
 
-## 6. What stays unsupported, and how it should appear in the UI
+## 6. Category 2 — actual tax-policy consolidation (conditional preservation, verify before assuming)
+
+Collapsing the marginal-bracket-rate formula
+(`min(0.90, _marginal_rate(...) + max(0, state_income_tax_rate))`,
+independently typed at 6+ call sites across `projection_engine.py` and
+`simulation_engine.py`) into one shared function every consumer calls,
+instead of each retyping it. Section 2's revision note already checked
+by direct reading that every current copy computes the same thing for
+the same inputs — this category's job is proving that with an
+equivalence test, not re-asserting it from the same reading:
+
+- **Known single-age/two-age differences, checked**: none found (section
+  2). Both are held to the exact same marginal-bracket-plus-state
+  formula in every consumer that has both forms (Roth Conversion, the
+  owner-split/pooled Retirement Projection walk). Tax Efficiency's
+  flat-rate model is the one deliberate exception, applied identically
+  in its single-age and two-age forms — not a single-age/two-age split
+  at all, a Tax-Efficiency-vs-everything-else split (section 2's table).
+- **Consolidation is still worth doing** precisely because no
+  divergence exists YET — duplication, not divergence, is the actual
+  risk being retired. The one confirmed historical bug in this area
+  (Roth Conversion's `base_taxable` omitting gross wages, section 2)
+  lived in exactly one of several near-identical copies; a shared
+  function makes that class of bug structurally impossible to
+  reintroduce in only one call site again.
+- **What "preserve existing results" means here, precisely**: after
+  consolidation, every consumer's tax-related output fields
+  (`estimated_tax`, Roth Conversion's `base_taxable_income`/
+  `room_in_22_bracket`, etc.) must be byte-for-byte identical to their
+  pre-consolidation values, for every existing test fixture and a new
+  battery of synthetic households spanning the input ranges each
+  consumer's own bracket-capacity logic branches on (zero income, high
+  income crossing bracket edges, RMD-triggering ages, both SS timings).
+  If any consumer's number changes, that is either a bug the
+  consolidation exposed (document it, don't silently keep the old
+  wrong number) or proof the two copies were never actually equivalent
+  (stop, don't consolidate that pair until the real difference is
+  understood and it's clear which one is correct).
+
+## 7. Category 3 — owner-specific obligations that legitimately change totals
+
+Genuinely new calculations, not exposures of existing ones — no
+"preserve existing results" framing applies, because there is no
+existing result to preserve:
+
+- **Per-person RMDs.** RMDs are legally per-person: each spouse's own
+  pretax balance uses the IRS Uniform Lifetime Table factor for THEIR
+  OWN age. Today's aggregate/Jason-anchored RMD (section 3, "per-spouse
+  RMDs during normal both-alive operation are explicitly out of scope
+  per section 37.4") uses one age for the whole pooled pretax balance.
+  For any household where the spouses' ages actually differ, a genuine
+  per-person calculation produces a DIFFERENT total mandatory
+  distribution than today's aggregate approximation — smaller if the
+  younger spouse holds a larger share of the pretax balance (their
+  factor is more generous), larger if the older spouse does. This is a
+  real, documentable numerical change, not a bug fix disguised as one —
+  today's aggregate figure was always a stated approximation, not a
+  wrong computation of a well-defined "true" figure.
+- **Inherited-account/survivor transitions.** When one spouse dies,
+  their pretax/taxable/Roth balances transfer to the survivor under
+  real inherited-IRA rules, and the household's filing status changes
+  from joint to single — which changes the marginal bracket the
+  survivor's future withdrawals land in. None of today's Survivor
+  Scenario math (pooled or owner-split) attempts this; the owner-split
+  walk reports balances up to death and stops. Modeling it would change
+  the survivor scenario's post-death tax figures relative to today's
+  (undocumented-as-such) implicit assumption that the household's tax
+  treatment doesn't change at death.
+- Both require their own before/after numeric examples and explicit
+  approval before implementation, per the brief's own instruction — not
+  bundled into category 1/2's lower-risk work, and not scoped further
+  in this document until that approval exists.
+
+## 8. What stays unsupported, and how it should appear in the UI
 
 Per the milestone's own instruction ("identify which advanced tax rules
 remain unsupported and how limitations will appear in the UI"):
 
-| Limitation | Where it should be disclosed |
-|---|---|
-| No withholding/quarterly-payment modeling, only an annual-liability estimate | Wherever a tax figure renders (natural fit: Milestone 2's "How this was calculated" panel, once extended to tools other than retirement funding) |
-| No filing-status input | Settings/Planning Inputs, if filing status becomes a real input; until then, a note wherever the marginal-rate estimate is shown |
-| Tax Efficiency's flat-rate model doesn't reflect the household's real bracket | Tax Efficiency's own page, ideally its own explainer once Milestone 2 reaches it |
-| Owner-attributed withdrawal (Slice 2 below) doesn't exist yet outside Survivor Scenario's starting balances | Any page that shows per-owner figures, until Slice 2 ships |
-| Survivor transitions (inherited-account tax treatment) unmodeled | Survivor Scenario's own existing disclosure text (it already has one methodology note; extend it) |
+| Limitation | Category | Where it should be disclosed |
+|---|---|---|
+| No withholding/quarterly-payment modeling, only an annual-liability estimate | Unsupported (disclose only) | Wherever a tax figure renders (natural fit: Milestone 2's "How this was calculated" panel, once extended to tools other than retirement funding) |
+| No filing-status input | Unsupported (disclose only) | A note wherever the marginal-rate estimate is shown |
+| Tax Efficiency's flat-rate model doesn't reflect the household's real bracket | Category 1 (already intentional, needs visibility) | Tax Efficiency's own page, ideally its own explainer once Milestone 2 reaches it |
+| Owner-attributed withdrawal doesn't exist yet outside Survivor Scenario's starting balances | Category 1 (exists, not exposed elsewhere) | Any page that shows per-owner figures, until that slice ships |
+| Per-person RMDs unmodeled (aggregate/Jason-anchored today) | Category 3 (would change totals) | Wherever an RMD figure is shown, until implemented and approved |
+| Survivor transitions (inherited-account tax treatment) unmodeled | Category 3 (would change totals) | Survivor Scenario's own existing disclosure text (it already has one methodology note; extend it) |
 
-## 7. Proposed implementation slices
+## 9. Proposed implementation slices
 
 Each slice ships independently, on its own branch, with its own
 reference tests — per the overall brief's "start each milestone from
-current GitHub main... commit and push for independent review."
+current GitHub main... commit and push for independent review." Grouped
+by category (section 4) so approval can be granted per-category, not
+all-or-nothing.
 
-**Slice 1 — Expose the existing owner-split walk's output.**
-No new calculation logic: `run_owner_split_two_dimensional_projection`
-already computes a correct, tested, by-construction-reconciled
-per-owner `yearly_detail`. Return it from two-age Survivor Scenario's
-existing API response (it's computed today and discarded after the
-death-row lookup) so the frontend can render "Jason's balance vs
-Justin's" for the one consumer where the math already exists.
-*Acceptance*: no numeric change to any currently-returned field; new
-test asserts the newly-exposed owner-split rows sum to the
-already-returned pooled figures for the same response.
+**Category 1 (visibility, unconditional preserve) — lowest risk, most defensible to approve first:**
 
-**Slice 2 — Generalize the owner-split walk beyond Survivor Scenario.**
-Remove the assumptions coupling `run_owner_split_two_dimensional_projection`
-specifically to the death-walk call site (its `death_jason_age`/
-`deceased` handling) so a consumer with no death event can call it too,
-reusing the same by-construction allocation approach.
-*Acceptance*: `TestOwnerSplitReconcilesAgainstPooledTotals`-style test
-extended to a second call site with no death event; zero behavior
-change for the existing Survivor Scenario caller.
+- **Slice 1 — Expose the existing owner-split walk's output.** Return
+  two-age Survivor Scenario's already-computed, already-discarded
+  per-owner `yearly_detail` from its API response.
+  *Acceptance*: no numeric change to any currently-returned field; new
+  test asserts the newly-exposed owner-split rows sum to the
+  already-returned pooled figures for the same response.
+- **Slice 2 — Generalize the owner-split walk beyond Survivor Scenario.**
+  Remove the assumptions coupling `run_owner_split_two_dimensional_
+  projection` specifically to the death-walk call site so a consumer
+  with no death event can call it too, reusing the identical
+  by-construction allocation approach — no new withdrawal logic.
+  *Acceptance*: `TestOwnerSplitReconcilesAgainstPooledTotals`-style test
+  extended to a second call site with no death event; zero behavior
+  change for the existing Survivor Scenario caller.
+- **Slice 3 — Owner-attributed withdrawal for a second consumer.** Wire
+  Slice 2's generalized entry point into one more consumer (candidate:
+  the plain pooled two-age Retirement Projection).
+  *Acceptance*: household + owner-level reconciliation test (owner
+  totals sum to the same pooled total the unmodified function produces,
+  for identical inputs).
+- **Slice 4 — Shared tax-output shape.** The uniform
+  `{federal_marginal_rate, state_rate, effective_pretax_rate,
+  effective_taxable_rate, total_tax_owed}` shape (section 5), adopted by
+  every consumer without changing which model computes the number.
+  *Acceptance*: existing tax-related tests for every adopting consumer
+  pass unchanged; new tests assert the output shape's fields reconcile
+  to what each consumer's own existing (unchanged) internal tax figure
+  was.
 
-**Slice 3 — Owner-attributed withdrawal for a second consumer.**
-Wire the generalized entry point from Slice 2 into one more consumer
-(candidate: the plain pooled two-age Retirement Projection, since it's
-the most-used tool and already shares the same underlying pooled
-function this walk reconciles against).
-*Acceptance*: household + owner-level reconciliation test (owner totals
-sum to the same pooled total the unmodified function produces, for
-identical inputs) — same verification pattern already used for the
-existing split.
+**Category 2 (consolidation, conditional preserve) — needs its own equivalence-test pass, not bundled with category 1:**
 
-**Slice 4 — Shared tax-contract output shape.**
-Introduce the uniform `{federal_marginal_rate, state_rate,
-effective_pretax_rate, effective_taxable_rate, total_tax_owed}` shape
-from section 4, adopted by the marginal-bracket path first (no behavior
-change — it's a repackaging of numbers already computed). Tax
-Efficiency's flat-rate path adopts the same output shape without
-adopting the same model — the shape unifies, the number doesn't.
-*Acceptance*: existing tax-related tests for every adopting consumer
-pass unchanged; new tests assert the output shape's fields reconcile to
-what each consumer's own existing (unchanged) internal tax figure was.
+- **Slice 5 — Shared marginal-bracket-rate function.** Replace the 6+
+  independently-typed copies of `min(0.90, _marginal_rate(...) +
+  max(0, state_income_tax_rate))` with calls to one shared function.
+  *Acceptance*: a new synthetic-household battery (zero income, high
+  income crossing bracket edges, RMD-triggering ages, both SS timings)
+  run through every adopting consumer before AND after, asserting
+  byte-for-byte identical tax-related output fields. Any discrepancy
+  found stops the slice — it becomes its own documented bug-fix (with a
+  before/after example) rather than being silently absorbed into
+  "consolidation."
 
-**Slice 5 — Filing status input (if approved as in-scope).**
-Add a filing-status field to Planning Inputs, thread it through the
-shared tax contract as a real parameter instead of an implicit
-married-filing-jointly assumption. Bigger scope decision — should be
-approved separately, since it touches the bracket table itself
-(`retirement_tools_engine.py` / wherever `_marginal_rate` sources its
-brackets), not just the contract's plumbing.
-*Acceptance*: TBD pending approval to even scope this slice; likely its
-own before/after numeric-difference documentation given it changes real
-tax-rate numbers for any household not filing jointly.
+**Category 3 (owner-specific, changes totals) — requires separate approval, not started by approving categories 1-2:**
 
-## 8. Explicitly out of scope for all of this
+- **Slice 6 — Per-person RMDs (if approved as in-scope).** Real
+  per-spouse Uniform Lifetime Table calculation instead of the
+  aggregate/Jason-anchored approximation.
+  *Acceptance*: before/after numeric examples for at least one household
+  with meaningfully different spouse ages, showing exactly how the
+  total RMD changes and why; TBD pending approval to even scope this
+  slice further.
+- **Slice 7 — Inherited-account survivor transitions (if approved as
+  in-scope).** Model the filing-status change and inherited-IRA tax
+  treatment at death.
+  *Acceptance*: TBD pending approval; likely the largest single slice in
+  this document given it touches both the owner-split ledger and the
+  tax-rate computation together.
 
-- No slice above changes any number a currently-shipped consumer
-  produces for a household with `owner='joint'` on every account (the
-  common case) — every slice is additive/opt-in until proven otherwise
-  by its own reconciliation test.
-- Inherited-account/survivor-transition tax treatment (section 6) is
-  named as a real gap, not silently promised by any slice here.
+## 10. Explicitly out of scope for all of this
+
+- No category-1 or category-2 slice changes any number a currently-
+  shipped consumer produces, for ANY household — category 1 by
+  construction (repackaging only), category 2 by its own required
+  equivalence-test gate (section 6). Category 3 is the only place
+  numbers can legitimately change, and only there, and only after its
+  own separate approval.
 - Withholding/quarterly-payment modeling is explicitly NOT proposed —
-  section 4 recommends disclosure, not implementation, given the scope
+  section 8 recommends disclosure, not implementation, given the scope
   this would add for a personal (non-payroll-integrated) planning tool.
+- Filing-status-as-a-real-input (beyond disclosing today's implicit
+  assumption) is not scoped in this revision — the first version's
+  "Slice 5" for this is dropped pending a decision on whether it
+  belongs in category 2 (if it turns out today's implicit assumption
+  really is uniform MFJ everywhere, making this pure consolidation) or
+  category 3 (if adding it changes any consumer's current numbers for
+  a household that isn't MFJ).
 
-## 9. Approval needed before any of section 7 is implemented
+## 11. Approval needed before any of section 9 is implemented
 
-Per the brief's own instruction, nothing in sections 4–7 gets built
-until this document itself is reviewed and approved — including which
-slices (if any) are in scope for now versus deferred indefinitely.
+Per the brief's own instruction, nothing in section 9 gets built until
+this document itself is reviewed and approved — and per section 4,
+approval can reasonably be granted per-category rather than all at
+once: category 1 carries essentially no risk to existing calculations,
+category 2 requires its own equivalence-test discipline, and category 3
+requires a separate decision about whether household totals should
+change at all before any slice in it is scoped further.
