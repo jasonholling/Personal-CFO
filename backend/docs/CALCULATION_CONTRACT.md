@@ -5870,3 +5870,97 @@ own funding-order logic (risking the "recreate formulas in the
 frontend" this component exists to avoid) or cross-checking against a
 real backend-computed reference case rather than a hand-built fixture.
 Listed as unbuilt, not silently claimed complete.
+
+## 71. Real annual reconciliation against actual backend output, and a double-counting fix (2026-09-10, on `codex/milestone-2-explainability`)
+
+Independent review: the "not yet a full annual reconciliation" gap left
+open at the end of section 69 needed closing before either milestone
+merges, and a real bug was found in the process — an income offset
+(second-earner gap income, and for `ret_age==55` households, bridge
+income) was being counted BOTH as "income" in the explainer AND already
+netted into the displayed "spending" figure (`income_need`), which
+`run_retirement_projection` itself computes net of those two offsets
+(`year_need -= life_event_monthly_this_year`, `year_need -=
+income.justin_gap_income` — confirmed by reading the actual source, not
+assumed).
+
+**Backend**: three new fields added to `run_retirement_projection`'s
+`yearly_detail`, each a direct read of an already-computed value — no
+new arithmetic logic:
+- `gross_spending_need`: the year's spending target BEFORE the two
+  generic offsets (life-event monthly delta, second-earner gap income).
+  Bridge income (`ret_age==55` only) is intentionally NOT re-added here
+  — it's already correctly netted into the branch-specific formula,
+  including its `max(0, ...)` clamp, which a naive "add bridge_income
+  back" reconstruction in the frontend would get wrong whenever bridge
+  income exceeds the target.
+- `remaining_portfolio_need`: `year_result.spending_need -
+  year_result.external_income` — the exact `remaining` value
+  `annual_engine.simulate_withdrawal_year` already computes internally
+  before drawing from any bucket, now exposed instead of discarded.
+- `growth`: `sum(year_result.growth.values())` — the same per-bucket
+  growth dict `AnnualResult.reconcile()` already checks against
+  internally, previously computed and thrown away by this loop. The
+  explainer's growth column is no longer "disclosed as unavailable" —
+  it's a real number.
+
+**Frontend**: `CalculationExplainer`'s flows table now shows Gross
+spending / Income offsets / Remaining need as three distinct columns
+(previously "income" and "spending" conflated the two, is the exact bug
+described above). Income offsets = `pension + social_security +
+justin_gap_income + life_event_cash + life_event_monthly_adjustment` —
+deliberately excludes `bridge_income`, matching the backend's own
+`gross_spending_need` definition. Growth is now a real column.
+
+**Independently verified reconciliation** (new file
+`tests/test_annual_reconciliation.py`) — this is the part done
+differently from sections 68-69's fixture-only self-consistency checks:
+- Runs the ACTUAL `run_retirement_projection`, spying on the REAL
+  `annual_engine.simulate_withdrawal_year` calls it makes (patched at
+  `projection_engine`'s own name binding, since `from annual_engine
+  import simulate_withdrawal_year` means patching `annual_engine`'s copy
+  wouldn't affect `projection_engine`'s calls) to capture every actual
+  `AnnualResult`.
+- Asserts `AnnualResult.reconcile()` — the engine's own authoritative
+  per-year ledger check, already used once to catch a real bug before
+  any consumer was migrated onto this engine (see `annual_engine.py`'s
+  own docstring) — returns `None` for every single year of two full
+  synthetic households: a "rich" one engineered to exercise every flow
+  type the acceptance review listed (working-spouse wages + gap income,
+  bridge income, one-time positive/negative life events, recurring
+  positive/negative life events, RMD reinvestment, taxes, growth), and a
+  "poor" one engineered to deplete (confirms the ledger still balances
+  in years where `unmet_need > 0` and the portfolio has hit $0).
+- A coverage test explicitly asserts each of those flow types is
+  actually nonzero somewhere in the rich run — guards against the
+  reconciliation check passing vacuously because a flow type happened to
+  be zero for this particular household.
+- Confirms `gross_spending_need - income_offsets ==
+  remaining_portfolio_need` (within small rounding tolerance, since each
+  field is independently rounded) using the real run's own numbers, and
+  that the new `growth` field matches the captured `AnnualResult`'s own
+  growth dict exactly.
+- All 5 tests pass; 181 pre-existing `test_projection_engine.py` tests
+  continued to pass unchanged.
+
+**No calculation changes** — `run_retirement_projection`'s existing
+returned fields (`income_need`, `withdrawal`, `portfolio_balance`, etc.)
+are byte-for-byte unchanged; only new fields were added and a frontend
+double-counting bug was fixed (the frontend never affects any number
+`run_retirement_projection` itself returns).
+
+**Verified**: full backend suite 1391 passed at 97.19% coverage
+(2 fewer than section 67's backend-count baseline of 1386+5 expected —
+consistent with `test_annual_reconciliation.py`'s 5 new tests landing
+inside the count, not a regression). Full frontend suite 9 files, 52
+tests. Sensitive-data check clean.
+
+**Still explicitly open**: per-year reconciliation is now verified
+against real engine output, but no test yet reconciles the FULL
+multi-year lifecycle against an independently-computed reference total
+(e.g. "sum of every year's withdrawal + ending balance == starting
+balance + total lifetime income + total lifetime growth - total lifetime
+tax", a stronger whole-of-plan identity beyond the per-year one this
+section verifies). Not attempted here — listed, not silently claimed.
+
+Branch: `codex/milestone-2-explainability`. Pending push.

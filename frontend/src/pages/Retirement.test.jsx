@@ -28,17 +28,28 @@ const click = async text => {
   await act(async () => { button.click() })
 }
 
+// Milestone 2 acceptance follow-up (2026-09-10): gross_spending_need/
+// remaining_portfolio_need/growth are now real backend fields (see
+// projection_engine.py's yearly.append) rather than derived in the
+// frontend -- this fixture supplies them directly, matching the exact
+// identity TestAnnualReconciliationAgainstRealBackendOutput verifies
+// against real engine output on the backend side: remaining_need ==
+// gross_spending - (life_event_monthly_adjustment + justin_gap_income +
+// pension + social_security + life_event_cash).
 const yearlyDetail = Array.from({ length: 5 }, (_, i) => ({
-  jason_age: 60 + i, year: 2031 + i, income_need: 80000, healthcare_cost: 5000,
+  jason_age: 60 + i, year: 2031 + i, healthcare_cost: 5000,
+  gross_spending_need: 80000,
   pension: 10000, social_security: 20000, bridge_income: 0,
-  // Review finding (2026-09-09): justin_gap_income and life_event_cash
-  // are nonzero on year index 3 specifically so a reconciliation test
-  // can confirm the explainer's "Income" column actually sums ALL FIVE
-  // income-like fields, not just the three it originally used.
+  // justin_gap_income and life_event_cash are nonzero on year index 3
+  // specifically so a reconciliation test can confirm the offsets are
+  // counted exactly once (in "Income offsets"), not also silently baked
+  // into a lower "Gross spending" or double-subtracted from need.
   justin_gap_income: i === 3 ? 6000 : 0, life_event_cash: i === 3 ? -2500 : 0,
+  life_event_monthly_adjustment: 0,
+  remaining_portfolio_need: i === 3 ? 46500 : 50000,
   rmd: i === 2 ? 8000 : 0, rmd_reinvested: i === 2 ? 8000 : 0, estimated_tax: 4000,
   withdrawal_pretax: 30000, withdrawal_taxable: 10000, withdrawal_roth: 5000, withdrawal_hsa: 0,
-  withdrawal: 45000, unmet_need: 0, portfolio_balance: 900000 - i * 20000,
+  withdrawal: 45000, growth: 42000 - i * 1000, unmet_need: 0, portfolio_balance: 900000 - i * 20000,
 }))
 
 const scenario = (label) => ({
@@ -84,7 +95,7 @@ describe('Retirement Projection — How this was calculated (Milestone 2)', () =
     expect(container.textContent).toContain('2031 (age 60)')
   })
 
-  it('reconciles opening/closing balances across years and discloses that growth is not itemized per-year', async () => {
+  it('reconciles opening/closing balances across years and shows real growth figures', async () => {
     await act(async () => root.render(<Retirement onNavigate={() => {}} />))
     await flush()
     await click('How this was calculated')
@@ -97,8 +108,9 @@ describe('Retirement Projection — How this was calculated (Milestone 2)', () =
     expect(container.textContent).toContain('$880,000') // year 1 closing = year 2 opening
     // The transfers column surfaces the one nonzero rmd_reinvested row.
     expect(container.textContent).toContain('$8,000')
-    // Growth is explicitly disclosed as unavailable, not silently omitted.
-    expect(container.textContent).toContain("Investment growth isn't itemized per year")
+    // Growth is now a real per-year figure (backend field), not
+    // disclosed as unavailable.
+    expect(container.textContent).toContain('$42,000') // year 0's growth
   })
 
   it('withdrawal breakdown sums to the same total shown as the gross withdrawal figure', async () => {
@@ -113,23 +125,31 @@ describe('Retirement Projection — How this was calculated (Milestone 2)', () =
     expect(container.textContent).toContain('taxable $10,000')
   })
 
-  it('the Income column reconciles against ALL of a year\'s income-like fields, including second-earner gap income and life-event cash', async () => {
-    // Review finding (2026-09-09): the Income column used to omit
-    // justin_gap_income and life_event_cash entirely, understating any
-    // year where either was nonzero. Year index 3 has both set --
-    // confirm the displayed figure is the full sum, not the partial one.
+  it('gross spending, income offsets, and remaining need are distinct, with no offset double-counted', async () => {
+    // Acceptance follow-up (2026-09-10): "distinguish gross household
+    // spending from income offsets and remaining portfolio need... do
+    // not count an income offset both as income and as a reduction in
+    // displayed spending." Year index 3 has justin_gap_income and a
+    // negative life_event_cash both nonzero -- confirm the offset total
+    // shown ($33,500) is distinct from gross spending ($80,000, SAME for
+    // every year in this fixture, never reduced by the offset), and
+    // that remaining need ($46,500) is exactly gross minus offsets.
     await act(async () => root.render(<Retirement onNavigate={() => {}} />))
     await flush()
     await click('How this was calculated')
     await flush()
     const y = yearlyDetail[3]
-    const fullReconciledIncome = y.pension + y.social_security + y.bridge_income + y.justin_gap_income + y.life_event_cash
-    expect(fullReconciledIncome).toBe(33500) // 10000 + 20000 + 0 + 6000 - 2500
+    const incomeOffsets = y.pension + y.social_security + y.justin_gap_income + y.life_event_cash + y.life_event_monthly_adjustment
+    expect(incomeOffsets).toBe(33500) // 10000 + 20000 + 6000 - 2500 + 0
+    expect(y.gross_spending_need - incomeOffsets).toBe(y.remaining_portfolio_need) // 80000 - 33500 = 46500
     expect(container.textContent).toContain('$33,500')
-    // The old, incomplete sum (omitting gap income and life-event cash)
-    // would have shown $30,000 for this same year -- must NOT appear.
-    const partialIncome = y.pension + y.social_security + y.bridge_income
-    expect(partialIncome).toBe(30000)
+    expect(container.textContent).toContain('$46,500')
+    // Gross spending is the SAME $80,000 every year in this fixture --
+    // it must never itself be reduced by the offset (that would be the
+    // double-count the review flagged). $80,000 also appears once more
+    // in the dollar-basis line above the table (income_first_year), so
+    // the count is at least one-per-row, not exactly one-per-row.
+    expect(container.textContent.match(/\$80,000/g).length).toBeGreaterThanOrEqual(yearlyDetail.length)
   })
 
   it('an earlier, slower request cannot overwrite a later, faster one (out-of-order response guard)', async () => {
