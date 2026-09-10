@@ -10,6 +10,7 @@ import { isPrivacyMode, MASK_CURRENCY } from '../utils/privacy'
 import SecondEarnerNote from '../components/SecondEarnerNote'
 import ActiveScenarioBanner from '../components/ActiveScenarioBanner'
 import ClaimAgeSlider from '../components/ClaimAgeSlider'
+import CalculationExplainer from '../components/CalculationExplainer'
 
 const NAVY = '#5C7CE0' // was #1B3A6B — nearly the same luminance as the dark card background, effectively invisible
 
@@ -146,6 +147,39 @@ export default function Retirement({ onNavigate }) {
     }
   }
 
+  // Milestone 2 (2026-09-09, "Explain every major result"): every value
+  // fed to CalculationExplainer below is read straight from `s` / the
+  // per-year rows already returned by /api/projections/retirement --
+  // opening balance is the only derived value, and it's just a carry-
+  // forward of the previous row's own closing balance (or
+  // portfolio_at_retirement for year 0), not a recomputed formula.
+  //
+  // Integration note (2026-09-09, codex/milestone-1-2-integration): this
+  // is the SAME `s` object saveThisScenario() above sends as `summary` --
+  // the explainer and the save button are provably describing the same
+  // displayed calculation because they both read off one shared variable,
+  // not two independently-fetched copies. See ScenarioFlow.test.jsx's
+  // (Retirement.test.jsx here) integration test for the assertion.
+  const explainerFlows = s.yearly_detail.map((y, i) => ({
+    year: y.year, jasonAge: y.jason_age,
+    opening: i === 0 ? s.portfolio_at_retirement : s.yearly_detail[i - 1].portfolio_balance,
+    income: y.pension + y.social_security + y.bridge_income,
+    spending: y.income_need,
+    taxes: y.estimated_tax,
+    withdrawal: y.withdrawal,
+    withdrawalBreakdown: { pretax: y.withdrawal_pretax, taxable: y.withdrawal_taxable, roth: y.withdrawal_roth, hsa: y.withdrawal_hsa },
+    transfers: y.rmd_reinvested,
+    unmetNeed: y.unmet_need,
+    closing: y.portfolio_balance,
+  }))
+  const explainerAssumptions = [
+    ['Retirement age', `${retAge}`],
+    ['Social Security', jasonSsClaimAge != null ? `custom claim age ${jasonSsClaimAge}` : (ssTiming === 'delayed' ? 'wait until 67' : 'take at 62')],
+    [`${person2Name}'s SS`, justinSsClaimAge != null ? `custom claim age ${justinSsClaimAge}` : 'spousal, tied to the toggle above'],
+    ['Modeled through age', `${s.retirement_end_age}`],
+    ['State tax rate on distributions', `${((s.state_income_tax_rate || 0) * 100).toFixed(1)}%`],
+  ]
+
   return (
     <div>
       <div style={{ marginBottom:28 }}>
@@ -153,6 +187,16 @@ export default function Retirement({ onNavigate }) {
       </div>
 
       <ActiveScenarioBanner />
+
+      <CalculationExplainer
+        calcDate={new Date().toLocaleDateString()}
+        assumptions={explainerAssumptions}
+        dollarBasis={{ label: 'First-year retirement income need', todayValue: s.income_today_dollars, futureValue: s.income_first_year }}
+        flows={explainerFlows}
+        notes={[
+          "Monte Carlo, Stress Test, and this page can show different funded percentages for what looks like the same household — each runs its own return sequence/assumptions set, not a shared single number. See each page's own methodology if two figures disagree.",
+        ]}
+      />
 
       <div className="card" style={{ marginBottom:24, display:'flex', gap:10, alignItems:'center', flexWrap:'wrap' }}>
         <span className="label" style={{ marginRight:4 }}>Save this scenario</span>

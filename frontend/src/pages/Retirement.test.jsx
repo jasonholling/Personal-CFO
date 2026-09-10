@@ -6,9 +6,12 @@ import Retirement from './Retirement'
 import { setRetAge, setSsTiming } from '../utils/scenario'
 
 // Milestone 1 (2026-09-09, "Add 'Save this scenario' to the relevant
-// planning results"): rendered-DOM coverage for the save button added to
-// the primary retirement-projection result, confirming it posts exactly
-// the assumptions the page is currently showing.
+// planning results") + Milestone 2 (2026-09-09, "Explain every major
+// result") -- combined in one file per the integration branch
+// (codex/milestone-1-2-integration): both features live on this same
+// page and both read off the same `s`/`data` values, so this file also
+// covers the cross-check that the saved scenario and the explanation
+// panel refer to the same displayed calculation.
 
 vi.mock('axios', () => ({ default: { get: vi.fn(), post: vi.fn() } }))
 vi.mock('../hooks/usePersonNames', () => ({
@@ -22,10 +25,13 @@ globalThis.ResizeObserver = globalThis.ResizeObserver || class {
 let container, root
 const flush = async () => { await act(async () => { await Promise.resolve(); await Promise.resolve() }) }
 const click = async text => {
-  const button = [...container.querySelectorAll('button')].find(b => b.textContent.trim() === text)
+  const button = [...container.querySelectorAll('button, summary')].find(b => b.textContent.trim() === text)
   expect(button, text).toBeTruthy()
   await act(async () => { button.click() })
 }
+// React tracks <input> value via a property override, so a plain
+// `el.value = x` assignment is invisible to its onChange — go through the
+// native setter first, same workaround RTL's fireEvent uses internally.
 const nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set
 const typeInto = async (el, value) => {
   await act(async () => {
@@ -34,15 +40,19 @@ const typeInto = async (el, value) => {
   })
 }
 
-const yearlyDetail = Array.from({ length: 30 }, (_, i) => ({
-  jason_age: 60 + i, pension: 10000, social_security: 20000, rmd_reinvested: 0,
-  withdrawal: 30000, portfolio_balance: i < 29 ? 500000 : 0,
+const yearlyDetail = Array.from({ length: 5 }, (_, i) => ({
+  jason_age: 60 + i, year: 2031 + i, income_need: 80000, healthcare_cost: 5000,
+  pension: 10000, social_security: 20000, bridge_income: 0, justin_gap_income: 0,
+  rmd: i === 2 ? 8000 : 0, rmd_reinvested: i === 2 ? 8000 : 0, estimated_tax: 4000,
+  withdrawal_pretax: 30000, withdrawal_taxable: 10000, withdrawal_roth: 5000, withdrawal_hsa: 0,
+  withdrawal: 45000, unmet_need: 0, portfolio_balance: 900000 - i * 20000,
 }))
 
 const scenario = (label) => ({
   label, retirement_age: 60, percent_funded: 85, projected_surplus: 40000,
   years_to_retirement: 5, retirement_end_age: 90, current_investable_assets: 800000,
   portfolio_at_retirement: 900000, pension_annual: 30000, jason_ss_start_age: 62,
+  income_today_dollars: 70000, income_first_year: 80000, state_income_tax_rate: 0.05,
   yearly_detail: yearlyDetail,
 })
 
@@ -51,7 +61,10 @@ const resolvedAssumptions = {
   kids: [], life_events: [], surplus_allocations: [],
 }
 
-const projectionsResponse = { scenarios: [scenario('age_60_early'), scenario('age_60_delayed')], resolved_assumptions: resolvedAssumptions }
+const projectionsResponse = {
+  scenarios: [scenario('age_60_early'), scenario('age_60_delayed')],
+  resolved_assumptions: resolvedAssumptions,
+}
 
 beforeEach(() => {
   vi.clearAllMocks()
@@ -127,5 +140,86 @@ describe('Retirement Projection — Save this scenario (Milestone 1)', () => {
     await click('Save this scenario')
     await flush()
     expect(axios.post).not.toHaveBeenCalled()
+  })
+})
+
+describe('Retirement Projection — How this was calculated (Milestone 2)', () => {
+  it('renders the explainer panel and expands to show the scenario\'s own dollar basis and flows', async () => {
+    await act(async () => root.render(<Retirement onNavigate={() => {}} />))
+    await flush()
+    expect(container.textContent).toContain('How this was calculated')
+    await click('How this was calculated')
+    await flush()
+    expect(container.textContent).toContain('Retirement age: 60')
+    expect(container.textContent).toContain('$70,000')
+    expect(container.textContent).toContain('$80,000')
+    expect(container.textContent).toContain('2031 (age 60)')
+  })
+
+  it('reconciles opening/closing balances across years and discloses that growth is not itemized per-year', async () => {
+    await act(async () => root.render(<Retirement onNavigate={() => {}} />))
+    await flush()
+    await click('How this was calculated')
+    await flush()
+    // Opening balance for year 3 (index 2) must equal year 2's own closing
+    // balance -- this is the carry-forward identity the explainer relies
+    // on instead of re-deriving anything; year 0's opening must equal the
+    // scenario's own portfolio_at_retirement.
+    expect(container.textContent).toContain('$900,000') // year 0 opening = portfolio_at_retirement
+    expect(container.textContent).toContain('$880,000') // year 1 closing = year 2 opening
+    // The transfers column surfaces the one nonzero rmd_reinvested row.
+    expect(container.textContent).toContain('$8,000')
+    // Growth is explicitly disclosed as unavailable, not silently omitted.
+    expect(container.textContent).toContain("Investment growth isn't itemized per year")
+  })
+
+  it('withdrawal breakdown sums to the same total shown as the gross withdrawal figure', async () => {
+    await act(async () => root.render(<Retirement onNavigate={() => {}} />))
+    await flush()
+    await click('How this was calculated')
+    await flush()
+    const breakdownSum = yearlyDetail[0].withdrawal_pretax + yearlyDetail[0].withdrawal_taxable
+      + yearlyDetail[0].withdrawal_roth + yearlyDetail[0].withdrawal_hsa
+    expect(breakdownSum).toBe(yearlyDetail[0].withdrawal)
+    expect(container.textContent).toContain('pretax $30,000')
+    expect(container.textContent).toContain('taxable $10,000')
+  })
+})
+
+describe('Integration (Milestone 1 + Milestone 2 combined, 2026-09-09) — same displayed calculation', () => {
+  it('the saved-scenario summary and the explainer panel agree on the same portfolio-at-retirement figure', async () => {
+    axios.post.mockResolvedValue({ data: { id: 1 } })
+    await act(async () => root.render(<Retirement onNavigate={() => {}} />))
+    await flush()
+
+    // The explainer panel's own displayed opening balance for year 0...
+    await click('How this was calculated')
+    await flush()
+    expect(container.textContent).toContain('$900,000')
+
+    // ...is the exact same number Save posts as the scenario's
+    // portfolio_at_retirement. Both features read off the same `s`
+    // object -- this asserts that fact directly rather than assuming it
+    // from reading the source.
+    const nameInput = container.querySelector('input[placeholder="e.g. Retire at 62 with delayed SS"]')
+    await typeInto(nameInput, 'Cross-check')
+    await click('Save this scenario')
+    await flush()
+    const [, payload] = axios.post.mock.calls[0]
+    expect(payload.summary.portfolio_at_retirement).toBe(900000)
+  })
+
+  it('changing the retirement age drops both features into the same "no data" state, not a silent divergence', async () => {
+    await act(async () => root.render(<Retirement onNavigate={() => {}} />))
+    await flush()
+    await click('Age 65')
+    await flush()
+    // No age_65 scenario exists in the fixture, so the page falls back to
+    // its own "No data for this scenario" state -- confirms both features
+    // are driven by the SAME lookup (`s`), not independent state that
+    // could silently diverge when the shared retAge changes.
+    expect(container.textContent).toContain('No data for this scenario')
+    expect(container.textContent).not.toContain('How this was calculated')
+    expect(container.textContent).not.toContain('Save this scenario')
   })
 })

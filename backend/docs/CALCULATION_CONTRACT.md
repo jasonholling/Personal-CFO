@@ -5875,3 +5875,133 @@ is unchanged).
 - Comparison is two-at-a-time, not N-way.
 
 Branch: `codex/milestone-1-saved-scenarios`. Pending push.
+## 68. Milestone 2, first slice: "How this was calculated" for retirement funding (2026-09-09, on `codex/milestone-2-explainability`)
+
+Renumbered from this branch's own section 66 to 68 during the
+Milestone 1 + Milestone 2 integration merge (codex/milestone-1-2-integration)
+-- both branches independently used 66/67 since both started from the
+same main commit; no content conflict, just numbering.
+
+Milestone 2 ("Explain every major result") starts here, scoped to its
+first result: retirement funding (the Retirement Projection page's
+headline "% funded" and portfolio-at-retirement figures).
+
+- New shared component `CalculationExplainer.jsx` — a collapsible "How
+  this was calculated" panel taking already-computed data as props:
+  assumptions (label/value pairs, caller-supplied so each page picks
+  what's relevant to itself), a dollar-basis pair (today's $ vs the
+  actual future-dollar figure, so "distinguish today's dollars from
+  future dollars" is explicit rather than implied by whichever single
+  number happens to be on screen), a per-year annual-flows table
+  (opening balance, income, spending need, taxes, gross withdrawal with
+  its pretax/taxable/roth/hsa breakdown, unmet need, closing balance),
+  and free-text notes for explaining intentional cross-tool differences.
+  Every value is read straight from the calculation's own returned
+  data — the only derived value is "opening balance," and that's a
+  carry-forward of the previous row's own closing balance (or
+  `portfolio_at_retirement` for year 0), not a recomputed formula. This
+  satisfies the milestone's own "generate explanations from the
+  calculation's returned data; do not recreate formulas in the
+  frontend."
+- Wired into `Retirement.jsx`: assumptions include retirement age, both
+  SS claim-age/timing choices actually in effect (reusing the same
+  `jasonSsClaimAge`/`justinSsClaimAge`/`ssTiming` state
+  `ActiveScenarioBanner` already reads), modeled-through age, and the
+  state tax rate the projection itself used
+  (`s.state_income_tax_rate`) — not a second, independently-sourced
+  copy of any of these. Dollar basis pairs `income_today_dollars` against
+  `income_first_year`, both already returned per-scenario.
+- Privacy mode: `CalculationExplainer` uses the same
+  `isPrivacyMode()`/`MASK_CURRENCY` formatter as every other page — every
+  dollar figure inside the expanded panel masks, verified by a dedicated
+  test counting masked occurrences rather than trusting the pattern by
+  inspection alone.
+
+**Verified**: 4 new `CalculationExplainer.test.jsx` tests (assumptions +
+dollar-basis + flow rows render from props alone, withdrawal breakdown
+shown per bucket, privacy mode masks every figure including inside the
+expanded table, empty-props renders the collapsed shell only) + 1 new
+`Retirement.test.jsx` test (the panel expands and shows the scenario's
+own dollar-basis/flow figures, not a placeholder). Full frontend suite:
+9 files, 46 tests, green. Backend untouched by this slice — full backend
+suite and sensitive-data check still run against this commit per the
+brief's own completion requirements (see completion report for counts).
+
+**No calculation changes** — this slice only reads and displays
+already-returned data; nothing in `projection_engine.py` was touched.
+
+**Explicitly out of scope for this slice** (documented, not silently
+dropped):
+- Only the retirement-funding result has the explainer wired in.
+  Monte Carlo success, insurance shortfall, and Roth conversion benefit
+  — the milestone's other three "major results" — do not have it yet.
+  Monte Carlo in particular still needs its own specific treatment
+  ("distinguish trial outcomes from percentile summaries") that this
+  slice doesn't address at all.
+- "Independent reference cases cover surplus income, depletion, taxes,
+  retirement boundaries, and SS timing" (the milestone's acceptance
+  criteria) — this slice's tests confirm the panel displays what it's
+  given correctly, but don't independently re-derive a reference case
+  to confirm what it's given is itself correct; that reconciliation
+  work is unbuilt.
+- No calculation-date freshness indicator beyond `toLocaleDateString()`
+  at render time — no explicit "recalculated N minutes ago" or
+  staleness detection here (Milestone 3's stale-result pattern from
+  `StressTestWhatIf.jsx` wasn't ported over to this page in this slice).
+
+Branch: `codex/milestone-2-explainability`, branched from `main` at
+`a75258d`. Not yet pushed — pending the full backend suite run against
+this commit.
+
+## 69. Milestone 2 acceptance follow-up: reconcile flows, identify unavailable fields explicitly (2026-09-09, on `codex/milestone-2-explainability`)
+
+Independent review asked to "verify the explanation reconciles opening
+balances, income, spending, taxes, transfers, growth, closing balances,
+and unmet need" and to "identify unavailable fields explicitly." The
+first slice's flows table had opening/income/spending/taxes/withdrawal/
+unmetNeed/closing but no `transfers` column, and silently omitted growth
+rather than saying why.
+
+Fix:
+- Added a `transfers` column to `CalculationExplainer`'s flows table,
+  fed from `yearly_detail`'s own `rmd_reinvested` — an internal
+  bucket-to-bucket movement (an RMD forced out of pretax and reinvested
+  into taxable) that doesn't itself fund spending, distinct from a
+  withdrawal.
+- Added a permanent disclosure line under the table: investment growth
+  isn't itemized per-year by this projection (the engine returns opening/
+  closing balances, not a separate per-year growth figure), so showing
+  one here would mean computing it from the other columns — exactly the
+  "recreate formulas in the frontend" this component exists to avoid.
+  Disclosed explicitly rather than silently leaving the column out.
+
+**Verified** (the "reconciles" half of the request — checking identities
+the already-returned data satisfies, not deriving new ones):
+- New test confirms one year's `closing` balance equals the next year's
+  `opening` balance end-to-end across the whole flows array (the
+  carry-forward identity `CalculationExplainer`'s only derived value
+  depends on), and that year 0's opening equals the scenario's own
+  `portfolio_at_retirement`.
+- New test confirms the withdrawal-bucket breakdown
+  (pretax+taxable+roth+hsa) sums to the same total shown as the gross
+  withdrawal figure, for real numbers from the fixture data.
+- New tests confirm the `transfers` column renders the fixture's nonzero
+  `rmd_reinvested` value, and that the growth-unavailable disclosure
+  renders every time the flows table does.
+- Full frontend suite: 9 files, 49 tests. Backend untouched by this
+  slice — full backend suite and sensitive-data check still run against
+  this commit per the brief's own completion requirements (counts in the
+  completion report).
+
+**No calculation changes** — this only adds a column sourced from data
+`yearly_detail` already returned, and a disclosure string; nothing in
+`projection_engine.py` changed.
+
+**Explicitly out of scope** (unchanged from section 66, restated):
+Monte Carlo/insurance/Roth Conversion don't have the explainer yet;
+Monte Carlo's own "trial vs. percentile" distinction is unaddressed;
+independent reference-case reconciliation against a hand-computed
+expected value (as opposed to internal self-consistency checks like the
+carry-forward/breakdown-sum tests above) is still unbuilt.
+
+Branch: `codex/milestone-2-explainability`. Pending push.
