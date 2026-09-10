@@ -264,3 +264,157 @@ class TestAnnualReconciliationAgainstRealBackendOutput:
         assert y0["estimated_tax"] == 0
         assert y0["growth"] == 0
         assert captured[0].reconcile() is None
+
+
+def _bridge_household(monkeypatch, bridge_income_55, retirement_income_today_dollars=100000,
+                       taxable_balance=500000, extra_inputs=None, life_events=None):
+    """Shared household builder for the surplus-sweep boundary tests
+    below -- same zeroed-out structure as
+    test_bridge_income_reference_case_matches_independent_reproduction,
+    parameterized on bridge_income_55 and (for the combined-offsets
+    test) extra inputs/life events layered on top."""
+    inputs = {
+        **BASE_INPUTS,
+        "jason_age": 55, "justin_age": 55,
+        "retirement_income_today_dollars": retirement_income_today_dollars,
+        "bridge_income_55": bridge_income_55, "bridge_years_55": 1,
+        "kids_years_at_home_55": 0, "kids_annual_cost": 0,
+        "inflation_rate": 0, "expected_return_pre_retirement": 0, "expected_return_post_retirement": 0,
+        "state_income_tax_rate": 0,
+        "pension_55": 0, "pension_60": 0, "pension_65": 0,
+        "jason_social_security": 0, "jason_ss_delayed": 0, "justin_social_security": 0,
+        "justin_w2_salary": 0, "justin_ret_age": 0,
+        "healthcare_pre_medicare": 0, "healthcare_post_medicare": 0,
+        **(extra_inputs or {}),
+    }
+    accounts = [{"id": 1, "name": "Brokerage", "account_type": "taxable", "owner": "joint", "balance": taxable_balance}]
+    return _run_with_spy(monkeypatch, inputs, accounts, ret_ages=[55], life_events=life_events if life_events is not None else [])
+
+
+class TestBridgeIncomeSurplusSweep:
+    """Review finding P1 boundary case (2026-09-10): bridge income above
+    spending used to vanish entirely -- the pre-existing `max(0, target -
+    bridge)` clamp discarded any surplus before annual_engine ever saw
+    it, so it was never withdrawn, never saved, never reported anywhere.
+    Fixed by no longer netting bridge into year_need at all; bridge now
+    flows into fixed_income/guaranteed_income alongside pension/SS, so
+    the shared engine's own existing surplus-sweep logic (already
+    correct and tested for every other guaranteed-income source) handles
+    the overshoot the same way it always has for everything else.
+
+    Covers bridge income below, equal to, and above spending -- each
+    checking both the real ending balance (an actual money question) and
+    the displayed reconciliation (gross spending - income offsets ==
+    remaining need), which is the distinction the review specifically
+    called out: passing reconciliation checks alone doesn't prove the
+    underlying numbers are right, since a consistently-mislabeled or
+    consistently-lossy value can still "reconcile" against itself."""
+
+    def test_bridge_below_spending_no_surplus_needed(self, monkeypatch):
+        """$35,000 bridge against $100,000 spending -- no surplus in
+        play, portfolio funds the $65,000 remainder. Restates
+        test_bridge_income_reference_case_matches_independent_reproduction's
+        own numbers with an explicit ending-balance check alongside it."""
+        result, captured = _bridge_household(monkeypatch, bridge_income_55=35000, taxable_balance=500000)
+        yearly = next(s for s in result["scenarios"] if s["ss_timing"] == "early")["yearly_detail"]
+        y0 = yearly[0]
+        offsets = y0["pension"] + y0["social_security"] + y0["bridge_income"] + y0["justin_gap_income"] + y0["life_event_cash"] + y0["life_event_monthly_adjustment"]
+        assert y0["gross_spending_need"] == 100000
+        assert offsets == 35000
+        assert y0["remaining_portfolio_need"] == 65000
+        assert y0["gross_spending_need"] - offsets == y0["remaining_portfolio_need"]
+        assert y0["portfolio_balance"] == 500000 - 65000  # 435000 -- drawn down by the shortfall, no growth in play
+        assert captured[0].reconcile() is None
+
+    def test_bridge_equal_to_spending_zero_draw_zero_surplus(self, monkeypatch):
+        """$100,000 bridge against $100,000 spending -- fully covered,
+        nothing drawn, nothing swept. The boundary between the two cases
+        above and below it."""
+        result, captured = _bridge_household(monkeypatch, bridge_income_55=100000, taxable_balance=500000)
+        yearly = next(s for s in result["scenarios"] if s["ss_timing"] == "early")["yearly_detail"]
+        y0 = yearly[0]
+        offsets = y0["pension"] + y0["social_security"] + y0["bridge_income"] + y0["justin_gap_income"] + y0["life_event_cash"] + y0["life_event_monthly_adjustment"]
+        assert y0["gross_spending_need"] == 100000
+        assert offsets == 100000
+        assert y0["remaining_portfolio_need"] == 0
+        assert y0["gross_spending_need"] - offsets == y0["remaining_portfolio_need"]
+        assert y0["withdrawal"] == 0
+        assert y0["portfolio_balance"] == 500000  # untouched -- no draw, no surplus, no growth
+        assert captured[0].reconcile() is None
+
+    def test_bridge_above_spending_exact_review_reproduction(self, monkeypatch):
+        """The review's own exact reproduction: $500,000 taxable,
+        $100,000 spending, $150,000 bridge income, zero tax/growth.
+        Before this fix: ending balance $500,000 (the $50,000 surplus
+        silently discarded by the pre-existing clamp). After: $550,000,
+        matching the shared engine's existing surplus-sweep behavior for
+        every other guaranteed-income source."""
+        result, captured = _bridge_household(monkeypatch, bridge_income_55=150000, taxable_balance=500000)
+        yearly = next(s for s in result["scenarios"] if s["ss_timing"] == "early")["yearly_detail"]
+        y0 = yearly[0]
+        offsets = y0["pension"] + y0["social_security"] + y0["bridge_income"] + y0["justin_gap_income"] + y0["life_event_cash"] + y0["life_event_monthly_adjustment"]
+        assert y0["gross_spending_need"] == 100000
+        assert offsets == 150000
+        # remaining_portfolio_need is legitimately negative here -- a
+        # true surplus, not a shortfall -- and the displayed
+        # reconciliation identity must hold even in that direction.
+        assert y0["remaining_portfolio_need"] == -50000
+        assert y0["gross_spending_need"] - offsets == y0["remaining_portfolio_need"]
+        assert y0["withdrawal"] == 0  # nothing needed to be drawn -- bridge alone covered spending with room to spare
+        assert y0["portfolio_balance"] == 550000  # the exact figure the review expected
+        assert captured[0].reconcile() is None
+
+    def test_bridge_above_spending_combined_with_pension_and_life_event_and_gap_income(self, monkeypatch):
+        """"Verify... combinations with other income offsets": bridge
+        overshoot stacked with pension, a one-time life event, AND
+        second-earner gap income all active in the same year, confirming
+        none of them interfere with each other or get double-counted
+        once bridge's own surplus is in play."""
+        extra_inputs = {
+            "pension_55": 20000, "pension_60": 20000, "pension_65": 20000,
+            "justin_w2_salary": 60000, "justin_ret_age": 58,  # gap income active from age 55
+        }
+        life_events = [
+            {"event_year": projection_engine.CURRENT_YEAR, "one_time_cash_delta": 10000,
+             "monthly_cash_flow_delta": 0, "duration_months": 0},
+        ]
+        result, captured = _bridge_household(
+            monkeypatch, bridge_income_55=150000, taxable_balance=500000,
+            extra_inputs=extra_inputs, life_events=life_events,
+        )
+        yearly = next(s for s in result["scenarios"] if s["ss_timing"] == "early")["yearly_detail"]
+        y0 = yearly[0]
+        assert y0["pension"] == 20000
+        assert y0["bridge_income"] == 150000
+        assert y0["life_event_cash"] == 10000
+        assert y0["justin_gap_income"] > 0  # second earner still working during the bridge phase
+
+        offsets = y0["pension"] + y0["social_security"] + y0["bridge_income"] + y0["justin_gap_income"] + y0["life_event_cash"] + y0["life_event_monthly_adjustment"]
+        assert y0["gross_spending_need"] == 100000
+        assert offsets == 150000 + 20000 + 10000 + y0["justin_gap_income"]  # every offset counted exactly once
+        assert y0["gross_spending_need"] - offsets == y0["remaining_portfolio_need"]
+        assert y0["withdrawal"] == 0  # combined guaranteed income comfortably exceeds spending
+        expected_surplus = offsets - y0["gross_spending_need"]
+        assert y0["portfolio_balance"] == 500000 + expected_surplus
+        assert captured[0].reconcile() is None
+
+    def test_scenario_level_funded_status_credits_the_bridge_surplus(self, monkeypatch):
+        """The fix touches total_cap_need/total_cap_income (percent_
+        funded/projected_surplus/on_track) too -- bridge_income now has
+        to be added to total_cap_income explicitly, since it no longer
+        nets into income_need the way it used to. Doesn't assert an
+        absolute "on track" claim (this household's later, bridge-free
+        years still have to fund $100,000/year from a modest starting
+        balance at 0% growth, so it may legitimately run short over a
+        full retirement horizon regardless of this fix) -- instead
+        compares the SAME household with and without the bridge surplus,
+        confirming the surplus year is credited rather than silently
+        producing an inflated need with no offsetting income, which
+        would make the WITH-surplus household look WORSE or equal
+        instead of strictly better."""
+        with_surplus, _ = _bridge_household(monkeypatch, bridge_income_55=150000, taxable_balance=500000)
+        without_bridge, _ = _bridge_household(monkeypatch, bridge_income_55=0, taxable_balance=500000)
+        s_with = next(sc for sc in with_surplus["scenarios"] if sc["ss_timing"] == "early")
+        s_without = next(sc for sc in without_bridge["scenarios"] if sc["ss_timing"] == "early")
+        assert s_with["projected_surplus"] > s_without["projected_surplus"]
+        assert s_with["percent_funded"] >= s_without["percent_funded"]

@@ -1146,17 +1146,32 @@ def run_retirement_projection(inputs: Dict, accounts: List[Dict], ret_ages: List
                         bridge    = bridge_income_at_ret    * ((1 + inflation) ** yr)
                         bridge_this_year = bridge
                         # Milestone 2 reconciliation follow-up (2026-09-10,
-                        # review finding P2): gross_target is the
-                        # household's real spending target BEFORE bridge
-                        # income offsets it -- captured here, at the
-                        # source, rather than reconstructed later by
-                        # adding bridge_income back into the clamped
-                        # year_need, which silently produces the wrong
-                        # answer whenever bridge income exceeds the
-                        # target (max(0, ...) below would have already
-                        # floored the value being added back to).
+                        # review finding P1, boundary case): bridge income
+                        # is no longer subtracted from year_need at all --
+                        # it used to be netted in here via
+                        # `max(0, target - bridge)`, which silently
+                        # discarded any surplus once bridge exceeded the
+                        # target (spending_need floored at 0, and the
+                        # excess bridge dollars were never passed to
+                        # simulate_withdrawal_year in ANY form, so they
+                        # vanished from the ledger entirely -- not
+                        # withdrawn, not saved, not reported anywhere).
+                        # Reproduced: $500,000 taxable, $100,000 spending,
+                        # $150,000 bridge income, zero tax/growth --
+                        # ending balance was $500,000 (the $50,000 surplus
+                        # gone) instead of the correct $550,000. Bridge
+                        # income now flows into `fixed_income` below
+                        # instead (see its own comment), alongside
+                        # pension/SS, so the shared engine's own existing
+                        # surplus-sweep logic (`cash_available >=
+                        # spending_need` -> surplus swept into taxable,
+                        # annual_engine.simulate_withdrawal_year's own
+                        # documented contract) handles bridge income
+                        # exceeding spending exactly like it already
+                        # handles any other guaranteed-income overshoot --
+                        # not a new, bridge-specific rule.
                         gross_target = income_at_ret * ((1 + inflation) ** yr) + kids_cost
-                        year_need = max(0, gross_target - bridge)
+                        year_need = gross_target
                     elif kids_still_home and age < 65:
                         # Phase 2: retired, kids home, family healthcare
                         healthcare_this_year = healthcare_kids_at_ret
@@ -1175,28 +1190,15 @@ def run_retirement_projection(inputs: Dict, accounts: List[Dict], ret_ages: List
                     healthcare_inflated  = income.healthcare
                     year_need = income_at_ret * ((1 + inflation) ** yr) + healthcare_inflated
 
-                # Milestone 2 reconciliation follow-up (2026-09-10,
-                # corrected same-day per review finding P2): the
+                # Milestone 2 reconciliation follow-up (2026-09-10): the
                 # household's actual spending target for the year, before
-                # ANY income offset -- bridge income included. The first
-                # version of this field used the post-bridge, post-clamp
-                # year_need for bridge-active years, which silently
-                # excluded bridge income from "gross spending" entirely
-                # (a $100,000 target with $35,000 bridge income showed
-                # gross spending of $65,000, not $100,000 -- the
-                # portfolio withdrawal was correct, but the explanation
-                # hid the bridge income and understated actual spending).
-                # gross_target (bridge-active years only) is the pre-
-                # bridge, pre-clamp figure captured directly above, at
-                # the source -- not reconstructed after the fact by
-                # adding bridge_income back into a value that may have
-                # already been floored to 0 by max(0, ...), which would
-                # silently produce the wrong answer whenever bridge
-                # income exceeds the target. Every other branch has no
-                # bridge concept, so year_need (already the gross target,
-                # before the two offsets applied just below) is correct
-                # unchanged.
-                gross_spending_need = gross_target if (ret_age == 55 and bridge_active) else year_need
+                # ANY income offset -- bridge income included. Bridge
+                # income no longer participates in year_need's own
+                # computation at all (see the review finding P1 comment
+                # above), so year_need IS the gross target uniformly
+                # across every branch now -- no per-branch special case
+                # needed here anymore.
+                gross_spending_need = year_need
 
                 # Life events landing in the withdrawal phase — generic
                 # across every ret_age, not just 55. A recurring monthly
@@ -1222,11 +1224,18 @@ def run_retirement_projection(inputs: Dict, accounts: List[Dict], ret_ages: List
                 # deliberate, consumer-specific policy this consolidation
                 # preserves rather than folding into the shared builder
                 # (see annual_inputs.py's module docstring). Social
-                # Security is the shared builder's output.
+                # Security is the shared builder's output. bridge_this_year
+                # (review finding P1, 2026-09-10) joins pension/SS here
+                # instead of being netted into year_need -- it's real
+                # guaranteed income for the year same as they are, and
+                # this is what lets simulate_withdrawal_year's own
+                # surplus-sweep logic see and save any bridge income left
+                # over after spending is covered, instead of silently
+                # discarding it.
                 year_pen = pension_annual
                 year_jss = income.jason_ss
                 year_uss = income.justin_ss
-                fixed_income = year_pen + year_jss + year_uss
+                fixed_income = year_pen + year_jss + year_uss + bridge_this_year
 
                 # RMD on pre-tax bucket
                 rmd = _rmd(pretax, age, jason_rmd_start_age)
@@ -1370,11 +1379,25 @@ def run_retirement_projection(inputs: Dict, accounts: List[Dict], ret_ages: List
 
             # Discount the same beginning-of-year cash flows shown in the
             # table, including events and withdrawal taxes, to retirement.
+            #
+            # bridge_income (review finding P1, 2026-09-10): now that
+            # bridge income no longer nets into income_need at all (it
+            # flows into fixed_income/guaranteed_income for the actual
+            # withdrawal call instead -- see the year_need comment
+            # above), it must be added here explicitly, same as pension/
+            # social_security, or the scenario-level percent_funded/
+            # projected_surplus/on_track figures would overstate
+            # cap_needed_from_assets by the FULL bridge amount every
+            # bridge-active year with no offsetting credit -- not just in
+            # the bridge-exceeds-spending edge case, in EVERY bridge-
+            # active year, since income_need is now always the un-netted
+            # gross target rather than the previously bridge-reduced
+            # figure.
             total_cap_need = sum(
                 (max(0, y["income_need"]) + y["estimated_tax"] + max(0, -y["life_event_cash"]))
                 / ((1 + post_ret) ** yr) for yr, y in enumerate(yearly))
             total_cap_income = sum(
-                (y["pension"] + y["social_security"] + max(0, y["life_event_cash"]) + max(0, -y["income_need"]))
+                (y["pension"] + y["social_security"] + y["bridge_income"] + max(0, y["life_event_cash"]) + max(0, -y["income_need"]))
                 / ((1 + post_ret) ** yr) for yr, y in enumerate(yearly))
             cap_needed_from_assets = max(0, total_cap_need - total_cap_income)
             surplus = portfolio_at_ret + total_cap_income - total_cap_need

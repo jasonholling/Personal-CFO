@@ -6255,4 +6255,95 @@ check clean.
 returned field, including the withdrawal amount) is byte-for-byte
 unchanged; only `gross_spending_need`'s capture point moved.
 
+## 73. Review finding P1 (boundary case): bridge income above spending was silently discarded (2026-09-10, brought in from `codex/milestone-2-explainability`)
+
+This one WAS a real calculation bug, not just a labeling bug like
+section 72 — and it predates any of this milestone's work. Reproduction:
+$500,000 taxable, $100,000 spending, $150,000 bridge income, zero tax/
+growth. The pre-existing `year_need = max(0, target - bridge)` clamp
+discarded the $50,000 surplus before `simulate_withdrawal_year` ever
+saw it — not withdrawn, not saved, not reported anywhere. Ending balance
+was $500,000 (unchanged) instead of the correct $550,000. Section 72's
+own reconciliation tests didn't catch this because they check that the
+engine's ledger balances against itself, which a consistently-lossy
+value still does.
+
+**Fix**: bridge income no longer participates in `year_need`'s
+computation at all — `year_need` is now always the unclamped gross
+target (further simplifying `gross_spending_need`'s capture to a single
+unconditional assignment, no bridge-active special case needed anymore).
+`bridge_this_year` now joins `year_pen`/`year_jss`/`year_uss` in
+`fixed_income`, the `guaranteed_income` argument to
+`simulate_withdrawal_year` — so the shared engine's own existing
+surplus-sweep logic (`cash_available >= spending_need` → surplus swept
+into taxable, already correct and tested for every other guaranteed-
+income source, per `annual_engine.py`'s own documented contract) handles
+bridge income exceeding spending the same way it already handles
+everything else. Not a new, bridge-specific rule.
+
+**A second bug found and fixed as a direct consequence**: the
+scenario-level `total_cap_need`/`total_cap_income` formulas (which
+compute `percent_funded`/`projected_surplus`/`on_track` — the actual
+headline numbers) never included `bridge_income` at all. Before this
+fix, that was masked because bridge income was implicitly reflected via
+a *reduced* `income_need` (the old netting). Once bridge stopped netting
+into `income_need`, `total_cap_need` would have overstated capitalized
+need by the FULL bridge amount for every bridge-active year — not just
+the overshoot case, every case — with no offsetting credit anywhere.
+Fixed by adding `y["bridge_income"]` to `total_cap_income` explicitly,
+symmetric with how `pension`/`social_security` are already there.
+
+**Verified**: new test class `TestBridgeIncomeSurplusSweep` (6 tests) —
+bridge below spending (restates section 72's own numbers with an
+explicit ending-balance check), bridge exactly equal to spending (zero
+draw, zero surplus — the boundary between the two directions), the
+review's own exact $500,000/$100,000/$150,000 reproduction (confirms
+$550,000 ending balance and that `remaining_portfolio_need` is
+legitimately negative, with the displayed identity still holding in
+that direction), the same overshoot combined with pension + a one-time
+life event + second-earner gap income simultaneously (confirms none of
+the offsets interfere or get double-counted), and a scenario-level
+`percent_funded`/`projected_surplus` comparison (with vs. without the
+bridge surplus, since asserting an absolute "on track" isn't meaningful
+for a household whose later, bridge-free years still have to self-fund
+— the relative comparison is the actual claim being verified: the
+surplus must make the household look strictly better, never worse or
+unchanged). All 181 pre-existing `test_projection_engine.py` tests
+continued to pass. Frontend: new test confirms a negative
+`remainingNeed` renders as a real negative currency figure, not blank
+or NaN. Full backend suite: 1397 passed, 97.19% coverage. Full frontend
+suite: 9 files, 54 tests. Sensitive-data check clean.
+
+**"Check other consumers for the same clamp before propagating a
+fix"** — checked, not fixed here, reported instead of silently expanding
+scope:
+
+The identical clamp pattern (`year_need = max(0, target - bridge)`)
+exists in `two_age_spending_need_fn` (`projection_engine.py`), the
+shared per-year-need factory for every TWO-AGE consumer. Confirmed by
+reading every one of its 7 call sites:
+- `run_two_dimensional_retirement_projection` (two-age Retirement
+  Projection) actually captures the returned `bridge_income_this_year`
+  — but only to report it in `yearly_detail`'s own `bridge_income`
+  field; it is NEVER added to that function's own `fixed_income`, so
+  the surplus is discarded exactly the same way, just one step later
+  than in the other six call sites.
+- The other 6 call sites (`run_owner_split_two_dimensional_projection`
+  and 5 sites across `simulation_engine.py` — two-age Monte Carlo,
+  two-age Stress Tests, two-age Tax Efficiency) discard the returned
+  value entirely, via an underscore-prefixed variable name
+  (`_bridge_income`/`_bridge_income_this_year`) at every one.
+
+So: the same bug exists, identically, in every two-age consumer that
+supports `ret_age==55` bridge income. NOT fixed in this commit — fixing
+it means touching `two_age_spending_need_fn` itself plus updating all 7
+call sites' own `fixed_income`/`guaranteed_income` assembly (and
+checking each one for its own version of the `total_cap_need`/
+`total_cap_income`-equivalent secondary bug found above), which is a
+materially larger, multi-file, multi-consumer change than this
+milestone's scope (the single-age Retirement Projection explainer).
+Reported here as a confirmed, precisely-located finding for a separate
+scoping decision — not silently deferred without a paper trail, and not
+silently fixed without review.
+
 Branch: `codex/milestone-1-2-integration`.
