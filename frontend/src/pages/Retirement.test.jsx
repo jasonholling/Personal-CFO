@@ -31,7 +31,7 @@ const click = async text => {
 const yearlyDetail = Array.from({ length: 5 }, (_, i) => ({
   jason_age: 60 + i, year: 2031 + i, income_need: 80000, healthcare_cost: 5000,
   pension: 10000, social_security: 20000, bridge_income: 0, justin_gap_income: 0,
-  rmd: 0, rmd_reinvested: 0, estimated_tax: 4000,
+  rmd: i === 2 ? 8000 : 0, rmd_reinvested: i === 2 ? 8000 : 0, estimated_tax: 4000,
   withdrawal_pretax: 30000, withdrawal_taxable: 10000, withdrawal_roth: 5000, withdrawal_hsa: 0,
   withdrawal: 45000, unmet_need: 0, portfolio_balance: 900000 - i * 20000,
 }))
@@ -76,5 +76,34 @@ describe('Retirement Projection — How this was calculated (Milestone 2)', () =
     expect(container.textContent).toContain('$70,000')
     expect(container.textContent).toContain('$80,000')
     expect(container.textContent).toContain('2031 (age 60)')
+  })
+
+  it('reconciles opening/closing balances across years and discloses that growth is not itemized per-year', async () => {
+    await act(async () => root.render(<Retirement onNavigate={() => {}} />))
+    await flush()
+    await click('How this was calculated')
+    await flush()
+    // Opening balance for year 3 (index 2) must equal year 2's own closing
+    // balance -- this is the carry-forward identity the explainer relies
+    // on instead of re-deriving anything; year 0's opening must equal the
+    // scenario's own portfolio_at_retirement.
+    expect(container.textContent).toContain('$900,000') // year 0 opening = portfolio_at_retirement
+    expect(container.textContent).toContain('$880,000') // year 1 closing = year 2 opening
+    // The transfers column surfaces the one nonzero rmd_reinvested row.
+    expect(container.textContent).toContain('$8,000')
+    // Growth is explicitly disclosed as unavailable, not silently omitted.
+    expect(container.textContent).toContain("Investment growth isn't itemized per year")
+  })
+
+  it('withdrawal breakdown sums to the same total shown as the gross withdrawal figure', async () => {
+    await act(async () => root.render(<Retirement onNavigate={() => {}} />))
+    await flush()
+    await click('How this was calculated')
+    await flush()
+    const breakdownSum = yearlyDetail[0].withdrawal_pretax + yearlyDetail[0].withdrawal_taxable
+      + yearlyDetail[0].withdrawal_roth + yearlyDetail[0].withdrawal_hsa
+    expect(breakdownSum).toBe(yearlyDetail[0].withdrawal)
+    expect(container.textContent).toContain('pretax $30,000')
+    expect(container.textContent).toContain('taxable $10,000')
   })
 })

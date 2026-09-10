@@ -25,10 +25,10 @@ afterEach(async () => {
 const flows = [
   { year: 2031, jasonAge: 60, opening: 900000, income: 30000, spending: 80000, taxes: 5000,
     withdrawal: 55000, withdrawalBreakdown: { pretax: 40000, taxable: 10000, roth: 5000, hsa: 0 },
-    unmetNeed: 0, closing: 875000 },
+    transfers: 0, unmetNeed: 0, closing: 875000 },
   { year: 2032, jasonAge: 61, opening: 875000, income: 30000, spending: 81000, taxes: 5100,
     withdrawal: 56000, withdrawalBreakdown: { pretax: 41000, taxable: 10000, roth: 5000, hsa: 0 },
-    unmetNeed: 0, closing: 850000 },
+    transfers: 6000, unmetNeed: 0, closing: 850000 },
 ]
 
 describe('CalculationExplainer', () => {
@@ -55,6 +55,12 @@ describe('CalculationExplainer', () => {
     await act(async () => root.render(<CalculationExplainer flows={flows} />))
     expect(container.textContent).toContain('pretax $40,000')
     expect(container.textContent).toContain('taxable $10,000')
+  })
+
+  it('shows transfers separately from withdrawals and discloses that growth is not itemized per-year', async () => {
+    await act(async () => root.render(<CalculationExplainer flows={flows} />))
+    expect(container.textContent).toContain('$6,000') // the nonzero transfer, year 2032
+    expect(container.textContent).toContain("Investment growth isn't itemized per year")
   })
 
   it('privacy mode masks every dollar figure, including inside the expanded flows table', async () => {

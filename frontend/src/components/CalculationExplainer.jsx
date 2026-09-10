@@ -24,10 +24,21 @@ const fmt = n => isPrivacyMode() ? MASK_CURRENCY : new Intl.NumberFormat('en-US'
  *   figure, so "today's $ vs future $" is explicit rather than implied by
  *   which single number happens to be on screen.
  * flows: array of { year, jasonAge, opening, income, spending, taxes,
- *   withdrawal, withdrawalBreakdown, unmetNeed, closing } — one row per
- *   already-computed projection year. withdrawalBreakdown is an optional
- *   { pretax, taxable, roth, hsa } object for "distinguish gross
- *   withdrawals... " without re-deriving it.
+ *   withdrawal, withdrawalBreakdown, transfers, unmetNeed, closing } —
+ *   one row per already-computed projection year. withdrawalBreakdown is
+ *   an optional { pretax, taxable, roth, hsa } object for "distinguish
+ *   gross withdrawals... " without re-deriving it. transfers is optional
+ *   — an internal bucket-to-bucket movement that doesn't change total
+ *   portfolio value (e.g. an RMD forced out of pretax and reinvested into
+ *   taxable), distinct from a withdrawal that actually funds spending.
+ *
+ * This table intentionally does NOT show a per-year "growth" column —
+ * the projection engine returns opening/closing balances but doesn't
+ * itemize investment growth as its own per-year figure, so showing one
+ * would mean computing it here (opening - withdrawal + transfers -
+ * closing, sign-flipped), which is exactly the "recreate formulas in the
+ * frontend" this component exists to avoid. It's disclosed once below
+ * the table instead of silently omitted.
  * notes: array of strings — "explain intentional differences between
  *   tools" free text, e.g. why this tool's number differs from another
  *   page's for what looks like the same question.
@@ -70,6 +81,7 @@ export default function CalculationExplainer({ assumptions = [], dollarBasis, fl
                     <th style={{ padding: '4px 6px' }}>Spending need</th>
                     <th style={{ padding: '4px 6px' }}>Taxes</th>
                     <th style={{ padding: '4px 6px' }}>Withdrawal</th>
+                    <th style={{ padding: '4px 6px' }}>Transfers</th>
                     <th style={{ padding: '4px 6px' }}>Unmet need</th>
                     <th style={{ padding: '4px 6px' }}>Closing</th>
                   </tr>
@@ -90,12 +102,21 @@ export default function CalculationExplainer({ assumptions = [], dollarBasis, fl
                           </div>
                         )}
                       </td>
+                      <td style={{ padding: '4px 6px', textAlign: 'right', color: 'var(--text3)' }}>
+                        {f.transfers ? fmt(f.transfers) : '—'}
+                      </td>
                       <td style={{ padding: '4px 6px', textAlign: 'right', color: f.unmetNeed > 0 ? 'var(--red)' : 'var(--text3)' }}>{fmt(f.unmetNeed)}</td>
                       <td style={{ padding: '4px 6px', textAlign: 'right', fontWeight: 600 }}>{fmt(f.closing)}</td>
                     </tr>
                   ))}
                 </tbody>
               </table>
+            </div>
+            <div style={{ fontSize: 11, color: 'var(--text3)', marginTop: 8 }}>
+              ℹ Investment growth isn't itemized per year by this projection — only reflected implicitly in how
+              the closing balance compares to the opening balance, withdrawals, and transfers above. "Transfers"
+              covers internal bucket-to-bucket movements (like an RMD forced out and reinvested) that don't
+              themselves fund spending.
             </div>
           </>
         )}

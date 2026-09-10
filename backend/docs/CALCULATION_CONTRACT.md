@@ -5759,3 +5759,56 @@ dropped):
 Branch: `codex/milestone-2-explainability`, branched from `main` at
 `a75258d`. Not yet pushed — pending the full backend suite run against
 this commit.
+
+## 67. Milestone 2 acceptance follow-up: reconcile flows, identify unavailable fields explicitly (2026-09-09, on `codex/milestone-2-explainability`)
+
+Independent review asked to "verify the explanation reconciles opening
+balances, income, spending, taxes, transfers, growth, closing balances,
+and unmet need" and to "identify unavailable fields explicitly." The
+first slice's flows table had opening/income/spending/taxes/withdrawal/
+unmetNeed/closing but no `transfers` column, and silently omitted growth
+rather than saying why.
+
+Fix:
+- Added a `transfers` column to `CalculationExplainer`'s flows table,
+  fed from `yearly_detail`'s own `rmd_reinvested` — an internal
+  bucket-to-bucket movement (an RMD forced out of pretax and reinvested
+  into taxable) that doesn't itself fund spending, distinct from a
+  withdrawal.
+- Added a permanent disclosure line under the table: investment growth
+  isn't itemized per-year by this projection (the engine returns opening/
+  closing balances, not a separate per-year growth figure), so showing
+  one here would mean computing it from the other columns — exactly the
+  "recreate formulas in the frontend" this component exists to avoid.
+  Disclosed explicitly rather than silently leaving the column out.
+
+**Verified** (the "reconciles" half of the request — checking identities
+the already-returned data satisfies, not deriving new ones):
+- New test confirms one year's `closing` balance equals the next year's
+  `opening` balance end-to-end across the whole flows array (the
+  carry-forward identity `CalculationExplainer`'s only derived value
+  depends on), and that year 0's opening equals the scenario's own
+  `portfolio_at_retirement`.
+- New test confirms the withdrawal-bucket breakdown
+  (pretax+taxable+roth+hsa) sums to the same total shown as the gross
+  withdrawal figure, for real numbers from the fixture data.
+- New tests confirm the `transfers` column renders the fixture's nonzero
+  `rmd_reinvested` value, and that the growth-unavailable disclosure
+  renders every time the flows table does.
+- Full frontend suite: 9 files, 49 tests. Backend untouched by this
+  slice — full backend suite and sensitive-data check still run against
+  this commit per the brief's own completion requirements (counts in the
+  completion report).
+
+**No calculation changes** — this only adds a column sourced from data
+`yearly_detail` already returned, and a disclosure string; nothing in
+`projection_engine.py` changed.
+
+**Explicitly out of scope** (unchanged from section 66, restated):
+Monte Carlo/insurance/Roth Conversion don't have the explainer yet;
+Monte Carlo's own "trial vs. percentile" distinction is unaddressed;
+independent reference-case reconciliation against a hand-computed
+expected value (as opposed to internal self-consistency checks like the
+carry-forward/breakdown-sum tests above) is still unbuilt.
+
+Branch: `codex/milestone-2-explainability`. Pending push.

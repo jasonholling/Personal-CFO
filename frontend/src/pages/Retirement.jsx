@@ -129,6 +129,7 @@ export default function Retirement({ onNavigate }) {
     taxes: y.estimated_tax,
     withdrawal: y.withdrawal,
     withdrawalBreakdown: { pretax: y.withdrawal_pretax, taxable: y.withdrawal_taxable, roth: y.withdrawal_roth, hsa: y.withdrawal_hsa },
+    transfers: y.rmd_reinvested,
     unmetNeed: y.unmet_need,
     closing: y.portfolio_balance,
   }))
