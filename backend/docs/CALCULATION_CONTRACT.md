@@ -5679,3 +5679,83 @@ unsaved-changes navigation, keyboard operation, actual browser
 behavior).
 
 Branch: `codex/milestone-3-navigation`, pushed, not merged.
+
+## 66. Milestone 2, first slice: "How this was calculated" for retirement funding (2026-09-09, on `codex/milestone-2-explainability`)
+
+Numbered independently of Milestone 1's own section 66 on
+`codex/milestone-1-saved-scenarios` — both branch from the same `main`
+commit (`a75258d`, post-Milestone-3-merge) per the brief's instruction,
+so their section numbers will collide until whichever merges second
+renumbers on top of the other. Not a conflict in content, just in
+numbering.
+
+Milestone 2 ("Explain every major result") starts here, scoped to its
+first result: retirement funding (the Retirement Projection page's
+headline "% funded" and portfolio-at-retirement figures).
+
+- New shared component `CalculationExplainer.jsx` — a collapsible "How
+  this was calculated" panel taking already-computed data as props:
+  assumptions (label/value pairs, caller-supplied so each page picks
+  what's relevant to itself), a dollar-basis pair (today's $ vs the
+  actual future-dollar figure, so "distinguish today's dollars from
+  future dollars" is explicit rather than implied by whichever single
+  number happens to be on screen), a per-year annual-flows table
+  (opening balance, income, spending need, taxes, gross withdrawal with
+  its pretax/taxable/roth/hsa breakdown, unmet need, closing balance),
+  and free-text notes for explaining intentional cross-tool differences.
+  Every value is read straight from the calculation's own returned
+  data — the only derived value is "opening balance," and that's a
+  carry-forward of the previous row's own closing balance (or
+  `portfolio_at_retirement` for year 0), not a recomputed formula. This
+  satisfies the milestone's own "generate explanations from the
+  calculation's returned data; do not recreate formulas in the
+  frontend."
+- Wired into `Retirement.jsx`: assumptions include retirement age, both
+  SS claim-age/timing choices actually in effect (reusing the same
+  `jasonSsClaimAge`/`justinSsClaimAge`/`ssTiming` state
+  `ActiveScenarioBanner` already reads), modeled-through age, and the
+  state tax rate the projection itself used
+  (`s.state_income_tax_rate`) — not a second, independently-sourced
+  copy of any of these. Dollar basis pairs `income_today_dollars` against
+  `income_first_year`, both already returned per-scenario.
+- Privacy mode: `CalculationExplainer` uses the same
+  `isPrivacyMode()`/`MASK_CURRENCY` formatter as every other page — every
+  dollar figure inside the expanded panel masks, verified by a dedicated
+  test counting masked occurrences rather than trusting the pattern by
+  inspection alone.
+
+**Verified**: 4 new `CalculationExplainer.test.jsx` tests (assumptions +
+dollar-basis + flow rows render from props alone, withdrawal breakdown
+shown per bucket, privacy mode masks every figure including inside the
+expanded table, empty-props renders the collapsed shell only) + 1 new
+`Retirement.test.jsx` test (the panel expands and shows the scenario's
+own dollar-basis/flow figures, not a placeholder). Full frontend suite:
+9 files, 46 tests, green. Backend untouched by this slice — full backend
+suite and sensitive-data check still run against this commit per the
+brief's own completion requirements (see completion report for counts).
+
+**No calculation changes** — this slice only reads and displays
+already-returned data; nothing in `projection_engine.py` was touched.
+
+**Explicitly out of scope for this slice** (documented, not silently
+dropped):
+- Only the retirement-funding result has the explainer wired in.
+  Monte Carlo success, insurance shortfall, and Roth conversion benefit
+  — the milestone's other three "major results" — do not have it yet.
+  Monte Carlo in particular still needs its own specific treatment
+  ("distinguish trial outcomes from percentile summaries") that this
+  slice doesn't address at all.
+- "Independent reference cases cover surplus income, depletion, taxes,
+  retirement boundaries, and SS timing" (the milestone's acceptance
+  criteria) — this slice's tests confirm the panel displays what it's
+  given correctly, but don't independently re-derive a reference case
+  to confirm what it's given is itself correct; that reconciliation
+  work is unbuilt.
+- No calculation-date freshness indicator beyond `toLocaleDateString()`
+  at render time — no explicit "recalculated N minutes ago" or
+  staleness detection here (Milestone 3's stale-result pattern from
+  `StressTestWhatIf.jsx` wasn't ported over to this page in this slice).
+
+Branch: `codex/milestone-2-explainability`, branched from `main` at
+`a75258d`. Not yet pushed — pending the full backend suite run against
+this commit.
