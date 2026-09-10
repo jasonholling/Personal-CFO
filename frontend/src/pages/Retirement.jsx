@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import axios from 'axios'
 import TaskPanel from '../components/TaskPanel'
 import { BarChart, Bar, AreaChart, Area, XAxis, YAxis, Tooltip, Legend, ResponsiveContainer } from 'recharts'
@@ -70,14 +70,29 @@ export default function Retirement({ onNavigate }) {
   // see a custom claim age reflected here -- it's a genuine, explicit
   // per-request override, not a read of the Settings value.
 
+  // Out-of-order response guard (2026-09-09, review finding): rapidly
+  // toggling the claim-age sliders fires a new GET on every change:
+  // nothing here previously stopped an earlier, slower request from
+  // resolving AFTER a later, faster one and overwriting it with stale
+  // data via setData -- the UI would then show numbers for the CURRENT
+  // claim ages while `data` actually held a projection computed for a
+  // PREVIOUS selection. Milestone 1's "Save this scenario" makes this
+  // consequential rather than just a visual flash: saving during that
+  // window would persist the stale result while claiming (via
+  // jasonSsClaimAge/justinSsClaimAge, which the save payload also reads)
+  // to be the current selection. Same genRef guard pattern already
+  // established for exactly this class of bug in StressTestWhatIf.jsx's
+  // SurvivorScenarioSection (CALCULATION_CONTRACT.md section 65).
+  const genRef = useRef(0)
   useEffect(() => {
     const params = {}
     if (jasonSsClaimAge  != null) params.jason_ss_claim_age  = jasonSsClaimAge
     if (justinSsClaimAge != null) params.justin_ss_claim_age = justinSsClaimAge
+    const gen = ++genRef.current
     setLoading(true)
     axios.get('/api/projections/retirement', { params })
-      .then(r => { setData(r.data); setLoading(false) })
-      .catch(e => { setError(e.response?.data?.detail || 'Could not load projections'); setLoading(false) })
+      .then(r => { if (gen !== genRef.current) return; setData(r.data); setLoading(false) })
+      .catch(e => { if (gen !== genRef.current) return; setError(e.response?.data?.detail || 'Could not load projections'); setLoading(false) })
   }, [jasonSsClaimAge, justinSsClaimAge])
 
   if (loading) return <div className="loading">Running projections...</div>
