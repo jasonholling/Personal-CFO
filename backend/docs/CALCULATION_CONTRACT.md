@@ -5799,3 +5799,79 @@ noted as a known limitation, not silently dropped):
 Branch: `codex/milestone-1-saved-scenarios`, branched from `main` at
 `a75258d` (post-Milestone-3-merge). Not yet pushed — pending the full
 backend suite run against this commit.
+
+## 67. Milestone 1 acceptance follow-up: pin saves to the displayed result, not a re-read (2026-09-09, on `codex/milestone-1-saved-scenarios`)
+
+Independent review of section 66's first slice found a real gap before
+any code changed: `save_scenario()` re-read `planning_inputs`/`accounts`
+fresh from the database at save time and recomputed
+`run_retirement_projection` itself, rather than storing what the caller
+had actually displayed. If Settings changed in the gap between a page
+loading its result and the user clicking "Save this scenario," the saved
+summary would reflect the LATER state, not the plan the user evaluated —
+exactly the "silently rerun against different current Settings" failure
+this milestone's acceptance criteria call out by name.
+
+Fix:
+- `GET /api/projections/retirement` now also returns
+  `resolved_assumptions` — the exact `planning_inputs`/`accounts`/`kids`/
+  `life_events`/`surplus_allocations` bundle it used to compute THIS
+  response (refactored into `_capture_household_data_bundle()`, shared
+  with the save path).
+- `Retirement.jsx` holds that bundle in `data.resolved_assumptions` and,
+  on save, sends it back verbatim as `household_data`, along with the
+  currently-displayed scenario object `s` as `summary`.
+- `POST /api/saved-scenarios` now stores `summary`/`household_data`
+  VERBATIM when both are present — no recompute, no second database
+  read. `_capture_resolved_assumptions()` gained an optional
+  `household_data` param for this. Omitting both still falls back to the
+  original recompute-from-current-DB path, for callers with no live
+  displayed result to pin to (`SavedScenarios.jsx`'s own "create by
+  parameters" form, which never fetched a projection of its own).
+- `SavedScenarios.jsx`: added a "View saved inputs" `<details>` per card
+  — the "reopening" view, reading only the row's own frozen
+  `assumptions_json`, explicitly labeled "frozen at save time," never a
+  fresh fetch. `CompareDiff` gained a "Changed scenario choices" table
+  (retirement age, SS timing, both claim-age overrides) ahead of the
+  existing "Changed household-data assumptions" (`planning_inputs`)
+  table — the acceptance criteria's "changed assumptions" covers both,
+  and the two were being conflated into one `planning_inputs`-only diff.
+
+**Verified**:
+- New backend test class `TestSavedScenariosPinnedToDisplayedResult`
+  (4 tests): `GET /api/projections/retirement` actually returns
+  `resolved_assumptions`; a pinned save stores an intentionally-impossible
+  summary verbatim (proving no recompute happens); a pinned save made
+  AFTER a Settings change still reflects the pre-change data it was
+  pinned to; the unpinned fallback path still works for the
+  parameters-only form.
+- New backend test class `TestSavedScenariosReopenAndCompareAndBackup`
+  (2 tests): reopening returns byte-identical summary/assumptions even
+  after Settings and accounts change post-save; backup/restore round-
+  trips a full scenario AND its recalculated revision (assumptions,
+  summary, `revision_of`, `revision_number`, `schema_version`,
+  `is_legacy` all preserved).
+- Frontend: `Retirement.test.jsx` gained a test asserting the exact
+  `household_data` sent on save deep-equals what the GET response
+  returned, and that Save triggers no second `/api/projections/retirement`
+  fetch. `SavedScenarios.test.jsx` gained tests for the reopen view
+  (frozen `jason_age` shown, labeled "frozen at save time") and the new
+  choice-diff table.
+- Full backend suite: 1400 passed, 97.22% coverage. Full frontend suite:
+  9 files, 52 tests. Sensitive-data check: clean (153 tracked files —
+  grew from 151 as this doc itself grows).
+
+**No calculation changes** — `run_retirement_projection` itself is
+untouched; this only changes what gets read/stored around it, and only
+for the save path specifically (the fallback recompute path's behavior
+is unchanged).
+
+**Explicitly out of scope for this follow-up** (still true from section
+66, restated so this section stands on its own):
+- "Save this scenario" only lives on the Retirement Projection overview.
+- `seed`/`trial_count` exist on the schema but nothing stochastic saves
+  through them yet — the Monte Carlo/Stress/Roth Conversion extension is
+  its own follow-up milestone slice, not started.
+- Comparison is two-at-a-time, not N-way.
+
+Branch: `codex/milestone-1-saved-scenarios`. Pending push.

@@ -238,6 +238,17 @@ class ScenarioSave(BaseModel):
     # numbers, per Milestone 1's reproducibility requirement.
     seed: Optional[int] = None
     trial_count: Optional[int] = None
+    # Milestone 1 acceptance follow-up (2026-09-09): "must not silently
+    # rerun against different current Settings." When the caller already
+    # has a live displayed result (Retirement.jsx does), it passes both of
+    # these straight from what's on screen -- summary is stored verbatim
+    # (no recompute), and household_data is the exact resolved_assumptions
+    # bundle GET /api/projections/retirement returned for that same
+    # result. Omitting both falls back to the original recompute-from-
+    # current-DB-state behavior, for callers with no live result to pin to
+    # (e.g. SavedScenarios.jsx's own "create by parameters" form).
+    summary: Optional[Dict] = None
+    household_data: Optional[Dict] = None
 
 class LifeEvent(BaseModel):
     name: str
@@ -578,16 +589,17 @@ def save_surplus_allocation(goal: str, allocation: SurplusAllocation):
     conn.close()
     return dict(row)
 
-def _capture_resolved_assumptions(conn, ss_timing, jason_ss_claim_age=None, justin_ss_claim_age=None,
-                                   seed=None, trial_count=None) -> dict:
-    """Milestone 1: 'resolved assumptions actually used by the
-    calculation—not merely visible controls or selected overrides.' A
-    saved scenario needs enough here to be re-run byte-for-byte later, so
-    this captures the full rows a projection actually reads from, not a
-    hand-picked subset that will inevitably drift out of sync with the
-    engine as new inputs get added.
+def _capture_household_data_bundle(conn) -> dict:
+    """The household-data half of 'resolved assumptions actually used by
+    the calculation' -- planning_inputs/accounts/kids/life_events/
+    surplus_allocations, i.e. everything a projection call reads from the
+    database. Shared by both the retirement-projection GET endpoint (so
+    the frontend can echo back EXACTLY what it was shown, not let a save
+    re-read the database a second time -- see _capture_resolved_assumptions'
+    own docstring) and the save/recalculate endpoints' fallback path.
     """
-    inputs = dict(conn.execute("SELECT * FROM planning_inputs WHERE id=1").fetchone())
+    inputs_row = conn.execute("SELECT * FROM planning_inputs WHERE id=1").fetchone()
+    inputs = dict(inputs_row) if inputs_row else None
     accounts = [dict(r) for r in conn.execute("SELECT * FROM accounts").fetchall()]
     kids = [dict(r) for r in conn.execute("SELECT * FROM kids ORDER BY display_order").fetchall()]
     life_events = _get_active_life_events(conn)
@@ -598,6 +610,29 @@ def _capture_resolved_assumptions(conn, ss_timing, jason_ss_claim_age=None, just
         "kids": kids,
         "life_events": life_events,
         "surplus_allocations": surplus_allocations,
+    }
+
+def _capture_resolved_assumptions(conn, ss_timing, jason_ss_claim_age=None, justin_ss_claim_age=None,
+                                   seed=None, trial_count=None, household_data=None) -> dict:
+    """Milestone 1: 'resolved assumptions actually used by the
+    calculation—not merely visible controls or selected overrides.' A
+    saved scenario needs enough here to be re-run byte-for-byte later, so
+    this captures the full rows a projection actually reads from, not a
+    hand-picked subset that will inevitably drift out of sync with the
+    engine as new inputs get added.
+
+    household_data: pass the EXACT bundle the frontend already displayed
+    (echoed back from GET /api/projections/retirement's own
+    resolved_assumptions, round-tripped through the save request) when
+    one is available -- see save_scenario()'s docstring for why re-reading
+    the database here instead would risk saving a plan the user never
+    actually looked at. Only recompute-from-DB (conn is None-safe here
+    because the caller already has a connection open) when the caller
+    truly has no live displayed result to pin to, e.g. the standalone
+    "create by parameters" form on SavedScenarios.jsx.
+    """
+    return {
+        **(household_data if household_data is not None else _capture_household_data_bundle(conn)),
         "ss_timing": ss_timing,
         "jason_ss_claim_age": jason_ss_claim_age,
         "justin_ss_claim_age": justin_ss_claim_age,
@@ -642,28 +677,51 @@ def save_scenario(body: ScenarioSave):
     if existing:
         conn.close()
         raise HTTPException(status_code=409, detail="A saved scenario with this name already exists. Choose a different name, or use Recalculate on the existing one.")
-    assumptions = _capture_resolved_assumptions(conn, body.ss_timing, body.jason_ss_claim_age, body.justin_ss_claim_age, body.seed, body.trial_count)
-    if not assumptions["planning_inputs"]: conn.close(); raise HTTPException(status_code=400,detail="Planning inputs not set")
-    # Used to hardcode "early" here regardless of body.ss_timing, so a
-    # scenario saved while "SS at 67" was selected everywhere else in the
-    # app was silently projected as if early claiming had been chosen
-    # instead (external audit 2026-09-07, finding #15).
-    # run_retirement_projection only applies a continuous claim age when
-    # jason_ss_claim_age/justin_ss_claim_age are passed as explicit keyword
-    # args (CALCULATION_CONTRACT.md section 44, ninth follow-up review) —
-    # pass through whatever override was active when the user hit Save, so
-    # the saved numbers match what was actually on screen.
-    result=run_retirement_projection(assumptions["planning_inputs"],assumptions["accounts"],ret_ages=[body.retirement_age],
-                                      life_events=assumptions["life_events"],surplus_allocations=assumptions["surplus_allocations"],
-                                      jason_ss_claim_age=body.jason_ss_claim_age,justin_ss_claim_age=body.justin_ss_claim_age)
-    # A jason_ss_claim_age override collapses run_retirement_projection's
-    # scenario set down to a single "custom"-labeled entry instead of the
-    # usual early/delayed pair (see the jason_ss_options branch in
-    # projection_engine.py) — look that up instead of body.ss_timing
-    # whenever an override is active, or this always returns None.
-    wanted_label = "custom" if body.jason_ss_claim_age is not None else body.ss_timing
-    scenario=next((s for s in result["scenarios"] if s["ss_timing"]==wanted_label),None)
-    summary={k:scenario[k] for k in ("retirement_age","percent_funded","portfolio_at_retirement","projected_surplus","on_track")}
+
+    if body.summary is not None and body.household_data is not None:
+        # Milestone 1 acceptance follow-up (2026-09-09): "must not silently
+        # rerun against different current Settings." The caller already
+        # has a live displayed result (Retirement.jsx passes its own `s`
+        # scenario object as `summary` and the exact resolved_assumptions
+        # bundle GET /api/projections/retirement returned as
+        # `household_data`) -- store both VERBATIM, with zero recompute
+        # and zero second DB read. If Settings changed in the exact gap
+        # between page load and clicking Save, this still saves the plan
+        # the user actually looked at, not whatever Settings say now.
+        summary = {k: body.summary[k] for k in ("retirement_age", "percent_funded", "portfolio_at_retirement", "projected_surplus", "on_track")}
+        assumptions = _capture_resolved_assumptions(None, body.ss_timing, body.jason_ss_claim_age, body.justin_ss_claim_age, body.seed, body.trial_count, household_data=body.household_data)
+    else:
+        # Fallback for a caller with no live displayed result to pin to
+        # (e.g. SavedScenarios.jsx's own "create by parameters" form,
+        # which only has a name + age + ss_timing, never fetched a
+        # projection itself) -- best effort: read current household data
+        # and recompute now. This path is inherently the exact "rerun
+        # against current Settings" behavior the milestone's acceptance
+        # criteria warn about for a DISPLAYED result, but there's no
+        # displayed result here to contradict.
+        assumptions = _capture_resolved_assumptions(conn, body.ss_timing, body.jason_ss_claim_age, body.justin_ss_claim_age, body.seed, body.trial_count)
+        if not assumptions["planning_inputs"]: conn.close(); raise HTTPException(status_code=400,detail="Planning inputs not set")
+        # Used to hardcode "early" here regardless of body.ss_timing, so a
+        # scenario saved while "SS at 67" was selected everywhere else in
+        # the app was silently projected as if early claiming had been
+        # chosen instead (external audit 2026-09-07, finding #15).
+        # run_retirement_projection only applies a continuous claim age
+        # when jason_ss_claim_age/justin_ss_claim_age are passed as
+        # explicit keyword args (CALCULATION_CONTRACT.md section 44,
+        # ninth follow-up review) — pass through whatever override was
+        # active, so the saved numbers match what was actually chosen.
+        result=run_retirement_projection(assumptions["planning_inputs"],assumptions["accounts"],ret_ages=[body.retirement_age],
+                                          life_events=assumptions["life_events"],surplus_allocations=assumptions["surplus_allocations"],
+                                          jason_ss_claim_age=body.jason_ss_claim_age,justin_ss_claim_age=body.justin_ss_claim_age)
+        # A jason_ss_claim_age override collapses run_retirement_projection's
+        # scenario set down to a single "custom"-labeled entry instead of the
+        # usual early/delayed pair (see the jason_ss_options branch in
+        # projection_engine.py) — look that up instead of body.ss_timing
+        # whenever an override is active, or this always returns None.
+        wanted_label = "custom" if body.jason_ss_claim_age is not None else body.ss_timing
+        scenario=next((s for s in result["scenarios"] if s["ss_timing"]==wanted_label),None)
+        summary={k:scenario[k] for k in ("retirement_age","percent_funded","portfolio_at_retirement","projected_surplus","on_track")}
+
     cur = conn.execute(
         "INSERT INTO saved_scenarios (name,retirement_age,ss_timing,summary_json,assumptions_json,schema_version,calculation_version,seed,trial_count,revision_of,revision_number,is_legacy) "
         "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
@@ -1488,10 +1546,11 @@ def get_retirement_projections(jason_ss_claim_age: int = None, justin_ss_claim_a
     user turns it on; left unset (as WhatIf.jsx always does), behavior
     is 100% unchanged regardless of what's saved in Settings."""
     conn = get_db()
-    inputs_row = conn.execute("SELECT * FROM planning_inputs WHERE id=1").fetchone()
-    accounts   = [dict(r) for r in conn.execute("SELECT * FROM accounts").fetchall()]
-    life_events = _get_active_life_events(conn)
-    surplus_allocations = _get_relevant_surplus_allocations(conn)
+    household_data = _capture_household_data_bundle(conn)
+    inputs_row = household_data["planning_inputs"]
+    accounts   = household_data["accounts"]
+    life_events = household_data["life_events"]
+    surplus_allocations = household_data["surplus_allocations"]
     conn.close()
     if not inputs_row:
         raise HTTPException(status_code=400, detail="Planning inputs not set yet")
@@ -1501,8 +1560,19 @@ def get_retirement_projections(jason_ss_claim_age: int = None, justin_ss_claim_a
     # WhatIf.jsx's baseline for its full 55-67 slider, where a narrower
     # range here silently broke the "Impact on Retire at X" comparison
     # for any age outside the original [55,56,57,58,59,60,65] set.
-    return run_retirement_projection(dict(inputs_row), accounts, ret_ages=list(range(55, 68)), life_events=life_events, surplus_allocations=surplus_allocations,
-                                      jason_ss_claim_age=jason_ss_claim_age, justin_ss_claim_age=justin_ss_claim_age)
+    result = run_retirement_projection(dict(inputs_row), accounts, ret_ages=list(range(55, 68)), life_events=life_events, surplus_allocations=surplus_allocations,
+                                        jason_ss_claim_age=jason_ss_claim_age, justin_ss_claim_age=justin_ss_claim_age)
+    # Milestone 1 acceptance follow-up (2026-09-09): "saving must not
+    # silently rerun against different current Settings." The original
+    # save_scenario() re-read planning_inputs/accounts fresh from the DB
+    # at save time -- if Settings changed in the gap between this page
+    # loading and the user clicking Save, the saved summary would reflect
+    # THAT later state, not the plan actually on screen when they clicked.
+    # Echoing the exact bundle used for THIS response lets the frontend
+    # round-trip it back on save, so what gets saved is provably the same
+    # data that produced what's displayed -- no second DB read involved.
+    result["resolved_assumptions"] = household_data
+    return result
 
 @app.get("/api/projections/two-dimensional-retirement")
 def get_two_dimensional_retirement_projection(jason_ret_age: int, justin_ret_age: int, ss_timing: str = "early"):

@@ -1969,3 +1969,143 @@ class TestSavedScenariosMilestone1:
         assert r.status_code == 200, r.text
         saved = next(s for s in client.get("/api/saved-scenarios").json() if s["name"] == "Custom Claim Age")
         assert saved["assumptions"]["jason_ss_claim_age"] == 70
+
+
+class TestSavedScenariosPinnedToDisplayedResult:
+    """Milestone 1 acceptance follow-up (2026-09-09): "Demonstrate that
+    'Save this scenario' captures the exact result currently
+    displayed—including temporary overrides and custom SS ages. Saving
+    must not silently rerun against different current Settings." The
+    frontend now round-trips its own GET /api/projections/retirement
+    response (summary + resolved_assumptions) back on save; these tests
+    prove the backend stores that verbatim rather than re-reading the
+    database, and that GET actually returns a resolved_assumptions bundle
+    to round-trip in the first place."""
+
+    def _seed(self, client, sample_inputs, sample_accounts):
+        _seed_planning_inputs(client, sample_inputs)
+        _seed_accounts(client, sample_accounts)
+
+    def test_get_retirement_projections_includes_resolved_assumptions(self, client, sample_inputs, sample_accounts):
+        self._seed(client, sample_inputs, sample_accounts)
+        r = client.get("/api/projections/retirement")
+        assert r.status_code == 200, r.text
+        bundle = r.json()["resolved_assumptions"]
+        assert bundle["planning_inputs"]["id"] == 1
+        assert len(bundle["accounts"]) == len(sample_accounts)
+        assert "kids" in bundle and "life_events" in bundle and "surplus_allocations" in bundle
+
+    def test_pinned_save_stores_displayed_summary_verbatim_even_if_it_disagrees_with_current_data(
+        self, client, sample_inputs, sample_accounts
+    ):
+        """The regression this exists to prevent: a save that recomputes
+        against the database instead of trusting the caller's own
+        displayed result would silently substitute today's numbers for
+        whatever was actually on screen. Pass a summary that could not
+        possibly come from a real recompute of the seeded household, and
+        confirm it's stored exactly as given."""
+        self._seed(client, sample_inputs, sample_accounts)
+        pinned_summary = {
+            "retirement_age": 61, "percent_funded": 42, "portfolio_at_retirement": 123456,
+            "projected_surplus": -9999, "on_track": False,
+        }
+        household_data = {
+            "planning_inputs": {"id": 1, "jason_age": 999}, "accounts": [], "kids": [],
+            "life_events": [], "surplus_allocations": [],
+        }
+        r = client.post("/api/saved-scenarios", json={
+            "name": "Pinned", "retirement_age": 61, "ss_timing": "delayed",
+            "summary": pinned_summary, "household_data": household_data,
+        })
+        assert r.status_code == 200, r.text
+        saved = next(s for s in client.get("/api/saved-scenarios").json() if s["name"] == "Pinned")
+        assert saved["summary"] == pinned_summary
+        assert saved["assumptions"]["planning_inputs"] == {"id": 1, "jason_age": 999}
+
+    def test_pinned_save_ignores_a_subsequent_settings_change(self, client, sample_inputs, sample_accounts):
+        """The exact scenario the acceptance criteria describe: Settings
+        change AFTER the result was displayed but the save still uses
+        what was displayed, not the new Settings."""
+        self._seed(client, sample_inputs, sample_accounts)
+        displayed = client.get("/api/projections/retirement").json()
+        displayed_scenario = next(s for s in displayed["scenarios"] if s["label"] == "age_60_early")
+
+        # Settings change after the result was already displayed/held by
+        # the frontend, before the user gets around to clicking Save.
+        changed_inputs = {**sample_inputs, "jason_age": sample_inputs["jason_age"] + 10}
+        client.put("/api/planning-inputs", json=changed_inputs)
+
+        r = client.post("/api/saved-scenarios", json={
+            "name": "Pinned Before Change", "retirement_age": 60, "ss_timing": "early",
+            "summary": displayed_scenario, "household_data": displayed["resolved_assumptions"],
+        })
+        assert r.status_code == 200, r.text
+        saved = next(s for s in client.get("/api/saved-scenarios").json() if s["name"] == "Pinned Before Change")
+        assert saved["summary"]["portfolio_at_retirement"] == displayed_scenario["portfolio_at_retirement"]
+        assert saved["assumptions"]["planning_inputs"]["jason_age"] == sample_inputs["jason_age"]
+
+    def test_unpinned_save_still_works_for_the_parameters_only_form(self, client, sample_inputs, sample_accounts):
+        """SavedScenarios.jsx's own standalone form has no live displayed
+        result to pin to — omitting summary/household_data must still
+        fall back to the original recompute-from-current-data behavior."""
+        self._seed(client, sample_inputs, sample_accounts)
+        r = client.post("/api/saved-scenarios", json={"name": "No Pin", "retirement_age": 60, "ss_timing": "early"})
+        assert r.status_code == 200, r.text
+        saved = next(s for s in client.get("/api/saved-scenarios").json() if s["name"] == "No Pin")
+        assert saved["assumptions"]["planning_inputs"]["id"] == 1
+
+
+class TestSavedScenariosReopenAndCompareAndBackup:
+    """Milestone 1 acceptance follow-up: "Confirm that reopening
+    preserves the original inputs/results, ... comparisons show changed
+    assumptions as well as outcomes, and backup/restore preserves
+    everything."""
+
+    def _seed(self, client, sample_inputs, sample_accounts):
+        _seed_planning_inputs(client, sample_inputs)
+        _seed_accounts(client, sample_accounts)
+
+    def test_reopening_returns_the_exact_original_inputs_and_results_unaffected_by_later_changes(
+        self, client, sample_inputs, sample_accounts
+    ):
+        self._seed(client, sample_inputs, sample_accounts)
+        r = client.post("/api/saved-scenarios", json={"name": "Reopen Me", "retirement_age": 60, "ss_timing": "early"})
+        original_id = r.json()["id"]
+        original = client.get(f"/api/saved-scenarios/{original_id}").json()
+
+        # Change Settings and accounts after saving.
+        client.put("/api/planning-inputs", json={**sample_inputs, "jason_age": sample_inputs["jason_age"] + 5})
+        client.post("/api/accounts", json={"name": "New Account", "account_type": "taxable", "owner": "joint",
+                                            "institution": "", "balance": 999999, "notes": ""})
+
+        reopened = client.get(f"/api/saved-scenarios/{original_id}").json()
+        assert reopened["summary"] == original["summary"]
+        assert reopened["assumptions"] == original["assumptions"]
+        assert reopened["assumptions"]["planning_inputs"]["jason_age"] == sample_inputs["jason_age"]
+        assert len(reopened["assumptions"]["accounts"]) == len(sample_accounts)
+
+    def test_backup_restore_preserves_full_saved_scenario_including_revisions(
+        self, client, sample_inputs, sample_accounts
+    ):
+        self._seed(client, sample_inputs, sample_accounts)
+        original_id = client.post("/api/saved-scenarios", json={
+            "name": "Backup Me", "retirement_age": 60, "ss_timing": "early",
+        }).json()["id"]
+        rec = client.post(f"/api/saved-scenarios/{original_id}/recalculate")
+        assert rec.status_code == 200, rec.text
+        new_id = rec.json()["id"]
+
+        before = {s["id"]: s for s in client.get("/api/saved-scenarios").json()}
+
+        backup = client.get("/api/backup/export").json()
+        r = client.post("/api/backup/restore", params={"confirm": "true"},
+                         files={"file": ("b.json", json.dumps(backup), "application/json")})
+        assert r.status_code == 200, r.text
+
+        after = {s["id"]: s for s in client.get("/api/saved-scenarios").json()}
+        assert after[original_id]["assumptions"] == before[original_id]["assumptions"]
+        assert after[original_id]["summary"] == before[original_id]["summary"]
+        assert after[new_id]["revision_of"] == original_id
+        assert after[new_id]["revision_number"] == before[new_id]["revision_number"]
+        assert after[original_id]["schema_version"] == before[original_id]["schema_version"]
+        assert after[original_id]["is_legacy"] == before[original_id]["is_legacy"]

@@ -35,6 +35,33 @@ const SUMMARY_FIELDS = [
   ['projected_surplus', 'Projected surplus'],
 ]
 
+// Milestone 1 acceptance follow-up (2026-09-09): "reopening" a saved
+// scenario means seeing its FROZEN original inputs, clearly distinguished
+// from whatever the household's current data says now — not just its
+// summary outcome. This <details> block is that reopen view; every value
+// inside it comes from the saved row's own assumptions_json, never a
+// fresh fetch of current planning_inputs/accounts.
+function SavedInputsSnapshot({ assumptions }) {
+  if (!assumptions) return (
+    <div style={{ fontSize: 11, color: 'var(--text3)', marginTop: 8 }}>No full input snapshot was captured for this save.</div>
+  )
+  const pi = assumptions.planning_inputs || {}
+  return (
+    <div style={{ marginTop: 8, fontSize: 12 }}>
+      <div style={{ color: 'var(--amber)', marginBottom: 6, fontSize: 11 }}>
+        Frozen at save time — will not change even if current household data does.
+      </div>
+      <div>Jason's age at save: {pi.jason_age ?? '—'}</div>
+      <div>Justin's age at save: {pi.justin_age ?? '—'}</div>
+      <div>SS timing: {ssLabel(assumptions.ss_timing || 'early')}</div>
+      <div>Jason's SS claim-age override: {assumptions.jason_ss_claim_age ?? 'none (used the toggle above)'}</div>
+      <div>Justin's SS claim-age override: {assumptions.justin_ss_claim_age ?? 'none'}</div>
+      <div>Accounts snapshotted: {assumptions.accounts?.length ?? 0}</div>
+      <div>Kids snapshotted: {assumptions.kids?.length ?? 0}</div>
+    </div>
+  )
+}
+
 function ScenarioCard({ x, onRecalculate, recalculating, onToggleCompare, compareChecked }) {
   return (
     <div className="card" style={{ position: 'relative' }}>
@@ -60,6 +87,10 @@ function ScenarioCard({ x, onRecalculate, recalculating, onToggleCompare, compar
         Saved {new Date(x.created_at).toLocaleDateString()}
         {x.calculation_version && ` · engine v${x.calculation_version}`}
       </div>
+      <details style={{ marginTop: 8 }}>
+        <summary style={{ cursor: 'pointer', fontSize: 12, color: 'var(--text2)' }}>View saved inputs</summary>
+        <SavedInputsSnapshot assumptions={x.assumptions} />
+      </details>
       <button
         className="btn-secondary"
         style={{ marginTop: 10, fontSize: 12, padding: '4px 10px' }}
@@ -73,6 +104,19 @@ function ScenarioCard({ x, onRecalculate, recalculating, onToggleCompare, compar
   )
 }
 
+// Milestone 1 acceptance follow-up: "comparisons show changed assumptions
+// as well as outcomes" means the scenario CHOICES too (retirement age,
+// SS timing, claim-age overrides) — not just whatever planning_inputs
+// happened to differ. These live at the top level of each row/its
+// assumptions blob, not inside planning_inputs, so they need their own
+// pass rather than falling out of the planning_inputs diff below.
+const CHOICE_FIELDS = [
+  ['retirement_age', 'Retirement age', x => x.retirement_age],
+  ['ss_timing', 'SS timing', x => ssLabel(x.ss_timing || 'early')],
+  ['jason_ss_claim_age', "Jason's SS claim-age override", x => x.assumptions?.jason_ss_claim_age ?? 'none'],
+  ['justin_ss_claim_age', "Justin's SS claim-age override", x => x.assumptions?.justin_ss_claim_age ?? 'none'],
+]
+
 function CompareDiff({ a, b }) {
   if (!a || !b) return null
   const aq = a.assumptions?.planning_inputs || {}
@@ -80,6 +124,7 @@ function CompareDiff({ a, b }) {
   const inputKeys = Array.from(new Set([...Object.keys(aq), ...Object.keys(bq)])).filter(
     k => k !== 'id' && JSON.stringify(aq[k]) !== JSON.stringify(bq[k])
   )
+  const changedChoices = CHOICE_FIELDS.filter(([, , get]) => get(a) !== get(b))
   return (
     <div className="card" style={{ marginTop: 20 }}>
       <div className="label" style={{ marginBottom: 10 }}>Comparing "{a.name}" vs "{b.name}"</div>
@@ -104,7 +149,23 @@ function CompareDiff({ a, b }) {
           ))}
         </tbody>
       </table>
-      <div className="label" style={{ marginTop: 16, marginBottom: 6, fontSize: 11 }}>Changed assumptions</div>
+      <div className="label" style={{ marginTop: 16, marginBottom: 6, fontSize: 11 }}>Changed scenario choices</div>
+      {changedChoices.length === 0 ? (
+        <div style={{ fontSize: 12, color: 'var(--text3)' }}>Same retirement age, SS timing, and claim-age overrides.</div>
+      ) : (
+        <table style={{ width: '100%', fontSize: 13, borderCollapse: 'collapse', marginBottom: 12 }}>
+          <tbody>
+            {changedChoices.map(([key, label, get]) => (
+              <tr key={key} style={{ borderBottom: '1px solid var(--border)' }}>
+                <td style={{ padding: '4px 0', color: 'var(--text2)' }}>{label}</td>
+                <td style={{ padding: '4px 8px', textAlign: 'right' }}>{String(get(a))}</td>
+                <td style={{ padding: '4px 8px', textAlign: 'right' }}>{String(get(b))}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+      <div className="label" style={{ marginTop: 16, marginBottom: 6, fontSize: 11 }}>Changed household-data assumptions</div>
       {inputKeys.length === 0 ? (
         <div style={{ fontSize: 12, color: 'var(--text3)' }}>No differing planning-input fields captured between these two.</div>
       ) : (

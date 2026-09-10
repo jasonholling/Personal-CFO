@@ -119,4 +119,27 @@ describe('Saved Scenarios', () => {
     expect(container.textContent).toContain('Comparing "Retire at 60" vs "Old Save"')
     expect(container.textContent).toContain('legacy saves')
   })
+
+  it('compare shows changed scenario choices (retirement age) separately from household-data assumptions', async () => {
+    await act(async () => root.render(<SavedScenarios />))
+    await flush()
+    const checkboxes = [...container.querySelectorAll('input[type="checkbox"]')]
+    await act(async () => { checkboxes[0].click() })
+    await act(async () => { checkboxes[1].click() })
+    await flush()
+    expect(container.textContent).toContain('Changed scenario choices')
+    expect(container.textContent).toContain('Retirement age')
+    expect(container.textContent).toContain('Changed household-data assumptions')
+  })
+
+  it('reopening (View saved inputs) shows the frozen snapshot, not current household data', async () => {
+    await act(async () => root.render(<SavedScenarios />))
+    await flush()
+    const summary = [...container.querySelectorAll('summary')].find(s => s.textContent.trim() === 'View saved inputs')
+    expect(summary).toBeTruthy()
+    await act(async () => { summary.click() })
+    await flush()
+    expect(container.textContent).toContain("Jason's age at save: 45")
+    expect(container.textContent).toContain('Frozen at save time')
+  })
 })

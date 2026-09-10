@@ -46,7 +46,12 @@ const scenario = (label) => ({
   yearly_detail: yearlyDetail,
 })
 
-const projectionsResponse = { scenarios: [scenario('age_60_early'), scenario('age_60_delayed')] }
+const resolvedAssumptions = {
+  planning_inputs: { id: 1, jason_age: 55 }, accounts: [{ id: 1, name: 'Test 401k' }],
+  kids: [], life_events: [], surplus_allocations: [],
+}
+
+const projectionsResponse = { scenarios: [scenario('age_60_early'), scenario('age_60_delayed')], resolved_assumptions: resolvedAssumptions }
 
 beforeEach(() => {
   vi.clearAllMocks()
@@ -79,8 +84,30 @@ describe('Retirement Projection — Save this scenario (Milestone 1)', () => {
     expect(axios.post).toHaveBeenCalledWith('/api/saved-scenarios', {
       name: 'My Saved Plan', retirement_age: 60, ss_timing: 'early',
       jason_ss_claim_age: null, justin_ss_claim_age: null,
+      summary: scenario('age_60_early'), household_data: resolvedAssumptions,
     })
     expect(container.textContent).toContain('Saved.')
+  })
+
+  it('sends the exact resolved_assumptions bundle the page was rendered from, not a fresh re-read', async () => {
+    // Milestone 1 acceptance follow-up: this is the regression the fix
+    // targets -- the payload's household_data must be object-identical
+    // (well, deep-equal, since it round-trips through JSON) to what THIS
+    // GET response returned, never re-fetched or recomputed client-side.
+    axios.post.mockResolvedValue({ data: { id: 1 } })
+    await act(async () => root.render(<Retirement onNavigate={() => {}} />))
+    await flush()
+    const nameInput = container.querySelector('input[placeholder="e.g. Retire at 62 with delayed SS"]')
+    await typeInto(nameInput, 'Pinned Plan')
+    await click('Save this scenario')
+    await flush()
+    const [, payload] = axios.post.mock.calls[0]
+    expect(payload.household_data).toEqual(resolvedAssumptions)
+    expect(payload.summary.percent_funded).toBe(85)
+    // The projections GET only ever happened once -- Save triggers no
+    // second fetch/recompute of its own.
+    const projectionCalls = axios.get.mock.calls.filter(([url]) => url === '/api/projections/retirement')
+    expect(projectionCalls).toHaveLength(1)
   })
 
   it('surfaces a 409 name-conflict message instead of failing silently', async () => {

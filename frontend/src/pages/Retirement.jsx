@@ -127,9 +127,17 @@ export default function Retirement({ onNavigate }) {
     if (!saveName.trim()) return
     setSaveStatus('saving'); setSaveMessage(null)
     try {
+      // Milestone 1 acceptance follow-up (2026-09-09): "must not silently
+      // rerun against different current Settings." `s` and
+      // `data.resolved_assumptions` are exactly what THIS page rendered
+      // from THIS GET response -- sending them verbatim means the backend
+      // stores the plan actually on screen, not whatever Settings/accounts
+      // happen to say at the moment Save is clicked (which could have
+      // drifted if the household edited Settings in another tab first).
       await axios.post('/api/saved-scenarios', {
         name: saveName.trim(), retirement_age: retAge, ss_timing: ssTiming,
         jason_ss_claim_age: jasonSsClaimAge, justin_ss_claim_age: justinSsClaimAge,
+        summary: s, household_data: data.resolved_assumptions,
       })
       setSaveStatus('idle'); setSaveName(''); setSaveMessage({ ok: true, text: 'Saved.' })
     } catch (e) {
