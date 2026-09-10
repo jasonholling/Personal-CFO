@@ -1837,7 +1837,10 @@ class TestSavedScenariosSsTiming:
             "name": "Snapshot me", "retirement_age": 62, "ss_timing": "delayed",
         })
         saved = next(s for s in client.get("/api/saved-scenarios").json() if s["name"] == "Snapshot me")
-        assert saved["assumptions"] == {"retirement_age": 62, "ss_timing": "delayed"}
+        assert saved["assumptions"]["ss_timing"] == "delayed"
+        assert saved["assumptions"]["planning_inputs"]["id"] == 1
+        assert len(saved["assumptions"]["accounts"]) == len(sample_accounts)
+        assert {a["name"] for a in saved["assumptions"]["accounts"]} == {a["name"] for a in sample_accounts}
 
     def test_invalid_ss_timing_rejected(self, client, sample_inputs, sample_accounts):
         self._seed(client, sample_inputs, sample_accounts)
@@ -1846,18 +1849,263 @@ class TestSavedScenariosSsTiming:
         })
         assert r.status_code == 400
 
-    def test_saving_over_same_name_updates_ss_timing(self, client, sample_inputs, sample_accounts):
-        """Re-saving under the same name (the ON CONFLICT upsert path) must
-        also overwrite the previously stored ss_timing, not just retirement_age
-        and the summary."""
+
+class TestSavedScenariosMilestone1:
+    """Milestone 1 (2026-09-09): a saved scenario is insert-only —
+    re-saving under an existing name no longer silently overwrites it
+    (external audit 2026-09-07 finding #15's ON CONFLICT upsert path was
+    itself the exact "silently changes a saved snapshot" failure Milestone
+    1's acceptance criteria rules out). Recalculating goes through the
+    dedicated /recalculate endpoint, which always preserves the original."""
+
+    def _seed(self, client, sample_inputs, sample_accounts):
+        _seed_planning_inputs(client, sample_inputs)
+        _seed_accounts(client, sample_accounts)
+
+    def test_saving_over_same_name_is_rejected_original_untouched(self, client, sample_inputs, sample_accounts):
         self._seed(client, sample_inputs, sample_accounts)
         client.post("/api/saved-scenarios", json={
             "name": "Retire at 60", "retirement_age": 60, "ss_timing": "early",
         })
-        client.post("/api/saved-scenarios", json={
+        r = client.post("/api/saved-scenarios", json={
             "name": "Retire at 60", "retirement_age": 60, "ss_timing": "delayed",
         })
+        assert r.status_code == 409
         rows = client.get("/api/saved-scenarios").json()
         matching = [s for s in rows if s["name"] == "Retire at 60"]
         assert len(matching) == 1
-        assert matching[0]["ss_timing"] == "delayed"
+        assert matching[0]["ss_timing"] == "early"
+
+    def test_new_saves_are_not_legacy(self, client, sample_inputs, sample_accounts):
+        self._seed(client, sample_inputs, sample_accounts)
+        client.post("/api/saved-scenarios", json={"name": "Fresh", "retirement_age": 60})
+        saved = next(s for s in client.get("/api/saved-scenarios").json() if s["name"] == "Fresh")
+        assert saved["is_legacy"] is False
+        assert saved["schema_version"] == 2
+        assert saved["calculation_version"]
+
+    def test_pre_migration_row_is_flagged_legacy(self, client, sample_inputs, sample_accounts, temp_db):
+        """A row that predates this migration (no schema_version/is_legacy
+        ever written for it) must still surface as legacy, not be silently
+        treated as fully reproducible — the migration's own DEFAULT is what
+        makes this true without inventing any missing historical data."""
+        self._seed(client, sample_inputs, sample_accounts)
+        import sqlite3
+        conn = sqlite3.connect(temp_db)
+        conn.execute(
+            "INSERT INTO saved_scenarios (name, retirement_age, ss_timing, summary_json) VALUES (?,?,?,?)",
+            ("Old Row", 60, "early", json.dumps({"retirement_age": 60})),
+        )
+        conn.commit(); conn.close()
+        saved = next(s for s in client.get("/api/saved-scenarios").json() if s["name"] == "Old Row")
+        assert saved["is_legacy"] is True
+        assert saved["schema_version"] == 1
+        assert saved["assumptions"] is None
+
+    def test_recalculate_creates_new_revision_and_preserves_original(self, client, sample_inputs, sample_accounts):
+        self._seed(client, sample_inputs, sample_accounts)
+        r = client.post("/api/saved-scenarios", json={"name": "Base Plan", "retirement_age": 60, "ss_timing": "early"})
+        original_id = r.json()["id"]
+
+        rec = client.post(f"/api/saved-scenarios/{original_id}/recalculate")
+        assert rec.status_code == 200, rec.text
+        new_id = rec.json()["id"]
+        assert new_id != original_id
+        assert rec.json()["revision_of"] == original_id
+        assert rec.json()["revision_number"] == 2
+
+        rows = {s["id"]: s for s in client.get("/api/saved-scenarios").json()}
+        assert rows[original_id]["name"] == "Base Plan"
+        assert rows[original_id]["revision_number"] == 1
+        assert rows[new_id]["revision_of"] == original_id
+        assert rows[new_id]["revision_number"] == 2
+        assert "recalculated" in rows[new_id]["name"]
+
+    def test_recalculate_reflects_changed_household_data(self, client, sample_inputs, sample_accounts, temp_db):
+        self._seed(client, sample_inputs, sample_accounts)
+        r = client.post("/api/saved-scenarios", json={"name": "Will Change", "retirement_age": 60, "ss_timing": "early"})
+        original_id = r.json()["id"]
+        original_summary = r.json()
+
+        # Household data changes after the save — update an existing
+        # account's balance directly (not another _seed_accounts call,
+        # which would only add duplicate rows rather than changing anything).
+        import sqlite3
+        conn = sqlite3.connect(temp_db)
+        conn.execute("UPDATE accounts SET balance = balance + 500000 WHERE name = ?", (sample_accounts[0]["name"],))
+        conn.commit(); conn.close()
+
+        rec = client.post(f"/api/saved-scenarios/{original_id}/recalculate")
+        assert rec.status_code == 200, rec.text
+        assert rec.json()["portfolio_at_retirement"] != original_summary["portfolio_at_retirement"]
+
+        # The original row's own summary must be untouched by the recalculation.
+        original_row = client.get(f"/api/saved-scenarios/{original_id}").json()
+        assert original_row["summary"]["portfolio_at_retirement"] == original_summary["portfolio_at_retirement"]
+
+    def test_recalculate_missing_scenario_404s(self, client, sample_inputs, sample_accounts):
+        self._seed(client, sample_inputs, sample_accounts)
+        r = client.post("/api/saved-scenarios/999999/recalculate")
+        assert r.status_code == 404
+
+    def test_get_single_saved_scenario(self, client, sample_inputs, sample_accounts):
+        self._seed(client, sample_inputs, sample_accounts)
+        created = client.post("/api/saved-scenarios", json={"name": "One", "retirement_age": 60}).json()
+        r = client.get(f"/api/saved-scenarios/{created['id']}")
+        assert r.status_code == 200
+        assert r.json()["name"] == "One"
+
+    def test_get_single_saved_scenario_missing_404s(self, client, sample_inputs, sample_accounts):
+        self._seed(client, sample_inputs, sample_accounts)
+        r = client.get("/api/saved-scenarios/999999")
+        assert r.status_code == 404
+
+    def test_claim_age_override_is_captured_and_affects_result(self, client, sample_inputs, sample_accounts):
+        self._seed(client, sample_inputs, sample_accounts)
+        r = client.post("/api/saved-scenarios", json={
+            "name": "Custom Claim Age", "retirement_age": 62, "ss_timing": "early",
+            "jason_ss_claim_age": 70,
+        })
+        assert r.status_code == 200, r.text
+        saved = next(s for s in client.get("/api/saved-scenarios").json() if s["name"] == "Custom Claim Age")
+        assert saved["assumptions"]["jason_ss_claim_age"] == 70
+
+
+class TestSavedScenariosPinnedToDisplayedResult:
+    """Milestone 1 acceptance follow-up (2026-09-09): "Demonstrate that
+    'Save this scenario' captures the exact result currently
+    displayed—including temporary overrides and custom SS ages. Saving
+    must not silently rerun against different current Settings." The
+    frontend now round-trips its own GET /api/projections/retirement
+    response (summary + resolved_assumptions) back on save; these tests
+    prove the backend stores that verbatim rather than re-reading the
+    database, and that GET actually returns a resolved_assumptions bundle
+    to round-trip in the first place."""
+
+    def _seed(self, client, sample_inputs, sample_accounts):
+        _seed_planning_inputs(client, sample_inputs)
+        _seed_accounts(client, sample_accounts)
+
+    def test_get_retirement_projections_includes_resolved_assumptions(self, client, sample_inputs, sample_accounts):
+        self._seed(client, sample_inputs, sample_accounts)
+        r = client.get("/api/projections/retirement")
+        assert r.status_code == 200, r.text
+        bundle = r.json()["resolved_assumptions"]
+        assert bundle["planning_inputs"]["id"] == 1
+        assert len(bundle["accounts"]) == len(sample_accounts)
+        assert "kids" in bundle and "life_events" in bundle and "surplus_allocations" in bundle
+
+    def test_pinned_save_stores_displayed_summary_verbatim_even_if_it_disagrees_with_current_data(
+        self, client, sample_inputs, sample_accounts
+    ):
+        """The regression this exists to prevent: a save that recomputes
+        against the database instead of trusting the caller's own
+        displayed result would silently substitute today's numbers for
+        whatever was actually on screen. Pass a summary that could not
+        possibly come from a real recompute of the seeded household, and
+        confirm it's stored exactly as given."""
+        self._seed(client, sample_inputs, sample_accounts)
+        pinned_summary = {
+            "retirement_age": 61, "percent_funded": 42, "portfolio_at_retirement": 123456,
+            "projected_surplus": -9999, "on_track": False,
+        }
+        household_data = {
+            "planning_inputs": {"id": 1, "jason_age": 999}, "accounts": [], "kids": [],
+            "life_events": [], "surplus_allocations": [],
+        }
+        r = client.post("/api/saved-scenarios", json={
+            "name": "Pinned", "retirement_age": 61, "ss_timing": "delayed",
+            "summary": pinned_summary, "household_data": household_data,
+        })
+        assert r.status_code == 200, r.text
+        saved = next(s for s in client.get("/api/saved-scenarios").json() if s["name"] == "Pinned")
+        assert saved["summary"] == pinned_summary
+        assert saved["assumptions"]["planning_inputs"] == {"id": 1, "jason_age": 999}
+
+    def test_pinned_save_ignores_a_subsequent_settings_change(self, client, sample_inputs, sample_accounts):
+        """The exact scenario the acceptance criteria describe: Settings
+        change AFTER the result was displayed but the save still uses
+        what was displayed, not the new Settings."""
+        self._seed(client, sample_inputs, sample_accounts)
+        displayed = client.get("/api/projections/retirement").json()
+        displayed_scenario = next(s for s in displayed["scenarios"] if s["label"] == "age_60_early")
+
+        # Settings change after the result was already displayed/held by
+        # the frontend, before the user gets around to clicking Save.
+        changed_inputs = {**sample_inputs, "jason_age": sample_inputs["jason_age"] + 10}
+        client.put("/api/planning-inputs", json=changed_inputs)
+
+        r = client.post("/api/saved-scenarios", json={
+            "name": "Pinned Before Change", "retirement_age": 60, "ss_timing": "early",
+            "summary": displayed_scenario, "household_data": displayed["resolved_assumptions"],
+        })
+        assert r.status_code == 200, r.text
+        saved = next(s for s in client.get("/api/saved-scenarios").json() if s["name"] == "Pinned Before Change")
+        assert saved["summary"]["portfolio_at_retirement"] == displayed_scenario["portfolio_at_retirement"]
+        assert saved["assumptions"]["planning_inputs"]["jason_age"] == sample_inputs["jason_age"]
+
+    def test_unpinned_save_still_works_for_the_parameters_only_form(self, client, sample_inputs, sample_accounts):
+        """SavedScenarios.jsx's own standalone form has no live displayed
+        result to pin to — omitting summary/household_data must still
+        fall back to the original recompute-from-current-data behavior."""
+        self._seed(client, sample_inputs, sample_accounts)
+        r = client.post("/api/saved-scenarios", json={"name": "No Pin", "retirement_age": 60, "ss_timing": "early"})
+        assert r.status_code == 200, r.text
+        saved = next(s for s in client.get("/api/saved-scenarios").json() if s["name"] == "No Pin")
+        assert saved["assumptions"]["planning_inputs"]["id"] == 1
+
+
+class TestSavedScenariosReopenAndCompareAndBackup:
+    """Milestone 1 acceptance follow-up: "Confirm that reopening
+    preserves the original inputs/results, ... comparisons show changed
+    assumptions as well as outcomes, and backup/restore preserves
+    everything."""
+
+    def _seed(self, client, sample_inputs, sample_accounts):
+        _seed_planning_inputs(client, sample_inputs)
+        _seed_accounts(client, sample_accounts)
+
+    def test_reopening_returns_the_exact_original_inputs_and_results_unaffected_by_later_changes(
+        self, client, sample_inputs, sample_accounts
+    ):
+        self._seed(client, sample_inputs, sample_accounts)
+        r = client.post("/api/saved-scenarios", json={"name": "Reopen Me", "retirement_age": 60, "ss_timing": "early"})
+        original_id = r.json()["id"]
+        original = client.get(f"/api/saved-scenarios/{original_id}").json()
+
+        # Change Settings and accounts after saving.
+        client.put("/api/planning-inputs", json={**sample_inputs, "jason_age": sample_inputs["jason_age"] + 5})
+        client.post("/api/accounts", json={"name": "New Account", "account_type": "taxable", "owner": "joint",
+                                            "institution": "", "balance": 999999, "notes": ""})
+
+        reopened = client.get(f"/api/saved-scenarios/{original_id}").json()
+        assert reopened["summary"] == original["summary"]
+        assert reopened["assumptions"] == original["assumptions"]
+        assert reopened["assumptions"]["planning_inputs"]["jason_age"] == sample_inputs["jason_age"]
+        assert len(reopened["assumptions"]["accounts"]) == len(sample_accounts)
+
+    def test_backup_restore_preserves_full_saved_scenario_including_revisions(
+        self, client, sample_inputs, sample_accounts
+    ):
+        self._seed(client, sample_inputs, sample_accounts)
+        original_id = client.post("/api/saved-scenarios", json={
+            "name": "Backup Me", "retirement_age": 60, "ss_timing": "early",
+        }).json()["id"]
+        rec = client.post(f"/api/saved-scenarios/{original_id}/recalculate")
+        assert rec.status_code == 200, rec.text
+        new_id = rec.json()["id"]
+
+        before = {s["id"]: s for s in client.get("/api/saved-scenarios").json()}
+
+        backup = client.get("/api/backup/export").json()
+        r = client.post("/api/backup/restore", params={"confirm": "true"},
+                         files={"file": ("b.json", json.dumps(backup), "application/json")})
+        assert r.status_code == 200, r.text
+
+        after = {s["id"]: s for s in client.get("/api/saved-scenarios").json()}
+        assert after[original_id]["assumptions"] == before[original_id]["assumptions"]
+        assert after[original_id]["summary"] == before[original_id]["summary"]
+        assert after[new_id]["revision_of"] == original_id
+        assert after[new_id]["revision_number"] == before[new_id]["revision_number"]
+        assert after[original_id]["schema_version"] == before[original_id]["schema_version"]
+        assert after[original_id]["is_legacy"] == before[original_id]["is_legacy"]
