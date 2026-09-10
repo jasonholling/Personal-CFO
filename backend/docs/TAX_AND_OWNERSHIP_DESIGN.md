@@ -9,14 +9,23 @@ actual current implementation (`projection_engine.py`,
 `simulation_engine.py`, `annual_engine.py`), not from assumptions about
 what it does.
 
-**Revised 2026-09-10** per independent review: the original version
-(section headings below reflect the revision) mainly proposed exposing
-ownership data and standardizing tax output fields without achieving
-consistent tax calculations across consumers, and didn't distinguish
-between work that's risk-free by construction and work that would need
-its own verification or its own approval before touching a household's
-actual numbers. Section 4 explains the three-category split this
-revision organizes everything else around.
+**Revised 2026-09-10 (first pass)** per independent review: the
+original version mainly proposed exposing ownership data and
+standardizing tax output fields without achieving consistent tax
+calculations across consumers, and didn't distinguish between work
+that's risk-free by construction and work that would need its own
+verification or its own approval before touching a household's actual
+numbers. Section 4 explains the three-category split this revision
+organizes everything else around.
+
+**Revised 2026-09-10 (second pass)** per a follow-up review: the first
+pass's own inventory (section 2) checked withdrawal-phase tax-rate
+consistency across single-age/two-age consumers and found none, but
+missed checking Roth Conversion's SEPARATE conversion-tax calculation —
+which does diverge, and diverges because a known fix was applied to
+only one of the two implementations. Section 2 and section 6 (now split
+into 6.1/6.2) both corrected, with an independently reproduced,
+matched-household example.
 
 ## 1. Goal, restated
 
@@ -92,41 +101,72 @@ per-consumer.
   different capital-gains treatment from EACH OTHER, not just from the
   other consumers) — inventoried here for completeness, not new.
 
-**Single-age vs. two-age tax-model divergence — checked directly, none
-found.** Revision note (2026-09-10, independent review): the original
-version of this proposal didn't check this explicitly. Read the actual
-two-age implementations of the three consumers that have both a
-single-age and a two-age form:
-- `_run_tax_efficiency_simulation_two_age`: its own docstring states it
-  "has never had bracket-aware or marginal-rate-aware taxation" and
-  reuses the identical flat-rate model — confirmed consistent with
-  single-age Tax Efficiency by design, not coincidence.
-- `_run_roth_conversion_analysis_two_age`: reads `state_income_tax_rate`
-  and calls the same `_pretax_marginal_tax_rate`/marginal-bracket
-  pattern single-age Roth Conversion uses, at the same call sites
-  (`base_taxable`/`room_in_22` bracket-capacity math included) — a
-  comment at this call site explicitly notes still-working income is
-  folded into the spending-need offset "in either direction -- exactly
-  the existing single-axis" behavior, i.e. deliberately mirrored, not
-  independently reimplemented and hoped to match.
-- `run_owner_split_two_dimensional_projection` (two-age Retirement
-  Projection/Survivor Scenario's underlying walk): uses the identical
-  `min(0.90, _marginal_rate(...) + max(0, state_income_tax_rate))`
-  pattern found in single-age `run_retirement_projection` — same
-  formula, independently confirmed at each of the three call sites in
-  `projection_engine.py`.
+**Single-age vs. two-age tax-model divergence — a real one exists, found
+on second review.** Revision note (2026-09-10, independent review):
+the first revision of this proposal checked the WITHDRAWAL-PHASE tax
+rate (`_pretax_marginal_tax_rate`/`_marginal_rate`, applied to pretax
+draws/RMDs) across every consumer with both forms and found it
+consistent everywhere. That check was real but incomplete — it didn't
+separately check Roth Conversion's OWN conversion-tax calculation, a
+genuinely different computation within the same function, and that one
+diverges:
 
-So: no currently-existing single-age/two-age tax-model gap was found.
-What IS real, and is exactly what makes "no gap today" fragile rather
-than reassuring: this identical formula is typed out independently at
-6+ call sites across `projection_engine.py` and `simulation_engine.py`,
-not called from one shared function. A past real bug (Roth Conversion's
-`base_taxable` once omitting gross wages from bracket capacity, fixed
-per CALCULATION_CONTRACT.md section 32) lived in exactly one of these
-copies while the others were unaffected — proof duplication is how a
-single-age/two-age (or any-consumer/any-other-consumer) divergence
-actually gets introduced in this codebase, even though none currently
-exists. See category 2 below.
+- **Single-age `run_roth_conversion_analysis`** (`simulation_engine.py`
+  ~line 2904) taxes the conversion itself with `tax_model=
+  marginal_bracket_tax_model(pretax_rate=TAX_BRACKET_22, taxable_rate=
+  0.0)` — `TAX_BRACKET_22` is a hardcoded flat `0.22`, applied to the
+  ENTIRE conversion amount regardless of the household's actual bracket
+  position. Its own `base_taxable = year_pen + ss_taxable + pretax_draw
+  - STD_DEDUCTION` also omits any working spouse's gross wages from the
+  bracket-capacity estimate entirely — there's no `gross_wages_this_year`
+  term at all.
+- **Two-age `_run_roth_conversion_analysis_two_age`** taxes the SAME
+  conversion progressively/incrementally instead: its own comment says
+  so explicitly — *"TAX_BRACKET_22 (a flat 22% conversion-tax rate) is
+  gone -- the conversion's own tax is now computed progressively via
+  `_incremental_conversion_tax`/`_max_conversion_for_tax_budget`"* — and
+  its `base_taxable = year_pen + ss_taxable + pretax_draw +
+  gross_wages_this_year - STD_DEDUCTION` DOES include working wages.
+  The two-age code's own comment cites a reproduction of the flat
+  model's error: *"a $243,600 conversion... $0 other taxable income...
+  costs $35,932"* under the progressive model — visibly less than a flat
+  22% of $243,600 (~$53,592) would produce.
+
+**Independently reproduced, matched household** (2026-09-10 review):
+both spouses age 71, both retire at 71, $100,000 pretax + $100,000
+taxable, zero spending/income/growth/state tax — same inputs to both
+functions:
+
+| | Converts | Tax charged |
+|---|---|---|
+| Single-age | $100,000 | **$22,000** (exactly 22% flat) |
+| Two-age | $100,000 | **$7,640** (progressive, MFJ 2026 brackets against $0 other income) |
+
+This is not a coexisting, equally-legitimate policy choice like Tax
+Efficiency's flat-rate model (section 2's table) — the two-age code's
+own comments frame the flat 22% model as something progressive taxation
+REPLACED because it was wrong, not as an alternative kept on purpose.
+Single-age Roth Conversion is running the flat model years after it was
+identified as incorrect and fixed — just not backported. Per the
+milestone's own instruction ("preserve existing results where policies
+are equivalent — not where an existing calculation is incorrect"), this
+is the second case: single-age's current numbers are not the ones to
+preserve. See category 2 (section 6) for how this is scoped as its own
+slice, separate from the lower-risk consolidation work.
+
+What IS still true of the withdrawal-phase check specifically: that
+formula is typed out independently at 6+ call sites across
+`projection_engine.py` and `simulation_engine.py`, not called from one
+shared function, and no divergence was found there. A past real bug
+(Roth Conversion's own `base_taxable`, in its WITHDRAWAL-phase tax rate,
+once omitting gross wages from bracket capacity, fixed per
+CALCULATION_CONTRACT.md section 32) lived in exactly one of these copies
+while the others were unaffected — proof duplication is how a
+divergence gets introduced and survives undetected in this codebase.
+The conversion-tax divergence just found (above) is a second, separate
+instance of the same root cause — a fix applied to one implementation
+(two-age) and never propagated to its sibling (single-age). See
+category 2 below for both.
 
 ## 3. Inventory: account ownership across every consumer
 
@@ -208,23 +248,21 @@ slice's content:
    one is exposing or repackaging a value already computed, never
    computing a new one). "Preserve existing results" applies without
    qualification here.
-2. **Actual tax-policy consolidation** — collapsing the 6+ duplicated
-   copies of the marginal-bracket-rate formula (section 2's revision
-   note) into one shared function. This is NOT risk-free the way
-   category 1 is: consolidating duplicated code is exactly how a
-   currently-hidden divergence between two copies would surface — and
-   section 2 already found zero current divergence across every copy
-   checked, but "checked by reading the code" is not the same
-   confidence level as "checked by an equivalence test." Every
-   consumer's existing numbers must be verified equal before-and-after
-   consolidation, not assumed equal because the source read the same.
-   "Preserve existing results" applies here CONDITIONALLY: only where
-   verification confirms the policies were already equivalent — if
-   consolidation surfaces a real pre-existing divergence between two
-   consumers (not found yet, but not ruled out by inspection alone
-   either), that is a bug to fix and document with a before/after
-   example per the brief's own instruction, not something to preserve
-   by keeping the old, divergent, unconsolidated code paths.
+2. **Actual tax-policy consolidation** — two pieces, not one, per
+   section 6: (2a) collapsing the 6+ duplicated copies of the
+   withdrawal-phase marginal-bracket-rate formula into one shared
+   function, where section 2 found zero current divergence but
+   "checked by reading the code" isn't the same confidence level as
+   "checked by an equivalence test," so every consumer's numbers still
+   need verifying equal before-and-after, not assumed equal; and (2b)
+   Roth Conversion's OWN conversion-tax model, where a real divergence
+   WAS found (single-age still flat-22%, two-age already progressive —
+   section 6.2's matched-household reproduction: $22,000 vs. $7,640 on
+   an identical $100,000 conversion). "Preserve existing results"
+   applies CONDITIONALLY to 2a (only where verification confirms the
+   policies were already equivalent) and does NOT apply to 2b at all —
+   single-age's current number is the one known to be wrong, not the
+   one to protect.
 3. **Owner-specific obligations that can legitimately change household
    totals** — genuinely new calculations (per-person RMDs, inherited-
    account tax treatment) that do NOT exist today in any form, pooled
@@ -264,42 +302,81 @@ repackage it, computing nothing new:
 
 ## 6. Category 2 — actual tax-policy consolidation (conditional preservation, verify before assuming)
 
+Two genuinely different pieces of work, because they carry different
+risk and one of them is NOT "preserve existing results" at all:
+
+### 6.1 Withdrawal-phase tax-rate consolidation — no known divergence, preserve unconditionally-but-verified
+
 Collapsing the marginal-bracket-rate formula
 (`min(0.90, _marginal_rate(...) + max(0, state_income_tax_rate))`,
 independently typed at 6+ call sites across `projection_engine.py` and
 `simulation_engine.py`) into one shared function every consumer calls,
-instead of each retyping it. Section 2's revision note already checked
-by direct reading that every current copy computes the same thing for
-the same inputs — this category's job is proving that with an
-equivalence test, not re-asserting it from the same reading:
+instead of each retyping it. Section 2 checked by direct reading that
+every current copy computes the same thing for the same inputs — this
+subsection's job is proving that with an equivalence test, not
+re-asserting it from the same reading:
 
-- **Known single-age/two-age differences, checked**: none found (section
-  2). Both are held to the exact same marginal-bracket-plus-state
-  formula in every consumer that has both forms (Roth Conversion, the
-  owner-split/pooled Retirement Projection walk). Tax Efficiency's
-  flat-rate model is the one deliberate exception, applied identically
-  in its single-age and two-age forms — not a single-age/two-age split
-  at all, a Tax-Efficiency-vs-everything-else split (section 2's table).
+- **Known single-age/two-age differences in THIS formula specifically,
+  checked**: none found. Both are held to the exact same
+  marginal-bracket-plus-state formula in every consumer that has both
+  forms. Tax Efficiency's flat-rate model is the one deliberate
+  exception, applied identically in its single-age and two-age forms —
+  not a single-age/two-age split at all, a Tax-Efficiency-vs-everything-
+  else split (section 2's table).
 - **Consolidation is still worth doing** precisely because no
-  divergence exists YET — duplication, not divergence, is the actual
-  risk being retired. The one confirmed historical bug in this area
-  (Roth Conversion's `base_taxable` omitting gross wages, section 2)
-  lived in exactly one of several near-identical copies; a shared
-  function makes that class of bug structurally impossible to
-  reintroduce in only one call site again.
+  divergence exists YET in this particular formula — duplication, not
+  divergence, is the risk being retired. Section 6.2's finding is proof
+  this class of risk is not hypothetical.
 - **What "preserve existing results" means here, precisely**: after
   consolidation, every consumer's tax-related output fields
-  (`estimated_tax`, Roth Conversion's `base_taxable_income`/
-  `room_in_22_bracket`, etc.) must be byte-for-byte identical to their
+  (`estimated_tax`, etc.) must be byte-for-byte identical to their
   pre-consolidation values, for every existing test fixture and a new
   battery of synthetic households spanning the input ranges each
-  consumer's own bracket-capacity logic branches on (zero income, high
-  income crossing bracket edges, RMD-triggering ages, both SS timings).
-  If any consumer's number changes, that is either a bug the
-  consolidation exposed (document it, don't silently keep the old
-  wrong number) or proof the two copies were never actually equivalent
-  (stop, don't consolidate that pair until the real difference is
-  understood and it's clear which one is correct).
+  consumer's own logic branches on (zero income, high income crossing
+  bracket edges, RMD-triggering ages, both SS timings). If any
+  consumer's number changes, that is either a bug the consolidation
+  exposed (document it, don't silently keep the old wrong number) or
+  proof the two copies were never actually equivalent (stop, don't
+  consolidate that pair until the real difference is understood and
+  it's clear which one is correct).
+
+### 6.2 Roth Conversion's own conversion-tax model — a known, already-found divergence, NOT preserve
+
+This is the case section 2's revision found: single-age
+`run_roth_conversion_analysis` taxes the conversion itself at a flat
+22% and omits working wages from bracket capacity; two-age
+`_run_roth_conversion_analysis_two_age` taxes it progressively via
+`_incremental_conversion_tax`/`_max_conversion_for_tax_budget` and
+includes working wages — and per the two-age code's own comments, the
+progressive model REPLACED the flat one because the flat one was wrong,
+not because both are equally legitimate.
+
+**Matched-household reproduction** (both age 71, both retire at 71,
+$100,000 pretax + $100,000 taxable, zero spending/income/growth/state
+tax — repeated here from section 2 since this is the number that
+actually justifies the slice below):
+
+| | Converts | Tax charged |
+|---|---|---|
+| Single-age | $100,000 | $22,000 |
+| Two-age | $100,000 | $7,640 |
+
+- **This is NOT category-1-style consolidation** — it's a documented
+  correction being backported. Per the milestone's own instruction
+  ("preserve existing results where policies are equivalent — not where
+  an existing calculation is incorrect"): the policies here are NOT
+  equivalent, and single-age's current $22,000 figure is the incorrect
+  one to preserve, not the correct one to protect.
+- **Scoped as its own slice** (Slice 6 below), separate from 6.1's
+  lower-risk consolidation — approving 6.1 does not imply approval for
+  this; this changes a real, currently-displayed number for any
+  household using single-age Roth Conversion with a meaningful
+  conversion amount.
+- **The fix already exists** — `_incremental_conversion_tax` and
+  `_max_conversion_for_tax_budget` (two-age's own helpers) are the
+  target implementation; single-age needs to call them instead of
+  reimplementing a flat rate, not a new algorithm invented for this
+  slice.
 
 ## 7. Category 3 — owner-specific obligations that legitimately change totals
 
@@ -345,6 +422,7 @@ remain unsupported and how limitations will appear in the UI"):
 | No withholding/quarterly-payment modeling, only an annual-liability estimate | Unsupported (disclose only) | Wherever a tax figure renders (natural fit: Milestone 2's "How this was calculated" panel, once extended to tools other than retirement funding) |
 | No filing-status input | Unsupported (disclose only) | A note wherever the marginal-rate estimate is shown |
 | Tax Efficiency's flat-rate model doesn't reflect the household's real bracket | Category 1 (already intentional, needs visibility) | Tax Efficiency's own page, ideally its own explainer once Milestone 2 reaches it |
+| Single-age Roth Conversion's conversion tax is a flat 22%, not the household's real bracket (two-age already computes this correctly) | Category 2, section 6.2 (known-incorrect, until Slice 6 ships) | Roth Conversion's own page, until the fix ships — should say so explicitly rather than presenting the flat-rate figure as the real number |
 | Owner-attributed withdrawal doesn't exist yet outside Survivor Scenario's starting balances | Category 1 (exists, not exposed elsewhere) | Any page that shows per-owner figures, until that slice ships |
 | Per-person RMDs unmodeled (aggregate/Jason-anchored today) | Category 3 (would change totals) | Wherever an RMD figure is shown, until implemented and approved |
 | Survivor transitions (inherited-account tax treatment) unmodeled | Category 3 (would change totals) | Survivor Scenario's own existing disclosure text (it already has one methodology note; extend it) |
@@ -388,11 +466,12 @@ all-or-nothing.
   to what each consumer's own existing (unchanged) internal tax figure
   was.
 
-**Category 2 (consolidation, conditional preserve) — needs its own equivalence-test pass, not bundled with category 1:**
+**Category 2 (consolidation) — two slices with different preserve rules, not bundled together:**
 
-- **Slice 5 — Shared marginal-bracket-rate function.** Replace the 6+
-  independently-typed copies of `min(0.90, _marginal_rate(...) +
-  max(0, state_income_tax_rate))` with calls to one shared function.
+- **Slice 5 — Shared marginal-bracket-rate function (6.1, conditional
+  preserve).** Replace the 6+ independently-typed copies of
+  `min(0.90, _marginal_rate(...) + max(0, state_income_tax_rate))` with
+  calls to one shared function.
   *Acceptance*: a new synthetic-household battery (zero income, high
   income crossing bracket edges, RMD-triggering ages, both SS timings)
   run through every adopting consumer before AND after, asserting
@@ -400,17 +479,34 @@ all-or-nothing.
   found stops the slice — it becomes its own documented bug-fix (with a
   before/after example) rather than being silently absorbed into
   "consolidation."
+- **Slice 6 — Backport progressive conversion-tax to single-age Roth
+  Conversion (6.2, NOT preserve — a known, intentional numerical
+  change).** Replace `run_roth_conversion_analysis`'s flat-22%
+  `TAX_BRACKET_22` conversion tax and wage-omitting `base_taxable` with
+  calls to the same `_incremental_conversion_tax`/
+  `_max_conversion_for_tax_budget`/wage-inclusive `base_taxable` two-age
+  Roth Conversion already uses correctly.
+  *Acceptance*: the matched-household reproduction in section 6.2
+  ($100,000 pretax + $100,000 taxable, both age 71, zero spending/
+  income/growth/state tax) moves single-age's reported conversion tax
+  from $22,000 to $7,640 — this specific before/after pair IS the
+  slice's required documentation, not a placeholder for one written
+  later. Every OTHER single-age Roth Conversion test fixture must be
+  re-verified against hand-computed progressive-bracket expected values
+  (not just "runs without erroring") before this ships, since every
+  existing fixture's expected `tax_cost`/`net_benefit` values were
+  computed against the flat model being replaced.
 
 **Category 3 (owner-specific, changes totals) — requires separate approval, not started by approving categories 1-2:**
 
-- **Slice 6 — Per-person RMDs (if approved as in-scope).** Real
+- **Slice 7 — Per-person RMDs (if approved as in-scope).** Real
   per-spouse Uniform Lifetime Table calculation instead of the
   aggregate/Jason-anchored approximation.
   *Acceptance*: before/after numeric examples for at least one household
   with meaningfully different spouse ages, showing exactly how the
   total RMD changes and why; TBD pending approval to even scope this
   slice further.
-- **Slice 7 — Inherited-account survivor transitions (if approved as
+- **Slice 8 — Inherited-account survivor transitions (if approved as
   in-scope).** Model the filing-status change and inherited-IRA tax
   treatment at death.
   *Acceptance*: TBD pending approval; likely the largest single slice in
@@ -419,12 +515,17 @@ all-or-nothing.
 
 ## 10. Explicitly out of scope for all of this
 
-- No category-1 or category-2 slice changes any number a currently-
-  shipped consumer produces, for ANY household — category 1 by
-  construction (repackaging only), category 2 by its own required
-  equivalence-test gate (section 6). Category 3 is the only place
-  numbers can legitimately change, and only there, and only after its
-  own separate approval.
+- Category 1 changes no number, for any household, by construction
+  (repackaging only). Category 2 is split: 6.1 (withdrawal-rate
+  consolidation) changes no number, gated by its own required
+  equivalence test; 6.2 (Roth Conversion's conversion-tax model) is a
+  known, intentional exception — its whole purpose is changing
+  single-age Roth Conversion's currently-wrong number to match two-age's
+  already-correct one, per section 6.2's reproduction. Category 3 can
+  also legitimately change numbers, for its own separate reasons
+  (genuinely new calculations, not corrections). Both 6.2 and category 3
+  require their own separate approval before implementation — approving
+  6.1/category 1 does not imply approval for either.
 - Withholding/quarterly-payment modeling is explicitly NOT proposed —
   section 8 recommends disclosure, not implementation, given the scope
   this would add for a personal (non-payroll-integrated) planning tool.
@@ -440,8 +541,11 @@ all-or-nothing.
 
 Per the brief's own instruction, nothing in section 9 gets built until
 this document itself is reviewed and approved — and per section 4,
-approval can reasonably be granted per-category rather than all at
-once: category 1 carries essentially no risk to existing calculations,
-category 2 requires its own equivalence-test discipline, and category 3
-requires a separate decision about whether household totals should
-change at all before any slice in it is scoped further.
+approval can reasonably be granted per-category, and even per-
+subsection, rather than all at once: category 1 carries essentially no
+risk to existing calculations; category 2's 6.1 requires its own
+equivalence-test discipline but changes no number, while 6.2 is a known,
+already-scoped bug fix that DOES change a number (Slice 6's own
+acceptance criteria) and needs its own explicit go-ahead separate from
+6.1; category 3 requires a separate decision about whether household
+totals should change at all before any slice in it is scoped further.
