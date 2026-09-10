@@ -357,18 +357,33 @@ def _run_single(
             hc_kids       = phase_inputs.get("healthcare_kids", 0) * ((1 + inflation) ** max(0, withdrawal_start_age - jason_age))
             if yr < bridge_years:
                 hc_this_year = 0
-                year_need = max(0, income_at_ret*cum_inf + kids_cost*cum_inf - bridge_income*cum_inf)
+                # Single-age bridge-surplus fix (2026-09-10, sibling to
+                # the two-age fix -- CALCULATION_CONTRACT.md section 76):
+                # year_need no longer nets bridge income at all. The old
+                # `max(0, target - bridge)` clamp discarded any bridge
+                # surplus before simulate_withdrawal_year below ever saw
+                # it -- not withdrawn, not saved, not reported. bridge_
+                # this_year now joins `fixed` (guaranteed_income) just
+                # like pension/SS, reusing simulate_withdrawal_year's own
+                # existing surplus-sweep behavior instead of a new,
+                # bridge-specific adjustment.
+                year_need = income_at_ret*cum_inf + kids_cost*cum_inf
+                bridge_this_year = bridge_income * cum_inf
             elif yr < kids_years and age < 65:
                 hc_this_year = hc_kids
                 year_need = income_at_ret*cum_inf + kids_cost*cum_inf + hc_kids*cum_inf
+                bridge_this_year = 0.0
             elif age < 65:
                 hc_this_year = healthcare_pre
                 year_need = income_at_ret*cum_inf + healthcare_pre*cum_inf
+                bridge_this_year = 0.0
             else:
                 hc_this_year = healthcare_post
                 year_need = income_at_ret*cum_inf + healthcare_post*cum_inf
+                bridge_this_year = 0.0
         else:
             year_need = income_at_ret * cum_inf + income.healthcare
+            bridge_this_year = 0.0
 
         # Life events active in the withdrawal phase — computed above via
         # the shared builder (same _post_retirement_year_effects call
@@ -394,7 +409,10 @@ def _run_single(
         year_pen  = pension_annual  # frozen pension, no COLA
         year_jss  = income.jason_ss
         year_uss  = income.justin_ss
-        fixed     = year_pen + year_jss + year_uss
+        # bridge_this_year joins guaranteed income here, like pension/SS
+        # -- see the bridge-active branch above (CALCULATION_CONTRACT.md
+        # section 76).
+        fixed     = year_pen + year_jss + year_uss + bridge_this_year
 
         # RMD
         rmd = _rmd(pretax, age, _rmd_start)
@@ -539,7 +557,7 @@ def _run_single_two_age(
         justin_age_this_year = timeline.justin_age_at(age)
         calendar_year = timeline.calendar_year(yr)
 
-        year_need, healthcare_inflated, _bridge_income_this_year = need_for_year(age, yr)
+        year_need, healthcare_inflated, bridge_income_this_year = need_for_year(age, yr)
 
         life_event_cash, life_event_monthly = _post_retirement_year_effects(post_life_events or [], calendar_year)
         year_need -= life_event_monthly
@@ -551,7 +569,13 @@ def _run_single_two_age(
         year_pen = two_age_pension_for_year(pension_annual, age, jason_effective_start_age)
         year_jss = _cola(jason_ss_annual, jason_ss_offset, yr) if age >= jason_ss_age else 0.0
         year_uss = _cola(justin_ss_annual, justin_ss_offset, yr) if justin_age_this_year >= justin_ss_age else 0.0
-        fixed = year_pen + year_jss + year_uss
+        # Two-age bridge-surplus fix (2026-09-10): same fix as every
+        # other two_age_spending_need_fn caller -- bridge income above
+        # spending used to vanish entirely (year_need's own clamp
+        # discarded it, and this Monte Carlo/Stress Tests trial loop
+        # discarded the returned value on top of that). Now flows into
+        # `fixed` (guaranteed_income) like pension/SS.
+        fixed = year_pen + year_jss + year_uss + bridge_income_this_year
 
         rmd = _rmd(pretax, age, _rmd_start)
         pretax_tax_rate = _pretax_marginal_tax_rate(year_pen, year_jss, year_uss, rmd, state_tax_rate)
@@ -731,10 +755,19 @@ def _household_spending_success_rate_two_age(
             ret = returns[yr]
             justin_age_this_year = timeline.justin_age_at(age)
 
-            # need_for_year already nets out any age-55 bridge income
-            # internally (see its own docstring) -- not subtracted again
-            # here.
-            year_need, _healthcare_inflated, _bridge_income_this_year = need_for_year(age, yr)
+            # Two-age bridge-surplus fix (2026-09-10): need_for_year no
+            # longer nets bridge income into year_need at all (previously
+            # it did, via a clamp that silently discarded any bridge
+            # surplus above spending -- CALCULATION_CONTRACT.md section
+            # 73/its two-age follow-up). bridge_income_this_year is now
+            # captured and added into the guaranteed-income argument
+            # below, alongside pension/SS/still-working income, so
+            # _swr_year_step's own existing surplus-sweep behavior
+            # (event_monthly exceeding portfolio_draw sweeps into
+            # taxable) handles a bridge surplus the same way it already
+            # handles every other guaranteed-income source -- not a new,
+            # bridge-specific adjustment.
+            year_need, _healthcare_inflated, bridge_income_this_year = need_for_year(age, yr)
 
             year_pen = two_age_pension_for_year(pension_annual, age, jason_effective_start_age)
             year_jss = jason_ss_annual * ((1 + inflation) ** max(0, age - jason_ss_age)) if age >= jason_ss_age else 0.0
@@ -756,7 +789,7 @@ def _household_spending_success_rate_two_age(
             # every income source must offset it.
             pretax, roth, taxable, hsa, remaining = _swr_year_step(
                 pretax, roth, taxable, hsa, year_need, event_cash,
-                event_monthly + still_working_income_this_year + year_pen + year_jss + year_uss,
+                event_monthly + still_working_income_this_year + year_pen + year_jss + year_uss + bridge_income_this_year,
                 rmd, pretax_tax_rate)
 
             if remaining > 0:
@@ -2484,12 +2517,18 @@ def _run_roth_conversion_analysis_two_age(inputs: Dict, accounts: List[Dict], ja
         age = timeline.age(yr)
         justin_age_this_year = timeline.justin_age_at(age)
 
-        year_need, _healthcare_inflated, _bridge_income = need_for_year(age, yr)
+        # Two-age bridge-surplus fix (2026-09-10): bridge_income_this_year
+        # joins pension/SS in `guaranteed` below -- previously discarded,
+        # meaning any bridge income above this year's spending need
+        # vanished instead of being swept into taxable the way
+        # simulate_withdrawal_year's own surplus handling already does
+        # for every other guaranteed-income source.
+        year_need, _healthcare_inflated, bridge_income_this_year = need_for_year(age, yr)
         year_pen = two_age_pension_for_year(pension_annual, age, jason_effective_start_age)
         year_jss = jason_ss_annual * ((1 + inflation) ** max(0, age - jason_ss_age)) if age >= jason_ss_age else 0.0
         year_uss = (justin_ss_annual * ((1 + inflation) ** max(0, justin_age_this_year - justin_ss_age))
                     if justin_age_this_year >= justin_ss_age else 0.0)
-        guaranteed = year_pen + year_jss + year_uss
+        guaranteed = year_pen + year_jss + year_uss + bridge_income_this_year
 
         life_event_cash, life_event_monthly = _post_retirement_year_effects(post_events, retirement_year_for_events + yr)
         still_working_income_this_year = justin_gap_income_for_year(
@@ -2604,12 +2643,18 @@ def _run_roth_conversion_analysis_two_age(inputs: Dict, accounts: List[Dict], ja
     for yr in range(conversion_years):
         age = timeline.age(yr)
         justin_age_this_year = timeline.justin_age_at(age)
-        year_need, _hc, _bridge = need_for_year(age, yr)
+        # Two-age bridge-surplus fix (2026-09-10): same fix as the
+        # with-conversions loop above -- bridge_income_this_year joins
+        # guaranteed_income instead of being discarded, so this baseline
+        # path reflects the same corrected behavior the conversions path
+        # does (otherwise the "without conversions" comparison itself
+        # would be biased by whichever path still lost the surplus).
+        year_need, _hc, bridge_income_this_year = need_for_year(age, yr)
         year_pen = two_age_pension_for_year(pension_annual, age, jason_effective_start_age)
         year_jss = jason_ss_annual * ((1 + inflation) ** max(0, age - jason_ss_age)) if age >= jason_ss_age else 0.0
         year_uss = (justin_ss_annual * ((1 + inflation) ** max(0, justin_age_this_year - justin_ss_age))
                     if justin_age_this_year >= justin_ss_age else 0.0)
-        guaranteed = year_pen + year_jss + year_uss
+        guaranteed = year_pen + year_jss + year_uss + bridge_income_this_year
         life_event_cash, life_event_monthly = _post_retirement_year_effects(post_events, retirement_year_for_events + yr)
         still_working_income_this_year = justin_gap_income_for_year(
             yr, phase2_duration_years, still_working_income_at_start, _salary_growth_pct)
@@ -3325,12 +3370,19 @@ def _run_tax_efficiency_simulation_two_age(inputs: Dict, accounts: List[Dict], j
                 ret = returns[yr]
                 justin_age_this_year = timeline.justin_age_at(age)
 
-                year_need, _healthcare_inflated, _bridge_income = need_for_year(age, yr)
+                # Two-age bridge-surplus fix (2026-09-10): bridge_income_
+                # this_year joins `guaranteed` below, feeding into
+                # _cash_available_offsets_need's own existing surplus-
+                # sweep return value (surplus_credit, added to taxable
+                # just below) instead of being discarded -- the same
+                # shared mechanism every other income source here already
+                # goes through, not a new bridge-specific rule.
+                year_need, _healthcare_inflated, bridge_income_this_year = need_for_year(age, yr)
                 year_pen = two_age_pension_for_year(pension_annual, age, jason_effective_start_age)
                 year_jss = jason_ss_annual * ((1 + inflation) ** max(0, age - jason_ss_age)) if age >= jason_ss_age else 0.0
                 year_uss = (justin_ss_annual * ((1 + inflation) ** max(0, justin_age_this_year - justin_ss_age))
                             if justin_age_this_year >= justin_ss_age else 0.0)
-                guaranteed = year_pen + year_jss + year_uss
+                guaranteed = year_pen + year_jss + year_uss + bridge_income_this_year
 
                 calendar_year_te = retirement_year_te + yr
                 life_event_cash, life_event_monthly = _post_retirement_year_effects(post_events_te, calendar_year_te)

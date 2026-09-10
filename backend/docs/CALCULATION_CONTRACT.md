@@ -6347,3 +6347,330 @@ scoping decision — not silently deferred without a paper trail, and not
 silently fixed without review.
 
 Branch: `codex/milestone-1-2-integration`.
+
+## 74. Two-age bridge-surplus fix: extended to all 7 confirmed callers from section 73 (2026-09-10, on `codex/two-age-bridge-surplus-fix`, branched from `codex/milestone-1-2-integration` at `f2c4a5d`)
+
+Correctness follow-up, separate from Milestone 4's tax/ownership
+design (which stays design-only, untouched by this branch). Fixes the
+identical bug section 73 located but did not fix: every two-age
+consumer's `year_need = max(0, target - bridge)` clamp inside
+`two_age_spending_need_fn`'s `need_for_year` closure, which both
+mislabeled gross spending (netting bridge in before any "gross"
+figure was captured) and, in the boundary case where bridge income
+exceeds the spending target, silently discarded the excess before it
+ever reached any withdrawal/guaranteed-income parameter — not
+withdrawn, not saved, not reported.
+
+**Fix.** `need_for_year` no longer nets bridge income into `year_need`
+at all — it returns the gross target unchanged, exactly matching the
+single-age fix (section 73's own predecessor). `bridge_income_this_year`
+(already returned unclamped) is now actually consumed by all 7 call
+sites, each fed into that consumer's OWN pre-existing
+surplus-sweep-capable channel — no new bridge-specific balance
+adjustment was introduced anywhere:
+
+1. `run_two_dimensional_retirement_projection` (`projection_engine.py`)
+   — added to `fixed_income`, which flows into
+   `annual_engine.simulate_withdrawal_year`'s own surplus sweep via its
+   `guaranteed_income` parameter.
+2. `run_owner_split_two_dimensional_projection` (`projection_engine.py`)
+   — same `fixed_income` channel, PLUS added to the `owner_cash["jason"]`
+   bucket (the bridge job is Jason's own income; the gate
+   `jason_ret_age == 55` is keyed to him specifically), so the owner-split
+   ledger attributes the surplus correctly instead of losing it or
+   crediting it to `joint`.
+3. `_run_single_two_age` (`simulation_engine.py`, two-age Monte
+   Carlo/Stress single-trial loop) — added to `fixed`, same
+   `simulate_withdrawal_year` surplus sweep.
+4. `_household_spending_success_rate_two_age` (`simulation_engine.py`)
+   — added into `_swr_year_step`'s `event_monthly` argument, reusing
+   that function's own existing surplus logic
+   (`remaining = max(0, portfolio_draw - event_monthly) + ...`). A
+   stale comment here claiming bridge was "already netted internally"
+   was corrected.
+5 & 6. `_run_roth_conversion_analysis_two_age`'s two loops (with- and
+   without-conversions, `simulation_engine.py`) — added to `guaranteed`
+   in both, so the "without conversions" baseline isn't biased relative
+   to the with-conversions schedule by an inconsistency between the two
+   paths.
+7. `_run_tax_efficiency_simulation_two_age`'s `run_strategy` closure
+   (`simulation_engine.py`) — added to `guaranteed`, which feeds
+   `_cash_available_offsets_need`'s existing `(net_need, surplus_credit)`
+   return value; that helper itself was read, not modified — it was
+   already the reusable shared surplus-handling primitive for this
+   consumer.
+
+One pre-existing test needed updating after this fix:
+`test_two_dimensional_retirement.py::TestAge55BridgeAndKidsRulesPreserved
+::test_bridge_and_inflation_use_jasons_effective_start_not_the_raw_
+selected_age` asserted the OLD "income_need net of bridge" semantic
+(`== 50000`); updated to assert the new gross-target semantic
+(`== 80000`, matching single-age's own `income_need` convention), while
+confirming `draw` is unchanged at `== 50000` (still correctly nets
+bridge via `fixed_income`, just one step later in the pipeline).
+
+No frontend changes were needed: no two-age consumer's frontend
+display currently reads these fields directly (two-age Survivor
+Scenario and Monte Carlo/Stress/Roth/Tax-Efficiency views consume
+summary fields — `percent_funded`, `final_balance`,
+`median_final_balance`, etc. — not the per-year `bridge_income`/
+`income_need` breakdown the single-age explainer shows).
+
+**Independent test evidence** (`tests/test_two_age_bridge_surplus.py`,
+new file, 15 tests, all against real backend output — no mocking of
+the functions under test):
+- Exact review reproduction: $500,000 taxable / $100,000 spending /
+  $150,000 bridge / 0% tax / 0% growth → $550,000 ending assets
+  (`test_exact_review_reproduction_500k_100k_150k`).
+- Bridge below, equal to, and above spending
+  (`test_bridge_below_spending`, `test_bridge_equal_to_spending`, and
+  the reproduction case above for "above").
+- Bridge expiration: 2 years of bridge then reverts to full spending
+  from the portfolio; post-expiration balance matches a zero-bridge
+  household plus the two years' accumulated bridge income exactly
+  (`test_bridge_expiration_reverts_to_normal_spending`).
+- Inflation: bridge income and the spending target inflate on the same
+  compounding curve every year, keeping the surplus ratio consistent
+  (`test_bridge_with_inflation_reconciles_each_year`).
+- Both retirement orders (Jason first vs. Justin first) — bridge
+  eligibility stays keyed to Jason's own retirement regardless of which
+  spouse is `later_retiree`
+  (`test_both_retirement_orders_jason_first_vs_justin_first`).
+- Combined with pension AND a one-time life event in the same year, no
+  offset double-counted or lost
+  (`test_bridge_surplus_combined_with_pension_and_life_event`).
+- Zero-bridge regression guard: a household with no bridge income at
+  all produces byte-identical numbers to always-existing behavior
+  (`test_zero_bridge_household_unchanged`).
+- All 6 other consumers spot-checked via their OWN surplus mechanism:
+  owner-split attribution to Jason specifically
+  (`test_owner_split_projection_credits_surplus_to_jason`), Monte Carlo
+  (`test_monte_carlo_two_age_reflects_bridge_surplus`), Stress Tests —
+  compared against an identical no-bridge household per historical
+  scenario rather than an absolute floor, since real market returns
+  can still produce a loss in some years
+  (`test_stress_tests_two_age_reflects_bridge_surplus`), Roth
+  Conversion's both loops
+  (`test_roth_conversion_two_age_with_and_without_conversions_both_
+  credit_surplus`), Tax Efficiency
+  (`test_tax_efficiency_two_age_reflects_bridge_surplus`).
+- Single-age vs. two-age parity: an equivalent matched household
+  produces identical `bridge_income`, `gross_spending_need`/
+  `income_need`, and ending `portfolio_balance` across both engines
+  (`test_matched_household_produces_matching_surplus`).
+- Performance: two-age Monte Carlo (1000 trials/call) with bridge
+  income active runs within 3x + 1.0s of a zero-bridge run of the same
+  size — no order-of-magnitude regression from the one extra addition
+  per year, per trial
+  (`test_monte_carlo_two_age_runtime_unaffected_by_bridge`).
+
+Full backend suite (including this new file and the one updated
+pre-existing test): 1426 passed, 97.28% coverage (floor is 95%).
+Sensitive-data check: clean, 156 tracked files scanned.
+
+**Limitations.** Deterministic Monte Carlo/Stress confirmation here
+means fixed-seed(42), 0%-volatility-forcing inputs plus a
+no-bridge-vs.-bridge comparison for Stress Tests specifically — not a
+claim that every random trial or every historical scenario individually
+clears an absolute balance floor, since real historical returns can
+still produce a loss regardless of guaranteed income. Milestone 4's
+tax/ownership design remains untouched and design-only; this fix does
+not implement any part of it.
+
+Branch: `codex/two-age-bridge-surplus-fix`. Pushed for review, NOT
+merged into `codex/milestone-1-2-integration` or `main`.
+
+## 75. Section 74 review follow-up: strengthen cross-consumer regression evidence to fail-if-ignored (2026-09-10, on `codex/two-age-bridge-surplus-fix`)
+
+Independent review of section 74's commit found no new calculation
+defect in the implementation itself, but identified a real weakness in
+`test_two_age_bridge_surplus.py`'s cross-consumer evidence: several
+assertions could pass even if a given consumer still silently
+discarded bridge income entirely, because they checked a floor,
+`>=`, or a bare success/failure flag rather than an exact,
+bridge-sensitive value:
+
+- Stress Tests used `with_bridge >= without_bridge` per scenario --
+  equal values (i.e., bridge fully ignored) would satisfy `>=`.
+- Monte Carlo checked only `success_rate == 100.0` -- an
+  already-fully-funded household passes that regardless of whether
+  bridge income was ever counted.
+- Roth Conversion checked `taxable_balance >= $500,000` -- unrelated
+  conversion or growth behavior could satisfy that bound on its own.
+- Tax Efficiency checked final-balance/success-rate thresholds with the
+  same weakness.
+- The "both retirement orders" test never actually exercised Justin
+  retiring first with Jason still working (the later-retiree income
+  path bridge income does NOT reach), and its docstring didn't state
+  precisely that bridge eligibility is Jason-specific.
+
+**Fix: every cross-consumer test now asserts an exact bridge-vs-
+no-bridge figure, deterministic wherever the consumer allows it.**
+
+- **Monte Carlo and Tax Efficiency** (both run 1000 randomized
+  trials): `PORT_STD` is monkeypatched to `0.0` for the duration of
+  each test, making `random.gauss(mu, 0) == mu` for every trial --
+  every trial becomes identical, so `median_final_balance` is an
+  exact, hand-computable figure ($550,000 with a $150,000 bridge
+  covering a $100,000 spend against a $500,000 opening balance, 0%
+  return) rather than a threshold a broken bridge path could still
+  clear. Each test also runs the byte-identical household with
+  `bridge_income_55=0` and asserts the exact no-bridge figure AND the
+  exact delta between the two, so the fix's own contribution is
+  isolated rather than assumed. Tax Efficiency's per-strategy
+  no-bridge figures differ by strategy ("taxable_first"/"roth_first"
+  gross up a $100,000 taxable draw for the flat 15% `TAX_TAXABLE`
+  rate to $382,353; "optimal" uses its own capital-gains-aware
+  cost-basis assumption, landing at $399,806) -- both are legitimate,
+  pre-existing per-strategy tax treatments confirmed independently of
+  this fix, not something the bridge fix introduced or should paper
+  over with a single shared formula.
+- **Stress Tests**: the "base" scenario (`post_ret` every year, no
+  historical override, no randomness) is fully deterministic --
+  asserted at the same exact $550,000/$400,000 (with/without bridge)
+  figures. Every OTHER (historical) scenario now requires a STRICT
+  improvement (`>`, not `>=`) over an identical no-bridge household run
+  through the same scenario, with a count assertion confirming every
+  single scenario in the result set was actually checked (not a subset
+  silently skipped).
+- **Roth Conversion**: the accounts fixture was changed to zero pretax
+  balance, forcing `optimal_conversion == 0` every year (nothing to
+  convert) -- this isolates the surplus-sweep arithmetic from
+  conversion-tax arithmetic entirely, making `taxable_after` an exact,
+  hand-computable figure ($550,000 with bridge, $400,000 without, a
+  precise $150,000 delta -- bridge income flows through untaxed, at
+  tax-rate parity with pension/SS, not gross-up-taxed like a taxable
+  draw would be).
+- **Owner-split**: added the same zero-bridge comparison (`$400,000`
+  exact) and an isolated $150,000 delta on `owner_balances["jason"]
+  ["taxable"]` specifically, not just an absolute figure for the
+  bridge-active case alone.
+- **Retirement-order test split in two and renamed** to state the
+  bridge's Jason-specific eligibility accurately:
+  `test_bridge_is_jason_specific_when_jason_retires_first` (Jason
+  first, Justin still working -- bridge applies, isolated via an exact
+  zero-bridge comparison against Justin's own unchanged gap-income
+  contribution) and a NEW test,
+  `test_bridge_does_not_apply_when_justin_retires_first` (Justin first,
+  JASON still working and later -- exercises the later-retiree income
+  path the first test never reached; confirms `bridge_income == 0`
+  every year despite `bridge_income_55` being configured, since the
+  gate is `jason_ret_age == 55` specifically, then flips
+  `jason_ret_age` back to 55 on an otherwise-identical household to
+  confirm the zero really is the gate and not some unrelated zeroing).
+
+**Mutation-test sanity check** (not part of the committed suite --
+a one-time verification of the verification): the exact section-74
+source diff was reverted in place (`git apply -R`) and the full
+strengthened `test_two_age_bridge_surplus.py` was re-run against the
+now-reintroduced bug. 12 of 16 tests failed, including all 5
+"other consumer" tests the review specifically flagged (Monte Carlo:
+`500000 == 550000` failed; Stress: same; Roth: same; Tax Efficiency:
+same; owner-split: `KeyError: 'bridge_income'` against the pre-fix
+yearly_detail shape). The fix was then reapplied (`git apply`) and the
+full strengthened suite re-confirmed green before committing. This
+directly demonstrates the tests now fail if bridge income is ignored,
+rather than merely being consistent with a codebase that already
+includes the fix.
+
+Full backend suite re-run after these test changes: 1427 passed,
+97.28% coverage. Sensitive-data check: clean, 157 tracked files
+scanned.
+
+Branch: `codex/two-age-bridge-surplus-fix`. Pushed for review, still
+NOT merged into `codex/milestone-1-2-integration` or `main`. Milestone
+4 remains untouched.
+
+## 76. Sibling fix: the identical clamp survived in single-age _run_single (Monte Carlo/Stress Tests), found by review (2026-09-10, on `codex/two-age-bridge-surplus-fix`)
+
+Independent review of sections 74/75 found a SIBLING bug of the exact
+same shape, in a function neither section touched: `simulation_engine.
+py`'s single-age `_run_single` -- shared by single-age `run_monte_carlo`
+and `run_stress_tests` -- still had the OLD clamp, `year_need = max(0,
+income_at_ret*cum_inf + kids_cost*cum_inf - bridge_income*cum_inf)`,
+and never added bridge income to its own `fixed` (guaranteed_income).
+Section 73 only fixed `run_retirement_projection` (the deterministic
+projection); this Monte Carlo/Stress Tests trial loop is a separate
+function in the same file that was never touched by that fix or by
+sections 74/75's two-age follow-up.
+
+**Fix, identical pattern to every prior fix in this family:** the
+bridge-active branch no longer nets bridge income into `year_need` --
+it returns the gross target unchanged. A new `bridge_this_year`
+variable is set in every branch of the `ret_age == 55` conditional
+(the raw bridge amount when active, `0.0` in every other branch,
+including the non-55 `else`), then added to `fixed` alongside
+`year_pen`/`year_jss`/`year_uss`, feeding `simulate_withdrawal_year`'s
+own existing surplus-sweep behavior -- no new bridge-specific
+adjustment introduced.
+
+**Test evidence** (`TestSingleAgeBridgeSurplusSibling`,
+`test_two_age_bridge_surplus.py`, 4 new tests, same PORT_STD==0
+determinism technique sections 74/75 established for Monte Carlo/Tax
+Efficiency):
+- `test_single_age_monte_carlo_exact_bridge_surplus`: exact $550,000
+  with a $150,000 bridge against $500,000/$100,000, exact $400,000
+  zero-bridge parity, exact $150,000 delta.
+- `test_single_age_stress_tests_exact_and_strict_bridge_surplus`: the
+  deterministic "base" scenario asserted exactly; every other
+  (historical-override) scenario requires a strict improvement over an
+  identical no-bridge household, with a count assertion confirming
+  every scenario was checked. Uses an 11-year horizon and a larger
+  balance/smaller spend (rather than the other tests' 1-year, $500K/
+  $100K shape) -- see the "pre-existing, out of scope" findings below,
+  both of which this specific scenario shape was chosen to avoid.
+- `test_single_age_zero_bridge_household_unchanged`: regression guard,
+  exact figures for a household with no bridge configured at all, both
+  Monte Carlo and Stress Tests.
+- `test_single_age_bridge_surplus_matches_two_age_sibling`: single-age
+  and two-age Monte Carlo land on the exact same $550,000 for a matched
+  household -- confirms the sibling fix produces the same number as
+  section 74's fix, not merely an internally self-consistent one.
+
+**Mutation-test sanity check**, same method as section 75: this
+section's own source diff was reverted in place and the 4 new tests
+re-run -- 3 of 4 failed (`500000 == 550000`,
+`4900000 == 5040000`), the 4th (zero-bridge parity) correctly still
+passed since it exercises no bridge income at all. Fix reapplied and
+the full strengthened suite reconfirmed green before committing.
+
+**Two pre-existing bugs found in `run_stress_tests` (single-age) while
+writing these tests -- confirmed independent of bridge income, NOT
+fixed here, out of scope for this fix:**
+
+1. `seq_returns = [overrides.get(yr, normal_returns[max(0,
+   yr-len(overrides))]) for yr in range(retire_yrs)]` (the
+   `early_sequence` scenario) evaluates `normal_returns[...]` as an
+   eager `dict.get` default argument on EVERY iteration, even when
+   `overrides` already has that key. With a horizon at or below an
+   override table's length (e.g. a 1-year horizon against
+   `early_sequence`'s 8-year table), `normal_returns` is empty and this
+   raises `IndexError`, unconditionally -- reproduced independently
+   with `bridge_income_55=0`. The two-age copy of this same scenario
+   was already fixed for this exact issue (its own "Lazy branch, not
+   dict.get's eager default arg" comment); the single-age original
+   never was. Worked around in the new tests via an 11-year horizon
+   (longer than every override table); not fixed in source.
+2. Single-age `run_stress_tests` never calls `random.seed()` (unlike
+   single-age `run_monte_carlo`, which does), so the `early_sequence`
+   scenario's random-filled tail years are not reproducible between
+   calls -- its result depends on whatever global RNG state happens to
+   exist at call time. Reproduced: two back-to-back calls (with and
+   without bridge income, holding everything else fixed) produced an
+   `early_sequence` final balance that was LOWER with bridge income
+   than without it, purely from RNG-state drift, not from any real
+   miscalculation. Worked around in the new tests via the same
+   PORT_STD-monkeypatch determinism trick used elsewhere in this file
+   (`random.gauss(mu, 0) == mu` regardless of RNG state); not fixed in
+   source.
+
+Both are reported here as confirmed, precisely-located findings for a
+separate scoping decision -- not silently fixed beyond this fix's
+requested scope, and not silently left undocumented either.
+
+Full backend suite re-run after this fix: 1431 passed, 97.30%
+coverage. Sensitive-data check: clean, 157 tracked files scanned.
+
+Branch: `codex/two-age-bridge-surplus-fix`. Pushed for review, still
+NOT merged into `codex/milestone-1-2-integration` or `main`. Milestone
+4 remains untouched.
