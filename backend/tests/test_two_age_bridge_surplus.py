@@ -3,8 +3,9 @@ Two-age bridge-income surplus fix (2026-09-10) — correctness follow-up
 to the single-age fix (CALCULATION_CONTRACT.md section 73), separate
 from Milestone 4's tax/ownership design.
 
-CALCULATION_CONTRACT.md section 73 found and fixed the single-age bug,
-then checked (but did not fix) the identical clamp in
+CALCULATION_CONTRACT.md section 73 found and fixed the single-age bug
+in run_retirement_projection (projection_engine.py's deterministic
+projection), then checked (but did not fix) the identical clamp in
 two_age_spending_need_fn, shared by 7 call sites across
 projection_engine.py and simulation_engine.py: run_two_dimensional_
 retirement_projection, run_owner_split_two_dimensional_projection, and
@@ -17,6 +18,16 @@ simulate_withdrawal_year-based consumers, the guaranteed_income argument
 to _swr_year_step, or the guaranteed_income argument to
 _cash_available_offsets_need — reusing each one's ALREADY-EXISTING
 surplus-sweep behavior rather than a new, bridge-specific adjustment.
+
+Review follow-up, CALCULATION_CONTRACT.md section 76: a SIBLING bug of
+the exact same shape survived in simulation_engine.py's single-age
+_run_single (shared by single-age run_monte_carlo and run_stress_tests)
+-- section 73 only fixed the deterministic projection, not this
+Monte-Carlo/Stress-Tests trial loop, which still netted
+`max(0, target - bridge)` and never added bridge income to its own
+`fixed` (guaranteed_income). TestSingleAgeBridgeSurplusSibling below
+verifies that fix using the same exact-value, PORT_STD==0-determinism
+technique as the two-age Monte Carlo/Tax Efficiency tests above.
 """
 import time
 
@@ -432,3 +443,111 @@ class TestBridgeFixPerformance:
         # order-of-magnitude regression from the fix, not chasing a tight
         # bound that would make this test flaky on a loaded machine.
         assert bridge_elapsed < no_bridge_elapsed * 3 + 1.0
+
+
+class TestSingleAgeBridgeSurplusSibling:
+    """Sibling fix (CALCULATION_CONTRACT.md section 76): simulation_
+    engine.py's single-age _run_single -- shared by single-age
+    run_monte_carlo and run_stress_tests -- had the identical clamp bug
+    as the two-age one this file otherwise covers, but section 74/75's
+    fix never touched it (a different function, in a different part of
+    the same file). Same exact-value/zero-bridge-parity technique as
+    the two-age Monte Carlo/Stress tests above: PORT_STD monkeypatched
+    to 0.0 makes every Monte Carlo trial identical, and Stress Tests'
+    "base" scenario is already fully deterministic, so both give a
+    hand-computable $550,000 figure a broken/ignored bridge path could
+    not produce."""
+
+    def test_single_age_monte_carlo_exact_bridge_surplus(self, monkeypatch):
+        monkeypatch.setattr(simulation_engine, "PORT_STD", 0.0)
+        inputs = base_inputs(jason_age=55, justin_age=55, retirement_income_today_dollars=100000, retirement_end_age=56,
+                              bridge_income_55=150000, bridge_years_55=1)
+        result = run_monte_carlo(inputs, TAXABLE(500000), ret_age=55)
+        assert result["success_rate"] == 100.0
+        assert result["median_final_balance"] == 550000  # 500000 + (150000 bridge - 100000 spending)
+
+        no_bridge_inputs = base_inputs(jason_age=55, justin_age=55, retirement_income_today_dollars=100000, retirement_end_age=56)
+        no_bridge_result = run_monte_carlo(no_bridge_inputs, TAXABLE(500000), ret_age=55)
+        assert no_bridge_result["median_final_balance"] == 400000  # zero-bridge parity, unaffected by the fix
+        assert result["median_final_balance"] - no_bridge_result["median_final_balance"] == 150000
+
+    def test_single_age_stress_tests_exact_and_strict_bridge_surplus(self, monkeypatch):
+        # PORT_STD forced to 0 here too: single-age run_stress_tests
+        # (unlike run_monte_carlo) never calls random.seed(), so
+        # "early_sequence"'s random-filled tail years are NOT
+        # reproducible between calls -- with PORT_STD==0,
+        # random.gauss(mu, 0) == mu regardless of the RNG's actual
+        # state, making every scenario fully deterministic and the
+        # with-bridge/without-bridge comparison meaningful rather than
+        # incidentally flaky (pre-existing, unrelated to this fix --
+        # reported in CALCULATION_CONTRACT.md section 76, not silently
+        # fixed here).
+        monkeypatch.setattr(simulation_engine, "PORT_STD", 0.0)
+        # An 11-year horizon (longer than every SCENARIOS override table,
+        # the longest of which is 10 years for stagflation_1970s/
+        # lost_decade) sidesteps a PRE-EXISTING, bridge-unrelated crash:
+        # run_stress_tests's `normal_returns[max(0, yr-len(overrides))]`
+        # is an eager dict.get default argument, evaluated every
+        # iteration even when `overrides` already has that key -- with a
+        # horizon at or below an override table's length, normal_returns
+        # is empty and this indexes out of range regardless of bridge
+        # income (reproduced independently with bridge_income_55=0).
+        # Pre-existing, out of scope for this fix (the two-age version
+        # was already fixed for this exact issue, per its own "Lazy
+        # branch, not dict.get's eager default arg" comment) -- reported
+        # in CALCULATION_CONTRACT.md section 76, not silently fixed here.
+        # A large balance and small annual spend keep 11 years of $10,000
+        # spending easily affordable in every scenario, base included.
+        bridge_inputs = base_inputs(jason_age=55, justin_age=55, retirement_income_today_dollars=10000, retirement_end_age=66,
+                                     bridge_income_55=150000, bridge_years_55=1)
+        no_bridge_inputs = base_inputs(jason_age=55, justin_age=55, retirement_income_today_dollars=10000, retirement_end_age=66)
+        with_bridge = run_stress_tests(bridge_inputs, TAXABLE(5000000), ret_age=55)
+        without_bridge = run_stress_tests(no_bridge_inputs, TAXABLE(5000000), ret_age=55)
+
+        # "base" (post_ret every year, no override, no randomness) is
+        # fully deterministic -- exact value, not a floor: 5,000,000 +
+        # (150,000 bridge in year 0) - 11 * 10,000 spending.
+        assert with_bridge["scenarios"]["base"]["final_balance"] == 5000000 + 150000 - 11 * 10000
+        assert without_bridge["scenarios"]["base"]["final_balance"] == 5000000 - 11 * 10000
+
+        # Every remaining (historical-override) scenario applies the
+        # SAME return path to both runs, so extra guaranteed income that
+        # is never withdrawn can only strictly help -- >, not >=, which
+        # a fully-ignored bridge could also satisfy via equality.
+        strict_improvements = 0
+        for name, scenario in with_bridge["scenarios"].items():
+            no_bridge_balance = without_bridge["scenarios"][name]["final_balance"]
+            assert scenario["final_balance"] > no_bridge_balance, f"scenario {name!r} did not improve with bridge income"
+            strict_improvements += 1
+        assert strict_improvements == len(with_bridge["scenarios"])  # every scenario was actually checked, none skipped
+
+    def test_single_age_zero_bridge_household_unchanged(self, monkeypatch):
+        """Regression guard: a household with no bridge income at all
+        must be completely unaffected by this fix -- both Monte Carlo
+        and Stress Tests reduce to the plain opening-balance-minus-
+        spending arithmetic that always existed."""
+        monkeypatch.setattr(simulation_engine, "PORT_STD", 0.0)
+        inputs = base_inputs(jason_age=60, justin_age=60, retirement_income_today_dollars=80000, retirement_end_age=61)
+        mc_result = run_monte_carlo(inputs, TAXABLE(500000), ret_age=60)
+        assert mc_result["median_final_balance"] == 420000  # 500000 - 80000, no bridge configured at all
+
+        # 11-year horizon here too, for the same pre-existing-crash reason
+        # as the test above -- a plain (no-bridge) household is otherwise
+        # affected by it identically, confirming it's unrelated to bridge.
+        stress_inputs = base_inputs(jason_age=55, justin_age=55, retirement_income_today_dollars=10000, retirement_end_age=66)
+        stress_result = run_stress_tests(stress_inputs, TAXABLE(5000000), ret_age=55)
+        assert stress_result["scenarios"]["base"]["final_balance"] == 5000000 - 11 * 10000
+
+    def test_single_age_bridge_surplus_matches_two_age_sibling(self, monkeypatch):
+        """The single-age and two-age fixes are independent
+        implementations of the identical formula -- confirm they land on
+        the exact same number for a matched household, rather than each
+        merely being internally self-consistent."""
+        monkeypatch.setattr(simulation_engine, "PORT_STD", 0.0)
+        single_inputs = base_inputs(jason_age=55, justin_age=55, retirement_income_today_dollars=100000, retirement_end_age=56,
+                                     bridge_income_55=150000, bridge_years_55=1)
+        two_age_inputs = base_inputs(retirement_income_today_dollars=100000, retirement_end_age=56,
+                                      bridge_income_55=150000, bridge_years_55=1)
+        single_result = run_monte_carlo(single_inputs, TAXABLE(500000), ret_age=55)
+        two_age_result = run_monte_carlo(two_age_inputs, TAXABLE(500000), jason_ret_age=55, justin_ret_age=55)
+        assert single_result["median_final_balance"] == two_age_result["median_final_balance"] == 550000

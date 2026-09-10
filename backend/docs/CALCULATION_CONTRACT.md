@@ -6580,3 +6580,97 @@ scanned.
 Branch: `codex/two-age-bridge-surplus-fix`. Pushed for review, still
 NOT merged into `codex/milestone-1-2-integration` or `main`. Milestone
 4 remains untouched.
+
+## 76. Sibling fix: the identical clamp survived in single-age _run_single (Monte Carlo/Stress Tests), found by review (2026-09-10, on `codex/two-age-bridge-surplus-fix`)
+
+Independent review of sections 74/75 found a SIBLING bug of the exact
+same shape, in a function neither section touched: `simulation_engine.
+py`'s single-age `_run_single` -- shared by single-age `run_monte_carlo`
+and `run_stress_tests` -- still had the OLD clamp, `year_need = max(0,
+income_at_ret*cum_inf + kids_cost*cum_inf - bridge_income*cum_inf)`,
+and never added bridge income to its own `fixed` (guaranteed_income).
+Section 73 only fixed `run_retirement_projection` (the deterministic
+projection); this Monte Carlo/Stress Tests trial loop is a separate
+function in the same file that was never touched by that fix or by
+sections 74/75's two-age follow-up.
+
+**Fix, identical pattern to every prior fix in this family:** the
+bridge-active branch no longer nets bridge income into `year_need` --
+it returns the gross target unchanged. A new `bridge_this_year`
+variable is set in every branch of the `ret_age == 55` conditional
+(the raw bridge amount when active, `0.0` in every other branch,
+including the non-55 `else`), then added to `fixed` alongside
+`year_pen`/`year_jss`/`year_uss`, feeding `simulate_withdrawal_year`'s
+own existing surplus-sweep behavior -- no new bridge-specific
+adjustment introduced.
+
+**Test evidence** (`TestSingleAgeBridgeSurplusSibling`,
+`test_two_age_bridge_surplus.py`, 4 new tests, same PORT_STD==0
+determinism technique sections 74/75 established for Monte Carlo/Tax
+Efficiency):
+- `test_single_age_monte_carlo_exact_bridge_surplus`: exact $550,000
+  with a $150,000 bridge against $500,000/$100,000, exact $400,000
+  zero-bridge parity, exact $150,000 delta.
+- `test_single_age_stress_tests_exact_and_strict_bridge_surplus`: the
+  deterministic "base" scenario asserted exactly; every other
+  (historical-override) scenario requires a strict improvement over an
+  identical no-bridge household, with a count assertion confirming
+  every scenario was checked. Uses an 11-year horizon and a larger
+  balance/smaller spend (rather than the other tests' 1-year, $500K/
+  $100K shape) -- see the "pre-existing, out of scope" findings below,
+  both of which this specific scenario shape was chosen to avoid.
+- `test_single_age_zero_bridge_household_unchanged`: regression guard,
+  exact figures for a household with no bridge configured at all, both
+  Monte Carlo and Stress Tests.
+- `test_single_age_bridge_surplus_matches_two_age_sibling`: single-age
+  and two-age Monte Carlo land on the exact same $550,000 for a matched
+  household -- confirms the sibling fix produces the same number as
+  section 74's fix, not merely an internally self-consistent one.
+
+**Mutation-test sanity check**, same method as section 75: this
+section's own source diff was reverted in place and the 4 new tests
+re-run -- 3 of 4 failed (`500000 == 550000`,
+`4900000 == 5040000`), the 4th (zero-bridge parity) correctly still
+passed since it exercises no bridge income at all. Fix reapplied and
+the full strengthened suite reconfirmed green before committing.
+
+**Two pre-existing bugs found in `run_stress_tests` (single-age) while
+writing these tests -- confirmed independent of bridge income, NOT
+fixed here, out of scope for this fix:**
+
+1. `seq_returns = [overrides.get(yr, normal_returns[max(0,
+   yr-len(overrides))]) for yr in range(retire_yrs)]` (the
+   `early_sequence` scenario) evaluates `normal_returns[...]` as an
+   eager `dict.get` default argument on EVERY iteration, even when
+   `overrides` already has that key. With a horizon at or below an
+   override table's length (e.g. a 1-year horizon against
+   `early_sequence`'s 8-year table), `normal_returns` is empty and this
+   raises `IndexError`, unconditionally -- reproduced independently
+   with `bridge_income_55=0`. The two-age copy of this same scenario
+   was already fixed for this exact issue (its own "Lazy branch, not
+   dict.get's eager default arg" comment); the single-age original
+   never was. Worked around in the new tests via an 11-year horizon
+   (longer than every override table); not fixed in source.
+2. Single-age `run_stress_tests` never calls `random.seed()` (unlike
+   single-age `run_monte_carlo`, which does), so the `early_sequence`
+   scenario's random-filled tail years are not reproducible between
+   calls -- its result depends on whatever global RNG state happens to
+   exist at call time. Reproduced: two back-to-back calls (with and
+   without bridge income, holding everything else fixed) produced an
+   `early_sequence` final balance that was LOWER with bridge income
+   than without it, purely from RNG-state drift, not from any real
+   miscalculation. Worked around in the new tests via the same
+   PORT_STD-monkeypatch determinism trick used elsewhere in this file
+   (`random.gauss(mu, 0) == mu` regardless of RNG state); not fixed in
+   source.
+
+Both are reported here as confirmed, precisely-located findings for a
+separate scoping decision -- not silently fixed beyond this fix's
+requested scope, and not silently left undocumented either.
+
+Full backend suite re-run after this fix: 1431 passed, 97.30%
+coverage. Sensitive-data check: clean, 157 tracked files scanned.
+
+Branch: `codex/two-age-bridge-surplus-fix`. Pushed for review, still
+NOT merged into `codex/milestone-1-2-integration` or `main`. Milestone
+4 remains untouched.

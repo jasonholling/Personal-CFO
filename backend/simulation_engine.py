@@ -357,18 +357,33 @@ def _run_single(
             hc_kids       = phase_inputs.get("healthcare_kids", 0) * ((1 + inflation) ** max(0, withdrawal_start_age - jason_age))
             if yr < bridge_years:
                 hc_this_year = 0
-                year_need = max(0, income_at_ret*cum_inf + kids_cost*cum_inf - bridge_income*cum_inf)
+                # Single-age bridge-surplus fix (2026-09-10, sibling to
+                # the two-age fix -- CALCULATION_CONTRACT.md section 76):
+                # year_need no longer nets bridge income at all. The old
+                # `max(0, target - bridge)` clamp discarded any bridge
+                # surplus before simulate_withdrawal_year below ever saw
+                # it -- not withdrawn, not saved, not reported. bridge_
+                # this_year now joins `fixed` (guaranteed_income) just
+                # like pension/SS, reusing simulate_withdrawal_year's own
+                # existing surplus-sweep behavior instead of a new,
+                # bridge-specific adjustment.
+                year_need = income_at_ret*cum_inf + kids_cost*cum_inf
+                bridge_this_year = bridge_income * cum_inf
             elif yr < kids_years and age < 65:
                 hc_this_year = hc_kids
                 year_need = income_at_ret*cum_inf + kids_cost*cum_inf + hc_kids*cum_inf
+                bridge_this_year = 0.0
             elif age < 65:
                 hc_this_year = healthcare_pre
                 year_need = income_at_ret*cum_inf + healthcare_pre*cum_inf
+                bridge_this_year = 0.0
             else:
                 hc_this_year = healthcare_post
                 year_need = income_at_ret*cum_inf + healthcare_post*cum_inf
+                bridge_this_year = 0.0
         else:
             year_need = income_at_ret * cum_inf + income.healthcare
+            bridge_this_year = 0.0
 
         # Life events active in the withdrawal phase — computed above via
         # the shared builder (same _post_retirement_year_effects call
@@ -394,7 +409,10 @@ def _run_single(
         year_pen  = pension_annual  # frozen pension, no COLA
         year_jss  = income.jason_ss
         year_uss  = income.justin_ss
-        fixed     = year_pen + year_jss + year_uss
+        # bridge_this_year joins guaranteed income here, like pension/SS
+        # -- see the bridge-active branch above (CALCULATION_CONTRACT.md
+        # section 76).
+        fixed     = year_pen + year_jss + year_uss + bridge_this_year
 
         # RMD
         rmd = _rmd(pretax, age, _rmd_start)
