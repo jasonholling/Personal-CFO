@@ -219,3 +219,56 @@ describe('Survivor Scenario second-earner gap-income disclosure (backend/docs/CA
     expect(container.textContent).not.toContain('continued income')
   })
 })
+
+describe('Survivor Scenario stale-result handling (Milestone 3 stale-result audit, 2026-09-09)', () => {
+  // This section had neither of the two patterns MonteCarloSection/
+  // StressTestSection already use elsewhere in this app (see
+  // Simulation.jsx's own comments) -- a slow response could overwrite
+  // a newer selection's result, and changing an input after a
+  // completed run gave no indication the result on screen no longer
+  // matched. Both fixed together; these are the same two test shapes
+  // ScenarioFlow.test.jsx already uses for the other two sections.
+  it('discards a slow response that resolves after the survivor selection changed', async () => {
+    let resolveFirst
+    localStorage.setItem('cfo_scenario_ret_age', '60')
+    axios.get.mockImplementation(url => {
+      if (url === '/api/planning-inputs') return Promise.resolve({ data: mockPlanningInputs(60, 58) })
+      if (url === '/api/simulation/survivor-scenario') return new Promise(resolve => { resolveFirst = resolve })
+      return Promise.resolve({ data: projections })
+    })
+    await act(async () => root.render(<StressTestWhatIf />))
+    await flush()
+    await click('Survivor Scenario')
+    await flush()
+    await click('Run Scenario')
+    // Change the selection (who died first) while the request for the
+    // OLD selection is still in flight.
+    await click('Sam')
+    // The slow response for the OLD (Jason-deceased) selection now resolves.
+    await act(async () => {
+      resolveFirst({ data: { has_data: true, survives: true, verdict: 'stale result' } })
+      await flush()
+    })
+    // Must NOT render the stale result under the new selection.
+    expect(container.textContent).not.toContain('stale result')
+  })
+
+  it('shows a clear-previous-result notice after changing an input following a completed run', async () => {
+    localStorage.setItem('cfo_scenario_ret_age', '60')
+    axios.get.mockImplementation(url => Promise.resolve({
+      data: url === '/api/planning-inputs' ? mockPlanningInputs(60, 58)
+          : url === '/api/simulation/survivor-scenario' ? { has_data: false }
+          : projections,
+    }))
+    await act(async () => root.render(<StressTestWhatIf />))
+    await flush()
+    await click('Survivor Scenario')
+    await flush()
+    await click('Run Scenario')
+    await flush()
+    await click('Sam')  // change who died first after a completed run
+    await flush()
+    expect(container.textContent).toContain('Cleared the previous result')
+    expect(container.textContent).toContain('changed who died')
+  })
+})

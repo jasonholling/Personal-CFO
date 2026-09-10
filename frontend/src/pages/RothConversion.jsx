@@ -156,9 +156,11 @@ export default function RothConversion() {
           54): shared jasonSsClaimAge/justinSsClaimAge scenario state --
           same values carry over from/to Retirement.jsx, Monte Carlo,
           Historical Stress, and Survivor Scenario. */}
-      <div className="card" style={{ marginBottom:20, padding:'16px 20px' }}>
-        <div className="label" style={{ marginBottom:8 }}>Custom Social Security Claim Age (62-70)</div>
-        <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:24 }}>
+      {/* Milestone 3 (progressive disclosure, 2026-09-09): collapsed by
+          default -- see Retirement.jsx's identical comment. */}
+      <details className="card" style={{ marginBottom:20, padding:'16px 20px' }} open={jasonSsClaimAge != null || justinSsClaimAge != null}>
+        <summary style={{ cursor:'pointer', fontSize:13, fontWeight:600, padding:'4px 0', marginBottom:4 }}>Custom Social Security Claim Age (62-70)</summary>
+        <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:24, marginTop:8 }}>
           <ClaimAgeSlider
             label={`${person1Name}'s claim age`}
             claimAge={jasonSsClaimAge}
@@ -183,7 +185,7 @@ export default function RothConversion() {
             compact
           />
         </div>
-      </div>
+      </details>
 
       {/* Scenario controls */}
       <div className="card" style={{ marginBottom:24 }}>

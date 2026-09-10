@@ -5626,3 +5626,56 @@ acceptance-journey testing (two earners, 0/5 kids, keyboard operation,
 actual browser behavior).
 
 Branch: `codex/milestone-3-navigation`, pushed, not merged.
+
+## 65. Milestone 3, third slice: progressive disclosure + Survivor Scenario stale-result audit (2026-09-09, on `codex/milestone-3-navigation`)
+
+Two more Milestone 3 acceptance criteria closed this slice.
+
+**Progressive disclosure.** The "Custom Social Security Claim Age
+(62-70)" card appears on 4 pages (`Retirement.jsx`,
+`RothConversion.jsx`, `StressTestWhatIf.jsx` ×2 — the Survivor
+Scenario tab and the Monte Carlo/Stress tab) as an always-expanded
+card, even though it's an advanced, optional override most visits
+never touch (the Early/Delayed toggle already covers the common case).
+All 4 wrapped in a native `<details>`, matching this codebase's
+existing pattern (`Simulation.jsx`'s "More tools" section) instead of
+introducing new state — collapsed by default, but `open` automatically
+whenever either slider (or, for the Monte Carlo/Stress copy, the
+What-If Builder's SS multiplier) is actually active, so an in-effect
+override is never hidden behind a click.
+
+**Survivor Scenario stale-result audit.** Checked every explicit-run
+tool for the `genRef`/`lastRunSnapshotRef` stale-response-guard and
+clear-previous-result-notice pattern Monte Carlo/Stress Tests already
+have (sections 55-56). Roth Conversion/Retirement/Sensitivity don't
+need it — they auto-recompute on every input change via `useEffect`,
+so there's no explicit "Run" step and therefore nothing to go stale.
+Survivor Scenario (`StressTestWhatIf.jsx`'s `SurvivorScenarioSection`)
+DOES have an explicit "Run Scenario" button and had NEITHER pattern:
+a slow response could silently overwrite a newer selection's result,
+and changing deceased/death age/survivor-need-% or a claim age after
+a completed run gave no indication the result on screen no longer
+matched. Both added, adapted to this section's own fields (deceased/
+deathAge/needFactor instead of retAge/ssTiming/overrides) rather than
+literally sharing `describeAssumptionChange` (different field
+semantics; same pattern, separate implementation).
+
+New tests in `SurvivorScenario.test.jsx`: a slow response resolving
+after the deceased-spouse selection changed must not render under the
+new selection; changing an input after a completed run must show
+"Cleared the previous result — changed who died...".
+
+**Verified:** `npm run build` clean, `npm test` 41/41 (39 existing +
+2 new). No backend changes. Live browser verification of the
+`<details>` collapse/expand behavior and the new stale notices is
+still owed — same Chrome-connection gap as sections 63-64.
+
+**Still explicitly open from Milestone 3**: cross-page result/draft
+preservation (deliberately skipped per user decision — documented as
+a known limitation, not attempted, since it's a larger architecture
+change than fits this branch); the brief's full acceptance-journey
+testing (two earners, unequal ages, 0/5 kids, failed requests,
+unsaved-changes navigation, keyboard operation, actual browser
+behavior).
+
+Branch: `codex/milestone-3-navigation`, pushed, not merged.
