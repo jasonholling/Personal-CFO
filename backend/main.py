@@ -827,13 +827,21 @@ def get_estate_documents():
 
 @app.put("/api/estate-documents/{document_type}")
 def save_estate_document(document_type: str, body: EstateDocument):
-    # Status vocabulary corrected 2026-09-09: this endpoint originally
-    # validated against not_started/in_progress/complete, a set that
-    # never actually matched Estate.jsx's own UI (StatusBadge and its
-    # <select> have always offered executed/verify/outdated/pending) --
-    # this endpoint was built before ever being wired to the frontend,
-    # so the mismatch went unnoticed. Corrected to the real vocabulary.
-    if document_type != body.document_type or not document_type.strip() or body.status not in {"executed", "verify", "outdated", "pending"}:
+    # Status vocabulary widened 2026-09-09 -- corrected to
+    # executed/verify/outdated/pending in the previous commit on the
+    # (wrong) assumption that Estate.jsx was this endpoint's only
+    # caller. It isn't: PlanOperatingSystem.jsx ALSO calls this same
+    # endpoint, with its own disjoint document_type keys ("Will",
+    # "Revocable trust", etc. vs. Estate.jsx's "trust"/"wills"/...) AND
+    # its own disjoint status vocabulary (not_started/in_progress/
+    # complete) -- the narrower fix would have 400'd every save from
+    # that page. Accepts the union of both until the two estate-
+    # tracking UIs are reconciled into one (Milestone 3 navigation
+    # work) rather than silently regressing one of them in the
+    # meantime.
+    if document_type != body.document_type or not document_type.strip() or body.status not in {
+        "executed", "verify", "outdated", "pending", "not_started", "in_progress", "complete",
+    }:
         raise HTTPException(status_code=400, detail="Invalid estate-document status")
     conn = get_db()
     conn.execute("INSERT INTO estate_documents (document_type,status,reviewed_on,next_review_on,location_hint,notes,updated_at) VALUES (?,?,?,?,?,?,datetime('now')) ON CONFLICT(document_type) DO UPDATE SET status=excluded.status,reviewed_on=excluded.reviewed_on,next_review_on=excluded.next_review_on,location_hint=excluded.location_hint,notes=excluded.notes,updated_at=datetime('now')", (body.document_type,body.status,body.reviewed_on,body.next_review_on,body.location_hint,body.notes))

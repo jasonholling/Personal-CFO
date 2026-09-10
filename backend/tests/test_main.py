@@ -1639,13 +1639,16 @@ class TestCfoOperatingSystem:
         assert reviews.status_code == 200
         assert reviews.json()[0]["assumptions"]["inflation_rate"] == .025
 
-    def test_estate_document_rejects_old_removed_status_vocabulary(self, client):
-        """The vocabulary this endpoint validated against before the fix
-        above (not_started/in_progress/complete) must now be rejected --
-        confirms the fix actually changed the accepted set rather than
-        just widening it to accept everything."""
-        document = {"document_type":"Will","status":"complete"}
-        assert client.put("/api/estate-documents/Will", json=document).status_code == 400
+    def test_estate_document_accepts_both_live_callers_status_vocabularies(self, client):
+        """PlanOperatingSystem.jsx calls this SAME endpoint as
+        Estate.jsx, with its own disjoint status vocabulary
+        (not_started/in_progress/complete) -- both must be accepted
+        until the two estate-tracking UIs are reconciled (see the
+        endpoint's own comment). A genuinely invalid status must still
+        be rejected."""
+        assert client.put("/api/estate-documents/Will", json={"document_type":"Will","status":"complete"}).status_code == 200
+        assert client.put("/api/estate-documents/wills", json={"document_type":"wills","status":"executed"}).status_code == 200
+        assert client.put("/api/estate-documents/x", json={"document_type":"x","status":"bogus"}).status_code == 400
 
     def test_estate_beneficiaries_crud(self, client):
         """Regression test (external audit, 2026-09-09, P1): beneficiary

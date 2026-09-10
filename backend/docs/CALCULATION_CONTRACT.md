@@ -5447,10 +5447,13 @@ no dangling row (nothing to repair there), but the gap was real for
 any database in that intermediate state.
 
 **P2 — main itself failed the sensitive-data check.** Section 61's own
-prose ("the Omaha LTC benchmark") tripped the `Omaha` denylist entry —
-a verification/wording issue in a doc I wrote, not a credential leak;
-the `omaha_daily_cost_low/high` field *names* in code are lowercase and
-never matched. Reworded to "the local-market LTC cost benchmark."
+prose named the same local-market city this app's LTC benchmark is
+keyed to, tripping the denylist entry for that name — a verification/
+wording issue in a doc I wrote, not a credential leak; the
+`omaha_daily_cost_low/high` field *names* in code are lowercase and
+never matched. Reworded to "the local-market LTC cost benchmark" (and,
+per this section's own history, deliberately not spelling the city
+name out again here either).
 
 New regression tests: `TestRunInsuranceAnalysis` (kids-coverage
 exclusion, shortfall-stays-a-shortfall, insurance/education parity),
