@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import axios from 'axios'
 import TaskPanel from '../components/TaskPanel'
 import { BarChart, Bar, AreaChart, Area, XAxis, YAxis, Tooltip, Legend, ResponsiveContainer } from 'recharts'
@@ -62,14 +62,26 @@ export default function Retirement({ onNavigate }) {
   // see a custom claim age reflected here -- it's a genuine, explicit
   // per-request override, not a read of the Settings value.
 
+  // Out-of-order response guard (2026-09-09, review finding): rapidly
+  // toggling the claim-age sliders fires a new GET on every change:
+  // nothing here previously stopped an earlier, slower request from
+  // resolving AFTER a later, faster one and overwriting it with stale
+  // data via setData -- both the KPI cards and the explainer below would
+  // then show numbers computed for a PREVIOUS claim-age selection while
+  // the sliders themselves show the CURRENT one. Same genRef guard
+  // pattern already established for exactly this bug class in
+  // StressTestWhatIf.jsx's SurvivorScenarioSection (CALCULATION_
+  // CONTRACT.md section 65).
+  const genRef = useRef(0)
   useEffect(() => {
     const params = {}
     if (jasonSsClaimAge  != null) params.jason_ss_claim_age  = jasonSsClaimAge
     if (justinSsClaimAge != null) params.justin_ss_claim_age = justinSsClaimAge
+    const gen = ++genRef.current
     setLoading(true)
     axios.get('/api/projections/retirement', { params })
-      .then(r => { setData(r.data); setLoading(false) })
-      .catch(e => { setError(e.response?.data?.detail || 'Could not load projections'); setLoading(false) })
+      .then(r => { if (gen !== genRef.current) return; setData(r.data); setLoading(false) })
+      .catch(e => { if (gen !== genRef.current) return; setError(e.response?.data?.detail || 'Could not load projections'); setLoading(false) })
   }, [jasonSsClaimAge, justinSsClaimAge])
 
   if (loading) return <div className="loading">Running projections...</div>
@@ -124,7 +136,17 @@ export default function Retirement({ onNavigate }) {
   const explainerFlows = s.yearly_detail.map((y, i) => ({
     year: y.year, jasonAge: y.jason_age,
     opening: i === 0 ? s.portfolio_at_retirement : s.yearly_detail[i - 1].portfolio_balance,
-    income: y.pension + y.social_security + y.bridge_income,
+    // Review finding (2026-09-09): this used to omit justin_gap_income
+    // (second-earner income during the gap phase) and life_event_cash
+    // (a one-time inflow like an asset sale, or a negative one-time
+    // cost) -- both are guaranteed-income-like flows the backend itself
+    // already nets against spending need BEFORE any bucket is touched
+    // (see run_retirement_projection's own life-event-cash handling,
+    // CALCULATION_CONTRACT.md's withdrawal-waterfall migration note) --
+    // leaving them out understated total income for any year either one
+    // was nonzero, which is most years for a household with either a
+    // working second spouse or a planned asset sale.
+    income: y.pension + y.social_security + y.bridge_income + y.justin_gap_income + y.life_event_cash,
     spending: y.income_need,
     taxes: y.estimated_tax,
     withdrawal: y.withdrawal,
