@@ -320,6 +320,44 @@ class TestRunRetirementProjection:
         age_73_year = next(y for y in scenario["yearly_detail"] if y["jason_age"] == 73)
         assert age_73_year["rmd"] > 0
 
+    def test_age_75_rmd_times_divisor_equals_prior_year_pretax_balance(self, sample_inputs, sample_accounts):
+        """Independent verification of the RMD arithmetic itself (auditor
+        review, 2026-09-10, following a "this looks dramatic" report
+        against a large first RMD in the Monte Carlo companion chart):
+        the IRS Uniform Lifetime Table's age-75 divisor is 24.6
+        (RMD_TABLE in this file), so age 75's rmd, multiplied back out by
+        24.6, must reproduce age 74's CLOSING pretax_balance exactly (the
+        RMD is computed against the balance carried in from the prior
+        year -- see run_retirement_projection's `rmd = _rmd(pretax, age,
+        ...)` call, where `pretax` at that point is still last year's
+        closing value, not yet touched by this year's own withdrawal).
+        This doesn't re-derive _rmd's own formula -- it independently
+        recomputes the expected dollar figure from the published IRS
+        divisor and the account balance the app itself reports, so it
+        would catch a real regression (wrong divisor, balance computed
+        at the wrong point in the year, a stale table) that an assertion
+        merely checking "rmd > 0" never could."""
+        inputs = {**sample_inputs, "jason_age": 40}  # born 1986 => RMDs start at 75
+        result = run_retirement_projection(inputs, sample_accounts, ret_ages=[60])
+        scenario = next(s for s in result["scenarios"] if s["ss_timing"] == "early")
+        yearly = scenario["yearly_detail"]
+        age_74_year = next(y for y in yearly if y["jason_age"] == 74)
+        age_75_year = next(y for y in yearly if y["jason_age"] == 75)
+        assert age_74_year["rmd"] == 0  # not yet 75 -- no RMD the year before
+        assert age_75_year["rmd"] > 0   # otherwise the multiplication check below is vacuous
+        prior_pretax_balance = age_74_year["pretax_balance"]
+        RMD_DIVISOR_AGE_75 = 24.6
+        # Rounding tolerance: both sides are independently rounded to the
+        # nearest dollar (yearly_detail's own convention) BEFORE this
+        # test re-multiplies, so up to +/-0.5 of rounding error on each
+        # side of the division can be amplified by the 24.6 divisor
+        # (+/-0.5 * 24.6 = +/-12.3) plus the balance's own +/-0.5 —
+        # generously bounded at 15.0, nowhere near the tens-of-thousands-
+        # of-dollars discrepancy a real bug (wrong divisor, wrong
+        # balance, balance read at the wrong point in the year) would
+        # produce.
+        assert abs(age_75_year["rmd"] * RMD_DIVISOR_AGE_75 - prior_pretax_balance) < 15.0
+
     def test_pretax_withdrawals_now_carry_an_estimated_tax(self, sample_inputs, sample_accounts):
         """Regression test (external audit 2026-09-05): pretax
         withdrawals/RMDs used to be treated as tax-free when computing how

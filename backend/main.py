@@ -2126,15 +2126,44 @@ def get_income_sources(ret_age: int = 60, ss_timing: str = "early", body: dict =
     _label = f"age_{ret_age}_custom" if _jason_ss_claim_age is not None else f"age_{ret_age}_{ss_timing}"
     scenario = next((s for s in result["scenarios"] if s["label"] == _label), None)
     if not scenario: return {"error": "Scenario not found"}
-    # Return simplified chart data
+    # Return simplified chart data.
+    #
+    # "portfolio_draw" (== yearly_detail's "withdrawal") is a GROSS
+    # cash-flow figure: once RMDs start, it includes the full forced
+    # distribution even in years most of it is immediately reinvested
+    # back into taxable rather than spent (simulate_withdrawal_year's
+    # own surplus-sweep behavior, see annual_engine.py) — a household
+    # can show a large "portfolio draw" here while its actual spending
+    # need that year is much smaller. Auditor review (2026-09-10):
+    # this chart's own tooltip only ever showed the single combined
+    # "Portfolio Draw" number, inviting a reasonable reader to mistake
+    # a large RMD year for a large DISCRETIONARY withdrawal. Splitting
+    # rmd/discretionary_withdrawal out explicitly, and returning the
+    # raw rmd/rmd_reinvested/withdrawal_pretax fields already computed
+    # by yearly_detail (never re-derived here), lets the frontend show
+    # both the split stacked areas and the raw figures in the tooltip
+    # rather than only the conflated total. discretionary_withdrawal is
+    # never negative: draws["pretax"] only ever grows from the RMD
+    # baseline (annual_engine.simulate_withdrawal_year draws the full
+    # RMD unconditionally, then optionally ADDS a further discretionary
+    # pretax draw on top if spending need remains) and every other
+    # bucket (taxable/roth/hsa) is fully discretionary by construction,
+    # so subtracting the RMD-only portion from the full gross draw can't
+    # go below zero.
     chart = []
     for y in scenario["yearly_detail"]:
+        rmd = y.get("rmd", 0)
+        total_draw = y["withdrawal"]
         chart.append({
             "age":          y["jason_age"],
             "pension":      y["pension"],
             "social_security": y["social_security"],
             "bridge_income":   y.get("bridge_income", 0),
-            "portfolio_draw":  y["withdrawal"],
+            "portfolio_draw":  total_draw,
+            "rmd":                    rmd,
+            "rmd_reinvested":         y.get("rmd_reinvested", 0),
+            "withdrawal_pretax":      y.get("withdrawal_pretax", 0),
+            "discretionary_withdrawal": max(0, total_draw - rmd),
             "total_need":      y["income_need"],
         })
     return {"chart": chart, "label": scenario["label"]}
