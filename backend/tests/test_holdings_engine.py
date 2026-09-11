@@ -27,6 +27,7 @@ from holdings_engine import (
     expense_ratio_flags,
     duplicate_exposure_flags,
     unclassified_flags,
+    parse_holdings_csv,
 )
 
 
@@ -583,3 +584,84 @@ class TestUnclassifiedFlags:
     def test_classified_holding_not_flagged(self):
         household = [holding(1, 1, name="Fund", market_value=1000, asset_class="us_stock")]
         assert unclassified_flags(household) == []
+
+
+class TestParseHoldingsCsv:
+    HEADER = "account_id,name,description,shares,market_value,asset_class,expense_ratio,cost_basis,notes"
+
+    def test_valid_rows_parsed(self):
+        csv_text = self.HEADER + "\n1,VTI,Total market,100,50000,us_stock,0.0003,45000,core holding\n"
+        result = parse_holdings_csv(csv_text, {1})
+        assert result["valid_count"] == 1
+        assert result["invalid_count"] == 0
+        row = result["rows"][0]
+        assert row["account_id"] == 1
+        assert row["name"] == "VTI"
+        assert row["shares"] == 100
+        assert row["market_value"] == 50000
+        assert row["asset_class"] == "us_stock"
+        assert row["expense_ratio"] == 0.0003
+        assert row["cost_basis"] == 45000
+
+    def test_optional_columns_can_be_blank(self):
+        csv_text = self.HEADER + "\n1,VTI,,,50000,us_stock,,,\n"
+        result = parse_holdings_csv(csv_text, {1})
+        assert result["valid_count"] == 1
+        row = result["rows"][0]
+        assert row["shares"] is None
+        assert row["expense_ratio"] is None
+        assert row["cost_basis"] is None
+        assert row["description"] is None
+
+    def test_unknown_account_id_invalid(self):
+        csv_text = self.HEADER + "\n999,VTI,,,50000,us_stock,,,\n"
+        result = parse_holdings_csv(csv_text, {1})
+        assert result["invalid_count"] == 1
+        assert not result["rows"][0]["valid"]
+        assert "does not match any existing account" in result["rows"][0]["errors"][0]
+
+    def test_missing_name_invalid(self):
+        csv_text = self.HEADER + "\n1,,,,50000,us_stock,,,\n"
+        result = parse_holdings_csv(csv_text, {1})
+        assert not result["rows"][0]["valid"]
+        assert any("name is required" in e for e in result["rows"][0]["errors"])
+
+    def test_negative_market_value_invalid(self):
+        csv_text = self.HEADER + "\n1,VTI,,,-500,us_stock,,,\n"
+        result = parse_holdings_csv(csv_text, {1})
+        assert not result["rows"][0]["valid"]
+
+    def test_non_numeric_market_value_invalid(self):
+        csv_text = self.HEADER + "\n1,VTI,,,not_a_number,us_stock,,,\n"
+        result = parse_holdings_csv(csv_text, {1})
+        assert not result["rows"][0]["valid"]
+
+    def test_invalid_asset_class_not_guessed(self):
+        """An unrecognized asset_class fails validation -- the raw value
+        is preserved as-is for the preview step (so the user can see and
+        correct exactly what they entered), never silently coerced into
+        one of the real ASSET_CLASSES."""
+        csv_text = self.HEADER + "\n1,VTI,,,50000,crypto,,,\n"
+        result = parse_holdings_csv(csv_text, {1})
+        assert not result["rows"][0]["valid"]
+        assert result["rows"][0]["asset_class"] == "crypto"
+        assert any("asset_class must be one of" in e for e in result["rows"][0]["errors"])
+
+    def test_missing_required_column_rejects_whole_file(self):
+        csv_text = "account_id,name,market_value\n1,VTI,50000\n"  # no asset_class column
+        result = parse_holdings_csv(csv_text, {1})
+        assert result["rows"] == []
+        assert result["valid_count"] == 0
+        assert "asset_class" in result["errors"][0]["message"]
+
+    def test_empty_file(self):
+        result = parse_holdings_csv("", {1})
+        assert result["rows"] == []
+        assert result["errors"]
+
+    def test_multiple_rows_mixed_validity(self):
+        csv_text = self.HEADER + "\n1,VTI,,,50000,us_stock,,,\n1,Bad,,,50000,not_a_class,,,\n"
+        result = parse_holdings_csv(csv_text, {1})
+        assert result["valid_count"] == 1
+        assert result["invalid_count"] == 1
+        assert len(result["errors"]) == 1

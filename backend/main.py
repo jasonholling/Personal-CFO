@@ -185,6 +185,24 @@ class Account(BaseModel):
     expense_ratio: float = 0       # annual fraction, e.g. 0.0004 for 0.04% — investment accounts only
     monthly_rental_income: float = 0    # real_estate accounts only, rental properties
     monthly_rental_expenses: float = 0  # real_estate accounts only, rental properties (taxes, insurance, maintenance, etc — not the mortgage payment, which lives on the separate mortgage liability account)
+    # Portfolio holdings/allocation (codex/portfolio-holdings-allocation)
+    # — nullable override of holdings_engine.resolve_portfolio_account_type's
+    # own legacy-account_type mapping. None (the default for every
+    # existing account) means "derive it from account_type" — see that
+    # function's docstring for the full rationale and its one real
+    # limitation (this app can't otherwise distinguish a standalone Roth
+    # 401k from a Traditional 401k at the account level).
+    portfolio_account_type: Optional[str] = None
+
+    @field_validator("portfolio_account_type")
+    @classmethod
+    def _portfolio_account_type_must_be_known(cls, v):
+        if v is None:
+            return v
+        from holdings_engine import PORTFOLIO_ACCOUNT_TYPES
+        if v not in PORTFOLIO_ACCOUNT_TYPES:
+            raise ValueError(f"Unknown portfolio_account_type '{v}' — must be one of {sorted(PORTFOLIO_ACCOUNT_TYPES)} or unset")
+        return v
 
     # account_type used to be an unchecked str: a value outside
     # net_worth_engine.VALID_ACCOUNT_TYPES (a typo, a legacy value, a name
@@ -217,6 +235,72 @@ class SurplusAllocation(BaseModel):
     goal: str
     monthly_amount: float = 0
     notes: Optional[str] = None
+
+# Portfolio holdings/allocation/rebalancing (codex/portfolio-holdings-
+# allocation). Decision support only.
+class Holding(BaseModel):
+    id: Optional[int] = None
+    account_id: int
+    name: str
+    description: Optional[str] = None
+    shares: Optional[float] = None
+    market_value: float
+    asset_class: str = "unclassified"
+    expense_ratio: Optional[float] = None
+    cost_basis: Optional[float] = None
+    notes: Optional[str] = None
+
+    @field_validator("asset_class")
+    @classmethod
+    def _asset_class_must_be_known(cls, v):
+        from holdings_engine import ASSET_CLASSES
+        if v not in ASSET_CLASSES:
+            raise ValueError(f"Unknown asset_class '{v}' — must be one of {ASSET_CLASSES}")
+        return v
+
+    @field_validator("market_value")
+    @classmethod
+    def _market_value_non_negative(cls, v):
+        if v < 0:
+            raise ValueError("market_value cannot be negative")
+        return v
+
+class HoldingImportRow(BaseModel):
+    """Shape of one row returned by /api/holdings/import/preview and
+    accepted (possibly user-edited) by /api/holdings/import/commit --
+    deliberately NOT the same model as Holding (no id, asset_class isn't
+    validated against ASSET_CLASSES here since an invalid/still-blank row
+    the user hasn't fixed yet must round-trip through preview -> edit ->
+    commit without a 422 before the user gets a chance to see it)."""
+    account_id: int
+    name: str
+    description: Optional[str] = None
+    shares: Optional[float] = None
+    market_value: float
+    asset_class: str
+    expense_ratio: Optional[float] = None
+    cost_basis: Optional[float] = None
+    notes: Optional[str] = None
+
+class InvestmentPolicy(BaseModel):
+    id: Optional[int] = None
+    name: str = "Household Policy"
+    target_us_stock_pct: float = 0
+    target_international_stock_pct: float = 0
+    target_bonds_pct: float = 0
+    target_cash_pct: float = 0
+    target_real_estate_pct: float = 0
+    target_alternatives_pct: float = 0
+    drift_band_pct: float = 5
+    rebalance_cadence: str = "annual"
+    minimum_cash_reserve: float = 0
+    use_contributions_before_sales: bool = True
+    account_constraints: List[Dict] = []
+    notes: Optional[str] = None
+
+class PortfolioContributionRequest(BaseModel):
+    amount: float = 0
+
 class ScenarioSave(BaseModel):
     name: str
     retirement_age: int = 60
@@ -490,10 +574,10 @@ def get_account_freshness():
 def create_account(account: Account):
     conn = get_db()
     cur = conn.execute(
-        "INSERT INTO accounts (name, account_type, owner, institution, balance, notes, interest_rate, minimum_payment, term_months, stock_allocation_pct, expense_ratio, monthly_rental_income, monthly_rental_expenses) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO accounts (name, account_type, owner, institution, balance, notes, interest_rate, minimum_payment, term_months, stock_allocation_pct, expense_ratio, monthly_rental_income, monthly_rental_expenses, portfolio_account_type) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (account.name, account.account_type, account.owner, account.institution, account.balance, account.notes,
          account.interest_rate, account.minimum_payment, account.term_months, account.stock_allocation_pct, account.expense_ratio,
-         account.monthly_rental_income, account.monthly_rental_expenses)
+         account.monthly_rental_income, account.monthly_rental_expenses, account.portfolio_account_type)
     )
     conn.commit()
     account.id = cur.lastrowid
@@ -504,10 +588,10 @@ def create_account(account: Account):
 def update_account(account_id: int, account: Account):
     conn = get_db()
     conn.execute(
-        "UPDATE accounts SET name=?, account_type=?, owner=?, institution=?, balance=?, notes=?, interest_rate=?, minimum_payment=?, term_months=?, stock_allocation_pct=?, expense_ratio=?, monthly_rental_income=?, monthly_rental_expenses=? WHERE id=?",
+        "UPDATE accounts SET name=?, account_type=?, owner=?, institution=?, balance=?, notes=?, interest_rate=?, minimum_payment=?, term_months=?, stock_allocation_pct=?, expense_ratio=?, monthly_rental_income=?, monthly_rental_expenses=?, portfolio_account_type=? WHERE id=?",
         (account.name, account.account_type, account.owner, account.institution, account.balance, account.notes,
          account.interest_rate, account.minimum_payment, account.term_months, account.stock_allocation_pct, account.expense_ratio,
-         account.monthly_rental_income, account.monthly_rental_expenses, account_id)
+         account.monthly_rental_income, account.monthly_rental_expenses, account.portfolio_account_type, account_id)
     )
     conn.commit()
     conn.close()
@@ -520,6 +604,265 @@ def delete_account(account_id: int):
     conn.commit()
     conn.close()
     return {"deleted": account_id}
+
+# Portfolio holdings, allocation, and rebalancing (codex/portfolio-
+# holdings-allocation). Decision support only — see holdings_engine.py's
+# own module docstring. Milestone 1 (entry/import) endpoints below;
+# Milestone 2 (policy) and Milestone 3/4 (allocation/rebalance read
+# endpoints) follow in their own sections further down this file.
+
+@app.get("/api/holdings")
+def get_holdings():
+    conn = get_db()
+    rows = [dict(r) for r in conn.execute("SELECT * FROM holdings ORDER BY account_id, name").fetchall()]
+    conn.close()
+    return rows
+
+@app.get("/api/holdings/grouped")
+def get_holdings_grouped():
+    """Holdings grouped by account, each group carrying account type,
+    owner, resolved portfolio_account_type, total account balance,
+    holdings total, and unreconciled remainder — the Milestone 1
+    "grouped by account" view, and the data source for Milestone 4's
+    reconciliation warnings. Accounts with zero holdings are still
+    included (an all-cash/unentered account is real information, not
+    something to hide)."""
+    conn = get_db()
+    accounts = [dict(r) for r in conn.execute("SELECT * FROM accounts").fetchall()]
+    holdings = [dict(r) for r in conn.execute("SELECT * FROM holdings ORDER BY name").fetchall()]
+    conn.close()
+    from holdings_engine import resolve_portfolio_account_type, reconcile_account_holdings, is_allocation_blocked
+    by_account: Dict[int, List[Dict]] = {}
+    for h in holdings:
+        by_account.setdefault(h["account_id"], []).append(h)
+    groups = []
+    for acc in accounts:
+        acc_holdings = by_account.get(acc["id"], [])
+        ptype = resolve_portfolio_account_type(acc)
+        groups.append({
+            "account_id": acc["id"], "account_name": acc["name"],
+            "account_type": acc["account_type"], "owner": acc["owner"],
+            "portfolio_account_type": ptype,
+            "allocation_blocked": is_allocation_blocked(ptype),
+            "holdings": acc_holdings,
+            **reconcile_account_holdings(acc, acc_holdings),
+        })
+    return {"groups": groups}
+
+@app.post("/api/holdings")
+def create_holding(holding: Holding):
+    conn = get_db()
+    acc = conn.execute("SELECT id FROM accounts WHERE id=?", (holding.account_id,)).fetchone()
+    if not acc:
+        conn.close()
+        raise HTTPException(status_code=400, detail=f"account_id {holding.account_id} does not exist")
+    cur = conn.execute(
+        "INSERT INTO holdings (account_id, name, description, shares, market_value, asset_class, expense_ratio, cost_basis, notes, last_updated, updated_at) "
+        "VALUES (?,?,?,?,?,?,?,?,?,datetime('now'),datetime('now'))",
+        (holding.account_id, holding.name, holding.description, holding.shares, holding.market_value,
+         holding.asset_class, holding.expense_ratio, holding.cost_basis, holding.notes)
+    )
+    conn.commit()
+    holding.id = cur.lastrowid
+    conn.close()
+    return holding
+
+@app.put("/api/holdings/{holding_id}")
+def update_holding(holding_id: int, holding: Holding):
+    conn = get_db()
+    acc = conn.execute("SELECT id FROM accounts WHERE id=?", (holding.account_id,)).fetchone()
+    if not acc:
+        conn.close()
+        raise HTTPException(status_code=400, detail=f"account_id {holding.account_id} does not exist")
+    conn.execute(
+        "UPDATE holdings SET account_id=?, name=?, description=?, shares=?, market_value=?, asset_class=?, "
+        "expense_ratio=?, cost_basis=?, notes=?, last_updated=datetime('now'), updated_at=datetime('now') WHERE id=?",
+        (holding.account_id, holding.name, holding.description, holding.shares, holding.market_value,
+         holding.asset_class, holding.expense_ratio, holding.cost_basis, holding.notes, holding_id)
+    )
+    conn.commit()
+    conn.close()
+    return {**holding.dict(), "id": holding_id}
+
+@app.delete("/api/holdings/{holding_id}")
+def delete_holding(holding_id: int):
+    conn = get_db()
+    conn.execute("DELETE FROM holdings WHERE id=?", (holding_id,))
+    conn.commit()
+    conn.close()
+    return {"deleted": holding_id}
+
+@app.post("/api/holdings/import/preview")
+async def preview_holdings_import(file: UploadFile = File(...)):
+    """Parses and validates a holdings CSV WITHOUT writing anything —
+    the brief's required preview/validation step. The frontend shows
+    this response (including per-row errors) and lets the user fix rows
+    before calling /commit below with the corrected set."""
+    content = await file.read()
+    try:
+        text = content.decode("utf-8-sig")
+    except Exception:
+        text = content.decode("latin-1")
+    conn = get_db()
+    valid_account_ids = {r[0] for r in conn.execute("SELECT id FROM accounts").fetchall()}
+    conn.close()
+    from holdings_engine import parse_holdings_csv
+    return parse_holdings_csv(text, valid_account_ids)
+
+@app.post("/api/holdings/import/commit")
+def commit_holdings_import(rows: List[HoldingImportRow]):
+    """Saves rows the frontend already showed the user via /preview
+    above (and let them edit) — re-validates account_id/asset_class
+    server-side rather than trusting the client, and reports any row
+    still invalid instead of silently skipping it without explanation."""
+    from holdings_engine import ASSET_CLASSES
+    conn = get_db()
+    valid_account_ids = {r[0] for r in conn.execute("SELECT id FROM accounts").fetchall()}
+    created = 0
+    skipped = []
+    for row in rows:
+        if row.account_id not in valid_account_ids:
+            skipped.append({"name": row.name, "reason": f"account_id {row.account_id} does not exist"})
+            continue
+        if row.asset_class not in ASSET_CLASSES:
+            skipped.append({"name": row.name, "reason": f"asset_class '{row.asset_class}' is not one of {sorted(ASSET_CLASSES)}"})
+            continue
+        conn.execute(
+            "INSERT INTO holdings (account_id, name, description, shares, market_value, asset_class, expense_ratio, cost_basis, notes, last_updated, updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,datetime('now'),datetime('now'))",
+            (row.account_id, row.name, row.description, row.shares, row.market_value,
+             row.asset_class, row.expense_ratio, row.cost_basis, row.notes)
+        )
+        created += 1
+    conn.commit()
+    conn.close()
+    return {"created": created, "skipped": skipped}
+
+# Milestone 2: investment policy. "Latest row wins" — see db.py's
+# init_holdings_tables() docstring. GET returns has_policy=False (no
+# silent fallback to allocation_engine.py's account-level guess) when no
+# policy has ever been saved.
+@app.get("/api/investment-policy")
+def get_investment_policy():
+    conn = get_db()
+    row = conn.execute("SELECT * FROM investment_policies ORDER BY id DESC LIMIT 1").fetchone()
+    conn.close()
+    if not row:
+        return {"has_policy": False}
+    d = dict(row)
+    d["account_constraints"] = json.loads(d.pop("account_constraints_json") or "[]")
+    d["use_contributions_before_sales"] = bool(d["use_contributions_before_sales"])
+    return {"has_policy": True, "policy": d}
+
+@app.post("/api/investment-policy")
+def save_investment_policy(policy: InvestmentPolicy):
+    conn = get_db()
+    cur = conn.execute(
+        "INSERT INTO investment_policies (name, target_us_stock_pct, target_international_stock_pct, target_bonds_pct, "
+        "target_cash_pct, target_real_estate_pct, target_alternatives_pct, drift_band_pct, rebalance_cadence, "
+        "minimum_cash_reserve, use_contributions_before_sales, account_constraints_json, notes) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (policy.name, policy.target_us_stock_pct, policy.target_international_stock_pct, policy.target_bonds_pct,
+         policy.target_cash_pct, policy.target_real_estate_pct, policy.target_alternatives_pct, policy.drift_band_pct,
+         policy.rebalance_cadence, policy.minimum_cash_reserve, int(policy.use_contributions_before_sales),
+         json.dumps(policy.account_constraints), policy.notes)
+    )
+    conn.commit()
+    policy.id = cur.lastrowid
+    conn.close()
+    return policy
+
+# Milestone 3/4: allocation/rebalance read endpoints, driven entirely by
+# real holdings + the saved policy — never allocation_engine.py's
+# account-level stock_allocation_pct guess (see holdings_engine.py's own
+# module docstring for why the two are kept deliberately separate).
+def _load_portfolio_context(conn):
+    accounts = [dict(r) for r in conn.execute("SELECT * FROM accounts").fetchall()]
+    holdings = [dict(r) for r in conn.execute("SELECT * FROM holdings").fetchall()]
+    policy_row = conn.execute("SELECT * FROM investment_policies ORDER BY id DESC LIMIT 1").fetchone()
+    policy = None
+    if policy_row:
+        policy = dict(policy_row)
+        policy["account_constraints"] = json.loads(policy.pop("account_constraints_json") or "[]")
+        policy["use_contributions_before_sales"] = bool(policy["use_contributions_before_sales"])
+    return accounts, holdings, policy
+
+@app.get("/api/portfolio/allocation")
+def get_portfolio_allocation():
+    """Current (vs. target, when a policy exists) allocation, plus every
+    Milestone 3 health flag. Explicit setup states — {"has_holdings":
+    False} / {"has_policy": False} — rather than a silent fallback to a
+    guess, per the brief."""
+    conn = get_db()
+    accounts, holdings, policy = _load_portfolio_context(conn)
+    conn.close()
+    if not holdings:
+        return {"has_holdings": False}
+    from holdings_engine import (
+        classify_holdings, compute_current_allocation, compare_to_target,
+        concentration_flags, expense_ratio_flags, duplicate_exposure_flags, unclassified_flags,
+    )
+    classified = classify_holdings(accounts, holdings)
+    current = compute_current_allocation(classified["household"])
+    result = {
+        "has_holdings": True,
+        "current_allocation": current,
+        "hsa_allocation": compute_current_allocation(classified["hsa"]),
+        "child_specific_total": round(sum(h.get("market_value", 0) or 0 for h in classified["child_specific"]), 2),
+        "liquidity_total": round(sum(h.get("market_value", 0) or 0 for h in classified["liquidity"]), 2),
+        "blocked_holdings": [
+            {"holding_id": h.get("id"), "account_id": h.get("account_id"), "name": h.get("name")}
+            for h in classified["blocked"]
+        ],
+        "review_required_accounts": sorted({h["account_id"] for h in classified["review_required"]}),
+        "concentration_flags": concentration_flags(classified["household"]),
+        "expense_ratio_flags": expense_ratio_flags(classified["household"]),
+        "duplicate_exposure_flags": duplicate_exposure_flags(
+            classified["household"] + classified["hsa"] + classified["child_specific"]),
+        "unclassified_flags": unclassified_flags(classified["household"]),
+    }
+    if not policy:
+        result["has_policy"] = False
+        return result
+    result["has_policy"] = True
+    result["comparison"] = compare_to_target(current, policy)
+    return result
+
+@app.post("/api/portfolio/contribution-destination")
+def portfolio_contribution_destination(req: PortfolioContributionRequest):
+    """"Where should my next contribution go?" — Milestone 4's own
+    workflow name. Requires both real holdings and a saved policy;
+    returns an explicit setup-state error otherwise rather than
+    guessing."""
+    conn = get_db()
+    accounts, holdings, policy = _load_portfolio_context(conn)
+    conn.close()
+    if not holdings:
+        raise HTTPException(status_code=400, detail="No holdings entered yet — add holdings before requesting a contribution recommendation.")
+    if not policy:
+        raise HTTPException(status_code=400, detail="No investment policy saved yet — set target allocation before requesting a contribution recommendation.")
+    from holdings_engine import classify_holdings, compute_current_allocation, compare_to_target, recommend_contribution_destination
+    classified = classify_holdings(accounts, holdings)
+    current = compute_current_allocation(classified["household"])
+    comparison = compare_to_target(current, policy)
+    return {"actions": recommend_contribution_destination(comparison, req.amount)}
+
+@app.post("/api/portfolio/rebalance")
+def portfolio_rebalance(req: PortfolioContributionRequest):
+    """"How should I rebalance?" — Milestone 4's own workflow name.
+    req.amount is an optional pending contribution to apply first (0 by
+    default — a pure rebalance-what-exists request)."""
+    conn = get_db()
+    accounts, holdings, policy = _load_portfolio_context(conn)
+    conn.close()
+    if not holdings:
+        raise HTTPException(status_code=400, detail="No holdings entered yet — add holdings before requesting a rebalance plan.")
+    if not policy:
+        raise HTTPException(status_code=400, detail="No investment policy saved yet — set target allocation before requesting a rebalance plan.")
+    from holdings_engine import classify_holdings, compute_current_allocation, compare_to_target, recommend_rebalance_actions
+    classified = classify_holdings(accounts, holdings)
+    current = compute_current_allocation(classified["household"])
+    comparison = compare_to_target(current, policy)
+    return recommend_rebalance_actions(classified["household"], current, comparison, policy, pending_contribution=req.amount)
 
 # Monthly cash flow — recurring amounts, deliberately separate from balances.
 @app.get("/api/cash-flow")

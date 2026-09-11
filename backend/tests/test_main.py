@@ -2134,3 +2134,214 @@ class TestSavedScenariosReopenAndCompareAndBackup:
         assert after[new_id]["revision_number"] == before[new_id]["revision_number"]
         assert after[original_id]["schema_version"] == before[original_id]["schema_version"]
         assert after[original_id]["is_legacy"] == before[original_id]["is_legacy"]
+
+
+class TestPortfolioHoldings:
+    """Portfolio holdings, allocation, and rebalancing endpoints
+    (codex/portfolio-holdings-allocation). Full calc-correctness is
+    covered in test_holdings_engine.py; these verify the routes are
+    wired up, validate at the API boundary, and return the explicit
+    setup states the brief requires (never a silent guess)."""
+
+    def _account(self, client, account_type="taxable", **overrides):
+        payload = {"name": "Test Account", "account_type": account_type, "owner": "jason",
+                   "institution": "Test", "balance": 100000}
+        payload.update(overrides)
+        r = client.post("/api/accounts", json=payload)
+        assert r.status_code == 200, r.text
+        return r.json()["id"]
+
+    def test_create_and_list_holdings(self, client):
+        account_id = self._account(client)
+        r = client.post("/api/holdings", json={
+            "account_id": account_id, "name": "VTI", "market_value": 50000, "asset_class": "us_stock",
+        })
+        assert r.status_code == 200, r.text
+        holding_id = r.json()["id"]
+        r = client.get("/api/holdings")
+        assert r.status_code == 200
+        assert len(r.json()) == 1
+        assert r.json()[0]["id"] == holding_id
+
+    def test_create_holding_rejects_unknown_account(self, client):
+        r = client.post("/api/holdings", json={
+            "account_id": 999999, "name": "VTI", "market_value": 50000, "asset_class": "us_stock",
+        })
+        assert r.status_code == 400
+
+    def test_create_holding_rejects_unknown_asset_class(self, client):
+        account_id = self._account(client)
+        r = client.post("/api/holdings", json={
+            "account_id": account_id, "name": "VTI", "market_value": 50000, "asset_class": "crypto",
+        })
+        assert r.status_code == 422
+
+    def test_create_holding_rejects_negative_market_value(self, client):
+        account_id = self._account(client)
+        r = client.post("/api/holdings", json={
+            "account_id": account_id, "name": "VTI", "market_value": -100, "asset_class": "us_stock",
+        })
+        assert r.status_code == 422
+
+    def test_update_and_delete_holding(self, client):
+        account_id = self._account(client)
+        holding_id = client.post("/api/holdings", json={
+            "account_id": account_id, "name": "VTI", "market_value": 50000, "asset_class": "us_stock",
+        }).json()["id"]
+        r = client.put(f"/api/holdings/{holding_id}", json={
+            "account_id": account_id, "name": "VTI", "market_value": 60000, "asset_class": "us_stock",
+        })
+        assert r.status_code == 200
+        assert client.get("/api/holdings").json()[0]["market_value"] == 60000
+        r = client.delete(f"/api/holdings/{holding_id}")
+        assert r.status_code == 200
+        assert client.get("/api/holdings").json() == []
+
+    def test_holdings_grouped_by_account_shows_reconciliation(self, client):
+        """Milestone 1: grouped view shows account type, owner, total
+        account balance, holdings total, and unreconciled remainder."""
+        account_id = self._account(client, balance=100000)
+        client.post("/api/holdings", json={
+            "account_id": account_id, "name": "VTI", "market_value": 95000, "asset_class": "us_stock",
+        })
+        r = client.get("/api/holdings/grouped")
+        assert r.status_code == 200
+        group = r.json()["groups"][0]
+        assert group["account_type"] == "taxable"
+        assert group["portfolio_account_type"] == "brokerage"
+        assert group["account_balance"] == 100000
+        assert group["holdings_total"] == 95000
+        assert group["unreconciled_remainder"] == 5000
+        assert group["has_warning"] is True
+
+    def test_holdings_grouped_includes_zero_holding_accounts(self, client):
+        self._account(client)
+        r = client.get("/api/holdings/grouped")
+        assert len(r.json()["groups"]) == 1
+        assert r.json()["groups"][0]["holdings"] == []
+
+    def test_missing_account_type_blocks_allocation(self, client):
+        account_id = self._account(client, account_type="business")
+        client.post("/api/holdings", json={
+            "account_id": account_id, "name": "Mystery", "market_value": 50000, "asset_class": "us_stock",
+        })
+        group = client.get("/api/holdings/grouped").json()["groups"][0]
+        assert group["allocation_blocked"] is True
+        allocation = client.get("/api/portfolio/allocation").json()
+        assert allocation["blocked_holdings"]
+        assert allocation["current_allocation"]["total"] == 0  # blocked, not silently included
+
+    def test_529_and_custodial_excluded_from_household_retirement_allocation(self, client):
+        acc_529 = self._account(client, account_type="529")
+        client.post("/api/holdings", json={
+            "account_id": acc_529, "name": "529 Fund", "market_value": 20000, "asset_class": "us_stock",
+        })
+        allocation = client.get("/api/portfolio/allocation").json()
+        assert allocation["current_allocation"]["total"] == 0
+        assert allocation["child_specific_total"] == 20000
+
+    def test_hsa_reported_separately(self, client):
+        acc_hsa = self._account(client, account_type="hsa")
+        client.post("/api/holdings", json={
+            "account_id": acc_hsa, "name": "HSA Fund", "market_value": 10000, "asset_class": "bonds",
+        })
+        allocation = client.get("/api/portfolio/allocation").json()
+        assert allocation["current_allocation"]["total"] == 0
+        assert allocation["hsa_allocation"]["total"] == 10000
+
+    def test_traditional_vs_roth_treatment_via_override(self, client):
+        acc = self._account(client, account_type="401k", portfolio_account_type="roth_401k")
+        r = client.get("/api/holdings/grouped")
+        assert r.json()["groups"][0]["portfolio_account_type"] == "roth_401k"
+
+    def test_brokerage_holding_without_cost_basis_flagged_on_rebalance(self, client):
+        acc_401k = self._account(client, account_type="401k")
+        acc_taxable = self._account(client, account_type="taxable")
+        client.post("/api/holdings", json={"account_id": acc_401k, "name": "401k Bonds", "market_value": 5000, "asset_class": "bonds"})
+        client.post("/api/holdings", json={"account_id": acc_taxable, "name": "Brokerage Stock", "market_value": 95000, "asset_class": "us_stock"})
+        client.post("/api/investment-policy", json={"target_us_stock_pct": 50, "target_bonds_pct": 50, "drift_band_pct": 5})
+        r = client.post("/api/portfolio/rebalance", json={"amount": 0})
+        assert r.status_code == 200
+        taxable_sells = [a for a in r.json()["rebalance_actions"] if a.get("is_taxable_sale")]
+        assert taxable_sells
+        assert taxable_sells[0]["tax_warning"]["has_cost_basis"] is False
+
+    def test_no_holdings_gives_explicit_setup_state(self, client):
+        r = client.get("/api/portfolio/allocation")
+        assert r.json() == {"has_holdings": False}
+
+    def test_no_policy_gives_explicit_setup_state(self, client):
+        account_id = self._account(client)
+        client.post("/api/holdings", json={
+            "account_id": account_id, "name": "VTI", "market_value": 50000, "asset_class": "us_stock",
+        })
+        r = client.get("/api/portfolio/allocation")
+        assert r.json()["has_policy"] is False
+        assert "comparison" not in r.json()
+
+    def test_never_falls_back_to_account_level_guess(self, client):
+        """Never silently uses allocation_engine.py's stock_allocation_pct
+        guess — when real holdings exist, /api/portfolio/allocation's
+        current_allocation is built entirely from per-holding asset_class
+        data, with no reference to stock_allocation_pct at all."""
+        account_id = self._account(client, stock_allocation_pct=80)
+        client.post("/api/holdings", json={
+            "account_id": account_id, "name": "All Bonds", "market_value": 100000, "asset_class": "bonds",
+        })
+        allocation = client.get("/api/portfolio/allocation").json()
+        # The account-level guess says 80% stock; the real holding says
+        # 100% bonds. The real holding must win.
+        assert allocation["current_allocation"]["pct_by_class"]["bonds"] == 100.0
+        assert allocation["current_allocation"]["pct_by_class"]["us_stock"] == 0.0
+
+    def test_contribution_destination_requires_holdings_and_policy(self, client):
+        r = client.post("/api/portfolio/contribution-destination", json={"amount": 1000})
+        assert r.status_code == 400
+
+    def test_rebalance_requires_holdings_and_policy(self, client):
+        r = client.post("/api/portfolio/rebalance", json={"amount": 0})
+        assert r.status_code == 400
+
+    def test_investment_policy_save_and_get(self, client):
+        r = client.get("/api/investment-policy")
+        assert r.json() == {"has_policy": False}
+        r = client.post("/api/investment-policy", json={
+            "target_us_stock_pct": 60, "target_bonds_pct": 40, "drift_band_pct": 5,
+        })
+        assert r.status_code == 200
+        r = client.get("/api/investment-policy")
+        assert r.json()["has_policy"] is True
+        assert r.json()["policy"]["target_us_stock_pct"] == 60
+
+    def test_investment_policy_save_creates_new_row_not_overwrite(self, client):
+        """Latest-row-wins — a second save doesn't destroy the first
+        row's history."""
+        client.post("/api/investment-policy", json={"target_us_stock_pct": 60, "target_bonds_pct": 40})
+        client.post("/api/investment-policy", json={"target_us_stock_pct": 70, "target_bonds_pct": 30})
+        r = client.get("/api/investment-policy")
+        assert r.json()["policy"]["target_us_stock_pct"] == 70  # latest wins
+
+    def test_csv_import_preview_does_not_write(self, client):
+        account_id = self._account(client)
+        csv_text = f"account_id,name,description,shares,market_value,asset_class,expense_ratio,cost_basis,notes\n{account_id},VTI,,,50000,us_stock,,,\n"
+        r = client.post("/api/holdings/import/preview", files={"file": ("holdings.csv", csv_text, "text/csv")})
+        assert r.status_code == 200
+        assert r.json()["valid_count"] == 1
+        assert client.get("/api/holdings").json() == []  # nothing written yet
+
+    def test_csv_import_commit_writes_valid_rows(self, client):
+        account_id = self._account(client)
+        r = client.post("/api/holdings/import/commit", json=[
+            {"account_id": account_id, "name": "VTI", "market_value": 50000, "asset_class": "us_stock"},
+        ])
+        assert r.status_code == 200
+        assert r.json()["created"] == 1
+        assert len(client.get("/api/holdings").json()) == 1
+
+    def test_csv_import_commit_skips_invalid_rows_with_reason(self, client):
+        r = client.post("/api/holdings/import/commit", json=[
+            {"account_id": 999999, "name": "Bad", "market_value": 50000, "asset_class": "us_stock"},
+        ])
+        assert r.status_code == 200
+        assert r.json()["created"] == 0
+        assert r.json()["skipped"][0]["reason"]

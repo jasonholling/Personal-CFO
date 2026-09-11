@@ -17,7 +17,9 @@ account, THIS module's per-holding asset_class data is authoritative for
 that account; allocation_engine.py's account-level guess is never
 consulted here and this module never writes back to it.
 """
-from typing import Dict, List, Optional
+import csv
+import io
+from typing import Dict, List, Optional, Set
 
 # ── Account-type model ──────────────────────────────────────────────────
 # Deliberately separate from net_worth_engine.VALID_ACCOUNT_TYPES / the
@@ -618,3 +620,99 @@ def unclassified_flags(household_holdings: List[Dict]) -> List[Dict]:
             })
     flagged.sort(key=lambda f: -f["market_value"])
     return flagged
+
+
+# ── Milestone 1: CSV import (preview/validate, no writes) ──────────────
+
+REQUIRED_CSV_COLUMNS = {"account_id", "name", "market_value", "asset_class"}
+
+
+def _parse_optional_float(raw_row: Dict, key: str, row_errors: List[str]) -> Optional[float]:
+    value = (raw_row.get(key) or "").strip()
+    if not value:
+        return None
+    try:
+        return float(value)
+    except ValueError:
+        row_errors.append(f"{key} must be a number if provided")
+        return None
+
+
+def parse_holdings_csv(csv_text: str, valid_account_ids: Set[int]) -> Dict:
+    """Parses a holdings CSV into validated rows WITHOUT writing anything
+    -- the preview/validate step the brief requires before any holding is
+    actually saved. Every row failing validation carries its own specific
+    reason(s) and is marked invalid rather than silently dropped or
+    coerced into something plausible-looking (a blank asset_class is
+    never guessed as "us_stock", a missing account_id is never assumed
+    to mean "the first account," etc). Required columns:
+    account_id, name, market_value, asset_class. Optional: description,
+    shares, expense_ratio, cost_basis, notes."""
+    reader = csv.DictReader(io.StringIO(csv_text))
+    if reader.fieldnames is None:
+        return {"rows": [], "errors": [{"row": 0, "message": "Empty file or no header row."}],
+                "valid_count": 0, "invalid_count": 0}
+    missing_cols = REQUIRED_CSV_COLUMNS - {c.strip() for c in reader.fieldnames if c}
+    if missing_cols:
+        return {"rows": [], "errors": [{"row": 0, "message": f"Missing required column(s): {', '.join(sorted(missing_cols))}"}],
+                "valid_count": 0, "invalid_count": 0}
+
+    rows = []
+    errors = []
+    for i, raw in enumerate(reader, start=2):  # row 1 is the header
+        row_errors: List[str] = []
+
+        account_id_raw = (raw.get("account_id") or "").strip()
+        account_id = None
+        try:
+            account_id = int(account_id_raw)
+            if account_id not in valid_account_ids:
+                row_errors.append(f"account_id {account_id} does not match any existing account")
+        except ValueError:
+            row_errors.append("account_id must be a whole number")
+
+        name = (raw.get("name") or "").strip()
+        if not name:
+            row_errors.append("name is required")
+
+        market_value_raw = (raw.get("market_value") or "").strip()
+        market_value = None
+        try:
+            market_value = float(market_value_raw)
+            if market_value < 0:
+                row_errors.append("market_value cannot be negative")
+        except ValueError:
+            row_errors.append("market_value must be a number")
+
+        asset_class = (raw.get("asset_class") or "").strip()
+        if asset_class not in ASSET_CLASSES:
+            row_errors.append(f"asset_class must be one of: {', '.join(ASSET_CLASSES)}")
+
+        shares = _parse_optional_float(raw, "shares", row_errors)
+        expense_ratio = _parse_optional_float(raw, "expense_ratio", row_errors)
+        cost_basis = _parse_optional_float(raw, "cost_basis", row_errors)
+
+        parsed = {
+            "row": i,
+            "account_id": account_id,
+            "name": name or None,
+            "description": (raw.get("description") or "").strip() or None,
+            "shares": shares,
+            "market_value": market_value,
+            "asset_class": asset_class or None,
+            "expense_ratio": expense_ratio,
+            "cost_basis": cost_basis,
+            "notes": (raw.get("notes") or "").strip() or None,
+            "valid": not row_errors,
+            "errors": row_errors,
+        }
+        rows.append(parsed)
+        if row_errors:
+            errors.append({"row": i, "message": "; ".join(row_errors)})
+
+    return {
+        "rows": rows,
+        "errors": errors,
+        "valid_count": sum(1 for r in rows if r["valid"]),
+        "invalid_count": sum(1 for r in rows if not r["valid"]),
+    }
