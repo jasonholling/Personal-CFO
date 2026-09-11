@@ -6674,3 +6674,263 @@ coverage. Sensitive-data check: clean, 157 tracked files scanned.
 Branch: `codex/two-age-bridge-surplus-fix`. Pushed for review, still
 NOT merged into `codex/milestone-1-2-integration` or `main`. Milestone
 4 remains untouched.
+
+## 77. Portfolio holdings, allocation, and rebalancing (2026-09-10/11, on `codex/portfolio-holdings-allocation`, branched from `origin/main`)
+
+New feature, not a fix — full brief: entry/import of real per-account
+holdings, a saved household investment policy, a pure calculation
+engine comparing current vs. target allocation and recommending tax-
+aware rebalancing, a new Portfolio Allocation page, and an optional
+integration into the existing retirement/Monte Carlo/Stress/SWR/Roth
+Conversion/Tax Efficiency planners. Decision support only — nothing in
+this feature places a trade or presents a recommendation as guaranteed
+financial advice. Branched from `origin/main` directly (not from any
+other in-flight branch), per explicit instruction; not merged, only
+pushed for review, per the same instruction.
+
+**Design decision: a second, independent account-type enum, not a
+migration of the existing one.** The brief specifies a 12-value
+controlled enum (brokerage/traditional_401k/roth_401k/traditional_ira/
+roth_ira/hsa/529/custodial/checking/savings/trust/other). The existing
+`accounts.account_type` column uses different legacy values ("taxable"
+not "brokerage", "ira" not "traditional_ira", a single "401k" for BOTH
+traditional and Roth 401k contributions split only by a HOUSEHOLD-WIDE
+percentage — `planning_inputs.pretax_401k_pct`, defaulting to 0.75 —
+that `projection_engine.py`/`simulation_engine.py` already use for
+retirement-withdrawal math; no "trust" value at all), and every
+existing calculation engine keys off those exact legacy strings with
+zero fallback for an unrecognized one (the exact bug class an external
+audit already found and fixed once, `net_worth_engine.
+VALID_ACCOUNT_TYPES`). Renaming or migrating that column risked
+breaking every existing projection/Monte Carlo/net-worth number for
+no real benefit. Instead: a new, additive, nullable
+`accounts.portfolio_account_type` override column (added to `init_db()`
+'s own accounts_migrations list — NOT inside `init_holdings_tables()`,
+which runs unconditionally at `db.py`'s own module-import time, before
+the `accounts` table is guaranteed to exist yet; the ALTER belongs in
+`init_db()`, called explicitly and always after the CREATE). When
+unset (every existing account, until a user opts in),
+`holdings_engine.resolve_portfolio_account_type()` derives it from the
+legacy `account_type` via a documented, lossy many-to-one mapping.
+
+**Known limitation, disclosed not papered over:** this app has never
+distinguished a standalone Roth 401k from a Traditional 401k at the
+account level — only the household-wide split percentage above. Every
+plain `"401k"`-typed account defaults to `"traditional_401k"` under
+the mapping (matching the majority case). A household with a genuine
+separate Roth 401k account needs to set `portfolio_account_type=
+"roth_401k"` explicitly via the override on that specific account row.
+
+**Milestone 1 — holdings entry and import.** New `holdings` table (one
+row per position, `account_id` FK with `ON DELETE CASCADE`, required
+`name`/`market_value`/`asset_class`, optional `shares`/`expense_ratio`/
+`cost_basis`/`description`/`notes` — a `NULL` cost basis means
+"unknown," never coerced to 0). `GET /api/holdings/grouped` returns
+every account (including zero-holding ones) with its resolved
+portfolio type, `allocation_blocked` flag, and a full reconciliation:
+`holdings_total` vs. the account's own real `balance`, with the
+mismatch surfaced as an explicit `unreconciled_remainder` (positive:
+under-totaled; negative: over-totaled, e.g. stale holdings after a
+withdrawal) plus a warning — never invented, never silently absorbed.
+CSV import is a genuine two-phase flow: `POST /api/holdings/import/
+preview` parses and validates every row (each with its own specific
+error list) WITHOUT writing anything; `POST /api/holdings/import/
+commit` re-validates server-side (never trusts a client-echoed
+`valid`/`asset_class`) and writes only the valid rows, reporting any
+still-invalid row's reason rather than silently skipping it.
+
+**Milestone 2 — investment policy.** New `investment_policies` table:
+target percentages per asset class, `drift_band_pct`, `rebalance_
+cadence`, `minimum_cash_reserve`, `use_contributions_before_sales`,
+`account_constraints_json`. "Latest row wins" (`ORDER BY id DESC LIMIT
+1`), the same convention several other `planning_inputs`-adjacent
+endpoints in this codebase already use — a save INSERTs a new row
+rather than overwriting in place, so policy history isn't destroyed.
+No row at all → `GET /api/investment-policy` returns `{"has_policy":
+false}`, an explicit setup state. Verified NEVER falling back to the
+existing `allocation_engine.py`'s account-level `stock_allocation_pct`
+guess when real holdings exist: a dedicated test sets
+`stock_allocation_pct=80` on an account whose real holding is 100%
+bonds, and confirms `/api/portfolio/allocation` reports 100% bonds, not
+80/20. `allocation_engine.py` itself (and the pages that already call
+it — Net Worth's hidden Asset Allocation/Concentration Risk cards) are
+completely untouched by this branch.
+
+**Milestone 3 — `holdings_engine.py` (pure, no I/O, 90 hand-calculated
+tests).** Account-type behavior groups built directly from the brief's
+own rules: `TAXABLE_GAIN_TYPES` (brokerage only), `PRETAX_RMD_TYPES`
+(traditional_401k/ira), `ROTH_TYPES`, `HSA_TYPES` (reported separately
+via its own `hsa_allocation` field, never folded into household
+totals), `CHILD_SPECIFIC_TYPES` (529/custodial, excluded from
+household retirement allocation entirely), `LIQUIDITY_TYPES`
+(checking/savings, excluded from stock/bond allocation),
+`REVIEW_REQUIRED_TYPES` (trust — included in household totals but
+flagged), `BLOCKED_TYPES` (other/unresolvable — blocks allocation
+recommendations for that account until classified).
+`recommend_contribution_destination`: new money only ever funds
+UNDERWEIGHT classes, largest dollar gap first, up to each class's own
+target — never an overweight class, verified by both a direct test and
+a mutation check (see below). `recommend_rebalance_actions`:
+contribution-first (an overweight class is only ever sold down enough
+to fund the household's REMAINING underweight need after the
+contribution's own effect — not its own full excess in isolation,
+which would recommend a pointless sell with no destination once a
+contribution already closed every gap); within an overweight class,
+tax-advantaged holdings are sold before ever touching a taxable
+brokerage holding, and only touches brokerage if the tax-advantaged
+supply in that class is exhausted and drift remains; a taxable sale
+without `cost_basis` on file is flagged `has_cost_basis: false` with an
+explicit warning, never assumed to be a $0 or 100% gain. Returns an
+exact `projected_allocation` (dollar-for-dollar reconstruction from the
+actual sell/buy/contribution deltas applied to the real current
+allocation, not re-derived from percentages, which would compound
+rounding). `concentration_flags`/`expense_ratio_flags`/
+`duplicate_exposure_flags`/`unclassified_flags` operate on real
+per-holding data (unlike `allocation_engine.py`'s account-level
+concentration proxy).
+
+**Mutation checks (required, performed directly on this branch, not
+just asserted):**
+- Reconciliation: inverted `has_warning = abs(remainder) >
+  RECONCILIATION_TOLERANCE` to `<` in place. All 5
+  `TestReconcileAccountHoldings` tests failed immediately (exact-match/
+  under-totaled/over-totaled/tiny-rounding/no-holdings cases). Reverted,
+  confirmed green again.
+- Contribution-allocation: removing only the `deviation_dollars < 0`
+  underweight filter in `recommend_contribution_destination` did NOT
+  fail any test on its own — a downstream `if amount <= 0: continue`
+  guard (gap is negative for an overweight class, so `min(remaining,
+  gap)` is non-positive and gets skipped) is independent defense-in-
+  depth that happened to still catch the mutated case. Combining that
+  removal with also dropping the zero-guard DID fail 2 tests
+  immediately (`test_contribution_larger_than_every_gap_notes_the_
+  remainder`, `test_no_underweight_class_notes_nothing_to_correct`).
+  Both mutations reverted, confirmed green again. Documented here
+  because the first attempt's "no failure" result is itself a real,
+  useful finding — not a gap in the tests, but confirmation that a
+  second, independent safeguard exists in the implementation for the
+  exact rule the brief calls out ("never fund an overweight class").
+
+**Milestone 4 — frontend (`PortfolioAllocation.jsx`, new page, routed
+at `portfolio` in the PLAN nav group).** Grouped holdings/
+reconciliation display with an account-type filter, manual add/edit/
+delete, the two-phase CSV import UI, a current-vs-target bar chart plus
+drift-band table, an investment policy editor, portfolio health flags,
+and both named workflows ("Where should my next contribution go?" /
+"How should I rebalance?") — the second rendering a full trade
+checklist (account, holding, action, amount, tax impact, cost-basis
+status, reason, projected post-action allocation) exactly as the brief
+specifies. Privacy-mode masking via the existing `fmt()`/
+`isPrivacyMode()` convention. Stale-result clearing: any holdings/
+policy edit clears the previously-computed contribution/rebalance (and,
+after Milestone 5, planning-comparison) result state, so a
+recommendation computed against now-stale data never lingers on screen
+looking current.
+
+**Real bug found and fixed while writing the privacy-mode test (not
+part of the plan, caught by actually testing the requirement rather
+than assuming it):** the account reconciliation warning was rendered
+from the BACKEND's raw message string (`holdings_engine.
+reconcile_account_holdings`'s own `warning` field), which bakes real
+dollar figures directly into English text — invisible to the
+frontend's `fmt()` masking, which only ever operates on numbers it's
+given directly. Fixed by rebuilding the warning client-side from the
+already-masked numeric fields (`account_balance`/`holdings_total`/
+`unreconciled_remainder`) instead of trusting the backend string
+verbatim. The backend's own `warning` field is left as-is (still useful
+for a non-privacy-mode API consumer, e.g. a future CSV/report export)
+— only the frontend's rendering changed.
+
+**Milestone 5 — planning integration.** New `POST /api/portfolio/
+planning-comparison`, comparing the household's current plan against a
+policy-derived proposed plan across all 6 named engines (retirement
+projection, Monte Carlo, Historical Stress Tests, SWR, Roth Conversion,
+Tax Efficiency) — **without modifying any of the six functions**. Every
+one of them already reads `expected_return_pre_retirement`/
+`expected_return_post_retirement` out of its own `inputs` dict
+argument; the endpoint calls each function twice — once with the
+household's real, completely unmodified inputs (current — the
+identical call any other existing page already makes), once with a
+shallow copy where ONLY those two keys are replaced by
+`holdings_engine.blended_expected_return()`'s estimate from the saved
+policy's asset-class targets (proposed). No engine internals change,
+so "if no proposed allocation is supplied, all existing calculations
+must remain byte-identical" holds by construction — verified directly,
+not just asserted, by
+`test_holdings_and_policy_never_affect_other_endpoints_when_comparison_
+not_requested`: saves real holdings and a policy, then confirms the
+ordinary (pre-existing) `/api/simulation/monte-carlo` endpoint — which
+never calls the new comparison endpoint — returns BYTE-IDENTICAL JSON
+before and after.
+
+`ASSET_CLASS_EXPECTED_RETURNS` are documented, conservative long-run
+nominal capital-market assumptions (us_stock 9%, international_stock
+8%, bonds 4.5%, cash 2%, real_estate 7%, alternatives 6%, unclassified
+has no assumption at all) — decision support only, explicitly not a
+guarantee, matching the brief's own framing for the whole feature.
+`blended_expected_return` excludes "unclassified" from BOTH the
+weighted sum and the denominator, so a partially-unclassified portfolio
+isn't silently dragged toward a 0% assumption for the unknown portion.
+
+**Two limitations disclosed in the endpoint's own response (a
+`limitations` field, rendered on the frontend, not silently smoothed
+over) rather than fixed by inventing data that doesn't exist:**
+1. Monte Carlo/Stress Tests' own return VARIANCE (`PORT_STD`,
+   `simulation_engine.py`) is a fixed constant, independent of
+   `expected_return_pre/post_retirement` — shifting the expected return
+   moves the projection's MEAN outcome but not the spread used to build
+   percentile bands. "Downside outcome" in this comparison therefore
+   reflects a shifted mean with the SAME variance shape, not a fully
+   allocation-aware risk model (a genuinely lower-volatility proposed
+   allocation would not show tighter percentile bands here).
+2. "Projected fees" (`blended_expense_ratio`) and "concentration"
+   (`concentration_flags`) are computed ONLY for the current side, from
+   real per-holding data — an asset-class-level policy target doesn't
+   specify which actual funds would implement it, so a proposed
+   expense ratio or concentration figure would be invented, not
+   estimated, and isn't reported.
+
+**Scope: single retirement age only.** Two-age mode (explicit,
+independent `jason_ret_age`/`justin_ret_age`) is deferred for this
+comparison endpoint — not silently dropped, a real scoping decision
+matching this codebase's established "defer larger items, document
+them, don't silently expand scope" precedent (see e.g. section 22's own
+two-age rollout, done as a separate follow-on effort after the
+single-age version shipped).
+
+**Test evidence.** `test_holdings_engine.py`: 90 tests (account-type
+resolution/blocking, reconciliation, classification, current
+allocation, target comparison, contribution destination, rebalance
+actions including the two mutation-checked behaviors above,
+concentration/expense-ratio/duplicate-exposure/unclassified flags, CSV
+parsing, blended expected return, blended expense ratio) — all hand-
+calculated before asserting. `test_main.py::TestPortfolioHoldings`: 27
+endpoint tests (CRUD validation, grouped/reconciliation display,
+account-type behavior per the brief's own table, CSV preview/commit,
+setup states, never-falls-back-to-guess, the full six-engine planning
+comparison, the no-computable-return case, and the byte-identical
+regression test).
+`PortfolioAllocation.test.jsx`: 14 rendered-DOM tests (setup states,
+grouped display + reconciliation, account-type filter, manual entry,
+CSV preview/validation, current-vs-target visualization, both named
+workflows including the rebalance checklist with a tax warning, privacy
+mode, stale-result clearing, and the planning-comparison card).
+
+Full backend suite (final commit on this branch): 1549 passed, 97.01%
+coverage (floor 95%). Full frontend suite: 82 passed, 11 files.
+Production build: succeeds (one pre-existing bundle-size warning,
+unrelated to this feature — same warning existed before this branch).
+Sensitive-data check: clean, 162 tracked files scanned.
+
+**No pre-existing bugs found outside this feature's own scope during
+this work** (unlike several earlier sections in this file, which did
+surface real engine bugs along the way) — the one real bug found
+(the privacy-mode reconciliation-warning gap above) was inside this
+feature's own new code, fixed the same session it was found, not
+deferred.
+
+Branch: `codex/portfolio-holdings-allocation`, branched from
+`origin/main`. Pushed for review across 5 commits (foundation, API
+layer, frontend, Milestone 5). NOT merged, NOT pushed to `main` — per
+explicit instruction, `main` untouched by this branch.
+

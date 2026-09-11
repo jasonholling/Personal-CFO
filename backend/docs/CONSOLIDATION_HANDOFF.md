@@ -140,6 +140,79 @@ spending, ownership, and growth are determined for that year) — see
 section 43. Both reproductions now match exactly. Still nothing merged
 to `main` beyond Milestone 1.
 
+**2026-09-10/11 addendum — portfolio holdings, allocation, and
+rebalancing, a separate new feature, NOT part of the 9-item list
+below.** Built on its own branch, `codex/portfolio-holdings-allocation`,
+branched from `origin/main` (not this handoff's own consolidation
+work) — full detail lives in `CALCULATION_CONTRACT.md`'s own section
+for this feature. Status: all 5 milestones from the brief implemented
+and independently tested; **not merged to `main`**, pushed for review
+only, per explicit instruction ("do not modify, merge, or push to
+main").
+
+- Milestone 1 (holdings entry/import): new `holdings`/
+  `investment_policies` tables plus an additive, nullable
+  `accounts.portfolio_account_type` override column — the existing
+  `accounts.account_type` column and every engine that keys off it
+  (net_worth_engine, projection_engine, simulation_engine) are
+  completely untouched. CSV import is a genuine two-phase preview/
+  commit flow (nothing written until the user reviews per-row
+  validity).
+- Milestone 2 (investment policy): latest-row-wins, same convention
+  `planning_inputs`-adjacent endpoints already use elsewhere in this
+  codebase. No policy saved → an explicit `{"has_policy": false}`
+  setup state, never a silent fallback to `allocation_engine.py`'s
+  existing account-level `stock_allocation_pct` guess (that module is
+  untouched — still used by the pre-existing, separate Net Worth page
+  cards).
+- Milestone 3 (`holdings_engine.py`, pure, no I/O): current/target
+  allocation, drift-band comparison, contribution-first recommendation,
+  tax-aware rebalancing (prefers tax-advantaged exchanges over taxable
+  sales, flags missing cost basis rather than assuming zero),
+  concentration/expense-ratio/duplicate-exposure/unclassified flags.
+  90 hand-calculated tests. Mutation-checked the reconciliation and
+  contribution-allocation logic specifically (reverted each to a broken
+  form in place, confirmed the relevant tests fail, restored) — see
+  `CALCULATION_CONTRACT.md`'s own section for the exact mutations and
+  which tests caught them.
+- Milestone 4 (frontend): a new Portfolio Allocation page — grouped
+  holdings/reconciliation, CSV import, policy editor, current-vs-target
+  chart, both named workflows ("where should my next contribution go" /
+  "how should I rebalance"), a trade checklist with tax warnings,
+  privacy-mode masking, and stale-result clearing on any holdings/
+  policy edit. Found and fixed one real privacy-mode gap while writing
+  the privacy test: the reconciliation warning was rendered from a
+  backend string with real dollar figures baked directly into the
+  text, invisible to the frontend's masking — rebuilt client-side from
+  the already-masked numeric fields instead.
+- Milestone 5 (planning integration): a new `/api/portfolio/planning-
+  comparison` endpoint compares current vs. a policy-derived proposed
+  allocation across all 6 named engines (retirement projection, Monte
+  Carlo, Stress Tests, SWR, Roth Conversion, Tax Efficiency) —
+  **without modifying any of them**. The only difference between the
+  current and proposed call to each is `expected_return_pre_retirement`/
+  `expected_return_post_retirement` inside the same `inputs` dict every
+  one of those functions already reads. Verified directly, not just
+  asserted: a regression test saves real holdings and a policy, then
+  confirms the ordinary (pre-existing) Monte Carlo endpoint — which
+  never calls the new comparison endpoint — returns byte-identical
+  output before and after. Two real limitations disclosed in the
+  endpoint's own response rather than smoothed over: Monte Carlo/Stress
+  Tests' return variance is a fixed constant independent of expected
+  return (so "downside outcome" reflects a shifted mean, not a fully
+  allocation-aware risk model), and projected fees/concentration are
+  only ever computed for the current, real-holdings side. Scoped to
+  single retirement age only — two-age mode deferred, not silently
+  dropped.
+
+Test counts by commit on this branch: foundation (schema + engine) —
+1503 passed backend; API layer — 1535 passed backend; frontend page —
+80 passed frontend, production build succeeds; planning integration —
+1549 passed backend (97.01% coverage), 82 passed frontend. Sensitive-
+data check clean at every commit. No pre-existing bugs found outside
+this feature's own scope during this work (unlike some earlier
+addenda above, which did surface engine bugs along the way).
+
 ## Final status against Jason's 9-item follow-on task list
 
 All 9 items are resolved:
