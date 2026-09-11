@@ -149,6 +149,13 @@ def init_db():
         ("expense_ratio",    "REAL DEFAULT 0"),
         ("monthly_rental_income",   "REAL DEFAULT 0"),
         ("monthly_rental_expenses", "REAL DEFAULT 0"),
+        # Portfolio Coach (codex/portfolio-coach-recommendations) -- see
+        # init_portfolio_coach_tables()'s own docstring below for the
+        # full rationale. Lives in THIS migration list (guaranteed to
+        # run after the accounts table itself exists), not inside
+        # init_portfolio_coach_tables(), which runs unconditionally at
+        # db.py's own import time, possibly before accounts exists yet.
+        ("portfolio_account_type", "TEXT"),
     ]
     for col, typedef in accounts_migrations:
         if col not in accounts_cols:
@@ -682,3 +689,141 @@ def init_cfo_operating_tables():
     conn.commit(); conn.close()
 
 init_cfo_operating_tables()
+
+def init_portfolio_coach_tables():
+    """Portfolio Coach: holdings, an investment policy, a security-lookup
+    cache/snapshot pair, and the recommendation decision lifecycle
+    (codex/portfolio-coach-recommendations).
+
+    `accounts.portfolio_account_type` (nullable override, added to
+    init_db()'s own migration list above): the Coach's own 12-value
+    account-type enum, DELIBERATELY SEPARATE from the existing
+    `account_type` column net_worth_engine.py/projection_engine.py/
+    simulation_engine.py already key every calculation off of exactly —
+    renaming or migrating that column risks breaking every existing
+    projection/Monte Carlo/net-worth number for a feature that only
+    needs an ADDITIONAL classification layered on top. When NULL (every
+    existing account, until a user opts in), holdings_engine.
+    resolve_portfolio_account_type() derives it from the legacy
+    account_type instead. Known limitation: this app has never
+    distinguished a standalone Roth 401k from a Traditional 401k at the
+    account level, only a household-wide pretax/Roth SPLIT PERCENTAGE on
+    a single "401k"-typed account — a household with a genuine separate
+    Roth 401k account needs this override column to say so explicitly.
+
+    `securities`/`security_snapshots`: the provider-adapter cache and a
+    DATED snapshot of the metadata/quote actually used for a given
+    holding/recommendation, so a later quote change never silently
+    rewrites a historical decision (see security_provider.py).
+
+    `recommendations`/`recommendation_events`: the Coach's decision
+    lifecycle. `recommendation_key` is a STABLE identity (independent of
+    any one generation run) so a rejected/deferred recommendation can be
+    matched against a freshly-regenerated candidate and suppressed from
+    the active queue without deleting its history — see coach_engine.py's
+    own docstring for the exact reuse/suppression rule."""
+    conn = get_db()
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS holdings (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+            ticker TEXT,
+            security_name TEXT NOT NULL,
+            provider_identifier TEXT,
+            exchange TEXT,
+            security_type TEXT,
+            shares REAL,
+            market_value REAL NOT NULL DEFAULT 0 CHECK (market_value >= 0),
+            asset_class TEXT NOT NULL DEFAULT 'unclassified',
+            expense_ratio REAL,
+            cost_basis REAL,
+            as_of_date TEXT,
+            data_source TEXT NOT NULL DEFAULT 'manual',
+            confidence TEXT NOT NULL DEFAULT 'low',
+            notes TEXT,
+            created_at TEXT DEFAULT (datetime('now')),
+            updated_at TEXT DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_holdings_account_id ON holdings(account_id);
+
+        CREATE TABLE IF NOT EXISTS investment_policies (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL DEFAULT 'Household Policy',
+            target_us_large_cap_pct REAL NOT NULL DEFAULT 0,
+            target_us_mid_small_cap_pct REAL NOT NULL DEFAULT 0,
+            target_international_stock_pct REAL NOT NULL DEFAULT 0,
+            target_bonds_pct REAL NOT NULL DEFAULT 0,
+            target_cash_pct REAL NOT NULL DEFAULT 0,
+            target_real_estate_pct REAL NOT NULL DEFAULT 0,
+            target_alternatives_pct REAL NOT NULL DEFAULT 0,
+            drift_band_pct REAL NOT NULL DEFAULT 5,
+            rebalance_cadence TEXT NOT NULL DEFAULT 'annual',
+            minimum_cash_reserve REAL NOT NULL DEFAULT 0,
+            use_contributions_before_sales INTEGER NOT NULL DEFAULT 1,
+            risk_profile TEXT,
+            account_constraints_json TEXT,
+            effective_date TEXT,
+            review_date TEXT,
+            notes TEXT,
+            created_at TEXT DEFAULT (datetime('now')),
+            updated_at TEXT DEFAULT (datetime('now'))
+        );
+
+        CREATE TABLE IF NOT EXISTS securities (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            provider_identifier TEXT,
+            ticker TEXT,
+            security_name TEXT NOT NULL,
+            exchange TEXT,
+            currency TEXT,
+            security_type TEXT,
+            status TEXT NOT NULL DEFAULT 'active',
+            asset_class TEXT,
+            asset_class_source TEXT,
+            created_at TEXT DEFAULT (datetime('now')),
+            updated_at TEXT DEFAULT (datetime('now'))
+        );
+
+        CREATE TABLE IF NOT EXISTS security_snapshots (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            security_id INTEGER REFERENCES securities(id),
+            holding_id INTEGER REFERENCES holdings(id),
+            price REAL,
+            as_of_date TEXT NOT NULL,
+            data_source TEXT NOT NULL,
+            raw_json TEXT,
+            created_at TEXT DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_security_snapshots_holding ON security_snapshots(holding_id);
+
+        CREATE TABLE IF NOT EXISTS recommendations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            recommendation_key TEXT NOT NULL,
+            category TEXT NOT NULL,
+            priority INTEGER NOT NULL,
+            title TEXT NOT NULL,
+            action_text TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            assumptions_hash TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'proposed',
+            decision_date TEXT,
+            decision_notes TEXT,
+            decision_reason TEXT,
+            resulting_allocation_json TEXT,
+            created_at TEXT DEFAULT (datetime('now')),
+            updated_at TEXT DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_recommendations_key ON recommendations(recommendation_key);
+
+        CREATE TABLE IF NOT EXISTS recommendation_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            recommendation_id INTEGER NOT NULL REFERENCES recommendations(id) ON DELETE CASCADE,
+            event_type TEXT NOT NULL,
+            notes TEXT,
+            created_at TEXT DEFAULT (datetime('now'))
+        );
+    """)
+    conn.execute("PRAGMA optimize")
+    conn.commit(); conn.close()
+
+init_portfolio_coach_tables()
