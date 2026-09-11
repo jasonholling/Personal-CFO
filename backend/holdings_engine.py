@@ -260,7 +260,7 @@ def recommend_contribution_destination(comparison: Dict, contribution_amount: fl
 
 # ── Rebalance actions ─────────────────────────────────────────────────────
 
-def _account_taxable_gain_warning(holding: Dict, sell_amount: float) -> Optional[Dict]:
+def estimate_taxable_gain_warning(holding: Dict, sell_amount: float) -> Optional[Dict]:
     """A taxable sale's tax impact can only be ESTIMATED when cost_basis
     is known -- missing cost basis is flagged explicitly, never assumed
     to be zero or equal to market value."""
@@ -350,7 +350,7 @@ def recommend_rebalance_actions(
                     f"selling to fund the household's remaining underweight class(es)."
                 ),
                 "is_taxable_sale": is_taxable,
-                "tax_warning": _account_taxable_gain_warning(h, amount) if is_taxable else None,
+                "tax_warning": estimate_taxable_gain_warning(h, amount) if is_taxable else None,
                 "confidence_note": (
                     "Tax-advantaged account -- no tax consequence from this sale." if not is_taxable else
                     "Taxable brokerage account -- see tax_warning for the estimated gain."
