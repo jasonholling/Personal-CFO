@@ -716,3 +716,73 @@ def parse_holdings_csv(csv_text: str, valid_account_ids: Set[int]) -> Dict:
         "valid_count": sum(1 for r in rows if r["valid"]),
         "invalid_count": sum(1 for r in rows if not r["valid"]),
     }
+
+
+# ── Milestone 5: planning integration (proposed-allocation comparison) ──
+# Deliberately does NOT touch run_retirement_projection/run_monte_carlo/
+# run_stress_tests/run_swr_analysis/run_roth_conversion_analysis/
+# run_tax_efficiency_simulation at all -- every one of those functions
+# already reads expected_return_pre_retirement/expected_return_post_
+# retirement out of its own `inputs` dict argument. main.py's comparison
+# endpoint calls each function TWICE: once with the household's real,
+# unmodified inputs (the "current" plan -- literally the same call any
+# other page already makes), and once with a shallow copy of those same
+# inputs with ONLY those two keys replaced by blended_expected_return()
+# below (the "proposed" plan). No engine internals change, so "if no
+# proposed allocation is supplied, all existing calculations must remain
+# byte-identical" is trivially true -- every existing call site is
+# completely untouched.
+#
+# ASSET_CLASS_EXPECTED_RETURNS are documented, conservative long-run
+# nominal capital-market assumptions -- decision support only, not a
+# guarantee (per the brief's own framing for this entire feature).
+# "unclassified" has no assumption (None) since there's nothing to base
+# one on; blended_expected_return excludes it from both the weighted sum
+# and the denominator rather than treating it as 0% return, which would
+# silently drag a partially-unclassified portfolio's blend toward zero.
+ASSET_CLASS_EXPECTED_RETURNS = {
+    "us_stock": 0.09,
+    "international_stock": 0.08,
+    "bonds": 0.045,
+    "cash": 0.02,
+    "real_estate": 0.07,
+    "alternatives": 0.06,
+    "unclassified": None,
+}
+
+
+def blended_expected_return(pct_by_class: Dict[str, float]) -> Optional[float]:
+    """Weighted-average expected nominal return from an allocation's
+    pct_by_class (percentages, 0-100), using ASSET_CLASS_EXPECTED_
+    RETURNS. Returns None if there's no classified weight at all to
+    compute a blend from (an entirely-unclassified or empty
+    allocation) -- never silently returns 0%, which would read as a
+    real (and alarmingly bad) assumption rather than "unknown.\""""
+    known = [(c, pct) for c, pct in pct_by_class.items()
+             if c != "unclassified" and ASSET_CLASS_EXPECTED_RETURNS.get(c) is not None and pct]
+    total_known_weight = sum(pct for _, pct in known)
+    if total_known_weight <= 0:
+        return None
+    weighted = sum(pct * ASSET_CLASS_EXPECTED_RETURNS[c] for c, pct in known)
+    return round(weighted / total_known_weight, 4)
+
+
+def blended_expense_ratio(household_holdings: List[Dict]) -> Optional[Dict]:
+    """Real, holdings-weighted current expense ratio/annual fee --
+    there is no equivalent "proposed" figure computable from an asset-
+    class-level policy target alone (it doesn't specify which funds
+    would implement it), so this is only ever computed for the CURRENT
+    side of a planning comparison, never fabricated for the proposed
+    side. Returns None if no holding has an expense_ratio on file."""
+    total_value = sum(h.get("market_value", 0) or 0 for h in household_holdings)
+    rated = [h for h in household_holdings if h.get("expense_ratio") is not None]
+    if not rated or total_value <= 0:
+        return None
+    weighted_ratio = sum((h.get("market_value", 0) or 0) * h["expense_ratio"] for h in rated) / total_value
+    annual_fee = sum((h.get("market_value", 0) or 0) * h["expense_ratio"] for h in rated)
+    return {
+        "blended_expense_ratio_pct": round(weighted_ratio * 100, 3),
+        "annual_fee_dollars": round(annual_fee, 2),
+        "holdings_with_expense_ratio": len(rated),
+        "holdings_total": len(household_holdings),
+    }

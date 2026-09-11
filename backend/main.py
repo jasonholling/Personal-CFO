@@ -864,6 +864,129 @@ def portfolio_rebalance(req: PortfolioContributionRequest):
     comparison = compare_to_target(current, policy)
     return recommend_rebalance_actions(classified["household"], current, comparison, policy, pending_contribution=req.amount)
 
+class PlanningComparisonRequest(BaseModel):
+    ret_age: int = 60
+    ss_timing: str = "early"
+
+@app.post("/api/portfolio/planning-comparison")
+def portfolio_planning_comparison(req: PlanningComparisonRequest):
+    """Milestone 5: compares the household's CURRENT plan against a
+    PROPOSED plan built from the saved investment policy's target
+    allocation — on success rate, safe spending, downside outcome,
+    ending balance, projected fees, and concentration, across
+    retirement projection, Monte Carlo, Historical Stress Tests, SWR,
+    Roth Conversion, and Tax Efficiency.
+
+    Deliberately does NOT modify any of those six functions. The only
+    difference between the "current" and "proposed" call to each is
+    expected_return_pre_retirement/expected_return_post_retirement in
+    the inputs dict passed in — current uses the household's own saved
+    Settings value completely unchanged (the identical call every other
+    page already makes); proposed substitutes holdings_engine.
+    blended_expected_return()'s estimate from the saved policy's
+    asset-class targets, leaving every other input untouched. No engine
+    internals change for this endpoint to exist, so every OTHER
+    existing call site (every page that doesn't hit this endpoint) is
+    completely unaffected — literally the same function, same code
+    path, same real inputs it always received.
+
+    Two known, disclosed limitations (not silently smoothed over):
+    (1) Monte Carlo/Stress Tests' own return VARIANCE (PORT_STD) is a
+    fixed constant, independent of expected_return_pre/post_retirement —
+    shifting the expected return moves the projection's MEAN outcome but
+    not the spread used to build percentile bands, so "downside outcome"
+    here reflects a shifted mean with the same variance shape, not a
+    fully allocation-aware risk model. (2) "Projected fees" and
+    "concentration" are only ever computed for the CURRENT side, from
+    real per-holding data — an asset-class-level policy target doesn't
+    specify which funds would implement it, so a proposed fee/
+    concentration figure would be invented, not estimated, and isn't
+    reported here.
+
+    Scope: single retirement age only (two-age mode deferred — not a
+    silent omission, see CALCULATION_CONTRACT.md). Requires real
+    holdings AND a saved policy; explicit setup-state responses
+    otherwise."""
+    conn = get_db()
+    inputs_row = conn.execute("SELECT * FROM planning_inputs ORDER BY id DESC LIMIT 1").fetchone()
+    accounts, holdings, policy = _load_portfolio_context(conn)
+    life_events = _get_active_life_events(conn)
+    surplus_allocations = _get_relevant_surplus_allocations(conn)
+    conn.close()
+    if not inputs_row:
+        return {"error": "No planning inputs found"}
+    if not holdings:
+        return {"has_holdings": False}
+    if not policy:
+        return {"has_policy": False}
+
+    from holdings_engine import (
+        classify_holdings, compute_current_allocation, policy_targets_by_class,
+        blended_expected_return, blended_expense_ratio, concentration_flags,
+    )
+    from projection_engine import run_retirement_projection
+    from simulation_engine import (
+        run_monte_carlo, run_stress_tests, run_swr_analysis,
+        run_roth_conversion_analysis, run_tax_efficiency_simulation,
+    )
+
+    classified = classify_holdings(accounts, holdings)
+    current_alloc = compute_current_allocation(classified["household"])
+    proposed_pct = policy_targets_by_class(policy)
+    current_return = blended_expected_return(current_alloc["pct_by_class"])
+    proposed_return = blended_expected_return(proposed_pct)
+
+    base_inputs = dict(inputs_row)
+    proposed_inputs = dict(base_inputs)
+    if proposed_return is not None:
+        proposed_inputs["expected_return_pre_retirement"] = proposed_return
+        proposed_inputs["expected_return_post_retirement"] = proposed_return
+
+    def _run(run_inputs):
+        proj = run_retirement_projection(run_inputs, accounts, ret_ages=[req.ret_age],
+                                          life_events=life_events, surplus_allocations=surplus_allocations)
+        scenario = next((s for s in proj["scenarios"] if s["label"] == f"age_{req.ret_age}_{req.ss_timing}"), None)
+        mc = run_monte_carlo(run_inputs, accounts, ret_age=req.ret_age, ss_timing=req.ss_timing,
+                              life_events=life_events, surplus_allocations=surplus_allocations)
+        stress = run_stress_tests(run_inputs, accounts, ret_age=req.ret_age, ss_timing=req.ss_timing,
+                                   life_events=life_events, surplus_allocations=surplus_allocations)
+        swr = run_swr_analysis(run_inputs, accounts, ret_age=req.ret_age, ss_timing=req.ss_timing,
+                                life_events=life_events, surplus_allocations=surplus_allocations)
+        roth = run_roth_conversion_analysis(run_inputs, accounts, ret_age=req.ret_age, ss_timing=req.ss_timing,
+                                             life_events=life_events, surplus_allocations=surplus_allocations)
+        tax_eff = run_tax_efficiency_simulation(run_inputs, accounts, ret_age=req.ret_age, ss_timing=req.ss_timing,
+                                                 life_events=life_events, surplus_allocations=surplus_allocations)
+        worst_stress = min((s["final_balance"] for s in stress["scenarios"].values()), default=None)
+        return {
+            "ending_balance": scenario["yearly_detail"][-1]["portfolio_balance"] if scenario and scenario.get("yearly_detail") else None,
+            "on_track": scenario["on_track"] if scenario else None,
+            "success_rate": mc["success_rate"],
+            "monte_carlo_median_final_balance": mc["median_final_balance"],
+            "downside_outcome_worst_historical_scenario": worst_stress,
+            "safe_spending_annual": swr["total_safe_spend"],
+            "roth_conversion_net_lifetime_benefit": roth["net_lifetime_benefit"],
+            "tax_efficiency_optimal_median_final_balance": tax_eff["strategies"]["optimal"]["median_final_balance"],
+        }
+
+    current_result = _run(base_inputs)
+    proposed_result = _run(proposed_inputs) if proposed_return is not None else None
+
+    return {
+        "has_holdings": True, "has_policy": True,
+        "current_blended_expected_return": current_return,
+        "proposed_blended_expected_return": proposed_return,
+        "current": current_result,
+        "proposed": proposed_result,
+        "current_fees": blended_expense_ratio(classified["household"]),
+        "current_concentration_flags": concentration_flags(classified["household"]),
+        "limitations": [
+            "Monte Carlo/Stress Tests use a fixed return-variance constant independent of expected return — "
+            "the proposed side's downside figures reflect a shifted mean, not a fully allocation-aware risk model.",
+            "Projected fees and concentration are reported for the current (real-holdings) side only — an "
+            "asset-class-level policy target doesn't specify which funds would implement it.",
+        ],
+    }
+
 # Monthly cash flow — recurring amounts, deliberately separate from balances.
 @app.get("/api/cash-flow")
 def get_cash_flow():

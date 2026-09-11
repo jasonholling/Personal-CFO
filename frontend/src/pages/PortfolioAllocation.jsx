@@ -367,6 +367,13 @@ export default function PortfolioAllocation() {
   const [workflowLoading, setWorkflowLoading] = useState(false)
   const [refreshKey, setRefreshKey] = useState(0)
 
+  // Milestone 5: current-vs-proposed planning comparison — its own
+  // loading/result state, cleared on the same onDataChanged path as the
+  // contribution/rebalance results above (stale-result clearing applies
+  // here too).
+  const [comparisonResult, setComparisonResult] = useState(null)
+  const [comparisonLoading, setComparisonLoading] = useState(false)
+
   const load = useCallback(() => {
     setLoading(true)
     Promise.all([
@@ -390,9 +397,22 @@ export default function PortfolioAllocation() {
   const onDataChanged = () => {
     setContributionResult(null)
     setRebalanceResult(null)
+    setComparisonResult(null)
     setAddingTo(null)
     setEditingHolding(null)
     setRefreshKey(k => k + 1)
+  }
+
+  const runPlanningComparison = async () => {
+    setComparisonLoading(true)
+    try {
+      const r = await axios.post('/api/portfolio/planning-comparison', { ret_age: 60, ss_timing: 'early' })
+      setComparisonResult(r.data)
+    } catch {
+      setComparisonResult({ error: 'Could not compute the planning comparison.' })
+    } finally {
+      setComparisonLoading(false)
+    }
   }
 
   const runContributionDestination = async () => {
@@ -709,6 +729,78 @@ export default function PortfolioAllocation() {
                 </>
               )}
             </div>
+          )}
+        </Card>
+      )}
+
+      {allocation?.has_holdings && policy?.has_policy && (
+        <Card title="Compare current vs. proposed allocation in retirement projections"
+              subtitle="Runs retirement projection, Monte Carlo, Historical Stress Tests, SWR, Roth Conversion, and Tax Efficiency for both your current allocation and the policy's target allocation (retire at 60, SS at 62 — a fixed reference scenario for this comparison). Decision support only.">
+          <button className="btn-secondary" disabled={comparisonLoading} onClick={runPlanningComparison}>
+            {comparisonLoading ? 'Comparing…' : 'Run comparison'}
+          </button>
+          {comparisonResult && (
+            comparisonResult.error ? (
+              <div style={{ color: 'var(--red)', fontSize: 13, marginTop: 12 }}>⚠ {comparisonResult.error}</div>
+            ) : comparisonResult.proposed === null ? (
+              <div style={{ fontSize: 13, color: 'var(--text2)', marginTop: 12 }}>
+                The saved policy's targets don't produce a usable expected-return estimate (e.g. entirely
+                unclassified) — set real percentages across the classified asset classes to compare.
+              </div>
+            ) : (
+              <div style={{ marginTop: 16 }}>
+                <div style={{ fontSize: 12, color: 'var(--text2)', marginBottom: 12 }}>
+                  Current blended expected return: {fmtPct(comparisonResult.current_blended_expected_return * 100)} ·
+                  Proposed: {fmtPct(comparisonResult.proposed_blended_expected_return * 100)}
+                </div>
+                <div style={{ overflowX: 'auto' }}>
+                  <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+                    <thead>
+                      <tr style={{ borderBottom: '1px solid var(--border)' }}>
+                        {['Metric', 'Current', 'Proposed'].map(h => (
+                          <th key={h} style={{ padding: '6px 8px', textAlign: 'left', color: 'var(--text3)' }}>{h}</th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {[
+                        ['Monte Carlo success rate', v => `${v}%`, 'success_rate'],
+                        ['Safe spending (annual)', fmt, 'safe_spending_annual'],
+                        ['Downside outcome (worst historical scenario)', fmt, 'downside_outcome_worst_historical_scenario'],
+                        ['Ending balance (age 99)', fmt, 'ending_balance'],
+                        ['Roth Conversion net lifetime benefit', fmt, 'roth_conversion_net_lifetime_benefit'],
+                        ['Tax Efficiency (optimal) median final balance', fmt, 'tax_efficiency_optimal_median_final_balance'],
+                      ].map(([label, formatter, key]) => (
+                        <tr key={key} style={{ borderBottom: '1px solid var(--border)' }}>
+                          <td style={{ padding: '6px 8px' }}>{label}</td>
+                          <td style={{ padding: '6px 8px' }}>{comparisonResult.current[key] != null ? formatter(comparisonResult.current[key]) : '—'}</td>
+                          <td style={{ padding: '6px 8px' }}>{comparisonResult.proposed[key] != null ? formatter(comparisonResult.proposed[key]) : '—'}</td>
+                        </tr>
+                      ))}
+                      <tr style={{ borderBottom: '1px solid var(--border)' }}>
+                        <td style={{ padding: '6px 8px' }}>Projected fees (current holdings only)</td>
+                        <td style={{ padding: '6px 8px' }} colSpan={2}>
+                          {comparisonResult.current_fees
+                            ? `${comparisonResult.current_fees.blended_expense_ratio_pct}% (~${fmt(comparisonResult.current_fees.annual_fee_dollars)}/yr)`
+                            : 'No expense ratio data entered'}
+                        </td>
+                      </tr>
+                      <tr>
+                        <td style={{ padding: '6px 8px' }}>Concentration flags (current holdings only)</td>
+                        <td style={{ padding: '6px 8px' }} colSpan={2}>
+                          {comparisonResult.current_concentration_flags.length > 0
+                            ? comparisonResult.current_concentration_flags.map(f => f.name).join(', ')
+                            : 'None flagged'}
+                        </td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+                <div style={{ marginTop: 12, fontSize: 11, color: 'var(--text3)' }}>
+                  {comparisonResult.limitations.map((l, i) => <div key={i} style={{ marginBottom: 4 }}>· {l}</div>)}
+                </div>
+              </div>
+            )
           )}
         </Card>
       )}

@@ -344,3 +344,60 @@ describe('Portfolio Allocation — stale-result clearing', () => {
     expect(container.textContent).not.toContain('No trades needed')
   })
 })
+
+describe('Portfolio Allocation — Milestone 5 planning comparison', () => {
+  it('renders the current vs. proposed comparison table', async () => {
+    mockDefaultGets()
+    axios.post.mockImplementation(url => {
+      if (url === '/api/portfolio/planning-comparison') {
+        return Promise.resolve({ data: {
+          has_holdings: true, has_policy: true,
+          current_blended_expected_return: 0.09, proposed_blended_expected_return: 0.0695,
+          current: {
+            ending_balance: 500000, on_track: true, success_rate: 98.5, monte_carlo_median_final_balance: 600000,
+            downside_outcome_worst_historical_scenario: 100000, safe_spending_annual: 90000,
+            roth_conversion_net_lifetime_benefit: 20000, tax_efficiency_optimal_median_final_balance: 550000,
+          },
+          proposed: {
+            ending_balance: 480000, on_track: true, success_rate: 96.0, monte_carlo_median_final_balance: 580000,
+            downside_outcome_worst_historical_scenario: 150000, safe_spending_annual: 85000,
+            roth_conversion_net_lifetime_benefit: 18000, tax_efficiency_optimal_median_final_balance: 530000,
+          },
+          current_fees: { blended_expense_ratio_pct: 0.03, annual_fee_dollars: 18 },
+          current_concentration_flags: [],
+          limitations: ['Monte Carlo/Stress Tests use a fixed return-variance constant independent of expected return.'],
+        } })
+      }
+      return Promise.resolve({ data: {} })
+    })
+    await act(async () => root.render(<PortfolioAllocation />))
+    await flush()
+    await click('Run comparison')
+    await flush()
+    expect(container.textContent).toContain('Monte Carlo success rate')
+    expect(container.textContent).toContain('98.5%')
+    expect(container.textContent).toContain('96%')
+    expect(container.textContent).toContain('Safe spending')
+    expect(container.textContent).toContain('Projected fees')
+    expect(container.textContent).toContain('fixed return-variance constant')
+  })
+
+  it('shows an explicit message when the proposed side has no computable return', async () => {
+    mockDefaultGets()
+    axios.post.mockImplementation(url => {
+      if (url === '/api/portfolio/planning-comparison') {
+        return Promise.resolve({ data: {
+          has_holdings: true, has_policy: true,
+          current_blended_expected_return: 0.09, proposed_blended_expected_return: null,
+          current: null, proposed: null, current_fees: null, current_concentration_flags: [], limitations: [],
+        } })
+      }
+      return Promise.resolve({ data: {} })
+    })
+    await act(async () => root.render(<PortfolioAllocation />))
+    await flush()
+    await click('Run comparison')
+    await flush()
+    expect(container.textContent).toContain('produce a usable expected-return estimate')
+  })
+})

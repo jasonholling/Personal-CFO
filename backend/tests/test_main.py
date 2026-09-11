@@ -5,6 +5,8 @@ cfo.db).
 """
 import json
 
+import pytest
+
 import auth
 from projection_engine import CURRENT_YEAR
 
@@ -2345,3 +2347,90 @@ class TestPortfolioHoldings:
         assert r.status_code == 200
         assert r.json()["created"] == 0
         assert r.json()["skipped"][0]["reason"]
+
+    def test_planning_comparison_requires_holdings_and_policy(self, client, sample_inputs):
+        _seed_planning_inputs(client, sample_inputs)
+        r = client.post("/api/portfolio/planning-comparison", json={"ret_age": 60, "ss_timing": "early"})
+        assert r.json() == {"has_holdings": False}
+        account_id = self._account(client)
+        client.post("/api/holdings", json={
+            "account_id": account_id, "name": "VTI", "market_value": 50000, "asset_class": "us_stock",
+        })
+        r = client.post("/api/portfolio/planning-comparison", json={"ret_age": 60, "ss_timing": "early"})
+        assert r.json() == {"has_policy": False}
+
+    def test_planning_comparison_runs_all_six_engines_current_vs_proposed(self, client, sample_inputs):
+        """Milestone 5: compares current vs a policy-derived proposed
+        allocation across retirement projection/Monte Carlo/Stress/SWR/
+        Roth Conversion/Tax Efficiency, without modifying any of them —
+        current and proposed differ only in the blended expected return
+        passed through the ordinary inputs dict."""
+        inputs = {**sample_inputs, "jason_age": 50, "justin_age": 48}
+        _seed_planning_inputs(client, inputs)
+        account_id = self._account(client, account_type="401k", balance=300000)
+        client.post("/api/holdings", json={
+            "account_id": account_id, "name": "Target Date Fund", "market_value": 300000, "asset_class": "us_stock",
+        })
+        client.post("/api/investment-policy", json={
+            "target_us_stock_pct": 60, "target_bonds_pct": 30, "target_cash_pct": 10, "drift_band_pct": 5,
+        })
+        r = client.post("/api/portfolio/planning-comparison", json={"ret_age": 60, "ss_timing": "early"})
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["has_holdings"] is True and body["has_policy"] is True
+        assert body["current_blended_expected_return"] == 0.09  # 100% us_stock
+        assert body["proposed_blended_expected_return"] == pytest.approx(0.0695, abs=1e-4)
+        for side in ("current", "proposed"):
+            assert "success_rate" in body[side]
+            assert "safe_spending_annual" in body[side]
+            assert "downside_outcome_worst_historical_scenario" in body[side]
+            assert "ending_balance" in body[side]
+            assert "roth_conversion_net_lifetime_benefit" in body[side]
+            assert "tax_efficiency_optimal_median_final_balance" in body[side]
+        assert body["current_fees"] is None  # no expense_ratio entered on this holding
+        assert body["limitations"]  # disclosed, not silently omitted
+
+    def test_planning_comparison_with_100pct_unclassified_policy_has_no_proposed_side(self, client, sample_inputs):
+        """If the saved policy's targets don't produce a computable
+        blended return (e.g. everything routed to an asset class with no
+        expected-return assumption), the proposed side is explicitly
+        None rather than a fabricated number."""
+        inputs = {**sample_inputs, "jason_age": 50, "justin_age": 48}
+        _seed_planning_inputs(client, inputs)
+        account_id = self._account(client, account_type="401k", balance=300000)
+        client.post("/api/holdings", json={
+            "account_id": account_id, "name": "Target Date Fund", "market_value": 300000, "asset_class": "us_stock",
+        })
+        # A policy with every target at 0 has no classified weight to
+        # blend from -- blended_expected_return returns None.
+        client.post("/api/investment-policy", json={
+            "target_us_stock_pct": 0, "target_bonds_pct": 0, "target_cash_pct": 0,
+            "target_international_stock_pct": 0, "target_real_estate_pct": 0, "target_alternatives_pct": 0,
+        })
+        r = client.post("/api/portfolio/planning-comparison", json={"ret_age": 60, "ss_timing": "early"})
+        assert r.status_code == 200, r.text
+        assert r.json()["proposed_blended_expected_return"] is None
+        assert r.json()["proposed"] is None
+
+    def test_holdings_and_policy_never_affect_other_endpoints_when_comparison_not_requested(self, client, sample_inputs):
+        """Milestone 5's own required test: "proposed allocation changes
+        only affect projections when explicitly supplied." Confirms the
+        ordinary Monte Carlo endpoint (a page that never calls
+        /api/portfolio/planning-comparison) returns the EXACT same
+        result whether or not real holdings and a saved investment
+        policy exist — since no engine internals were modified to build
+        this feature, only a new orchestration endpoint that calls them
+        with a separately-constructed inputs dict."""
+        inputs = {**sample_inputs, "jason_age": 50, "justin_age": 48}
+        _seed_planning_inputs(client, inputs)
+        account_id = self._account(client, account_type="401k", balance=300000)
+        before = client.get("/api/simulation/monte-carlo?ret_age=60&ss_timing=early").json()
+
+        client.post("/api/holdings", json={
+            "account_id": account_id, "name": "Target Date Fund", "market_value": 300000, "asset_class": "us_stock",
+        })
+        client.post("/api/investment-policy", json={
+            "target_us_stock_pct": 60, "target_bonds_pct": 30, "target_cash_pct": 10,
+        })
+        after = client.get("/api/simulation/monte-carlo?ret_age=60&ss_timing=early").json()
+        assert after == before

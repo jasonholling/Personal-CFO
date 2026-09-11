@@ -28,6 +28,8 @@ from holdings_engine import (
     duplicate_exposure_flags,
     unclassified_flags,
     parse_holdings_csv,
+    blended_expected_return,
+    blended_expense_ratio,
 )
 
 
@@ -665,3 +667,58 @@ class TestParseHoldingsCsv:
         assert result["valid_count"] == 1
         assert result["invalid_count"] == 1
         assert len(result["errors"]) == 1
+
+
+class TestBlendedExpectedReturn:
+    def test_exact_weighted_average(self):
+        """Hand-calculated: 60% us_stock (9%) + 40% bonds (4.5%) =
+        0.6*0.09 + 0.4*0.045 = 0.054 + 0.018 = 0.072 (7.2%)."""
+        result = blended_expected_return({"us_stock": 60, "bonds": 40})
+        assert result == 0.072
+
+    def test_single_asset_class_returns_its_own_rate(self):
+        result = blended_expected_return({"us_stock": 100})
+        assert result == 0.09
+
+    def test_unclassified_excluded_from_both_sum_and_denominator(self):
+        """50% us_stock (9%) + 50% unclassified -- the unclassified half
+        must NOT be treated as 0%, which would give 4.5%. Excluding it
+        from both sides of the weighted average leaves just 9%."""
+        result = blended_expected_return({"us_stock": 50, "unclassified": 50})
+        assert result == 0.09
+
+    def test_entirely_unclassified_returns_none(self):
+        assert blended_expected_return({"unclassified": 100}) is None
+
+    def test_empty_allocation_returns_none(self):
+        assert blended_expected_return({}) is None
+
+    def test_zero_weight_class_ignored(self):
+        result = blended_expected_return({"us_stock": 100, "bonds": 0})
+        assert result == 0.09
+
+
+class TestBlendedExpenseRatio:
+    def test_exact_weighted_fee(self):
+        """$60,000 at 0.05% + $40,000 at 0.20% expense ratio ->
+        weighted = (60000*0.0005 + 40000*0.002) / 100000 = (30 + 80) /
+        100000 = 0.0011 (0.11%); annual fee = $110."""
+        household = [holding(1, 1, market_value=60000, expense_ratio=0.0005),
+                      holding(2, 1, market_value=40000, expense_ratio=0.002)]
+        result = blended_expense_ratio(household)
+        assert result["blended_expense_ratio_pct"] == 0.11
+        assert result["annual_fee_dollars"] == 110.0
+
+    def test_holdings_missing_expense_ratio_excluded_not_assumed_zero(self):
+        household = [holding(1, 1, market_value=50000, expense_ratio=0.001),
+                      holding(2, 1, market_value=50000, expense_ratio=None)]
+        result = blended_expense_ratio(household)
+        assert result["holdings_with_expense_ratio"] == 1
+        assert result["holdings_total"] == 2
+
+    def test_no_expense_ratio_data_at_all_returns_none(self):
+        household = [holding(1, 1, market_value=50000, expense_ratio=None)]
+        assert blended_expense_ratio(household) is None
+
+    def test_empty_holdings_returns_none(self):
+        assert blended_expense_ratio([]) is None
