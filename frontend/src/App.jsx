@@ -21,6 +21,7 @@ import RothConversion from './pages/RothConversion'
 import Debt from './pages/Debt'
 import RetirementTools from './pages/RetirementTools'
 import Allocation from './pages/Allocation'
+import PortfolioAllocation from './pages/PortfolioAllocation'
 import AnnualPlan from './pages/AnnualPlan'
 import CashFlow from './pages/CashFlow'
 import GoalsFunding from './pages/GoalsFunding'
@@ -64,6 +65,7 @@ const NAV = [
   { id:'roth',       label:'Roth Conversion', icon:'⟳' },
   { id:'tax',        label:'Tax Planning',   icon:'⊛' },
   { id:'rettools',   label:'Retirement Tools', icon:'⊚' },
+  { id:'portfolio',  label:'Portfolio Allocation', icon:'◆' },
   { id:'education',  label:'Education',      icon:'◇' },
   { id:'kids',       label:'Kids',           icon:'◉' },
   { id:'goals',      label:'Goals & Funding', icon:'◇' },
@@ -125,7 +127,7 @@ export default function App() {
     education:Education, kids:Kids, insurance:Insurance,
     risk:Risk, estate:Estate, settings:Settings, backup:BackupRestore,
     tax:TaxPlanning, report:Report, networth:NetWorth, roth:RothConversion, debt:Debt,
-    rettools:RetirementTools, allocation:Allocation, annualplan:AnnualPlan, annualreview:AnnualReview, cashflow:CashFlow, goals:GoalsFunding, surplus:SurplusPlan, protection:ProtectionScorecard,
+    rettools:RetirementTools, allocation:Allocation, portfolio:PortfolioAllocation, annualplan:AnnualPlan, annualreview:AnnualReview, cashflow:CashFlow, goals:GoalsFunding, surplus:SurplusPlan, protection:ProtectionScorecard,
   }
   const Page = pages[page]
 
