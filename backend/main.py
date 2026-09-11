@@ -33,7 +33,10 @@ app = FastAPI(title="Personal CFO API")
 # from the start; now backed by a real table (see its own schema
 # comment in db.py), same "predates this line -> rejected, not silently
 # incomplete" behavior as kids above applies to it too.
-_BACKUP_TABLES = ("accounts", "planning_inputs", "insurance_policies", "property_policies", "snapshots", "tasks", "cash_flow_items", "surplus_allocations", "saved_scenarios", "life_events", "estate_documents", "estate_beneficiaries", "assumption_reviews", "kids")
+# "holdings"/"investment_policies" added 2026-09-10 (codex/portfolio-
+# holdings-allocation, Milestone 1) -- same "predates this line ->
+# rejected, not silently incomplete" precedent as above.
+_BACKUP_TABLES = ("accounts", "planning_inputs", "insurance_policies", "property_policies", "snapshots", "tasks", "cash_flow_items", "surplus_allocations", "saved_scenarios", "life_events", "estate_documents", "estate_beneficiaries", "assumption_reviews", "kids", "holdings", "investment_policies")
 
 app.add_middleware(
     CORSMiddleware,

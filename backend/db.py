@@ -149,6 +149,18 @@ def init_db():
         ("expense_ratio",    "REAL DEFAULT 0"),
         ("monthly_rental_income",   "REAL DEFAULT 0"),
         ("monthly_rental_expenses", "REAL DEFAULT 0"),
+        # Portfolio holdings/allocation (codex/portfolio-holdings-
+        # allocation) -- see init_holdings_tables()'s own docstring below
+        # for the full rationale. Lives in THIS migration list (init_db(),
+        # guaranteed to run after the accounts table itself exists)
+        # rather than inside init_holdings_tables() -- that function runs
+        # unconditionally at db.py's own import time, same as every other
+        # init_*_table() call at the bottom of this file, BEFORE init_db()
+        # has necessarily been called anywhere (conftest.py's temp_db
+        # fixture calls init_db() first, but nothing enforces that
+        # ordering at import time) -- an ALTER TABLE accounts there would
+        # fail with "no such table: accounts" against a brand-new db file.
+        ("portfolio_account_type", "TEXT"),
     ]
     for col, typedef in accounts_migrations:
         if col not in accounts_cols:
@@ -682,3 +694,84 @@ def init_cfo_operating_tables():
     conn.commit(); conn.close()
 
 init_cfo_operating_tables()
+
+def init_holdings_tables():
+    """Portfolio holdings, allocation, and rebalancing (codex/portfolio-
+    holdings-allocation). Two new tables plus one additive column on the
+    existing `accounts` table:
+
+    - `accounts.portfolio_account_type` (nullable override): the Holdings
+      feature's own 12-value account-type enum (brokerage/traditional_401k/
+      roth_401k/traditional_ira/roth_ira/hsa/529/custodial/checking/
+      savings/trust/other), DELIBERATELY SEPARATE from the existing
+      `account_type` column net_worth_engine.py/projection_engine.py/
+      simulation_engine.py already key every calculation off of. Reusing
+      or renaming that column would either break those engines' exact-
+      string bucketing or force a data migration touching every existing
+      account row — neither is worth it for a feature that only needs an
+      ADDITIONAL classification layered on top. When NULL (every existing
+      account, until a user opts in), holdings_engine.py's
+      resolve_portfolio_account_type() derives it from the legacy
+      account_type instead — see that function's own docstring for the
+      full mapping and its one real limitation (this app has never
+      distinguished a standalone Roth 401k from a Traditional 401k at the
+      account level, only via a household-wide pretax/Roth SPLIT
+      PERCENTAGE on a single "401k"-typed account — a household with a
+      genuine separate Roth 401k account needs this override column to
+      say so explicitly).
+    - `holdings`: one row per position, belonging to exactly one account
+      (account_id, ON DELETE CASCADE — deleting an account clears its
+      holdings rather than leaving them orphaned). market_value and
+      asset_class are required; everything else (ticker, shares,
+      expense_ratio, cost_basis, notes) is optional, matching "do not
+      invent missing holdings data" — a NULL cost_basis means "unknown",
+      never 0.
+    - `investment_policies`: household-level target allocation + rebalance
+      rules. "Latest row wins" (ORDER BY id DESC LIMIT 1), the same
+      convention planning_inputs' own callers already use elsewhere in
+      this codebase — a save INSERTs a new row rather than overwriting in
+      place, so policy history isn't destroyed. No row at all means "no
+      policy set" (an explicit setup state the frontend renders, per the
+      brief — never silently substituted with a guess)."""
+    conn = get_db()
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS holdings (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+            name TEXT NOT NULL,
+            description TEXT,
+            shares REAL,
+            market_value REAL NOT NULL DEFAULT 0 CHECK (market_value >= 0),
+            asset_class TEXT NOT NULL DEFAULT 'unclassified',
+            expense_ratio REAL,
+            cost_basis REAL,
+            last_updated TEXT DEFAULT (datetime('now')),
+            notes TEXT,
+            created_at TEXT DEFAULT (datetime('now')),
+            updated_at TEXT DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_holdings_account_id ON holdings(account_id);
+
+        CREATE TABLE IF NOT EXISTS investment_policies (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL DEFAULT 'Household Policy',
+            target_us_stock_pct REAL NOT NULL DEFAULT 0,
+            target_international_stock_pct REAL NOT NULL DEFAULT 0,
+            target_bonds_pct REAL NOT NULL DEFAULT 0,
+            target_cash_pct REAL NOT NULL DEFAULT 0,
+            target_real_estate_pct REAL NOT NULL DEFAULT 0,
+            target_alternatives_pct REAL NOT NULL DEFAULT 0,
+            drift_band_pct REAL NOT NULL DEFAULT 5,
+            rebalance_cadence TEXT NOT NULL DEFAULT 'annual',
+            minimum_cash_reserve REAL NOT NULL DEFAULT 0,
+            use_contributions_before_sales INTEGER NOT NULL DEFAULT 1,
+            account_constraints_json TEXT,
+            notes TEXT,
+            created_at TEXT DEFAULT (datetime('now')),
+            updated_at TEXT DEFAULT (datetime('now'))
+        );
+    """)
+    conn.execute("PRAGMA optimize")
+    conn.commit(); conn.close()
+
+init_holdings_tables()
