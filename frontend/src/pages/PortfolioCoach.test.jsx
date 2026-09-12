@@ -22,7 +22,7 @@ const recommendationsResponse = {
       id: 1, category: 'taxable_rebalance', status: 'proposed',
       payload: {
         title: 'Sell Overweight Large Cap', action_text: 'Sell $12,345 of overweight large-cap stock.',
-        current_value: 65, target_value: 50, proposed_change: 'sell $12,345',
+        current_value: 65, target_value: 50, value_unit: 'percent', proposed_change: 'sell $12,345',
         expected_effect: 'Reduces drift.', confidence: 'medium',
         tax_impact: { has_cost_basis: true, estimated_gain: 9876 },
         assumptions: [], recommendation_key: 'k1',
@@ -84,5 +84,44 @@ describe('PortfolioCoach', () => {
     expect(container.textContent).not.toContain('65%')
     expect(container.textContent).not.toContain('50%')
     expect(container.textContent).toContain('••%')
+  })
+})
+
+describe('PortfolioCoach value_unit rendering (external review finding #11)', () => {
+  const currencyCardResponse = {
+    has_policy: true,
+    recommendations: [{
+      id: 2, category: 'concentration_or_liquidity_risk', status: 'proposed',
+      payload: {
+        title: 'Cash reserve is below your policy\'s minimum', action_text: 'Rebuild the cash reserve.',
+        current_value: 50, target_value: 10000, value_unit: 'currency',
+        proposed_change: 'Rebuild the cash reserve', expected_effect: 'Restores minimum liquidity.',
+        confidence: 'high', assumptions: [], recommendation_key: 'k2',
+      },
+    }],
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    setPrivacyMode(false)
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    root = createRoot(container)
+    axios.get.mockImplementation(url => {
+      if (url === '/api/recommendations') return Promise.resolve({ data: currencyCardResponse })
+      if (url === '/api/portfolio/allocation') return Promise.resolve({ data: { has_holdings: false } })
+      return Promise.resolve({ data: {} })
+    })
+  })
+  afterEach(async () => {
+    await act(async () => root.unmount())
+    container.remove()
+  })
+
+  it('renders a $50 currency value as $50, never as 50% (external review finding #11)', async () => {
+    await act(async () => root.render(<PortfolioCoach />))
+    await flush()
+    expect(container.textContent).toContain('$50')
+    expect(container.textContent).not.toContain('50%')
   })
 })

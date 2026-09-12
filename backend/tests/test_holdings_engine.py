@@ -728,6 +728,35 @@ class TestProposeAccountOptionMix:
         assert result["mix"] == []
         assert result["unavailable_classes"] == ["us_large_cap"]
 
+    def test_external_review_repro_balanced_fund_plus_pure_bond_solves_exactly(self):
+        """External review finding #3 (2026-09-12, commit 4812d84): the
+        prior implementation assigned each selected option's weight as
+        target[c]*exposure[c] independently per class, which double-
+        counts/under-counts whenever one option covers more than one
+        target class. Exact repro: 50/50 stock/bond target, a 60/40
+        balanced fund, and a pure bond fund -- the prior (wrong) code
+        produced 37.5%/62.5%, which actually delivers 22.5% stock /
+        77.5% bonds, not 50/50. The correct feasible mix is ~83.3%
+        balanced / ~16.7% bonds (0.8333*0.6=0.5 stock exactly;
+        0.8333*0.4+0.1667=0.5 bonds exactly)."""
+        opts = [
+            mix_option(1, "Balanced 60/40", ticker="BAL", asset_class="us_large_cap", expense_ratio=0.001,
+                   exposures=[{"asset_class": "us_large_cap", "weight_pct": 60}, {"asset_class": "us_bonds", "weight_pct": 40}]),
+            mix_option(2, "Pure Bond Fund", ticker="BND", asset_class="us_bonds", expense_ratio=0.001),
+        ]
+        result = propose_account_option_mix(opts, {"us_large_cap": 50, "us_bonds": 50})
+        by_name = {m["option_name"]: m["pct"] for m in result["mix"]}
+        assert by_name["Balanced 60/40"] == pytest.approx(83.33, abs=0.1)
+        assert by_name["Pure Bond Fund"] == pytest.approx(16.67, abs=0.1)
+        # Verify the resulting mix actually reproduces the 50/50 target
+        # (not just that the percentages look plausible).
+        w_balanced = by_name["Balanced 60/40"] / 100
+        w_bond = by_name["Pure Bond Fund"] / 100
+        implied_stock = w_balanced * 0.6
+        implied_bonds = w_balanced * 0.4 + w_bond * 1.0
+        assert implied_stock == pytest.approx(0.5, abs=0.01)
+        assert implied_bonds == pytest.approx(0.5, abs=0.01)
+
     def test_never_ranks_by_a_performance_field(self):
         """Guard against ever adding a performance-based sort -- the
         function signature and its options never take/require a

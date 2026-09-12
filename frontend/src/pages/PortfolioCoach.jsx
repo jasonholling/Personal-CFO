@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import axios from 'axios'
-import { isPrivacyMode, MASK_CURRENCY, MASK_PERCENT } from '../utils/privacy'
+import { isPrivacyMode, MASK_CURRENCY, MASK_PERCENT, MASK_NUMBER, maskDigitsInText } from '../utils/privacy'
 
 // Portfolio Coach (codex/portfolio-coach-recommendations). Decision
 // support only -- nothing here places a trade, connects to a
@@ -11,6 +11,22 @@ import { isPrivacyMode, MASK_CURRENCY, MASK_PERCENT } from '../utils/privacy'
 
 const fmt = n => isPrivacyMode() ? MASK_CURRENCY : (n == null ? '—' : new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 }).format(n))
 const pct = n => isPrivacyMode() ? MASK_PERCENT : (n == null ? '—' : `${n}%`)
+
+// External review finding #11: a value's display unit is now always
+// explicit on the payload (coach_engine.py's `value_unit`) -- never
+// guessed from magnitude, which used to render a $50 cash balance as
+// "50%" just because it happened to be <= 100.
+const formatByUnit = (value, unit) => {
+  if (value == null) return '—'
+  switch (unit) {
+    case 'percent': return pct(value)
+    case 'currency': return fmt(value)
+    case 'age': return isPrivacyMode() ? MASK_NUMBER : `age ${value}`
+    case 'count': return isPrivacyMode() ? MASK_NUMBER : String(value)
+    case 'text': return isPrivacyMode() ? maskDigitsInText(String(value)) : String(value)
+    default: return typeof value === 'number' ? fmt(value) : String(value)
+  }
+}
 
 const CATEGORY_LABELS = {
   missing_data: 'Data quality', concentration_or_liquidity_risk: 'Concentration / liquidity risk',
@@ -38,10 +54,11 @@ function ActionCard({ card, onDecide, busy }) {
           </div>
           <div style={{ fontWeight: 600, fontSize: 15, marginTop: 4 }}>{p.title}</div>
           <div style={{ color: 'var(--muted)', fontSize: 13, marginTop: 6 }}>{p.action_text}</div>
-          {p.current_value != null && p.target_value != null && (
+          {(p.current_value != null || p.target_value != null) && (
             <div style={{ fontSize: 12, marginTop: 8, color: 'var(--muted)' }}>
-              Current: <strong>{typeof p.current_value === 'number' && p.current_value <= 100 ? pct(p.current_value) : fmt(p.current_value)}</strong>
-              {' → '}Target: <strong>{typeof p.target_value === 'number' && p.target_value <= 100 ? pct(p.target_value) : fmt(p.target_value)}</strong>
+              {p.current_value != null && <>Current: <strong>{formatByUnit(p.current_value, p.value_unit)}</strong></>}
+              {p.current_value != null && p.target_value != null && ' → '}
+              {p.target_value != null && <>Target: <strong>{formatByUnit(p.target_value, p.value_unit)}</strong></>}
             </div>
           )}
           {p.proposed_change && (

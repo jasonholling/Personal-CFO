@@ -80,16 +80,30 @@ def recommendation_key(category: str, account_id=None, holding_id=None, asset_cl
     return ":".join([category, str(account_id), str(holding_id), str(asset_class), extra])
 
 
+# External review finding #11 (2026-09-12, commit 4812d84): the
+# frontend used to guess a value's display unit from its magnitude
+# (<=100 -> percent), which misrenders a $50 cash balance as "50%".
+# Every card now carries its own explicit value_unit for current_value/
+# target_value so the frontend never has to guess.
+VALUE_UNITS = ("currency", "percent", "age", "count", "text")
+
+
 def _card(category, key, priority_offset, title, action_text, accounts, holdings,
           current_value, target_value, proposed_change, expected_effect, tax_impact,
-          assumptions, confidence, review_date=None, invalidates_on=None, assumptions_hash_input=None):
+          assumptions, confidence, review_date=None, invalidates_on=None, assumptions_hash_input=None,
+          value_unit="currency"):
     """Builds one recommendation card with every field the brief
     requires: id (assigned by the caller/DB), category, priority, title,
     plain-English action, affected accounts/holdings, current/target
     value, proposed change, expected effect, tax impact, assumptions,
     data timestamp (via assumptions_hash's own inputs, which include
     whatever "as of" data went into the card), confidence, review date,
-    and invalidation conditions."""
+    and invalidation conditions. `value_unit` (default "currency")
+    tells the caller how to DISPLAY current_value/target_value --
+    "currency" / "percent" / "age" / "count" / "text" -- never inferred
+    from the number's magnitude."""
+    if value_unit not in VALUE_UNITS:
+        raise ValueError(f"Unknown value_unit '{value_unit}' -- must be one of {VALUE_UNITS}")
     return {
         "recommendation_key": key,
         "category": category,
@@ -101,6 +115,7 @@ def _card(category, key, priority_offset, title, action_text, accounts, holdings
         "affected_holdings": holdings,
         "current_value": current_value,
         "target_value": target_value,
+        "value_unit": value_unit,
         "proposed_change": proposed_change,
         "expected_effect": expected_effect,
         "tax_impact": tax_impact,
@@ -157,6 +172,7 @@ def data_quality_recommendations(classified: Dict, reconciliations: List[Dict]) 
                 expected_effect="Accurate allocation totals for this account.",
                 tax_impact=None, assumptions=["Account balance is current as of the last update."], confidence="high",
                 assumptions_hash_input={"account_id": recon["account_id"], "remainder": recon["unreconciled_remainder"]},
+                value_unit="currency",
             ))
     for h in classified["household"] + classified["hsa"] + classified["child_specific"]:
         if (h.get("asset_class") or "unclassified") == "unclassified" or h.get("asset_class") not in ASSET_CLASSES:
@@ -168,6 +184,7 @@ def data_quality_recommendations(classified: Dict, reconciliations: List[Dict]) 
                 proposed_change="Classify the holding's asset class", expected_effect="Included correctly in drift/rebalance math.",
                 tax_impact=None, assumptions=[], confidence="high",
                 assumptions_hash_input={"holding_id": h.get("id"), "asset_class": h.get("asset_class")},
+                value_unit="text",
             ))
         if h.get("_portfolio_account_type") in TAXABLE_GAIN_TYPES and h.get("cost_basis") is None and (h.get("market_value", 0) or 0) > 0:
             cards.append(_card(
@@ -198,6 +215,7 @@ def data_quality_recommendations(classified: Dict, reconciliations: List[Dict]) 
                 proposed_change="Confirm via security lookup", expected_effect="Higher-confidence data for this holding.",
                 tax_impact=None, assumptions=[], confidence="low",
                 assumptions_hash_input={"holding_id": h.get("id"), "data_source": h.get("data_source"), "confidence": h.get("confidence")},
+                value_unit="text",
             ))
     return cards
 
@@ -230,7 +248,7 @@ def concentration_and_liquidity_recommendations(household_holdings: List[Dict], 
             [f["account_id"]], [f["holding_id"]], current_value=f["pct_of_portfolio"], target_value=None,
             proposed_change="Review for a possible diversification plan", expected_effect="Reduced single-security risk, if acted on.",
             tax_impact=tax_impact, assumptions=["Concentration measured against total household investable assets."],
-            confidence="high", assumptions_hash_input=f,
+            confidence="high", assumptions_hash_input=f, value_unit="percent",
         ))
     if policy and policy.get("minimum_cash_reserve") and household_cash_value is not None:
         minimum = policy["minimum_cash_reserve"]
@@ -247,6 +265,7 @@ def concentration_and_liquidity_recommendations(household_holdings: List[Dict], 
                 confidence="high",
                 invalidates_on=["The saved policy's minimum_cash_reserve changes.", "Cash holdings change enough to close the shortfall."],
                 assumptions_hash_input={"household_cash_value": household_cash_value, "minimum": minimum},
+                value_unit="currency",
             ))
     return cards
 
@@ -279,6 +298,7 @@ def policy_violation_recommendations(comparison: Dict, policy: Dict) -> List[Dic
             confidence="high",
             invalidates_on=["The saved policy's target changes.", "Real holdings change enough to close the drift on their own."],
             assumptions_hash_input={"asset_class": asset_class, "current_pct": d["current_pct"], "target_pct": d["target_pct"]},
+            value_unit="percent",
         ))
     return cards
 
@@ -303,7 +323,7 @@ def high_cost_or_redundant_recommendations(household_holdings: List[Dict]) -> Li
             f"Review for a lower-cost equivalent — this is evidence for a decision, not an automatic sell.",
             [f["account_id"]], [f["holding_id"]], current_value=f["expense_ratio_pct"], target_value=None,
             proposed_change="Review for a lower-cost equivalent fund", expected_effect="Reduced fee drag, if acted on.",
-            tax_impact=None, assumptions=[], confidence="high", assumptions_hash_input=f,
+            tax_impact=None, assumptions=[], confidence="high", assumptions_hash_input=f, value_unit="percent",
         ))
     for f in duplicate_exposure_flags(household_holdings):
         cards.append(_card(
@@ -402,7 +422,7 @@ def minor_optimization_recommendations(household_holdings: List[Dict], goal_cont
             [f["account_id"]], [f["holding_id"]], current_value=f["pct_of_portfolio"], target_value=None,
             proposed_change="Review for a possible diversification plan", expected_effect="Reduced single-security risk, if acted on.",
             tax_impact=None, assumptions=["Concentration measured against total household investable assets."],
-            confidence="medium", assumptions_hash_input=f,
+            confidence="medium", assumptions_hash_input=f, value_unit="percent",
         ))
     goal_context = goal_context or {}
     years_to_retirement = goal_context.get("years_to_retirement")
@@ -426,7 +446,7 @@ def minor_optimization_recommendations(household_holdings: List[Dict], goal_cont
                 assumptions=[f"Retirement projection assumes age {retirement_age}.", "Monte Carlo downside scenario per the last run."],
                 confidence="medium",
                 invalidates_on=["Retirement age or the Monte Carlo assumptions change materially."],
-                assumptions_hash_input=goal_context,
+                assumptions_hash_input=goal_context, value_unit="age",
             ))
     if success_rate is not None and success_rate < 80:
         cards.append(_card(
@@ -438,7 +458,7 @@ def minor_optimization_recommendations(household_holdings: List[Dict], goal_cont
             proposed_change="Review broader plan assumptions, not just allocation", expected_effect="Better-informed planning decision.",
             tax_impact=None, assumptions=["Success rate per the last Monte Carlo run."], confidence="medium",
             invalidates_on=["Monte Carlo is re-run with different assumptions."],
-            assumptions_hash_input=goal_context,
+            assumptions_hash_input=goal_context, value_unit="percent",
         ))
     return cards
 

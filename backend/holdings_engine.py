@@ -500,25 +500,42 @@ def propose_account_option_mix(options: List[Dict], target_weights_by_class: Dic
             selected_by_option_id[oid] = {
                 "option_id": chosen_opt.get("id"), "option_name": chosen_opt.get("option_name"),
                 "ticker": chosen_opt.get("ticker"), "expense_ratio": chosen_opt.get("expense_ratio"),
-                "asset_classes_covered": [], "weight": 0.0, "is_single_class": chosen_is_single,
+                "asset_classes_covered": [], "is_single_class": chosen_is_single, "exposures": chosen_weights,
             }
-        entry = selected_by_option_id[oid]
-        entry["asset_classes_covered"].append(asset_class)
-        entry["weight"] += target[asset_class] * chosen_weights.get(asset_class, 1.0)
+        selected_by_option_id[oid]["asset_classes_covered"].append(asset_class)
 
-    covered_total = sum(e["weight"] for e in selected_by_option_id.values())
+    covered_classes = [c for c in target if c not in unavailable_classes]
+    covered_target_total = sum(target[c] for c in covered_classes)
     mix = []
-    if covered_total > 0:
-        for entry in selected_by_option_id.values():
-            pct = round(entry["weight"] / covered_total * 100, 2)
+    if covered_target_total > 0 and selected_by_option_id:
+        # Normalize the target over only the coverable classes, THEN
+        # solve for the portfolio weights that best reproduce that
+        # sub-target using the selected options' OWN FULL exposure
+        # vectors -- not a naive target[c]*exposure[c] sum, which
+        # double-counts/under-counts whenever a multi-exposure option
+        # covers more than one target class at once (external review
+        # finding #3, 2026-09-12, commit 4812d84: this exact bug
+        # produced 22.5%/77.5% stock/bond exposure for a 50/50 target
+        # using a 60/40 balanced fund + a pure bond fund, instead of the
+        # correct ~83.3%/16.7% mix that actually reproduces 50/50).
+        entries = list(selected_by_option_id.values())
+        class_list = sorted(covered_classes)
+        target_vec = [target[c] / covered_target_total for c in class_list]
+        weights = _solve_option_mix_weights([e["exposures"] for e in entries], class_list, target_vec)
+        for entry, w in zip(entries, weights):
+            if w <= 1e-6:
+                continue
             covered_desc = ', '.join(c.replace('_', ' ') for c in entry['asset_classes_covered'])
             reason = (
                 f"Lowest-cost eligible option covering {covered_desc}"
                 if entry["is_single_class"]
                 else f"Covers {covered_desc} via look-through of its own recorded exposures"
             )
-            is_single_class = entry.pop("is_single_class")
-            mix.append({**entry, "pct": pct, "reason": reason})
+            mix.append({
+                "option_id": entry["option_id"], "option_name": entry["option_name"], "ticker": entry["ticker"],
+                "expense_ratio": entry["expense_ratio"], "asset_classes_covered": entry["asset_classes_covered"],
+                "pct": round(w * 100, 2), "reason": reason,
+            })
         residual = round(100 - sum(m["pct"] for m in mix), 2)
         if residual and mix:
             largest = max(mix, key=lambda m: m["pct"])
@@ -528,6 +545,88 @@ def propose_account_option_mix(options: List[Dict], target_weights_by_class: Dic
         "unavailable_classes": sorted(unavailable_classes),
         "alternatives_considered": alternatives_considered,
     }
+
+
+def _gaussian_solve(matrix: List[List[float]], vector: List[float]) -> Optional[List[float]]:
+    """Solves a square linear system via Gaussian elimination with
+    partial pivoting. Returns None if the matrix is singular (caller
+    falls back to an equal split -- see _solve_option_mix_weights)."""
+    n = len(matrix)
+    if n == 0:
+        return []
+    aug = [row[:] + [vector[i]] for i, row in enumerate(matrix)]
+    for col in range(n):
+        pivot_row = max(range(col, n), key=lambda r: abs(aug[r][col]))
+        if abs(aug[pivot_row][col]) < 1e-10:
+            return None
+        aug[col], aug[pivot_row] = aug[pivot_row], aug[col]
+        pivot_val = aug[col][col]
+        aug[col] = [x / pivot_val for x in aug[col]]
+        for r in range(n):
+            if r != col:
+                factor = aug[r][col]
+                if factor:
+                    aug[r] = [aug[r][c] - factor * aug[col][c] for c in range(n + 1)]
+    return [aug[i][n] for i in range(n)]
+
+
+def _solve_option_mix_weights(option_exposures: List[Dict[str, float]], class_list: List[str],
+                               target_vec: List[float]) -> List[float]:
+    """Finds portfolio weights w (one per option, sum to 1, each >= 0)
+    that minimize squared error to `target_vec` across `class_list`,
+    given each option's own exposure vector -- a proper (small) active-
+    set constrained least-squares solve, not a per-class independent
+    approximation. Correctly reproduces an EXACT feasible mix when one
+    exists (e.g. a 60/40 balanced fund + a pure bond fund hitting a
+    50/50 stock/bond target needs ~83.3%/16.7%, not a naive 37.5%/62.5%
+    that actually delivers 22.5%/77.5% -- external review finding #3).
+
+    Pure Python (no numpy/scipy dependency) -- the option/class counts
+    here are always small (a handful of investment options across up to
+    11 asset classes), so plain Gaussian elimination is more than fast
+    enough."""
+    n = len(option_exposures)
+    if n == 0:
+        return []
+    if n == 1:
+        return [1.0]
+
+    def exposure_column(i):
+        return [option_exposures[i].get(c, 0.0) for c in class_list]
+
+    active = list(range(n))
+    while True:
+        k = len(active)
+        if k == 1:
+            solved = {active[0]: 1.0}
+        else:
+            pivot = active[-1]
+            free = active[:-1]
+            pivot_col = exposure_column(pivot)
+            b_cols = [[exposure_column(i)[m] - pivot_col[m] for m in range(len(class_list))] for i in free]
+            target_prime = [target_vec[m] - pivot_col[m] for m in range(len(class_list))]
+            kk = len(free)
+            btb = [[sum(b_cols[i][m] * b_cols[j][m] for m in range(len(class_list))) for j in range(kk)] for i in range(kk)]
+            btt = [sum(b_cols[i][m] * target_prime[m] for m in range(len(class_list))) for i in range(kk)]
+            x = _gaussian_solve(btb, btt)
+            if x is None:
+                x = [1.0 / k] * kk  # singular system (e.g. duplicate exposure vectors) -- equal split fallback
+            solved = {free[i]: x[i] for i in range(kk)}
+            solved[pivot] = 1.0 - sum(x)
+        most_negative_idx, most_negative_val = None, -1e-9
+        for idx, val in solved.items():
+            if val < most_negative_val:
+                most_negative_idx, most_negative_val = idx, val
+        if most_negative_idx is None:
+            break
+        active = [i for i in active if i != most_negative_idx]
+        if not active:
+            solved = {}
+            break
+    weights = [0.0] * n
+    for idx, val in solved.items():
+        weights[idx] = max(0.0, val)
+    return weights
 
 
 # ── Rebalance actions ─────────────────────────────────────────────────────

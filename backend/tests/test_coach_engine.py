@@ -14,7 +14,7 @@ from coach_engine import (
     concentration_and_liquidity_recommendations, policy_violation_recommendations,
     high_cost_or_redundant_recommendations, new_money_recommendations,
     rebalance_recommendations, minor_optimization_recommendations,
-    no_policy_recommendation,
+    no_policy_recommendation, _card,
     prioritize, reconcile_recommendation_queue, CATEGORY_BASE_PRIORITY, CATEGORIES,
 )
 
@@ -341,6 +341,56 @@ class TestMinorOptimizationRecommendations:
         context = {"monte_carlo_success_rate": 65}
         cards = minor_optimization_recommendations([], context)
         assert any("success rate" in c["title"].lower() for c in cards)
+
+
+class TestValueUnitTagging:
+    """External review finding #11 (2026-09-12, commit 4812d84): the
+    frontend used to guess a card's display unit from its magnitude
+    (<=100 -> percent), which misrenders a $50 cash balance as "50%".
+    Every card now carries an explicit value_unit."""
+
+    def test_liquidity_shortfall_is_currency_not_percent(self):
+        """A $50 cash-below-minimum figure must never be tagged percent
+        just because it happens to be <= 100."""
+        cards = concentration_and_liquidity_recommendations(
+            [], policy=policy(minimum_cash_reserve=10000), household_cash_value=50,
+        )
+        assert cards[0]["value_unit"] == "currency"
+        assert cards[0]["current_value"] == 50
+
+    def test_severe_concentration_is_percent(self):
+        household = [holding(1, 1, security_name="Employer Stock", market_value=60000)] + \
+                    [holding(100 + i, 1, security_name=f"Rest {i}", market_value=40000 / 9) for i in range(9)]
+        cards = concentration_and_liquidity_recommendations(household)
+        assert cards[0]["value_unit"] == "percent"
+
+    def test_policy_violation_drift_is_percent(self):
+        current = compute_current_allocation([
+            holding(1, 1, market_value=60000, asset_class="us_large_cap"),
+            holding(2, 1, market_value=20000, asset_class="us_mid_cap"),
+            holding(3, 1, market_value=20000, asset_class="us_bonds"),
+        ])
+        comparison = compare_to_target(current, policy())
+        cards = policy_violation_recommendations(comparison, policy())
+        assert all(c["value_unit"] == "percent" for c in cards)
+
+    def test_unclassified_security_is_text_not_percent(self):
+        accs = [account(1, "taxable")]
+        hs = [holding(1, 1, market_value=50000, asset_class="unclassified")]
+        classified = classify_holdings(accs, hs)
+        cards = data_quality_recommendations(classified, [])
+        unclassified_card = next(c for c in cards if "asset class" in c["title"])
+        assert unclassified_card["value_unit"] == "text"
+
+    def test_currency_amounts_default_correctly(self):
+        recon = {"account_id": 1, "has_warning": True, "holdings_total": 90000, "account_balance": 100000,
+                 "unreconciled_remainder": 10000, "warning": "mismatch"}
+        cards = data_quality_recommendations({"blocked": [], "household": [], "hsa": [], "child_specific": []}, [recon])
+        assert cards[0]["value_unit"] == "currency"
+
+    def test_invalid_value_unit_rejected(self):
+        with pytest.raises(ValueError):
+            _card("missing_data", "k", 0, "t", "a", [], [], None, None, "p", "e", None, [], "high", value_unit="bogus")
 
 
 class TestNoPolicyRecommendation:
