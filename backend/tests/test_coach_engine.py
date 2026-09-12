@@ -27,10 +27,11 @@ def holding(id, account_id, security_name="Fund", market_value=0, asset_class="u
 
 
 def policy(**overrides):
-    p = {"name": "Household Policy", "target_us_large_cap_pct": 40, "target_us_mid_small_cap_pct": 10,
-         "target_international_stock_pct": 0, "target_bonds_pct": 30, "target_cash_pct": 20,
-         "target_real_estate_pct": 0, "target_alternatives_pct": 0, "drift_band_pct": 5,
-         "use_contributions_before_sales": True}
+    p = {"name": "Household Policy", "target_us_large_cap_pct": 40, "target_us_mid_cap_pct": 5,
+         "target_us_small_cap_pct": 5, "target_international_developed_pct": 0,
+         "target_emerging_markets_pct": 0, "target_us_bonds_pct": 30, "target_international_bonds_pct": 0,
+         "target_cash_pct": 20, "target_real_estate_pct": 0, "target_alternatives_pct": 0,
+         "drift_band_pct": 5, "use_contributions_before_sales": True}
     p.update(overrides)
     return p
 
@@ -45,10 +46,10 @@ class TestStableHash:
 
 class TestRecommendationKey:
     def test_key_is_stable_and_distinguishes_fields(self):
-        k1 = recommendation_key("drift", asset_class="bonds")
+        k1 = recommendation_key("drift", asset_class="us_bonds")
         k2 = recommendation_key("drift", asset_class="cash")
         assert k1 != k2
-        assert recommendation_key("drift", asset_class="bonds") == k1
+        assert recommendation_key("drift", asset_class="us_bonds") == k1
 
 
 class TestDataQualityRecommendations:
@@ -99,8 +100,8 @@ class TestAllocationDriftRecommendations:
         it."""
         current = compute_current_allocation([
             holding(1, 1, market_value=60000, asset_class="us_large_cap"),
-            holding(2, 1, market_value=20000, asset_class="us_mid_small_cap"),
-            holding(3, 1, market_value=20000, asset_class="bonds"),
+            holding(2, 1, market_value=20000, asset_class="us_mid_cap"),
+            holding(3, 1, market_value=20000, asset_class="us_bonds"),
         ])
         comparison = compare_to_target(current, policy())
         cards = allocation_drift_recommendations(comparison, policy())
@@ -113,8 +114,8 @@ class TestAllocationDriftRecommendations:
     def test_within_band_not_flagged(self):
         current = compute_current_allocation([
             holding(1, 1, market_value=40000, asset_class="us_large_cap"),
-            holding(2, 1, market_value=10000, asset_class="us_mid_small_cap"),
-            holding(3, 1, market_value=30000, asset_class="bonds"),
+            holding(2, 1, market_value=10000, asset_class="us_mid_cap"),
+            holding(3, 1, market_value=30000, asset_class="us_bonds"),
             holding(4, 1, market_value=20000, asset_class="cash"),
         ])
         comparison = compare_to_target(current, policy())
@@ -126,13 +127,13 @@ class TestAllocationDriftRecommendations:
         identical holdings."""
         current = compute_current_allocation([
             holding(1, 1, market_value=60000, asset_class="us_large_cap"),
-            holding(2, 1, market_value=20000, asset_class="us_mid_small_cap"),
-            holding(3, 1, market_value=20000, asset_class="bonds"),
+            holding(2, 1, market_value=20000, asset_class="us_mid_cap"),
+            holding(3, 1, market_value=20000, asset_class="us_bonds"),
         ])
-        comparison_a = compare_to_target(current, policy(target_us_large_cap_pct=40, target_bonds_pct=30))
-        comparison_b = compare_to_target(current, policy(target_us_large_cap_pct=60, target_bonds_pct=10))
-        cards_a = allocation_drift_recommendations(comparison_a, policy(target_us_large_cap_pct=40, target_bonds_pct=30))
-        cards_b = allocation_drift_recommendations(comparison_b, policy(target_us_large_cap_pct=60, target_bonds_pct=10))
+        comparison_a = compare_to_target(current, policy(target_us_large_cap_pct=40, target_us_bonds_pct=30))
+        comparison_b = compare_to_target(current, policy(target_us_large_cap_pct=60, target_us_bonds_pct=10))
+        cards_a = allocation_drift_recommendations(comparison_a, policy(target_us_large_cap_pct=40, target_us_bonds_pct=30))
+        cards_b = allocation_drift_recommendations(comparison_b, policy(target_us_large_cap_pct=60, target_us_bonds_pct=10))
         hashes_a = {c["assumptions_hash"] for c in cards_a}
         hashes_b = {c["assumptions_hash"] for c in cards_b}
         assert hashes_a != hashes_b
@@ -145,11 +146,11 @@ class TestRebalanceRecommendations:
         household = [
             holding(1, 1, security_name="401k Large Cap", market_value=5000, asset_class="us_large_cap"),
             holding(2, 2, security_name="Brokerage Large Cap", market_value=50000, asset_class="us_large_cap", cost_basis=30000),
-            holding(3, 1, security_name="401k Bonds", market_value=25000, asset_class="bonds"),
+            holding(3, 1, security_name="401k Bonds", market_value=25000, asset_class="us_bonds"),
         ]
         classified = classify_holdings(accs, household)["household"]
         current = compute_current_allocation(classified)
-        p = policy(target_us_large_cap_pct=40, target_us_mid_small_cap_pct=0, target_bonds_pct=30, target_cash_pct=20)
+        p = policy(target_us_large_cap_pct=40, target_us_mid_cap_pct=0, target_us_small_cap_pct=0, target_us_bonds_pct=30, target_cash_pct=20)
         comparison = compare_to_target(current, p)
         result_on = recommend_rebalance_actions(classified, current, comparison, p, pending_contribution=0)
         result_off = recommend_rebalance_actions(classified, current, comparison, {**p, "use_contributions_before_sales": False}, pending_contribution=0)
@@ -165,7 +166,7 @@ class TestRebalanceRecommendations:
     def test_taxable_sale_card_has_medium_or_low_confidence(self):
         accs = [account(1, "taxable")]
         household = [holding(1, 1, security_name="Brokerage Large Cap", market_value=50000, asset_class="us_large_cap", cost_basis=None),
-                     holding(2, 1, security_name="Brokerage Bonds", market_value=5000, asset_class="bonds")]
+                     holding(2, 1, security_name="Brokerage Bonds", market_value=5000, asset_class="us_bonds")]
         classified = classify_holdings(accs, household)["household"]
         current = compute_current_allocation(classified)
         comparison = compare_to_target(current, policy())

@@ -289,16 +289,25 @@ class InvestmentPolicy(BaseModel):
     id: Optional[int] = None
     name: str = "Household Policy"
     target_us_large_cap_pct: float = 0
-    target_us_mid_small_cap_pct: float = 0
-    target_international_stock_pct: float = 0
-    target_bonds_pct: float = 0
+    target_us_mid_cap_pct: float = 0
+    target_us_small_cap_pct: float = 0
+    target_international_developed_pct: float = 0
+    target_emerging_markets_pct: float = 0
+    target_us_bonds_pct: float = 0
+    target_international_bonds_pct: float = 0
     target_cash_pct: float = 0
     target_real_estate_pct: float = 0
     target_alternatives_pct: float = 0
     drift_band_pct: float = 5
-    rebalance_cadence: str = "annual"
+    max_single_security_pct: Optional[float] = None
     minimum_cash_reserve: float = 0
+    rebalance_cadence: str = "annual"
     use_contributions_before_sales: bool = True
+    taxable_sale_preference: Optional[str] = None
+    excluded_accounts: List[int] = []
+    excluded_holdings: List[int] = []
+    employer_stock_exceptions: List[Dict] = []
+    legacy_holding_exceptions: List[Dict] = []
     risk_profile: Optional[str] = None
     account_constraints: List[Dict] = []
     effective_date: Optional[str] = None
@@ -821,6 +830,18 @@ def get_security_quote(security_id: int, holding_id: Optional[int] = None):
 
 # ── Investment policy (Milestone 3) ──────────────────────────────────────
 
+_POLICY_JSON_LIST_FIELDS = (
+    "account_constraints", "excluded_accounts", "excluded_holdings",
+    "employer_stock_exceptions", "legacy_holding_exceptions",
+)
+
+def _policy_row_to_dict(row) -> Dict:
+    d = dict(row)
+    for field in _POLICY_JSON_LIST_FIELDS:
+        d[field] = json.loads(d.pop(f"{field}_json") or "[]")
+    d["use_contributions_before_sales"] = bool(d["use_contributions_before_sales"])
+    return d
+
 @app.get("/api/investment-policy")
 def get_investment_policy():
     conn = get_db()
@@ -828,25 +849,31 @@ def get_investment_policy():
     conn.close()
     if not row:
         return {"has_policy": False}
-    d = dict(row)
-    d["account_constraints"] = json.loads(d.pop("account_constraints_json") or "[]")
-    d["use_contributions_before_sales"] = bool(d["use_contributions_before_sales"])
-    return {"has_policy": True, "policy": d}
+    return {"has_policy": True, "policy": _policy_row_to_dict(row)}
 
 @app.post("/api/investment-policy")
 def save_investment_policy(policy: InvestmentPolicy):
     conn = get_db()
     cur = conn.execute(
-        "INSERT INTO investment_policies (name, target_us_large_cap_pct, target_us_mid_small_cap_pct, "
-        "target_international_stock_pct, target_bonds_pct, target_cash_pct, target_real_estate_pct, "
-        "target_alternatives_pct, drift_band_pct, rebalance_cadence, minimum_cash_reserve, "
-        "use_contributions_before_sales, risk_profile, account_constraints_json, effective_date, review_date, notes) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        (policy.name, policy.target_us_large_cap_pct, policy.target_us_mid_small_cap_pct,
-         policy.target_international_stock_pct, policy.target_bonds_pct, policy.target_cash_pct,
-         policy.target_real_estate_pct, policy.target_alternatives_pct, policy.drift_band_pct, policy.rebalance_cadence,
-         policy.minimum_cash_reserve, int(policy.use_contributions_before_sales), policy.risk_profile,
-         json.dumps(policy.account_constraints), policy.effective_date, policy.review_date, policy.notes)
+        "INSERT INTO investment_policies (name, target_us_large_cap_pct, target_us_mid_cap_pct, "
+        "target_us_small_cap_pct, target_international_developed_pct, target_emerging_markets_pct, "
+        "target_us_bonds_pct, target_international_bonds_pct, target_cash_pct, target_real_estate_pct, "
+        "target_alternatives_pct, drift_band_pct, max_single_security_pct, minimum_cash_reserve, "
+        "rebalance_cadence, use_contributions_before_sales, taxable_sale_preference, "
+        "excluded_accounts_json, excluded_holdings_json, employer_stock_exceptions_json, "
+        "legacy_holding_exceptions_json, risk_profile, account_constraints_json, effective_date, "
+        "review_date, notes) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (policy.name, policy.target_us_large_cap_pct, policy.target_us_mid_cap_pct,
+         policy.target_us_small_cap_pct, policy.target_international_developed_pct,
+         policy.target_emerging_markets_pct, policy.target_us_bonds_pct,
+         policy.target_international_bonds_pct, policy.target_cash_pct,
+         policy.target_real_estate_pct, policy.target_alternatives_pct, policy.drift_band_pct,
+         policy.max_single_security_pct, policy.minimum_cash_reserve, policy.rebalance_cadence,
+         int(policy.use_contributions_before_sales), policy.taxable_sale_preference,
+         json.dumps(policy.excluded_accounts), json.dumps(policy.excluded_holdings),
+         json.dumps(policy.employer_stock_exceptions), json.dumps(policy.legacy_holding_exceptions),
+         policy.risk_profile, json.dumps(policy.account_constraints), policy.effective_date,
+         policy.review_date, policy.notes)
     )
     conn.commit()
     policy.id = cur.lastrowid
@@ -859,11 +886,7 @@ def _load_portfolio_context(conn):
     accounts = [dict(r) for r in conn.execute("SELECT * FROM accounts").fetchall()]
     holdings = [dict(r) for r in conn.execute("SELECT * FROM holdings").fetchall()]
     policy_row = conn.execute("SELECT * FROM investment_policies ORDER BY id DESC LIMIT 1").fetchone()
-    policy = None
-    if policy_row:
-        policy = dict(policy_row)
-        policy["account_constraints"] = json.loads(policy.pop("account_constraints_json") or "[]")
-        policy["use_contributions_before_sales"] = bool(policy["use_contributions_before_sales"])
+    policy = _policy_row_to_dict(policy_row) if policy_row else None
     return accounts, holdings, policy
 
 @app.get("/api/portfolio/allocation")
