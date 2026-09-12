@@ -31,6 +31,8 @@ import SavedScenarios from './pages/SavedScenarios'
 import BackupRestore from './pages/BackupRestore'
 import LifeEvents from './pages/LifeEvents'
 import PlanOperatingSystem from './pages/PlanOperatingSystem'
+import PortfolioCoach from './pages/PortfolioCoach'
+import PortfolioSetup from './pages/PortfolioSetup'
 import { usePrivacyMode } from './hooks/usePrivacyMode'
 import './App.css'
 
@@ -68,6 +70,8 @@ const NAV = [
   { id:'kids',       label:'Kids',           icon:'◉' },
   { id:'goals',      label:'Goals & Funding', icon:'◇' },
   { id:'surplus',    label:'Assign Surplus', icon:'+' },
+  { id:'portfoliosetup', label:'Portfolio Setup', icon:'⊞' },
+  { id:'coach',      label:'Portfolio Coach', icon:'◈' },
   { id:'lifeevents', label:'Life-Event Planning', icon:'◇' },
   // 'allocation' (Concentration Risk) intentionally not in the nav —
   // with Asset Allocation/Rebalancing and Investment Fee Audit already
@@ -125,7 +129,7 @@ export default function App() {
     education:Education, kids:Kids, insurance:Insurance,
     risk:Risk, estate:Estate, settings:Settings, backup:BackupRestore,
     tax:TaxPlanning, report:Report, networth:NetWorth, roth:RothConversion, debt:Debt,
-    rettools:RetirementTools, allocation:Allocation, annualplan:AnnualPlan, annualreview:AnnualReview, cashflow:CashFlow, goals:GoalsFunding, surplus:SurplusPlan, protection:ProtectionScorecard,
+    rettools:RetirementTools, allocation:Allocation, annualplan:AnnualPlan, annualreview:AnnualReview, cashflow:CashFlow, goals:GoalsFunding, surplus:SurplusPlan, protection:ProtectionScorecard, coach:PortfolioCoach, portfoliosetup:PortfolioSetup,
   }
   const Page = pages[page]
 
