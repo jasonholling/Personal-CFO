@@ -361,6 +361,73 @@ def recommend_contribution_destination(comparison: Dict, contribution_amount: fl
     return actions
 
 
+def recommend_multi_account_contribution_destination(comparison: Dict, account_pools: List[Dict]) -> Dict:
+    """The brief's three new-money workflows (a specific account, several
+    accounts' contributions this period, a household cash lump sum split
+    across eligible accounts) collapse to the same shape here: one or
+    more independent (account, dollars, eligible classes) pools to
+    allocate. "Calculate the allocation of new money that minimizes
+    remaining household drift. Do not merely allocate new money
+    according to target percentages" -- this is NOT a fixed-percentage
+    split. Each round, greedily funds whichever (pool, asset class) pair
+    represents the LARGEST remaining household gap that pool is actually
+    eligible to buy, repeating until every pool is exhausted or every
+    gap is closed. A pool with eligible_classes=None may fund any
+    underweight class (an open-universe account with no closed-menu
+    restriction modeled); a pool with an explicit list is constrained to
+    it (e.g. a 401(k) whose only underweight-covering option is bonds).
+
+    account_pools: [{"account_id":, "amount":, "eligible_classes": [...] or None}]
+
+    Returns {"actions": [...], "unallocated": [...], "remaining_drift": {...}}
+    -- unallocated pools/remaining_drift are surfaced explicitly, never
+    silently dropped, when a pool's eligible classes can't fully use its
+    own dollars (e.g. every gap it can address is already closed)."""
+    remaining_gap = {
+        asset_class: -d["deviation_dollars"]
+        for asset_class, d in comparison["by_class"].items()
+        if d["deviation_dollars"] < 0 and asset_class != "unclassified"
+    }
+    pools = [
+        {"account_id": p["account_id"], "remaining": p.get("amount", 0) or 0, "eligible_classes": p.get("eligible_classes")}
+        for p in account_pools if (p.get("amount", 0) or 0) > 0
+    ]
+    actions = []
+    while True:
+        best = None  # (gap, pool, asset_class)
+        for pool in pools:
+            if pool["remaining"] <= 0.01:
+                continue
+            eligible = pool["eligible_classes"]
+            for asset_class, gap in remaining_gap.items():
+                if gap <= 0.01:
+                    continue
+                if eligible is not None and asset_class not in eligible:
+                    continue
+                if best is None or gap > best[0]:
+                    best = (gap, pool, asset_class)
+        if best is None:
+            break
+        gap, pool, asset_class = best
+        amount = min(pool["remaining"], gap)
+        actions.append({
+            "account_id": pool["account_id"], "asset_class": asset_class, "amount": round(amount, 2),
+            "reason": (
+                f"Largest remaining household underweight ({asset_class.replace('_', ' ')}) this account's "
+                f"contribution can actually fund -- minimizes remaining household drift rather than following a "
+                f"fixed percentage split."
+            ),
+        })
+        pool["remaining"] -= amount
+        remaining_gap[asset_class] -= amount
+    unallocated = [{"account_id": p["account_id"], "amount": round(p["remaining"], 2)} for p in pools if p["remaining"] > 0.01]
+    return {
+        "actions": actions,
+        "unallocated": unallocated,
+        "remaining_drift": {c: round(v, 2) for c, v in remaining_gap.items() if v > 0.01},
+    }
+
+
 # ── Fund/option comparison ("which mix best implements my policy?") ──────
 
 def propose_account_option_mix(options: List[Dict], target_weights_by_class: Dict[str, float]) -> Dict:

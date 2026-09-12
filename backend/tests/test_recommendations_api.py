@@ -171,6 +171,39 @@ class TestRecommendationsDecisionLifecycle:
         assert r.status_code == 404
 
 
+class TestMultiAccountContributionDestination:
+    """Reference test #18: multiple-account new money reduces household
+    drift, via /api/portfolio/contribution-destination/multi-account."""
+
+    def test_no_holdings_400s(self, client):
+        r = client.post("/api/portfolio/contribution-destination/multi-account", json={
+            "pools": [{"account_id": 1, "amount": 1000, "eligible_classes": None}],
+        })
+        assert r.status_code == 400
+
+    def test_bonds_only_pool_gets_bonds_open_pool_gets_next_largest_gap(self, client):
+        acc1 = _create_account(client, name="401k")
+        acc2 = _create_account(client, name="Brokerage")
+        client.post("/api/holdings", json={
+            "account_id": acc1["id"], "security_name": "All Stock", "market_value": 10000, "asset_class": "us_large_cap",
+        })
+        _save_policy(client, target_us_large_cap_pct=40, target_us_bonds_pct=40, target_cash_pct=20)
+        r = client.post("/api/portfolio/contribution-destination/multi-account", json={
+            "pools": [
+                {"account_id": acc1["id"], "amount": 4000, "eligible_classes": ["us_bonds"]},
+                {"account_id": acc2["id"], "amount": 2000, "eligible_classes": None},
+            ],
+        })
+        assert r.status_code == 200, r.text
+        body = r.json()
+        by_account = {a["account_id"]: a for a in body["actions"]}
+        assert by_account[acc1["id"]]["asset_class"] == "us_bonds"
+        assert by_account[acc1["id"]]["amount"] == 4000
+        assert by_account[acc2["id"]]["asset_class"] == "cash"
+        assert by_account[acc2["id"]]["amount"] == 2000
+        assert body["unallocated"] == []
+
+
 class TestRecommendationsPrivacy:
     def test_included_in_backup_export_and_restore(self, client):
         acc = _create_account(client)

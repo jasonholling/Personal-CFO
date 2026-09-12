@@ -358,6 +358,14 @@ class InvestmentPolicy(BaseModel):
 class PortfolioContributionRequest(BaseModel):
     amount: float = 0
 
+class ContributionPool(BaseModel):
+    account_id: int
+    amount: float = 0
+    eligible_classes: Optional[List[str]] = None  # None = open universe, any underweight class
+
+class MultiAccountContributionRequest(BaseModel):
+    pools: List[ContributionPool]
+
 class OptionMixRequest(BaseModel):
     account_id: int
     target_weights: Optional[Dict[str, float]] = None  # defaults to the saved household policy's own targets
@@ -1100,6 +1108,32 @@ def portfolio_contribution_destination(req: PortfolioContributionRequest):
     comparison = compare_to_target(current, policy)
     return {"actions": recommend_contribution_destination(comparison, req.amount),
             "current_allocation": current, "comparison": comparison}
+
+@app.post("/api/portfolio/contribution-destination/multi-account")
+def portfolio_multi_account_contribution_destination(req: MultiAccountContributionRequest):
+    """The "multiple accounts" and "household cash lump sum" new-money
+    workflows -- both are one or more (account, dollars, eligible
+    classes) pools. Calculates the allocation that minimizes remaining
+    household drift; never a fixed percentage split (reference test
+    #18). The user must confirm each account's own contribution
+    eligibility (income limits, employer-match windows, etc.) before
+    calling this — it is never assumed here."""
+    conn = get_db()
+    accounts, holdings, policy = _load_portfolio_context(conn)
+    conn.close()
+    if not holdings:
+        raise HTTPException(status_code=400, detail="No holdings entered yet — add holdings before requesting a contribution recommendation.")
+    if not policy:
+        raise HTTPException(status_code=400, detail="No investment policy saved yet — set target allocation before requesting a contribution recommendation.")
+    from holdings_engine import classify_holdings, compute_current_allocation, compare_to_target, recommend_multi_account_contribution_destination
+    classified = classify_holdings(accounts, holdings)
+    current = compute_current_allocation(classified["household"])
+    comparison = compare_to_target(current, policy)
+    pools = [p.dict() for p in req.pools]
+    result = recommend_multi_account_contribution_destination(comparison, pools)
+    result["current_allocation"] = current
+    result["comparison"] = comparison
+    return result
 
 @app.post("/api/portfolio/rebalance")
 def portfolio_rebalance(req: PortfolioContributionRequest):

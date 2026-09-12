@@ -16,7 +16,8 @@ from holdings_engine import (
     resolve_portfolio_account_type, is_allocation_blocked, PORTFOLIO_ACCOUNT_TYPES,
     reconcile_account_holdings, classify_holdings, compute_current_allocation,
     holding_exposure_weights, policy_targets_by_class, compare_to_target,
-    recommend_contribution_destination, recommend_rebalance_actions,
+    recommend_contribution_destination, recommend_multi_account_contribution_destination,
+    recommend_rebalance_actions,
     concentration_flags, expense_ratio_flags, duplicate_exposure_flags, unclassified_flags,
     parse_holdings_csv, blended_expected_return, blended_expense_ratio, ASSET_CLASSES,
     is_closed_menu_account, eligible_options_for_account, is_option_actionable,
@@ -296,6 +297,120 @@ class TestRecommendContributionDestination:
     def test_zero_contribution_returns_no_actions(self):
         current = compute_current_allocation([holding(1, 1, market_value=100000, asset_class="us_large_cap")])
         assert recommend_contribution_destination(compare_to_target(current, policy()), 0) == []
+
+
+class TestRecommendMultiAccountContributionDestination:
+    """Reference test #18: multiple-account new money reduces household
+    drift -- NOT a fixed-percentage split across accounts."""
+
+    def test_reference_case_18_multiple_accounts_minimize_household_drift(self):
+        """401(k) contribution can only buy bonds (its only eligible
+        underweight-covering option); brokerage contribution is
+        unrestricted. Both us_large_cap and us_bonds are underweight.
+        The 401(k)'s money must go to bonds (its only option); the
+        greedy largest-gap-first algorithm then uses the brokerage
+        money for whichever gap remains larger -- proving the
+        allocation is driven by minimizing remaining drift, not a fixed
+        per-account percentage."""
+        current = compute_current_allocation([
+            holding(1, 1, market_value=10000, asset_class="us_large_cap"),
+            holding(2, 1, market_value=0, asset_class="us_bonds"),
+            holding(3, 1, market_value=0, asset_class="cash"),
+        ])
+        p = policy(target_us_large_cap_pct=40, target_us_mid_cap_pct=0, target_us_small_cap_pct=0,
+                   target_us_bonds_pct=40, target_cash_pct=20)
+        comparison = compare_to_target(current, p)
+        # total=10000: large_cap target 4000 (over by 6000), bonds target
+        # 4000 (under by 4000), cash target 2000 (under by 2000).
+        result = recommend_multi_account_contribution_destination(comparison, [
+            {"account_id": 1, "amount": 4000, "eligible_classes": ["us_bonds"]},  # 401k: bonds-only option
+            {"account_id": 2, "amount": 2000, "eligible_classes": None},  # brokerage: open universe
+        ])
+        by_account = {a["account_id"]: a for a in result["actions"]}
+        assert by_account[1]["asset_class"] == "us_bonds"
+        assert by_account[1]["amount"] == 4000
+        # Bonds gap is now fully closed by the 401k; the brokerage's
+        # $2000 funds the next-largest remaining gap (cash, $2000).
+        assert by_account[2]["asset_class"] == "cash"
+        assert by_account[2]["amount"] == 2000
+        assert result["unallocated"] == []
+        assert result["remaining_drift"] == {}
+
+    def test_pool_with_no_eligible_gap_left_unallocated(self):
+        current = compute_current_allocation([holding(1, 1, market_value=100000, asset_class="us_large_cap")])
+        p = policy(target_us_large_cap_pct=100, target_us_mid_cap_pct=0, target_us_small_cap_pct=0,
+                   target_us_bonds_pct=0, target_cash_pct=0)
+        comparison = compare_to_target(current, p)  # nothing underweight
+        result = recommend_multi_account_contribution_destination(comparison, [
+            {"account_id": 1, "amount": 5000, "eligible_classes": ["us_bonds"]},
+        ])
+        assert result["actions"] == []
+        assert result["unallocated"] == [{"account_id": 1, "amount": 5000}]
+
+    def test_does_not_merely_split_by_target_percentage(self):
+        """Mutation-style check required by the brief: a naive
+        percentage-based split would divide new money proportionally to
+        each class's OWN target weight regardless of which pool can buy
+        it and regardless of remaining gap size. This algorithm doesn't
+        -- a bonds-only pool never receives a large-cap allocation even
+        though large-cap has the bigger target percentage."""
+        current = compute_current_allocation([
+            holding(1, 1, market_value=0, asset_class="us_large_cap"),
+            holding(2, 1, market_value=0, asset_class="us_bonds"),
+        ])
+        p = policy(target_us_large_cap_pct=80, target_us_mid_cap_pct=0, target_us_small_cap_pct=0,
+                   target_us_bonds_pct=20, target_cash_pct=0)
+        comparison = compare_to_target(current, p)
+        result = recommend_multi_account_contribution_destination(comparison, [
+            {"account_id": 1, "amount": 1000, "eligible_classes": ["us_bonds"]},
+        ])
+        assert all(a["asset_class"] == "us_bonds" for a in result["actions"])
+
+
+class TestHsaCashThresholdPreserved:
+    """Reference test #11: HSA cash threshold is preserved -- the
+    household rebalance engine operates ONLY on classify_holdings'
+    "household" bucket (see main.py's real call sites), and HSA
+    holdings are routed to their own separate "hsa" bucket, never
+    "household" -- so no matter how large an HSA cash balance is, the
+    household idle-cash/rebalance step can never touch it to fund a
+    household-side gap. This is what "the HSA cash threshold is
+    preserved" means in this engine: the threshold is never even a
+    candidate for redeployment because it's a different bucket
+    entirely, not a threshold check the rebalance step could bypass."""
+
+    def test_hsa_cash_never_enters_household_rebalance_actions(self):
+        accs = [account(1, "taxable"), account(2, "hsa")]
+        holdings = [
+            holding(1, 1, security_name="Taxable Large Cap", market_value=60000, asset_class="us_large_cap"),
+            holding(2, 2, security_name="HSA Cash Reserve", market_value=100000, asset_class="cash"),
+        ]
+        classified = classify_holdings(accs, holdings)
+        assert classified["hsa"][0]["market_value"] == 100000
+        assert all(h["id"] != 2 for h in classified["household"])
+
+        # Even a policy with a large bonds underweight must never pull
+        # from the HSA's cash bucket -- it's simply not in the
+        # household-only input this function is ever called with.
+        current = compute_current_allocation(classified["household"])
+        p = policy(target_us_large_cap_pct=40, target_us_mid_cap_pct=0, target_us_small_cap_pct=0, target_us_bonds_pct=60, target_cash_pct=0)
+        comparison = compare_to_target(current, p)
+        result = recommend_rebalance_actions(classified["household"], current, comparison, p, pending_contribution=0)
+        assert all(a.get("holding_id") != 2 for a in result["rebalance_actions"])
+        idle_cash_actions = [a for a in result["rebalance_actions"] if a["action"] == "invest_idle_cash"]
+        assert idle_cash_actions == []  # no cash at all in the household bucket to redeploy
+
+    def test_hsa_allocation_reported_separately_from_household(self):
+        accs = [account(1, "taxable"), account(2, "hsa")]
+        holdings = [
+            holding(1, 1, market_value=50000, asset_class="us_large_cap"),
+            holding(2, 2, market_value=25000, asset_class="us_bonds"),
+        ]
+        classified = classify_holdings(accs, holdings)
+        household_alloc = compute_current_allocation(classified["household"])
+        hsa_alloc = compute_current_allocation(classified["hsa"])
+        assert household_alloc["total"] == 50000
+        assert hsa_alloc["total"] == 25000
 
 
 class TestRecommendRebalanceActions:
