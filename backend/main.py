@@ -371,6 +371,11 @@ class OptionMixRequest(BaseModel):
     target_weights: Optional[Dict[str, float]] = None  # defaults to the saved household policy's own targets
     for_new_contribution: bool = True
 
+class PlanningComparisonRequest(BaseModel):
+    proposed_allocation: Optional[Dict[str, float]] = None  # pct_by_class -- e.g. a policy's target mix
+    ret_age: int = 60
+    ss_timing: str = "early"
+
 class SecurityConfirmRequest(BaseModel):
     provider_identifier: Optional[str] = None
     ticker: Optional[str] = None
@@ -1153,6 +1158,74 @@ def portfolio_rebalance(req: PortfolioContributionRequest):
     current = compute_current_allocation(classified["household"])
     comparison = compare_to_target(current, policy)
     return recommend_rebalance_actions(classified["household"], current, comparison, policy, pending_contribution=req.amount)
+
+# ── Planning integration (retirement projection / Monte Carlo / SWR) ────
+
+@app.post("/api/portfolio/planning-comparison")
+def portfolio_planning_comparison(req: PlanningComparisonRequest):
+    """Compares retirement-planning outcomes between the household's
+    currently SAVED assumptions and a proposed allocation's blended
+    expected return -- by calling projection_engine.run_retirement_
+    projection / simulation_engine.run_monte_carlo / run_swr_analysis
+    DIRECTLY, twice, with ONLY expected_return_pre_retirement and
+    expected_return_post_retirement overridden on the "proposed" side
+    (both phases get the same blended figure -- this does not model a
+    post-retirement glide-path shift; the proposed mix is assumed held
+    statically through both phases). Never rebuilds any retirement
+    formula here, per the brief's explicit "do not duplicate calculation
+    formulas already present in the retirement engine" constraint.
+
+    If no proposed_allocation is supplied, only the baseline runs --
+    with COMPLETELY UNMODIFIED inputs, so this is byte-identical to
+    calling /api/projections/whatif (etc.) directly. `proposed` is null
+    in that case, not an empty/zeroed comparison object."""
+    from projection_engine import run_retirement_projection
+    from simulation_engine import run_monte_carlo, run_swr_analysis
+    from holdings_engine import blended_expected_return
+    conn = get_db()
+    inputs_row = conn.execute("SELECT * FROM planning_inputs WHERE id=1").fetchone()
+    accounts = [dict(r) for r in conn.execute("SELECT * FROM accounts").fetchall()]
+    life_events = _get_active_life_events(conn)
+    surplus_allocations = _get_relevant_surplus_allocations(conn)
+    conn.close()
+    if not inputs_row:
+        raise HTTPException(status_code=400, detail="Planning inputs not set yet")
+    baseline_inputs = dict(inputs_row)
+
+    def run_all(inputs):
+        retirement = run_retirement_projection(inputs, accounts, ret_ages=[req.ret_age], life_events=life_events, surplus_allocations=surplus_allocations)
+        scenario = next(iter(retirement["scenarios"]), {})
+        monte_carlo = run_monte_carlo(inputs, accounts, req.ret_age, req.ss_timing, life_events=life_events, surplus_allocations=surplus_allocations)
+        swr = run_swr_analysis(inputs, accounts, ret_age=req.ret_age, ss_timing=req.ss_timing, life_events=life_events, surplus_allocations=surplus_allocations)
+        return {
+            "projected_surplus": scenario.get("projected_surplus"),
+            "percent_funded": scenario.get("percent_funded"),
+            "on_track": scenario.get("on_track"),
+            "monte_carlo_success_rate": monte_carlo.get("success_rate"),
+            "monte_carlo_median_final_balance": monte_carlo.get("median_final_balance"),
+            "monte_carlo_median_depletion_age": monte_carlo.get("median_depletion_age"),
+            "safe_withdrawal_annual": swr.get("safe_withdrawal_annual"),
+            "swr_cushion_pct": swr.get("cushion_pct"),
+            "swr_total_safe_spend": swr.get("total_safe_spend"),
+            "swr_on_track": swr.get("on_track"),
+        }
+
+    result = {
+        "baseline": run_all(baseline_inputs),
+        "baseline_expected_return_pre_retirement": baseline_inputs.get("expected_return_pre_retirement"),
+        "baseline_expected_return_post_retirement": baseline_inputs.get("expected_return_post_retirement"),
+        "proposed": None,
+    }
+    if req.proposed_allocation:
+        blended = blended_expected_return(req.proposed_allocation)
+        if blended is None:
+            raise HTTPException(status_code=400, detail="Could not compute a blended expected return from the proposed allocation -- every class is unclassified or the allocation is empty.")
+        proposed_inputs = dict(baseline_inputs)
+        proposed_inputs["expected_return_pre_retirement"] = blended
+        proposed_inputs["expected_return_post_retirement"] = blended
+        result["proposed"] = run_all(proposed_inputs)
+        result["proposed_blended_expected_return"] = blended
+    return result
 
 # ── Recommendation engine: generate/list/decide (decision lifecycle) ────
 

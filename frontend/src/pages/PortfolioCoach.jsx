@@ -132,6 +132,18 @@ export default function PortfolioCoach() {
       .finally(() => setBusy(false))
   }
 
+  const [planningResult, setPlanningResult] = useState(null)
+  const runPlanningComparison = () => {
+    if (!allocation?.comparison?.by_class) return
+    const proposed_allocation = Object.fromEntries(
+      Object.entries(allocation.comparison.by_class).map(([c, d]) => [c, d.target_pct]),
+    )
+    setBusy(true)
+    axios.post('/api/portfolio/planning-comparison', { proposed_allocation })
+      .then(r => setPlanningResult(r.data))
+      .finally(() => setBusy(false))
+  }
+
   const cards = data?.recommendations || []
   const visible = useMemo(
     () => filterCategory === 'all' ? cards : cards.filter(c => c.category === filterCategory),
@@ -213,6 +225,57 @@ export default function PortfolioCoach() {
               </tbody>
             </table>
           </div>
+        </div>
+      )}
+
+      {allocation?.has_policy && allocation?.comparison && (
+        <div className="card" style={{ marginBottom: 24 }}>
+          <div className="label" style={{ marginBottom: 10 }}>What would this policy's target mix do to my retirement plan?</div>
+          <p style={{ fontSize: 12, color: 'var(--muted)', marginTop: -4, marginBottom: 10 }}>
+            Compares your saved retirement assumptions against the blended expected return of your policy's target
+            mix, using the same retirement/Monte Carlo/SWR engines the rest of the app uses — nothing here is
+            re-derived.
+          </p>
+          <button className="btn-primary" disabled={busy} onClick={runPlanningComparison}>Compare planning outcomes</button>
+          {planningResult && (
+            <div style={{ overflowX: 'auto', marginTop: 14 }}>
+              <table style={{ width: '100%', fontSize: 13, borderCollapse: 'collapse' }}>
+                <thead>
+                  <tr style={{ textAlign: 'left', color: 'var(--muted)' }}>
+                    <th style={{ padding: '4px 8px' }}></th>
+                    <th style={{ padding: '4px 8px' }}>Saved assumptions</th>
+                    <th style={{ padding: '4px 8px' }}>Policy target mix</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr style={{ borderTop: '1px solid var(--border)' }}>
+                    <td style={{ padding: '4px 8px' }}>Monte Carlo success rate</td>
+                    <td style={{ padding: '4px 8px' }}>{planningResult.baseline.monte_carlo_success_rate}%</td>
+                    <td style={{ padding: '4px 8px' }}>{planningResult.proposed.monte_carlo_success_rate}%</td>
+                  </tr>
+                  <tr style={{ borderTop: '1px solid var(--border)' }}>
+                    <td style={{ padding: '4px 8px' }}>Safe withdrawal (annual)</td>
+                    <td style={{ padding: '4px 8px' }}>{fmt(planningResult.baseline.safe_withdrawal_annual)}</td>
+                    <td style={{ padding: '4px 8px' }}>{fmt(planningResult.proposed.safe_withdrawal_annual)}</td>
+                  </tr>
+                  <tr style={{ borderTop: '1px solid var(--border)' }}>
+                    <td style={{ padding: '4px 8px' }}>SWR cushion</td>
+                    <td style={{ padding: '4px 8px' }}>{pct(planningResult.baseline.swr_cushion_pct)}</td>
+                    <td style={{ padding: '4px 8px' }}>{pct(planningResult.proposed.swr_cushion_pct)}</td>
+                  </tr>
+                  <tr style={{ borderTop: '1px solid var(--border)' }}>
+                    <td style={{ padding: '4px 8px' }}>Monte Carlo median ending balance</td>
+                    <td style={{ padding: '4px 8px' }}>{fmt(planningResult.baseline.monte_carlo_median_final_balance)}</td>
+                    <td style={{ padding: '4px 8px' }}>{fmt(planningResult.proposed.monte_carlo_median_final_balance)}</td>
+                  </tr>
+                </tbody>
+              </table>
+              <div style={{ fontSize: 11, color: 'var(--muted)', marginTop: 8 }}>
+                Assumes the target mix's blended expected return ({(planningResult.proposed_blended_expected_return * 100).toFixed(2)}%)
+                is held statically through both pre- and post-retirement phases — not a post-retirement glide path.
+              </div>
+            </div>
+          )}
         </div>
       )}
 
