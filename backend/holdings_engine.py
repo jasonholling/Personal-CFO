@@ -86,11 +86,16 @@ def is_allocation_blocked(portfolio_type: str) -> bool:
     return portfolio_type not in PORTFOLIO_ACCOUNT_TYPES or portfolio_type in BLOCKED_TYPES
 
 
-# 8 asset classes — the brief's own list, US stock split into large-cap
-# and mid/small-cap (unlike a simpler prior internal draft that only
-# had one "us_stock" bucket).
+# 11 asset classes -- superseded per the controlling product
+# clarification (2026-09-12): US stock split into large/mid/small-cap,
+# international split into developed/emerging, bonds split into US/
+# international. An earlier internal draft used a coarser 8-class model
+# (us_large_cap/us_mid_small_cap/international_stock/bonds/...); this
+# is the one the engine and every policy/recommendation now uses.
 ASSET_CLASSES = (
-    "us_large_cap", "us_mid_small_cap", "international_stock", "bonds",
+    "us_large_cap", "us_mid_cap", "us_small_cap",
+    "international_developed", "emerging_markets",
+    "us_bonds", "international_bonds",
     "cash", "real_estate", "alternatives", "unclassified",
 )
 
@@ -160,18 +165,57 @@ def classify_holdings(accounts: List[Dict], holdings: List[Dict]) -> Dict:
 
 # ── Current allocation ───────────────────────────────────────────────────
 
+def holding_exposure_weights(holding: Dict) -> Dict[str, float]:
+    """Fractional (sums to 1.0) asset-class exposure for a single
+    holding. A multi-asset holding (a target-date/balanced fund with
+    reliable component weights) carries its own `exposures` list --
+    [{"asset_class": ..., "weight_pct": ...}, ...] -- normalized here
+    to sum to exactly 1.0 (rounding-safe: any residual goes to the
+    largest-weight entry) rather than trusting the caller's own
+    percentages to already sum to 100. A holding with no `exposures` at
+    all falls back to its single `asset_class` field at 100% -- the
+    single-asset case is just exposures=[{asset_class, 100}], so every
+    existing single-class holding/test is unaffected. Per the brief:
+    "must not be forced into one category when reliable component
+    weights are available" -- this is the mechanism that satisfies it."""
+    exposures = holding.get("exposures")
+    if not exposures:
+        asset_class = holding.get("asset_class") or "unclassified"
+        if asset_class not in ASSET_CLASSES:
+            asset_class = "unclassified"
+        return {asset_class: 1.0}
+    raw = {}
+    for e in exposures:
+        ac = e.get("asset_class") or "unclassified"
+        if ac not in ASSET_CLASSES:
+            ac = "unclassified"
+        raw[ac] = raw.get(ac, 0.0) + (e.get("weight_pct", 0) or 0)
+    total_weight = sum(raw.values())
+    if total_weight <= 0:
+        return {"unclassified": 1.0}
+    normalized = {ac: w / total_weight for ac, w in raw.items()}
+    # Rounding-safe: force the exact sum to 1.0 by adjusting the
+    # largest-weight entry with whatever residual float error remains,
+    # so compute_current_allocation's own total never silently drifts.
+    residual = 1.0 - sum(normalized.values())
+    if residual and normalized:
+        largest = max(normalized, key=normalized.get)
+        normalized[largest] += residual
+    return normalized
+
+
 def compute_current_allocation(classified_holdings: List[Dict]) -> Dict:
-    """Current dollar/percentage allocation by asset class. An
-    unclassified/unrecognized asset_class is counted in its own
-    "unclassified" bucket, never dropped or guessed into a real class."""
+    """Current dollar/percentage allocation by asset class, using each
+    holding's own (possibly multi-class) exposure weights -- see
+    holding_exposure_weights(). An unclassified/unrecognized asset_class
+    is counted in its own "unclassified" bucket, never dropped or
+    guessed into a real class."""
     by_class = {c: 0.0 for c in ASSET_CLASSES}
     total = 0.0
     for h in classified_holdings:
         value = h.get("market_value", 0) or 0
-        asset_class = h.get("asset_class") or "unclassified"
-        if asset_class not in by_class:
-            asset_class = "unclassified"
-        by_class[asset_class] += value
+        for asset_class, weight in holding_exposure_weights(h).items():
+            by_class[asset_class] += value * weight
         total += value
     pct_by_class = {c: (round(v / total * 100, 2) if total > 0 else 0.0) for c, v in by_class.items()}
     return {"total": round(total, 2), "by_class": {c: round(v, 2) for c, v in by_class.items()}, "pct_by_class": pct_by_class}
@@ -180,13 +224,16 @@ def compute_current_allocation(classified_holdings: List[Dict]) -> Dict:
 # ── Policy comparison ─────────────────────────────────────────────────────
 
 POLICY_TARGET_FIELD_TO_ASSET_CLASS = {
-    "target_us_large_cap_pct":        "us_large_cap",
-    "target_us_mid_small_cap_pct":    "us_mid_small_cap",
-    "target_international_stock_pct": "international_stock",
-    "target_bonds_pct":               "bonds",
-    "target_cash_pct":                "cash",
-    "target_real_estate_pct":         "real_estate",
-    "target_alternatives_pct":        "alternatives",
+    "target_us_large_cap_pct":           "us_large_cap",
+    "target_us_mid_cap_pct":             "us_mid_cap",
+    "target_us_small_cap_pct":           "us_small_cap",
+    "target_international_developed_pct": "international_developed",
+    "target_emerging_markets_pct":       "emerging_markets",
+    "target_us_bonds_pct":               "us_bonds",
+    "target_international_bonds_pct":    "international_bonds",
+    "target_cash_pct":                   "cash",
+    "target_real_estate_pct":            "real_estate",
+    "target_alternatives_pct":           "alternatives",
 }
 
 
@@ -311,19 +358,70 @@ def recommend_rebalance_actions(
             dollars = min(0.0, dollars + contribution_by_class.get(asset_class, 0.0))
         remaining_deviation[asset_class] = dollars
 
-    overweight = sorted(
-        [(c, v) for c, v in remaining_deviation.items() if v > 0.01 and c != "unclassified"], key=lambda p: -p[1])
     underweight = sorted(
         [(c, -v) for c, v in remaining_deviation.items() if v < -0.01 and c != "unclassified"], key=lambda p: -p[1])
 
     rebalance_actions = []
+    # Multi-exposure holdings (a target-date/balanced fund spanning more
+    # than one asset class) are excluded from the sell-candidate pool --
+    # "selling only the bond portion" of one security isn't a real
+    # single transaction. They still count correctly toward current
+    # allocation (compute_current_allocation), just never toward a
+    # BUY/SELL action here. Documented limitation, not a silent gap.
     holdings_by_class: Dict[str, List[Dict]] = {c: [] for c in ASSET_CLASSES}
     for h in classified_household_holdings:
-        asset_class = h.get("asset_class") or "unclassified"
+        weights = holding_exposure_weights(h)
+        if len(weights) > 1:
+            continue
+        asset_class = next(iter(weights))
         if asset_class in holdings_by_class:
             holdings_by_class[asset_class].append(h)
 
     remaining_underweight_need = sum(gap for _, gap in underweight)
+
+    # Step 2 of the rebalance order (1. redirect contributions -- above;
+    # 2. invest idle cash already sitting in an investment account; 3.
+    # exchange inside tax-advantaged accounts; 4. taxable sale last):
+    # ONLY the portion of cash that's actually OVERWEIGHT vs. the
+    # policy's own cash target counts as "idle" -- cash held deliberately
+    # to meet minimum_cash_reserve/the policy's own target_cash_pct is
+    # not idle, and must never be swept away to fund another class. Caps
+    # total redeployment at remaining_deviation["cash"] (only positive
+    # when cash itself is overweight), not each holding's full balance.
+    cash_available_to_redeploy = max(0.0, remaining_deviation.get("cash", 0.0))
+    idle_cash_holdings = sorted(holdings_by_class.get("cash", []), key=lambda h: -(h.get("market_value", 0) or 0))
+    for h in idle_cash_holdings:
+        if remaining_underweight_need <= 0.01 or cash_available_to_redeploy <= 0.01:
+            break
+        available = min(h.get("market_value", 0) or 0, cash_available_to_redeploy)
+        if available <= 0:
+            continue
+        for asset_class, gap in underweight:
+            if remaining_underweight_need <= 0.01 or available <= 0.01:
+                break
+            amount = min(available, gap, remaining_underweight_need)
+            if amount <= 0:
+                continue
+            rebalance_actions.append({
+                "account_id": h.get("account_id"), "holding_id": h.get("id"), "holding_name": h.get("security_name"),
+                "action": "invest_idle_cash", "asset_class": asset_class, "amount": round(amount, 2),
+                "pct_of_holding": round(amount / (h.get("market_value") or 1) * 100, 1),
+                "reason": f"Idle cash already in this account can fund the {asset_class.replace('_', ' ')} underweight directly, before any exchange or sale.",
+                "is_taxable_sale": False, "tax_warning": None,
+                "confidence_note": "Redeploying idle cash already inside an investment account -- no sale, no tax consequence.",
+            })
+            available -= amount
+            cash_available_to_redeploy -= amount
+            remaining_underweight_need -= amount
+            gap_remaining = gap - amount
+            underweight = [(c, gap_remaining if c == asset_class else g) for c, g in underweight if not (c == asset_class and gap_remaining <= 0.01)]
+
+    # Recompute overweight AFTER idle-cash deployment -- cash itself is
+    # excluded (already handled above, and further "selling" idle cash
+    # to fund itself is meaningless).
+    remaining_deviation["cash"] = 0.0  # idle cash step already applied its own full available balance above
+    overweight = sorted(
+        [(c, v) for c, v in remaining_deviation.items() if v > 0.01 and c not in ("unclassified", "cash")], key=lambda p: -p[1])
 
     for asset_class, excess_dollars in overweight:
         if remaining_underweight_need <= 0.01:
@@ -380,7 +478,17 @@ def recommend_rebalance_actions(
         if a["asset_class"]:
             projected_by_class[a["asset_class"]] = projected_by_class.get(a["asset_class"], 0) + a["amount"]
     for a in rebalance_actions:
-        delta = a["amount"] if a["action"] == "buy" else -a["amount"]
+        if a["action"] == "buy":
+            delta = a["amount"]
+        elif a["action"] == "invest_idle_cash":
+            # Money moves FROM cash TO the destination class -- both
+            # sides of the transfer must move, or total would silently
+            # drift (this is the exact bug a mutation check below
+            # verifies is actually caught).
+            projected_by_class["cash"] = projected_by_class.get("cash", 0) - a["amount"]
+            delta = a["amount"]
+        else:  # "sell"
+            delta = -a["amount"]
         projected_by_class[a["asset_class"]] = projected_by_class.get(a["asset_class"], 0) + delta
     new_total = sum(projected_by_class.values())
     projected_pct = {c: (round(v / new_total * 100, 2) if new_total > 0 else 0.0) for c, v in projected_by_class.items()}
@@ -548,8 +656,10 @@ def parse_holdings_csv(csv_text: str, valid_account_ids: Set[int]) -> Dict:
 # ── Planning integration (Milestone 7) ────────────────────────────────────
 
 ASSET_CLASS_EXPECTED_RETURNS = {
-    "us_large_cap": 0.09, "us_mid_small_cap": 0.10, "international_stock": 0.08,
-    "bonds": 0.045, "cash": 0.02, "real_estate": 0.07, "alternatives": 0.06, "unclassified": None,
+    "us_large_cap": 0.09, "us_mid_cap": 0.095, "us_small_cap": 0.10,
+    "international_developed": 0.08, "emerging_markets": 0.085,
+    "us_bonds": 0.045, "international_bonds": 0.04,
+    "cash": 0.02, "real_estate": 0.07, "alternatives": 0.06, "unclassified": None,
 }
 
 
