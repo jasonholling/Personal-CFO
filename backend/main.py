@@ -1080,6 +1080,163 @@ def portfolio_rebalance(req: PortfolioContributionRequest):
     comparison = compare_to_target(current, policy)
     return recommend_rebalance_actions(classified["household"], current, comparison, policy, pending_contribution=req.amount)
 
+# ── Recommendation engine: generate/list/decide (decision lifecycle) ────
+
+def _generate_candidate_cards(accounts, holdings, policy, pending_contribution: float = 0.0) -> List[Dict]:
+    """Runs every coach_engine tier over already-loaded data and returns
+    a single prioritized candidate list. Never re-derives a calculation
+    holdings_engine.py already owns — this only classifies/compares/
+    wraps."""
+    import coach_engine as ce
+    from holdings_engine import (
+        classify_holdings, compute_current_allocation, compare_to_target,
+        recommend_rebalance_actions, reconcile_account_holdings,
+    )
+    classified = classify_holdings(accounts, holdings)
+    by_account: Dict[int, List[Dict]] = {}
+    for h in holdings:
+        by_account.setdefault(h["account_id"], []).append(h)
+    reconciliations = [reconcile_account_holdings(acc, by_account.get(acc["id"], [])) for acc in accounts]
+    cards = list(ce.data_quality_recommendations(classified, reconciliations))
+
+    current = compute_current_allocation(classified["household"])
+    household_cash = current["by_class"].get("cash")
+    cards += ce.concentration_and_liquidity_recommendations(classified["household"], policy, household_cash)
+    cards += ce.high_cost_or_redundant_recommendations(classified["household"])
+    cards += ce.minor_optimization_recommendations(classified["household"], {})
+
+    if not policy:
+        cards.append(ce.no_policy_recommendation())
+        return ce.prioritize(cards)
+
+    # Reference test #21: a material unreconciled discrepancy on any
+    # household-allocation account blocks the high-confidence drift/
+    # new-money/rebalance recommendations that would otherwise be built
+    # on top of a wrong total — the data-quality card above already
+    # surfaces the mismatch itself; nothing downstream compounds it.
+    household_account_ids = {h.get("account_id") for h in classified["household"]}
+    material_discrepancy = any(r["has_warning"] and r["account_id"] in household_account_ids for r in reconciliations)
+    if material_discrepancy:
+        return ce.prioritize(cards)
+
+    comparison = compare_to_target(current, policy)
+    cards += ce.policy_violation_recommendations(comparison, policy)
+    rebalance_result = recommend_rebalance_actions(classified["household"], current, comparison, policy, pending_contribution=pending_contribution)
+    cards += ce.new_money_recommendations(rebalance_result["contribution_actions"])
+    cards += ce.rebalance_recommendations(rebalance_result)
+    return ce.prioritize(cards)
+
+def _reconcile_and_persist_recommendations(conn, candidates: List[Dict]) -> None:
+    """Syncs freshly-generated candidates against existing DB rows via
+    coach_engine.reconcile_recommendation_queue's pure logic, then
+    performs the actual writes (main.py owns all DB I/O; coach_engine.py
+    stays pure)."""
+    import coach_engine as ce
+    keys = {c["recommendation_key"] for c in candidates}
+    # Fetches every row matching a fresh candidate's key (for the
+    # suppression/reuse checks below) PLUS every currently-active row
+    # regardless of key (so a recommendation whose condition fully
+    # resolved -- no candidate at all this round -- is still found and
+    # invalidated, not left stale forever; see reconcile_recommendation_
+    # queue's own docstring for why this case needs special handling).
+    if keys:
+        placeholders = ",".join("?" * len(keys))
+        rows = conn.execute(
+            f"SELECT * FROM recommendations WHERE recommendation_key IN ({placeholders}) "
+            "OR status IN ('proposed','reviewing','accepted') ORDER BY id DESC",
+            tuple(keys),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT * FROM recommendations WHERE status IN ('proposed','reviewing','accepted') ORDER BY id DESC"
+        ).fetchall()
+    existing_by_key: Dict[str, List[Dict]] = {}
+    for r in rows:
+        existing_by_key.setdefault(r["recommendation_key"], []).append(dict(r))
+    result = ce.reconcile_recommendation_queue(candidates, existing_by_key)
+    for c in result["to_insert"]:
+        conn.execute(
+            "INSERT INTO recommendations (recommendation_key, category, priority, title, action_text, payload_json, "
+            "assumptions_hash, status, updated_at) VALUES (?,?,?,?,?,?,?,?,datetime('now'))",
+            (c["recommendation_key"], c["category"], c["priority"], c["title"], c["action_text"],
+             json.dumps(c), c["assumptions_hash"], "proposed"),
+        )
+    for rid in result["invalidate_ids"]:
+        conn.execute("UPDATE recommendations SET status='invalidated', updated_at=datetime('now') WHERE id=?", (rid,))
+        conn.execute(
+            "INSERT INTO recommendation_events (recommendation_id, event_type, notes) VALUES (?,?,?)",
+            (rid, "invalidated", "Underlying holdings, policy, or contribution input changed before this was acted on."),
+        )
+    conn.commit()
+
+def _recommendation_row_to_dict(row) -> Dict:
+    d = dict(row)
+    d["payload"] = json.loads(d.pop("payload_json"))
+    return d
+
+@app.get("/api/recommendations")
+def get_recommendations(pending_contribution: float = 0.0):
+    """Generates fresh candidates, reconciles them against the decision
+    lifecycle (never resurfaces a rejected/deferred recommendation whose
+    underlying facts haven't changed), and returns the active queue —
+    the "What should I do next?" list — sorted by priority."""
+    conn = get_db()
+    accounts, holdings, policy = _load_portfolio_context(conn)
+    candidates = _generate_candidate_cards(accounts, holdings, policy, pending_contribution)
+    _reconcile_and_persist_recommendations(conn, candidates)
+    active_statuses = ("proposed", "reviewing", "accepted")
+    placeholders = ",".join("?" * len(active_statuses))
+    rows = conn.execute(
+        f"SELECT * FROM recommendations WHERE status IN ({placeholders}) ORDER BY priority ASC", active_statuses,
+    ).fetchall()
+    conn.close()
+    return {"recommendations": [_recommendation_row_to_dict(r) for r in rows], "has_policy": policy is not None}
+
+@app.get("/api/recommendations/{recommendation_id}")
+def get_recommendation_detail(recommendation_id: int):
+    conn = get_db()
+    row = conn.execute("SELECT * FROM recommendations WHERE id=?", (recommendation_id,)).fetchone()
+    if not row:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Recommendation not found")
+    d = _recommendation_row_to_dict(row)
+    d["events"] = [dict(r) for r in conn.execute(
+        "SELECT * FROM recommendation_events WHERE recommendation_id=? ORDER BY id", (recommendation_id,)
+    ).fetchall()]
+    conn.close()
+    return d
+
+@app.post("/api/recommendations/{recommendation_id}/decide")
+def decide_recommendation(recommendation_id: int, decision: RecommendationDecision):
+    """Records a decision-lifecycle transition. Status is never
+    validated against the PRIOR status here (e.g. accepted -> completed
+    is fine, rejected -> accepted is fine if the user changes their
+    mind) — coach_engine's reconcile logic is what prevents a rejected
+    recommendation from silently reappearing, not a status state
+    machine here."""
+    if decision.status not in ("reviewing", "accepted", "deferred", "rejected", "completed"):
+        raise HTTPException(status_code=400, detail=f"Unknown status '{decision.status}' — must be one of reviewing/accepted/deferred/rejected/completed")
+    conn = get_db()
+    row = conn.execute("SELECT id FROM recommendations WHERE id=?", (recommendation_id,)).fetchone()
+    if not row:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Recommendation not found")
+    conn.execute(
+        "UPDATE recommendations SET status=?, decision_date=datetime('now'), decision_notes=?, decision_reason=?, "
+        "resulting_allocation_json=?, updated_at=datetime('now') WHERE id=?",
+        (decision.status, decision.notes, decision.reason,
+         json.dumps(decision.resulting_allocation) if decision.resulting_allocation is not None else None,
+         recommendation_id),
+    )
+    conn.execute(
+        "INSERT INTO recommendation_events (recommendation_id, event_type, notes) VALUES (?,?,?)",
+        (recommendation_id, decision.status, decision.notes),
+    )
+    conn.commit()
+    updated = _recommendation_row_to_dict(conn.execute("SELECT * FROM recommendations WHERE id=?", (recommendation_id,)).fetchone())
+    conn.close()
+    return updated
+
 # Monthly cash flow — recurring amounts, deliberately separate from balances.
 @app.get("/api/cash-flow")
 def get_cash_flow():

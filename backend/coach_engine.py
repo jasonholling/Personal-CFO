@@ -112,6 +112,26 @@ def _card(category, key, priority_offset, title, action_text, accounts, holdings
     }
 
 
+def no_policy_recommendation() -> Dict:
+    """The brief: "Do not manufacture a target allocation solely from
+    age. If no policy exists, the first Coach recommendation is to
+    establish or review the investment policy." Tier 1 (missing_data,
+    priority offset -1 so it sorts ahead of every other missing_data
+    card) -- no drift/new-money/rebalance recommendation is valid
+    without a saved policy to measure against."""
+    return _card(
+        "missing_data", recommendation_key("no_investment_policy"),
+        -1, "Establish your investment policy",
+        "No investment policy is saved yet. Set a target allocation, drift band, and rebalance preferences before "
+        "the Coach can evaluate drift, new-money direction, or rebalancing -- nothing here is manufactured from age "
+        "or a generic model.",
+        [], [], current_value=None, target_value=None,
+        proposed_change="Create an investment policy", expected_effect="Unlocks drift/new-money/rebalance recommendations.",
+        tax_impact=None, assumptions=[], confidence="high",
+        assumptions_hash_input={"no_policy": True},
+    )
+
+
 # ── Tier 1: missing/unreliable data ─────────────────────────────────────
 
 def data_quality_recommendations(classified: Dict, reconciliations: List[Dict]) -> List[Dict]:
@@ -462,9 +482,24 @@ def reconcile_recommendation_queue(candidates: List[Dict], existing_by_key: Dict
         - DIFFERENT hash -> the condition recurred after completion;
           insert a fresh "proposed" row.
     - Latest existing row is invalidated -> always insert a fresh row.
+    - A key in `existing_by_key` has NO matching candidate this round at
+      all (the underlying condition fully resolved -- e.g. a policy
+      change eliminated the drift that produced it) and its latest row
+      is still proposed/reviewing/accepted -> invalidate it. This is
+      what makes reference test #20 ("policy change invalidates prior
+      recommendations") hold even when the new policy produces no
+      replacement candidate for that exact key, not only when it
+      produces one with a different hash.
 
     Returns {"to_insert": [...], "reuse_ids": [...], "invalidate_ids": [...]}."""
     to_insert, reuse_ids, invalidate_ids = [], [], []
+    candidate_keys = {c["recommendation_key"] for c in candidates}
+    for key, rows in existing_by_key.items():
+        if key in candidate_keys or not rows:
+            continue
+        latest = rows[0]
+        if latest["status"] in ("proposed", "reviewing", "accepted"):
+            invalidate_ids.append(latest["id"])
     for c in candidates:
         existing_rows = existing_by_key.get(c["recommendation_key"], [])
         latest = existing_rows[0] if existing_rows else None

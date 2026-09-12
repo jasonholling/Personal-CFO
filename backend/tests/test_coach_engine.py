@@ -14,6 +14,7 @@ from coach_engine import (
     concentration_and_liquidity_recommendations, policy_violation_recommendations,
     high_cost_or_redundant_recommendations, new_money_recommendations,
     rebalance_recommendations, minor_optimization_recommendations,
+    no_policy_recommendation,
     prioritize, reconcile_recommendation_queue, CATEGORY_BASE_PRIORITY, CATEGORIES,
 )
 
@@ -333,6 +334,15 @@ class TestMinorOptimizationRecommendations:
         assert any("success rate" in c["title"].lower() for c in cards)
 
 
+class TestNoPolicyRecommendation:
+    def test_is_missing_data_tier_and_sorts_first(self):
+        card = no_policy_recommendation()
+        assert card["category"] == "missing_data"
+        other = data_quality_recommendations({"blocked": [account(1, "business")], "household": [], "hsa": [], "child_specific": []}, [])
+        ordered = prioritize([card] + other)
+        assert ordered[0] is card
+
+
 class TestPrioritize:
     def test_missing_data_sorted_before_high_cost(self):
         dq = data_quality_recommendations({"blocked": [account(1, "business")], "household": [], "hsa": [], "child_specific": []}, [])
@@ -415,3 +425,22 @@ class TestReconcileRecommendationQueue:
         existing = {"k1": [{"id": 5, "status": "invalidated", "assumptions_hash": "h1"}]}
         result = reconcile_recommendation_queue([candidate], existing)
         assert result["to_insert"] == [candidate]
+
+    def test_resolved_condition_with_no_matching_candidate_is_invalidated(self):
+        """Reference test #20: a policy change that fully eliminates the
+        condition behind an active recommendation (no candidate at all
+        this round shares its key) must invalidate the stale row --
+        not leave it active forever just because nothing "replaced" it."""
+        existing = {"k1": [{"id": 5, "status": "proposed", "assumptions_hash": "h1"}]}
+        result = reconcile_recommendation_queue([], existing)
+        assert result["invalidate_ids"] == [5]
+        assert result["to_insert"] == []
+
+    def test_resolved_rejected_condition_not_reinvalidated(self):
+        """A key with no candidate this round whose latest row is
+        already rejected/deferred/completed/invalidated must NOT be
+        touched -- only an ACTIVE (proposed/reviewing/accepted) row
+        gets invalidated when its condition disappears."""
+        existing = {"k1": [{"id": 5, "status": "rejected", "assumptions_hash": "h1"}]}
+        result = reconcile_recommendation_queue([], existing)
+        assert result["invalidate_ids"] == []
