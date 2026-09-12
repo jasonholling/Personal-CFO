@@ -358,6 +358,11 @@ class InvestmentPolicy(BaseModel):
 class PortfolioContributionRequest(BaseModel):
     amount: float = 0
 
+class OptionMixRequest(BaseModel):
+    account_id: int
+    target_weights: Optional[Dict[str, float]] = None  # defaults to the saved household policy's own targets
+    for_new_contribution: bool = True
+
 class SecurityConfirmRequest(BaseModel):
     provider_identifier: Optional[str] = None
     ticker: Optional[str] = None
@@ -842,6 +847,41 @@ def delete_account_investment_option(option_id: int):
     conn.commit()
     conn.close()
     return {"deleted": option_id}
+
+@app.post("/api/account-investment-options/compare")
+def compare_account_investment_options(req: OptionMixRequest):
+    """"Given the investments available in this account, which mix
+    best implements my household policy?" Options are pre-filtered to
+    this account's own ELIGIBLE rows only (see eligible_options_for_
+    account) — never another account's, never a candidate merely found
+    via search. Defaults target_weights to the saved household policy's
+    own targets when the caller supplies none."""
+    from holdings_engine import eligible_options_for_account, propose_account_option_mix, is_closed_menu_account, resolve_portfolio_account_type, policy_targets_by_class
+    conn = get_db()
+    acc = conn.execute("SELECT * FROM accounts WHERE id=?", (req.account_id,)).fetchone()
+    if not acc:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Account not found")
+    acc = dict(acc)
+    options = [_option_row_to_dict(r) for r in conn.execute(
+        "SELECT * FROM account_investment_options WHERE account_id=?", (req.account_id,)
+    ).fetchall()]
+    target_weights = req.target_weights
+    if target_weights is None:
+        policy_row = conn.execute("SELECT * FROM investment_policies ORDER BY id DESC LIMIT 1").fetchone()
+        if not policy_row:
+            conn.close()
+            raise HTTPException(status_code=400, detail="No investment policy saved and no target_weights supplied — set a policy or pass explicit targets.")
+        target_weights = policy_targets_by_class(_policy_row_to_dict(policy_row))
+    conn.close()
+    eligible = eligible_options_for_account(options, for_new_contribution=req.for_new_contribution)
+    result = propose_account_option_mix(eligible, target_weights)
+    portfolio_type = resolve_portfolio_account_type(acc)
+    result["account_id"] = req.account_id
+    result["is_closed_menu_account"] = is_closed_menu_account(portfolio_type)
+    result["eligible_option_count"] = len(eligible)
+    result["recorded_option_count"] = len(options)
+    return result
 
 @app.post("/api/holdings/import/preview")
 async def preview_holdings_import(file: UploadFile = File(...)):

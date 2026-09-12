@@ -138,3 +138,73 @@ class TestAccountInvestmentOptionsCrud:
                          files={"file": ("b.json", __import__("json").dumps(payload), "application/json")})
         assert r.status_code == 200, r.text
         assert len(client.get("/api/account-investment-options").json()) == 1
+
+
+def _save_policy(client, **overrides):
+    body = {
+        "target_us_large_cap_pct": 60, "target_us_mid_cap_pct": 0, "target_us_small_cap_pct": 0,
+        "target_international_developed_pct": 0, "target_emerging_markets_pct": 0,
+        "target_us_bonds_pct": 40, "target_international_bonds_pct": 0, "target_cash_pct": 0,
+        "target_real_estate_pct": 0, "target_alternatives_pct": 0, "drift_band_pct": 5,
+    }
+    body.update(overrides)
+    r = client.post("/api/investment-policy", json=body)
+    assert r.status_code == 200, r.text
+    return r.json()
+
+
+class TestAccountInvestmentOptionsCompare:
+    """"Which mix best implements my household policy?" workflow."""
+
+    def test_defaults_to_saved_policy_targets(self, client):
+        acc = _create_account(client)
+        client.post("/api/account-investment-options", json={
+            "account_id": acc["id"], "option_name": "Stock Index", "asset_class": "us_large_cap", "expense_ratio": 0.0003,
+        })
+        client.post("/api/account-investment-options", json={
+            "account_id": acc["id"], "option_name": "Bond Index", "asset_class": "us_bonds", "expense_ratio": 0.0005,
+        })
+        _save_policy(client)
+        r = client.post("/api/account-investment-options/compare", json={"account_id": acc["id"]})
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert sum(m["pct"] for m in body["mix"]) == 100
+        assert body["unavailable_classes"] == []
+
+    def test_no_policy_and_no_explicit_targets_errors(self, client):
+        acc = _create_account(client)
+        r = client.post("/api/account-investment-options/compare", json={"account_id": acc["id"]})
+        assert r.status_code == 400
+
+    def test_explicit_target_weights_override_policy(self, client):
+        acc = _create_account(client)
+        client.post("/api/account-investment-options", json={
+            "account_id": acc["id"], "option_name": "Bond Index", "asset_class": "us_bonds", "expense_ratio": 0.0005,
+        })
+        r = client.post("/api/account-investment-options/compare", json={
+            "account_id": acc["id"], "target_weights": {"us_bonds": 100},
+        })
+        assert r.status_code == 200, r.text
+        assert r.json()["mix"][0]["option_name"] == "Bond Index"
+
+    def test_only_recorded_eligible_options_considered(self, client):
+        """Reference tests #9/#10: an option closed to new money is not
+        offered even though it's recorded for this account."""
+        acc = _create_account(client, account_type="401k")
+        client.post("/api/account-investment-options", json={
+            "account_id": acc["id"], "option_name": "Closed Fund", "asset_class": "us_large_cap",
+            "available_for_new_contributions": False,
+        })
+        r = client.post("/api/account-investment-options/compare", json={
+            "account_id": acc["id"], "target_weights": {"us_large_cap": 100},
+        })
+        body = r.json()
+        assert body["mix"] == []
+        assert body["unavailable_classes"] == ["us_large_cap"]
+        assert body["is_closed_menu_account"] is True
+
+    def test_unknown_account_404s(self, client):
+        r = client.post("/api/account-investment-options/compare", json={
+            "account_id": 999999, "target_weights": {"us_large_cap": 100},
+        })
+        assert r.status_code == 404

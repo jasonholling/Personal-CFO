@@ -178,12 +178,21 @@ function OptionsTab({ accounts }) {
   const [accountId, setAccountId] = useState('')
   const [options, setOptions] = useState([])
   const [form, setForm] = useState({ option_name: '', ticker: '', asset_class: 'us_large_cap', available_for_new_contributions: true, available_for_exchange: true })
+  const [mixResult, setMixResult] = useState(null)
+  const [mixError, setMixError] = useState(null)
 
   const load = id => {
     if (!id) { setOptions([]); return }
     axios.get('/api/account-investment-options', { params: { account_id: id } }).then(r => setOptions(r.data))
   }
-  useEffect(() => { load(accountId) }, [accountId])
+  useEffect(() => { load(accountId); setMixResult(null); setMixError(null) }, [accountId])
+
+  const runCompare = () => {
+    setMixError(null)
+    axios.post('/api/account-investment-options/compare', { account_id: parseInt(accountId, 10) })
+      .then(r => setMixResult(r.data))
+      .catch(e => setMixError(e.response?.data?.detail || 'Could not compare — check that a household investment policy is saved.'))
+  }
 
   const submit = async e => {
     e.preventDefault()
@@ -220,7 +229,7 @@ function OptionsTab({ accounts }) {
             <button className="btn-primary" type="submit">Add option</button>
           </form>
 
-          <div className="card">
+          <div className="card" style={{ marginBottom: 16 }}>
             {options.length === 0 && <div style={{ color: 'var(--muted)', fontSize: 13 }}>No investment options recorded for this account yet — a closed-menu account (401(k), Roth 401(k), HSA, 529, trust) can only be recommended options recorded here.</div>}
             {options.map(o => (
               <div key={o.id} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, padding: '6px 0', borderTop: '1px solid var(--border)' }}>
@@ -231,6 +240,34 @@ function OptionsTab({ accounts }) {
                 <button className="btn-secondary" style={{ padding: '2px 8px', fontSize: 11 }} onClick={() => remove(o.id)}>Remove</button>
               </div>
             ))}
+          </div>
+
+          <div className="card">
+            <div className="label" style={{ marginBottom: 10 }}>Which mix best implements my household policy?</div>
+            <button className="btn-primary" onClick={runCompare} disabled={options.length === 0}>Compare eligible options</button>
+            {mixError && <div style={{ color: 'var(--amber)', fontSize: 13, marginTop: 10 }}>{mixError}</div>}
+            {mixResult && (
+              <div style={{ marginTop: 14 }}>
+                {mixResult.is_closed_menu_account && (
+                  <div style={{ fontSize: 12, color: 'var(--muted)', marginBottom: 8 }}>
+                    Closed-menu account — only options recorded above were considered.
+                  </div>
+                )}
+                {mixResult.mix.length === 0 && <div style={{ color: 'var(--muted)', fontSize: 13 }}>No eligible option covers any target asset class in this account.</div>}
+                {mixResult.mix.map((m, i) => (
+                  <div key={i} style={{ fontSize: 13, padding: '6px 0', borderTop: i ? '1px solid var(--border)' : 'none' }}>
+                    <strong>{m.pct}%</strong> — {m.option_name} {m.ticker ? `(${m.ticker})` : ''}
+                    {m.expense_ratio != null && <span style={{ color: 'var(--muted)' }}> · {(m.expense_ratio * 100).toFixed(2)}% expense ratio</span>}
+                    <div style={{ color: 'var(--muted)', fontSize: 12 }}>{m.reason}</div>
+                  </div>
+                ))}
+                {mixResult.unavailable_classes?.length > 0 && (
+                  <div style={{ fontSize: 12, color: 'var(--amber)', marginTop: 10 }}>
+                    Not covered by any option in this account: {mixResult.unavailable_classes.map(c => c.replace(/_/g, ' ')).join(', ')} — consider whether another account should hold this exposure.
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         </>
       )}

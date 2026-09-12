@@ -20,7 +20,7 @@ from holdings_engine import (
     concentration_flags, expense_ratio_flags, duplicate_exposure_flags, unclassified_flags,
     parse_holdings_csv, blended_expected_return, blended_expense_ratio, ASSET_CLASSES,
     is_closed_menu_account, eligible_options_for_account, is_option_actionable,
-    CLOSED_MENU_TYPES, OPEN_UNIVERSE_TYPES,
+    CLOSED_MENU_TYPES, OPEN_UNIVERSE_TYPES, propose_account_option_mix,
 )
 
 
@@ -541,6 +541,88 @@ class TestParseHoldingsCsv:
         assert "asset_class" in result["errors"][0]["message"]
 
 
+def mix_option(id, option_name="Fund", ticker=None, asset_class="us_large_cap", expense_ratio=None, exposures=None):
+    return {"id": id, "option_name": option_name, "ticker": ticker, "asset_class": asset_class,
+            "expense_ratio": expense_ratio, "exposures": exposures}
+
+
+class TestProposeAccountOptionMix:
+    """"Which mix best implements my household policy?" (reference tests
+    #14/#15/#17)."""
+
+    def test_reference_case_15_lower_cost_index_preferred(self):
+        """Two similar index options for the same asset class -- the
+        lower-cost one is selected, and the other appears as an
+        alternative considered, not silently dropped."""
+        # Deliberately alphabetically REVERSE of cost order (the cheaper
+        # fund sorts later by name) so a tie-break-by-name bug can't
+        # accidentally pass this test for the wrong reason.
+        opts = [
+            mix_option(1, "Z-Series S&P 500 Index", expense_ratio=0.0003, asset_class="us_large_cap"),
+            mix_option(2, "A-Series S&P 500 Index", expense_ratio=0.0045, asset_class="us_large_cap"),
+        ]
+        result = propose_account_option_mix(opts, {"us_large_cap": 100})
+        assert len(result["mix"]) == 1
+        assert result["mix"][0]["option_name"] == "Z-Series S&P 500 Index"
+        assert "A-Series S&P 500 Index" in " ".join(result["alternatives_considered"]["us_large_cap"])
+
+    def test_reference_case_17_mix_totals_exactly_100(self):
+        opts = [
+            mix_option(1, "US Stock Index", expense_ratio=0.0003, asset_class="us_large_cap"),
+            mix_option(2, "Bond Index", expense_ratio=0.0005, asset_class="us_bonds"),
+            mix_option(3, "International Index", expense_ratio=0.0008, asset_class="international_developed"),
+        ]
+        result = propose_account_option_mix(opts, {"us_large_cap": 50, "us_bonds": 30, "international_developed": 20})
+        assert sum(m["pct"] for m in result["mix"]) == 100
+        assert result["unavailable_classes"] == []
+
+    def test_unavailable_class_reported_not_silently_dropped(self):
+        opts = [mix_option(1, "US Stock Index", expense_ratio=0.0003, asset_class="us_large_cap")]
+        result = propose_account_option_mix(opts, {"us_large_cap": 60, "us_bonds": 40})
+        assert result["unavailable_classes"] == ["us_bonds"]
+        # The covered portion (us_large_cap) still sums to exactly 100% of what COULD be covered.
+        assert sum(m["pct"] for m in result["mix"]) == 100
+
+    def test_target_date_fund_used_via_look_through_when_no_single_class_option(self):
+        """No pure bond option exists -- a target-date fund's own
+        recorded multi-asset exposures cover it via look-through
+        instead of forcing a wrong single classification (reference
+        test #16's option-side counterpart)."""
+        opts = [
+            mix_option(1, "Target Date 2050", expense_ratio=0.0012,
+                   exposures=[{"asset_class": "us_large_cap", "weight_pct": 60}, {"asset_class": "us_bonds", "weight_pct": 40}]),
+        ]
+        result = propose_account_option_mix(opts, {"us_bonds": 100})
+        assert len(result["mix"]) == 1
+        assert result["mix"][0]["option_name"] == "Target Date 2050"
+        assert "look-through" in result["mix"][0]["reason"]
+
+    def test_single_class_option_preferred_over_multi_exposure_for_same_class(self):
+        opts = [
+            mix_option(1, "Pure Bond Index", expense_ratio=0.002, asset_class="us_bonds"),
+            mix_option(2, "Target Date 2050", expense_ratio=0.0005,
+                   exposures=[{"asset_class": "us_large_cap", "weight_pct": 60}, {"asset_class": "us_bonds", "weight_pct": 40}]),
+        ]
+        # Even though the target-date fund is CHEAPER, a purer
+        # single-class option is preferred for a single-class target.
+        result = propose_account_option_mix(opts, {"us_bonds": 100})
+        assert result["mix"][0]["option_name"] == "Pure Bond Index"
+
+    def test_no_eligible_options_returns_empty_mix_with_full_unavailable_list(self):
+        result = propose_account_option_mix([], {"us_large_cap": 100})
+        assert result["mix"] == []
+        assert result["unavailable_classes"] == ["us_large_cap"]
+
+    def test_never_ranks_by_a_performance_field(self):
+        """Guard against ever adding a performance-based sort -- the
+        function signature and its options never take/require a
+        'return' or 'performance' field."""
+        opts = [mix_option(1, "Fund", expense_ratio=0.001, asset_class="us_large_cap")]
+        result = propose_account_option_mix(opts, {"us_large_cap": 100})
+        assert "performance" not in str(result).lower()
+        assert "outperform" not in str(result).lower()
+
+
 class TestBlendedExpectedReturn:
     def test_exact_weighted_average(self):
         assert blended_expected_return({"us_large_cap": 60, "us_bonds": 40}) == pytest.approx(0.072, abs=1e-3)
@@ -618,6 +700,20 @@ class TestAccountInvestmentOptionEligibility:
         assert opts[0]["ticker"] is None
         assert eligible_options_for_account(opts) == opts
         assert is_option_actionable(opts[0])
+
+    def test_reference_case_14_custodial_holdings_excluded_from_household_allocation(self):
+        """Custodial/529 assets never correct the parents' retirement
+        allocation -- classify_holdings routes them to their own
+        "child_specific" bucket, never "household," so
+        compute_current_allocation over the household bucket is
+        unaffected no matter how large the child account is."""
+        accs = [account(1, "taxable"), account(2, "custodial")]
+        household_only = [holding(1, 1, market_value=50000, asset_class="us_large_cap")]
+        with_custodial = household_only + [holding(2, 2, market_value=500000, asset_class="us_bonds")]
+        classified_without = classify_holdings(accs, household_only)
+        classified_with = classify_holdings(accs, with_custodial)
+        assert compute_current_allocation(classified_without["household"]) == compute_current_allocation(classified_with["household"])
+        assert classified_with["child_specific"][0]["market_value"] == 500000
 
     def test_exchange_eligibility_is_a_separate_flag_from_new_contributions(self):
         opts = [option(1, 1, available_for_new_contributions=False, available_for_exchange=True)]

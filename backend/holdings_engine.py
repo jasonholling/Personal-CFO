@@ -361,6 +361,108 @@ def recommend_contribution_destination(comparison: Dict, contribution_amount: fl
     return actions
 
 
+# ── Fund/option comparison ("which mix best implements my policy?") ──────
+
+def propose_account_option_mix(options: List[Dict], target_weights_by_class: Dict[str, float]) -> Dict:
+    """"Given the investments available in this account, which mix best
+    implements my household allocation with reasonable fees and limited
+    overlap?"
+
+    `options` must already be the ELIGIBLE options for this specific
+    account (see eligible_options_for_account -- this function never
+    searches beyond what's passed in, and never assumes a candidate not
+    recorded here is actually available). `target_weights_by_class` is
+    an asset-class -> weight dict the caller wants implemented in this
+    account (may be the full household policy, or just this account's
+    own share of a missing exposure).
+
+    Selection order per class: prefer a SINGLE-asset-class option
+    (purer, easier to reason about) over a multi-exposure one; among
+    options tying on that, the lowest expense_ratio wins (None/unknown
+    sorts last -- an unknown fee is never assumed cheap), then
+    option_name for determinism. A class with no single-class candidate
+    falls back to the best available multi-exposure (target-date/
+    balanced-fund) option that covers it via look-through, never by
+    forcing that fund into one category.
+
+    The proposed mix's percentages are normalized over only the classes
+    that COULD be covered by an available option, and always sum to
+    exactly 100% of that coverable total (rounding residual assigned to
+    the largest single entry) -- never diluted by classes this account
+    simply has no option for. Classes with no candidate at all are
+    reported separately in `unavailable_classes`, never silently
+    dropped, so the caller can flag that another account may need to
+    hold that exposure instead.
+
+    Never ranks by recent performance and never claims a fund will
+    outperform -- selection is cost/purity/coverage only."""
+    target = {c: w for c, w in target_weights_by_class.items() if w and w > 0 and c != "unclassified"}
+    if not target or not options:
+        return {"mix": [], "unavailable_classes": sorted(target.keys()), "alternatives_considered": {}}
+
+    def sort_key(opt, is_single):
+        er = opt.get("expense_ratio")
+        return (0 if is_single else 1, er if er is not None else float("inf"), opt.get("option_name") or "")
+
+    candidates_by_class: Dict[str, List[Dict]] = {c: [] for c in target}
+    for opt in options:
+        weights = holding_exposure_weights(opt)
+        is_single = len(weights) == 1
+        for asset_class in weights:
+            if asset_class in candidates_by_class:
+                candidates_by_class[asset_class].append((opt, is_single, weights))
+
+    unavailable_classes = []
+    selected_by_option_id: Dict[int, Dict] = {}
+    alternatives_considered: Dict[str, List[str]] = {}
+    for asset_class in sorted(target, key=lambda c: -target[c]):
+        pool = candidates_by_class.get(asset_class, [])
+        if not pool:
+            unavailable_classes.append(asset_class)
+            continue
+        pool_sorted = sorted(pool, key=lambda triple: sort_key(triple[0], triple[1]))
+        chosen_opt, chosen_is_single, chosen_weights = pool_sorted[0]
+        others = [p[0] for p in pool_sorted[1:]]
+        if others:
+            alternatives_considered[asset_class] = [
+                f"{o.get('option_name')} (expense ratio {o.get('expense_ratio')}) -- higher cost or a diluted (multi-exposure) match"
+                for o in others
+            ]
+        oid = chosen_opt.get("id") or id(chosen_opt)
+        if oid not in selected_by_option_id:
+            selected_by_option_id[oid] = {
+                "option_id": chosen_opt.get("id"), "option_name": chosen_opt.get("option_name"),
+                "ticker": chosen_opt.get("ticker"), "expense_ratio": chosen_opt.get("expense_ratio"),
+                "asset_classes_covered": [], "weight": 0.0, "is_single_class": chosen_is_single,
+            }
+        entry = selected_by_option_id[oid]
+        entry["asset_classes_covered"].append(asset_class)
+        entry["weight"] += target[asset_class] * chosen_weights.get(asset_class, 1.0)
+
+    covered_total = sum(e["weight"] for e in selected_by_option_id.values())
+    mix = []
+    if covered_total > 0:
+        for entry in selected_by_option_id.values():
+            pct = round(entry["weight"] / covered_total * 100, 2)
+            covered_desc = ', '.join(c.replace('_', ' ') for c in entry['asset_classes_covered'])
+            reason = (
+                f"Lowest-cost eligible option covering {covered_desc}"
+                if entry["is_single_class"]
+                else f"Covers {covered_desc} via look-through of its own recorded exposures"
+            )
+            is_single_class = entry.pop("is_single_class")
+            mix.append({**entry, "pct": pct, "reason": reason})
+        residual = round(100 - sum(m["pct"] for m in mix), 2)
+        if residual and mix:
+            largest = max(mix, key=lambda m: m["pct"])
+            largest["pct"] = round(largest["pct"] + residual, 2)
+    return {
+        "mix": sorted(mix, key=lambda m: -m["pct"]),
+        "unavailable_classes": sorted(unavailable_classes),
+        "alternatives_considered": alternatives_considered,
+    }
+
+
 # ── Rebalance actions ─────────────────────────────────────────────────────
 
 def estimate_taxable_gain_warning(holding: Dict, sell_amount: float) -> Optional[Dict]:
