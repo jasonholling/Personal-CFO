@@ -6674,3 +6674,442 @@ coverage. Sensitive-data check: clean, 157 tracked files scanned.
 Branch: `codex/two-age-bridge-surplus-fix`. Pushed for review, still
 NOT merged into `codex/milestone-1-2-integration` or `main`. Milestone
 4 remains untouched.
+
+## 77. Portfolio Coach: holdings, allocation, and an explainable decision engine (2026-09-07 through 2026-09-12, on `codex/portfolio-coach-recommendations`, branched from `origin/main`)
+
+**Decision support only.** Nothing in this feature places a trade,
+connects to a brokerage, or presents a recommendation as guaranteed or
+fiduciary advice. Every recommendation card carries its own
+`assumptions`, `confidence`, and `conditions_that_would_invalidate`
+fields specifically so this boundary is visible in the UI, not just
+asserted in a comment.
+
+This branch is **separate from and unrelated to**
+`codex/portfolio-holdings-allocation` (an earlier, differently-scoped
+holdings/allocation feature also branched from `origin/main`, complete
+but never merged) — they share no git history, no code, and were built
+against a different (superseded) product spec. Do not confuse the two;
+this section documents only `codex/portfolio-coach-recommendations`.
+
+### New modules
+
+- `holdings_engine.py` — pure calculation module (no I/O). Account-type
+  resolution, holdings classification, current-allocation computation,
+  policy-target comparison, contribution/rebalance recommendation math,
+  the closed-menu/open-universe eligibility model, and the fund/option
+  comparison algorithm.
+- `security_provider.py` — a replaceable ticker/security-lookup adapter
+  (ABC + a deterministic `MockSecurityProvider`, no live vendor
+  configured). `main.py` resolves exactly one active provider via
+  `get_active_provider()`/`set_active_provider()`; no business logic
+  hard-wires to a vendor.
+- `coach_engine.py` — pure recommendation-card generation (8 priority
+  tiers) and the decision-lifecycle sync logic
+  (`reconcile_recommendation_queue`). No DB access; `main.py` owns every
+  read/write.
+- New DB tables (`db.py`'s `init_portfolio_coach_tables()`): `holdings`,
+  `account_investment_options`, `investment_policies`, `securities`,
+  `security_snapshots`, `recommendations`, `recommendation_events`.
+- New frontend pages: `PortfolioSetup.jsx` (holdings / investment
+  policy / account investment options data entry) and
+  `PortfolioCoach.jsx` (the recommendation queue, allocation health,
+  new-money and planning-comparison workflows).
+
+### Account-type model (deliberately separate from `accounts.account_type`)
+
+`holdings_engine.PORTFOLIO_ACCOUNT_TYPES` is a 12-type enum (taxable
+brokerage, traditional 401(k), Roth 401(k), traditional IRA, Roth IRA,
+HSA, 529, custodial, checking, savings, trust, other) stored in a new,
+additive `accounts.portfolio_account_type` column — **never** the
+existing `accounts.account_type` column that
+`net_worth_engine.py`/`projection_engine.py`/`simulation_engine.py`
+already key every calculation off of. `resolve_portfolio_account_type()`
+derives a value from the legacy `account_type` when the override column
+is NULL (every existing account, until a household opts in), via an
+explicit compatibility map (`_LEGACY_TO_PORTFOLIO_TYPE`) — tested, and
+deliberately conservative: an unrecognized/missing legacy type maps to
+`"other"`, which `is_allocation_blocked()` excludes from every
+allocation calculation until classified, rather than guessing.
+
+Known limitation carried over from the legacy schema: this app has
+never distinguished a standalone Roth 401(k) from a Traditional 401(k)
+at the account level, only a household-wide pretax/Roth split
+percentage on one `"401k"`-typed account. A household with a genuine
+separate Roth 401(k) account must set `portfolio_account_type` on it
+explicitly.
+
+**Closed-menu vs. open-universe** (`CLOSED_MENU_TYPES` /
+`OPEN_UNIVERSE_TYPES`): 401(k), Roth 401(k), HSA, 529, and trust default
+to closed-menu (the Coach may recommend only options explicitly
+recorded in `account_investment_options` for that specific account);
+traditional/Roth IRA, taxable brokerage, and custodial default to
+open-universe (the Coach may search, but a candidate is never
+"actionable" until recorded as an option for that account —
+`is_option_actionable()` is the single choke point both paths go
+through). No per-account override of the type-level default exists yet
+(documented gap, not silently assumed).
+
+### Holdings and asset-class model
+
+**11 asset classes** (`ASSET_CLASSES`): `us_large_cap`, `us_mid_cap`,
+`us_small_cap`, `international_developed`, `emerging_markets`,
+`us_bonds`, `international_bonds`, `cash`, `real_estate`,
+`alternatives`, `unclassified`. Supersedes an earlier internal 8-class
+draft from before a mid-build clarification arrived (`us_large_cap` /
+`us_mid_small_cap` / `international_stock` / `bonds` / ... — those
+names no longer exist anywhere in this module, `security_provider.py`,
+or the DB schema).
+
+**Multi-asset exposure** (`holding_exposure_weights()`): a holding or
+option's optional `exposures` field —
+`[{"asset_class": ..., "weight_pct": ...}, ...]` — is normalized to sum
+to exactly 1.0 (float residual assigned to the largest-weight entry).
+Absent `exposures`, a holding/option falls back to its single
+`asset_class` field at 100%. This is the sole mechanism that lets a
+target-date or balanced fund be classified by its real composition
+instead of being forced into one category (reference tests #12/#16), and
+it is reused identically for `account_investment_options` (reference
+test #16's option-side counterpart, and the look-through fallback in
+`propose_account_option_mix`, below).
+
+**Reconciliation** (`reconcile_account_holdings()`): compares an
+account's own `balance` against the sum of its holdings'
+`market_value`. A mismatch beyond a $1 tolerance is shown as an
+explicit `unreconciled_remainder` with a warning — never silently
+absorbed into the account balance, and never silently assumed correct.
+A material mismatch on any household-allocation account **blocks** the
+policy-violation/new-money/tax-advantaged-rebalance/taxable-rebalance
+recommendation tiers for that generation run (the missing-data card for
+the mismatch itself still surfaces) — see `_generate_candidate_cards()`
+in `main.py` and reference test #21.
+
+**Custodial/529 exclusion** (reference test #14): `classify_holdings()`
+routes 529/custodial holdings to their own `child_specific` bucket,
+never `household` — `compute_current_allocation()` over the household
+bucket is structurally unaffected by any custodial/529 balance, however
+large.
+
+**HSA isolation** (reference test #11): HSA holdings are routed to
+their own `hsa` bucket, never `household`. The rebalance/idle-cash
+engine only ever receives the household bucket as input, so an HSA cash
+reserve can never be treated as redeployable household idle cash — the
+"threshold" is preserved by bucket separation, not by a runtime
+threshold check that could be bypassed.
+
+### Investment policy
+
+`investment_policies` has 10 target-allocation fields (one per
+non-`unclassified` asset class, `POLICY_TARGET_FIELD_TO_ASSET_CLASS` in
+`holdings_engine.py`), plus `drift_band_pct`, `max_single_security_pct`,
+`minimum_cash_reserve`, `rebalance_cadence`,
+`use_contributions_before_sales`, `taxable_sale_preference`,
+`excluded_accounts`/`excluded_holdings`/`employer_stock_exceptions`/
+`legacy_holding_exceptions` (JSON list columns), `risk_profile`,
+`account_constraints`, `effective_date`, `review_date`. **No target
+allocation is ever manufactured from age or a generic glide-path model**
+— when no policy is saved, `coach_engine.no_policy_recommendation()` is
+the Coach's only allocation-related output (tier 1, priority offset -1,
+so it always sorts first).
+
+### Recommendation engine: the 8-tier priority order
+
+`coach_engine.CATEGORIES` (also `CATEGORY_BASE_PRIORITY`), most urgent
+first:
+
+1. `missing_data` — account-type unresolved, unreconciled holdings,
+   unclassified securities, missing cost basis (taxable only), missing
+   expense ratio, low-confidence manual entries, no saved policy.
+2. `concentration_or_liquidity_risk` — SEVERE (not moderate) single-
+   security concentration, and a household cash balance below the
+   policy's own `minimum_cash_reserve`.
+3. `policy_violation` — allocation drift outside the policy's drift
+   band. Never recommends "invest more in X" without a measured current
+   exposure, a target, and the size of the gap.
+4. `high_cost_or_redundant` — high expense ratio, duplicate exposure
+   across accounts. Deliberately does NOT re-flag unclassified holdings
+   (already a tier-1 card for the same `holding_id` — re-surfacing it
+   here was a real duplicate-recommendation bug, found and fixed while
+   building this tier; see the reworked-`coach_engine.py` commit).
+5. `new_money` — wraps `recommend_contribution_destination`'s own
+   drift-minimizing output.
+6. `tax_advantaged_rebalance` — buy/sell/exchange/invest-idle-cash
+   actions that are NOT a taxable sale.
+7. `taxable_rebalance` — taxable-sale actions only. Always a strictly
+   lower priority than tier 6, per the brief's explicit ordering.
+8. `minor_optimization` — moderate (non-severe) concentration, and
+   goal-aware planning context (near-term depletion risk, low Monte
+   Carlo success rate) built from ALREADY-COMPUTED
+   `projection_engine.py`/`simulation_engine.py` figures — this tier
+   performs no retirement math of its own.
+
+Each card also carries a `classification` field (`data_quality_problem`
+/ `urgent_risk` / `policy_violation` / `optimization_opportunity` /
+`ordinary_review_item`) — a separate axis from priority tier, derived
+from category via `CATEGORY_CLASSIFICATION`. ("Permitted exception" from
+the brief's classification list is not yet wired up: the policy's own
+`employer_stock_exceptions`/`legacy_holding_exceptions` fields exist in
+the schema but are not yet consulted by the rebalance sell-candidate
+selection — a known, explicitly-tracked gap, not silently assumed
+handled.)
+
+### Rebalance engine: the 4-step order
+
+`recommend_rebalance_actions()` (unchanged core architecture, extended
+for the 11-class/multi-exposure model):
+
+1. Redirect future contributions
+   (`recommend_contribution_destination()` — largest-dollar-gap-first,
+   never funds an already-at-or-above-target class).
+2. Invest idle cash already inside investment accounts — only the
+   PORTION of a cash holding that is actually overweight relative to
+   the policy's own `target_cash_pct` is treated as redeployable, never
+   the full balance (a deliberately-held reserve is never silently
+   depleted). Multi-exposure holdings are excluded from the sell-
+   candidate pool entirely (can't cleanly sell "half a target-date
+   fund" for one asset class).
+3. Exchange holdings inside tax-advantaged accounts (sorted
+   non-taxable-account-first, largest-holding-first).
+4. Recommend a taxable sale only when steps 1-3 cannot reasonably
+   correct the remaining drift. `estimate_taxable_gain_warning()` never
+   invents a cost basis — a sell action with `cost_basis=None` gets
+   `is_taxable_sale=True` but no `tax_impact` figure, only a
+   low-confidence flag.
+
+`projected_allocation` math has an explicit branch per action type
+(`buy` / `sell` / `invest_idle_cash`) — a bug where `invest_idle_cash`
+silently misapplied its delta (crediting the wrong class, never
+debiting `cash`) was found and fixed while building this; see the
+holdings_engine rework commit.
+
+### New-money workflows (all three collapse to one algorithm)
+
+The brief's three workflows — a specific account, several accounts'
+contributions this period, a household cash lump sum split across
+eligible accounts — are all "one or more (account, dollars, eligible
+classes) pools," handled by:
+
+- `recommend_contribution_destination()` — single pooled amount, no
+  per-account constraint.
+- `recommend_multi_account_contribution_destination()` — multiple
+  pools, each optionally restricted to a list of `eligible_classes`
+  (e.g. a 401(k) whose only underweight-covering option is bonds).
+  Greedily funds whichever (pool, asset class) pair represents the
+  LARGEST remaining household gap that pool can actually buy, repeating
+  until every pool is exhausted or every gap closes — **explicitly not
+  a fixed-percentage split** (reference test #18; a mutation-style test
+  confirms a bonds-only pool never receives a large-cap allocation even
+  though large-cap has the larger target percentage). Unallocated pool
+  remainders and any still-open drift are reported explicitly, never
+  silently dropped.
+
+The user must confirm each account's own contribution eligibility
+(income limits, employer-match windows, HSA/IRA limits, etc.) before
+calling either function — neither one assumes it.
+
+### Fund/option comparison ("which mix best implements my policy?")
+
+`propose_account_option_mix(options, target_weights_by_class)` — given
+an account's own ELIGIBLE options (caller pre-filters via
+`eligible_options_for_account`) and a target weighting:
+
+- Prefers a single-asset-class option over a multi-exposure one for the
+  same class; among same-purity candidates, prefers the lowest
+  `expense_ratio` (unknown fee sorts last, never assumed cheap) —
+  reference test #15, mutation-checked with option names in REVERSE
+  alphabetical-cost order so a name-based tie-break bug couldn't
+  accidentally pass the test.
+- Falls back to a multi-exposure (target-date/balanced) option's own
+  recorded exposures via look-through when no single-class option
+  covers a target class.
+- Normalizes the proposed mix to sum to EXACTLY 100% of what's
+  actually coverable by an available option (reference test #17) —
+  classes with no candidate at all are reported in `unavailable_classes`,
+  never silently dropped or diluting the covered percentages.
+- Records `alternatives_considered` per class (why a similar,
+  not-selected option wasn't chosen).
+- Never ranks by recent performance, never claims a fund will
+  outperform — cost/purity/coverage only.
+
+### Planning integration
+
+`POST /api/portfolio/planning-comparison` calls
+`projection_engine.run_retirement_projection` /
+`simulation_engine.run_monte_carlo` / `run_swr_analysis` **directly**,
+twice: once with the household's saved assumptions completely
+unmodified (baseline), and — only if a `proposed_allocation` is
+supplied — once with ONLY `expected_return_pre_retirement` and
+`expected_return_post_retirement` overridden to the proposed mix's
+blended expected return (`holdings_engine.blended_expected_return()`,
+the same function used elsewhere in the Coach). Both phases receive the
+same blended figure; this does **not** model a post-retirement
+glide-path shift, and that limitation is stated in the UI, not just
+here.
+
+**Byte-identical when absent**: with no `proposed_allocation`, only the
+baseline runs against untouched inputs — verified by a test asserting
+the comparison endpoint's baseline figures exactly match calling
+`/api/projections/retirement` and `/api/simulation/monte-carlo`
+directly. The proposed-side override is entirely in-memory; a
+regression test confirms `planning_inputs` is never mutated by a
+comparison call. No retirement formula is re-derived inside
+`coach_engine.py`/`holdings_engine.py` — every planning number traces
+to the exact same engine call every other page in this app already
+makes.
+
+### Decision lifecycle
+
+Statuses: `proposed` → `reviewing` → `accepted`/`deferred`/`rejected` →
+`completed`/`invalidated`. `coach_engine.recommendation_key()` is a
+STABLE identity (category + account/holding/asset-class + an extra
+disambiguator) independent of any one generation run;
+`stable_hash()`/`assumptions_hash` lets the sync logic distinguish
+"nothing changed" from "the underlying facts moved" without re-running
+generation just to compare.
+
+`reconcile_recommendation_queue()` (pure; `main.py` performs the actual
+DB reads/writes via `_reconcile_and_persist_recommendations()`):
+
+- No existing row for a fresh candidate's key → insert `proposed`.
+- Existing row rejected/deferred, same hash → suppressed (not
+  resurfaced, not reinserted — its own history stays in the table).
+  Different hash → the underlying facts changed; insert a fresh
+  `proposed` row (reference test #19).
+- Existing row proposed/reviewing/accepted, same hash → reused
+  (no duplicate row for unchanged state). Different hash → invalidate
+  the old row, insert a fresh one (reference test #20, direct case).
+- Existing row completed, same hash → nothing to do. Different hash →
+  the condition recurred; insert a fresh `proposed` row.
+- Existing row invalidated → always insert a fresh row.
+- **A key with NO matching candidate at all this round** (the
+  underlying condition fully resolved — e.g. a policy change eliminates
+  the exact drift that produced it) whose latest row is still
+  proposed/reviewing/accepted → invalidated. This was a real gap found
+  while writing reference test #20's end-to-end API test: the original
+  logic only ever walked fresh candidates, so a recommendation whose
+  condition vanished entirely (no candidate shares its key) was never
+  invalidated and stayed active forever. Fixed in both
+  `reconcile_recommendation_queue()` and the DB-fetch query in
+  `main.py` (which now also fetches every currently-active row, not
+  just rows matching a fresh candidate's key). Mutation-checked.
+
+### Ticker/security lookup limitations (surfaced in the UI, not just here)
+
+A ticker search result never establishes: account type, owner, cost
+basis, actual availability in a specific account, tax treatment, or a
+complete ETF/mutual-fund look-through composition. `security_provider.py`'s
+`MockSecurityProvider` is the only provider wired in — no live
+market-data vendor is configured; a real adapter would implement the
+same `SecurityProvider` ABC (`search()`/`get_quote()`) and be swapped in
+via `set_active_provider()`, a one-line change with no other code
+touched. Cost basis is never guessed from a quote or a search result;
+manual entry is always available for securities without a public
+ticker (collective trusts, age-based 529 portfolios — reference test
+#13).
+
+### Privacy mode (reference test #22)
+
+`PortfolioCoach.jsx` routes every dollar/percent figure (household
+total, action-card current/target values, proposed-change amounts,
+tax-impact estimated gains, allocation-table percentages) through the
+existing `isPrivacyMode()`/`MASK_CURRENCY`/`MASK_PERCENT` utilities —
+no new masking mechanism introduced. Verified by
+`PortfolioCoach.test.jsx` against a mocked API response, and
+mutation-checked (removing the `isPrivacyMode()` branch from the page's
+`fmt()` helper reproduces the exact real-figure leak the test catches).
+
+### Reference tests (all 22 from the controlling spec)
+
+All 22 numbered reference tests are covered, each with a corresponding
+mutation check proving the test actually fails when the real production
+behavior is removed:
+
+| # | Covered by |
+|---|---|
+| 1 | `test_holdings_engine.py` — exact match, no policy-violation card |
+| 2 | `test_holdings_engine.py` — US large-cap underweight → new money there |
+| 3 | `test_holdings_engine.py` — bonds underweight, only eligible class funded |
+| 4 | `test_holdings_engine.py` — contribution corrects taxable overweight, no sale |
+| 5 | `test_holdings_engine.py` — insufficient contribution → tax-advantaged exchange first |
+| 6 | `test_holdings_engine.py` — only a taxable sale addresses concentration → tax warning shown |
+| 7 | `test_holdings_engine.py` — missing basis → no invented tax cost |
+| 8 | `test_holdings_engine.py` — same fund available in one account, not another |
+| 9 | `test_holdings_engine.py` / `test_account_investment_options_api.py` — closed-menu never receives an unavailable option |
+| 10 | `test_holdings_engine.py` / `test_account_investment_options_api.py` — open-universe requires recorded availability |
+| 11 | `test_holdings_engine.py::TestHsaCashThresholdPreserved` |
+| 12 | `test_holdings_engine.py` — multi-asset exposure look-through (holdings) |
+| 13 | `test_holdings_engine.py` / `test_account_investment_options_api.py` — no-ticker collective trust classified/recommended |
+| 14 | `test_holdings_engine.py::test_reference_case_14_custodial_holdings_excluded_from_household_allocation` |
+| 15 | `test_holdings_engine.py::TestProposeAccountOptionMix` — lower-cost index preferred |
+| 16 | `test_holdings_engine.py` / `test_account_investment_options_api.py` — target-date fund not counted as 100% one class |
+| 17 | `test_holdings_engine.py` / `test_account_investment_options_api.py` — a proposed mix totals exactly 100% |
+| 18 | `test_holdings_engine.py::TestRecommendMultiAccountContributionDestination` / `test_recommendations_api.py` |
+| 19 | `test_coach_engine.py` / `test_recommendations_api.py` — rejected recommendation doesn't reappear unchanged |
+| 20 | `test_coach_engine.py` / `test_recommendations_api.py` — policy change invalidates prior recommendations |
+| 21 | `test_recommendations_api.py` — unreconciled discrepancy blocks high-confidence tiers |
+| 22 | `PortfolioCoach.test.jsx` — privacy mode masks every figure |
+
+### The 5 required end-to-end acceptance scenarios
+
+Demonstrated via `TestClient` against the real FastAPI app instance
+(same routes the frontend calls), not just unit-level engine calls:
+
+1. "Does my current portfolio match my policy?" —
+   `GET /api/recommendations` + `GET /api/portfolio/allocation`
+   (`test_recommendations_api.py::TestRecommendationsGenerate`).
+2. "Where should I put $10,000?" —
+   `POST /api/portfolio/contribution-destination` and the multi-account
+   variant (`TestMultiAccountContributionDestination`).
+3. "Here are the available investments in this account — what mix best
+   implements my household policy?" —
+   `POST /api/account-investment-options/compare`
+   (`TestAccountInvestmentOptionsCompare`).
+4. "What should I rebalance without creating unnecessary taxable
+   sales?" — `POST /api/portfolio/rebalance`
+   (`TestRecommendRebalanceActions`, reference tests #4-#7).
+5. "Accept this recommendation and bring it back for follow-up
+   review." — `POST /api/recommendations/{id}/decide` accept →
+   complete round trip (`test_accept_and_complete_round_trip`).
+
+**Not yet demonstrated as a live interactive browser session** — the
+above is verified through the backend TestClient suite (which exercises
+the identical FastAPI routes the frontend calls) plus separate
+rendered-DOM frontend tests for the privacy-mode requirement, not a
+single end-to-end browser walkthrough. Documented as a manual review
+step in `CONSOLIDATION_HANDOFF.md`.
+
+### Known limitations / deferred work (not silently assumed complete)
+
+- `employer_stock_exceptions`/`legacy_holding_exceptions` policy fields
+  exist in the schema but are not yet consulted by rebalance
+  sell-candidate selection (no "permitted exception" classification is
+  ever emitted yet).
+- No per-account override of the closed-menu/open-universe type-level
+  default (e.g. a specific HSA that actually restricts to a cash-only
+  menu until a threshold).
+- `task_engine.py`/`assumption_reviews`/annual-review/`saved_scenarios`/
+  life-events integration points described in the original spec are not
+  wired up — the Coach's own decision lifecycle (recommendations/
+  recommendation_events tables) is self-contained and does not yet feed
+  into or read from those other systems.
+- Planning-comparison's proposed-return override applies the SAME
+  blended return to both pre- and post-retirement phases (no glide-path
+  modeling).
+- No live security-data provider is configured; `MockSecurityProvider`
+  is the only one wired in, by design, for this household today.
+
+### Verification
+
+Full backend suite (as of the final commit on this branch, `4db4e88`):
+**1612 passed, 1 skipped**. Frontend: `npm run build` succeeds;
+`npm test` — **71 passed**. Sensitive-data check passes (no new
+findings introduced by this branch). Every new pure function in
+`holdings_engine.py`/`coach_engine.py` has at least one mutation check
+(back up file → apply an in-place mutation → confirm the relevant
+test(s) fail → restore → confirm green again) — see individual commit
+messages on `codex/portfolio-coach-recommendations` for which mutation
+was applied to which behavior.
+
+Branch: `codex/portfolio-coach-recommendations`, branched from
+`origin/main` (NOT from `codex/portfolio-holdings-allocation`, an
+unrelated, separately-scoped, already-complete-but-unmerged feature).
+Pushed for independent review. **Not merged into `main`.**
