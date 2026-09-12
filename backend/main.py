@@ -1130,20 +1130,37 @@ def get_portfolio_allocation():
 @app.post("/api/portfolio/contribution-destination")
 def portfolio_contribution_destination(req: PortfolioContributionRequest):
     """"Where should my next contribution go?" — the Available Funds
-    workflow's own recommendation step."""
+    workflow's own recommendation step. Each action names an actual
+    destination (account + investment option) when one is recorded
+    anywhere in the household, resolved via resolve_new_money_
+    destinations against every account's own account_investment_options
+    -- external review finding #1 (2026-09-12, commit 4812d84): this
+    used to stop at "$X -> an asset class" with no account or fund."""
     conn = get_db()
     accounts, holdings, policy = _load_portfolio_context(conn)
+    option_rows = conn.execute("SELECT * FROM account_investment_options").fetchall()
     conn.close()
     if not holdings:
         raise HTTPException(status_code=400, detail="No holdings entered yet — add holdings before requesting a contribution recommendation.")
     if not policy:
         raise HTTPException(status_code=400, detail="No investment policy saved yet — set target allocation before requesting a contribution recommendation.")
-    from holdings_engine import classify_holdings, compute_current_allocation, compare_to_target, recommend_contribution_destination
+    from holdings_engine import (
+        classify_holdings, compute_current_allocation, compare_to_target,
+        recommend_contribution_destination, resolve_new_money_destinations,
+    )
     classified = classify_holdings(accounts, holdings)
     current = compute_current_allocation(classified["household"])
     comparison = compare_to_target(current, policy)
-    return {"actions": recommend_contribution_destination(comparison, req.amount),
-            "current_allocation": current, "comparison": comparison}
+    actions = recommend_contribution_destination(comparison, req.amount)
+    options_by_account: Dict[int, List[Dict]] = {}
+    for r in option_rows:
+        options_by_account.setdefault(r["account_id"], []).append(_option_row_to_dict(r))
+    resolved = resolve_new_money_destinations(actions, options_by_account)
+    account_names = {a["id"]: a["name"] for a in accounts}
+    for action in resolved:
+        if action.get("destination"):
+            action["destination"]["account_name"] = account_names.get(action["destination"]["account_id"])
+    return {"actions": resolved, "current_allocation": current, "comparison": comparison}
 
 @app.post("/api/portfolio/contribution-destination/multi-account")
 def portfolio_multi_account_contribution_destination(req: MultiAccountContributionRequest):
