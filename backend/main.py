@@ -1,7 +1,7 @@
 from fastapi import FastAPI, HTTPException, UploadFile, File, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response as FastAPIResponse
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, field_validator, model_validator
 from typing import Optional, List, Dict
 import sqlite3
 import json
@@ -248,6 +248,15 @@ class Holding(BaseModel):
     shares: Optional[float] = None
     market_value: float
     asset_class: str = "unclassified"
+    # External review finding #4 (2026-09-12, commit 4812d84): the
+    # calculation engine's holding_exposure_weights() already supports a
+    # multi-asset `exposures` list, but a real owned Holding had nowhere
+    # to persist one -- a target-date/balanced fund entered as a real
+    # holding was forced into a single asset_class regardless of its
+    # real composition. This field is the holdings-table counterpart to
+    # account_investment_options.exposures, added for the exact same
+    # reason. Optional list of {"asset_class": ..., "weight_pct": ...}.
+    exposures: List[Dict] = []
     expense_ratio: Optional[float] = None
     cost_basis: Optional[float] = None
     as_of_date: Optional[str] = None
@@ -354,6 +363,23 @@ class InvestmentPolicy(BaseModel):
     effective_date: Optional[str] = None
     review_date: Optional[str] = None
     notes: Optional[str] = None
+
+    @model_validator(mode="after")
+    def _targets_must_be_valid_percentages(self):
+        # Review finding (2026-09-12, external review of commit 4812d84,
+        # finding #6): a policy with negative targets or targets that
+        # don't sum to 100% used to save without error and feed straight
+        # into every drift/rebalance/new-money calculation downstream.
+        from holdings_engine import POLICY_TARGET_FIELD_TO_ASSET_CLASS
+        fields = list(POLICY_TARGET_FIELD_TO_ASSET_CLASS.keys())
+        values = [getattr(self, f) for f in fields]
+        negative = [f for f, v in zip(fields, values) if v < 0]
+        if negative:
+            raise ValueError(f"Target percentages cannot be negative: {', '.join(negative)}")
+        total = sum(values)
+        if abs(total - 100) > 0.5:
+            raise ValueError(f"Target percentages must sum to 100% (got {total:.2f}%)")
+        return self
 
 class PortfolioContributionRequest(BaseModel):
     amount: float = 0
@@ -705,18 +731,23 @@ def delete_account(account_id: int):
 # recommendation decision lifecycle, and planning integration.
 # ══════════════════════════════════════════════════════════════════════
 
+def _holding_row_to_dict(row) -> Dict:
+    d = dict(row)
+    d["exposures"] = json.loads(d.pop("exposures_json") or "[]")
+    return d
+
 @app.get("/api/holdings")
 def get_holdings():
     conn = get_db()
-    rows = [dict(r) for r in conn.execute("SELECT * FROM holdings ORDER BY account_id, security_name").fetchall()]
+    rows = conn.execute("SELECT * FROM holdings ORDER BY account_id, security_name").fetchall()
     conn.close()
-    return rows
+    return [_holding_row_to_dict(r) for r in rows]
 
 @app.get("/api/holdings/grouped")
 def get_holdings_grouped():
     conn = get_db()
     accounts = [dict(r) for r in conn.execute("SELECT * FROM accounts").fetchall()]
-    holdings = [dict(r) for r in conn.execute("SELECT * FROM holdings ORDER BY security_name").fetchall()]
+    holdings = [_holding_row_to_dict(r) for r in conn.execute("SELECT * FROM holdings ORDER BY security_name").fetchall()]
     conn.close()
     from holdings_engine import resolve_portfolio_account_type, reconcile_account_holdings, is_allocation_blocked
     by_account: Dict[int, List[Dict]] = {}
@@ -742,11 +773,11 @@ def create_holding(holding: Holding):
         raise HTTPException(status_code=400, detail=f"account_id {holding.account_id} does not exist")
     cur = conn.execute(
         "INSERT INTO holdings (account_id, ticker, security_name, provider_identifier, exchange, security_type, shares, "
-        "market_value, asset_class, expense_ratio, cost_basis, as_of_date, data_source, confidence, notes, updated_at) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,datetime('now'))",
+        "market_value, asset_class, exposures_json, expense_ratio, cost_basis, as_of_date, data_source, confidence, "
+        "notes, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,datetime('now'))",
         (holding.account_id, holding.ticker, holding.security_name, holding.provider_identifier, holding.exchange,
-         holding.security_type, holding.shares, holding.market_value, holding.asset_class, holding.expense_ratio,
-         holding.cost_basis, holding.as_of_date, holding.data_source, holding.confidence, holding.notes)
+         holding.security_type, holding.shares, holding.market_value, holding.asset_class, json.dumps(holding.exposures),
+         holding.expense_ratio, holding.cost_basis, holding.as_of_date, holding.data_source, holding.confidence, holding.notes)
     )
     conn.commit()
     holding.id = cur.lastrowid
@@ -762,11 +793,11 @@ def update_holding(holding_id: int, holding: Holding):
         raise HTTPException(status_code=400, detail=f"account_id {holding.account_id} does not exist")
     conn.execute(
         "UPDATE holdings SET account_id=?, ticker=?, security_name=?, provider_identifier=?, exchange=?, security_type=?, "
-        "shares=?, market_value=?, asset_class=?, expense_ratio=?, cost_basis=?, as_of_date=?, data_source=?, confidence=?, "
-        "notes=?, updated_at=datetime('now') WHERE id=?",
+        "shares=?, market_value=?, asset_class=?, exposures_json=?, expense_ratio=?, cost_basis=?, as_of_date=?, "
+        "data_source=?, confidence=?, notes=?, updated_at=datetime('now') WHERE id=?",
         (holding.account_id, holding.ticker, holding.security_name, holding.provider_identifier, holding.exchange,
-         holding.security_type, holding.shares, holding.market_value, holding.asset_class, holding.expense_ratio,
-         holding.cost_basis, holding.as_of_date, holding.data_source, holding.confidence, holding.notes, holding_id)
+         holding.security_type, holding.shares, holding.market_value, holding.asset_class, json.dumps(holding.exposures),
+         holding.expense_ratio, holding.cost_basis, holding.as_of_date, holding.data_source, holding.confidence, holding.notes, holding_id)
     )
     conn.commit()
     conn.close()
@@ -1059,7 +1090,7 @@ def save_investment_policy(policy: InvestmentPolicy):
 
 def _load_portfolio_context(conn):
     accounts = [dict(r) for r in conn.execute("SELECT * FROM accounts").fetchall()]
-    holdings = [dict(r) for r in conn.execute("SELECT * FROM holdings").fetchall()]
+    holdings = [_holding_row_to_dict(r) for r in conn.execute("SELECT * FROM holdings").fetchall()]
     policy_row = conn.execute("SELECT * FROM investment_policies ORDER BY id DESC LIMIT 1").fetchone()
     policy = _policy_row_to_dict(policy_row) if policy_row else None
     return accounts, holdings, policy

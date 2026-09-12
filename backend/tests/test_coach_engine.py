@@ -213,27 +213,36 @@ class TestNewMoneyRecommendations:
 
 class TestRebalanceRecommendations:
     def test_disabling_contribution_first_changes_recommended_action(self):
-        """Mutation-style check required by the brief."""
-        accs = [account(1, "401k"), account(2, "taxable")]
+        """External review finding #5 (2026-09-12, commit 4812d84):
+        use_contributions_before_sales used to be read into a variable
+        and never actually consulted -- toggling it produced an
+        identical card set every time. Fixed: a pending contribution
+        that fully closes an underweight gap prevents a sale ONLY when
+        the preference is on; with it off, the sell/exchange plan is
+        sized off the raw deviation regardless of the incoming
+        contribution.
+
+        $100,000 total: large_cap $70,000 (70%, target 40% -> $30,000
+        over), bonds $10,000 (10%, target 40% -> $30,000 under), cash
+        $20,000 (20%, exactly at target). A $30,000 contribution exactly
+        closes the bonds gap."""
+        accs = [account(1, "taxable")]
         household = [
-            holding(1, 1, security_name="401k Large Cap", market_value=5000, asset_class="us_large_cap"),
-            holding(2, 2, security_name="Brokerage Large Cap", market_value=50000, asset_class="us_large_cap", cost_basis=30000),
-            holding(3, 1, security_name="401k Bonds", market_value=25000, asset_class="us_bonds"),
+            holding(1, 1, security_name="Large Cap", market_value=70000, asset_class="us_large_cap"),
+            holding(2, 1, security_name="Bonds", market_value=10000, asset_class="us_bonds"),
+            holding(3, 1, security_name="Cash", market_value=20000, asset_class="cash"),
         ]
         classified = classify_holdings(accs, household)["household"]
         current = compute_current_allocation(classified)
-        p = policy(target_us_large_cap_pct=40, target_us_mid_cap_pct=0, target_us_small_cap_pct=0, target_us_bonds_pct=30, target_cash_pct=20)
+        p = policy(target_us_large_cap_pct=40, target_us_mid_cap_pct=0, target_us_small_cap_pct=0, target_us_bonds_pct=40, target_cash_pct=20)
         comparison = compare_to_target(current, p)
-        result_on = recommend_rebalance_actions(classified, current, comparison, p, pending_contribution=0)
-        result_off = recommend_rebalance_actions(classified, current, comparison, {**p, "use_contributions_before_sales": False}, pending_contribution=0)
-        cards_on = rebalance_recommendations(result_on)
-        cards_off = rebalance_recommendations(result_off)
-        # Both produce cards; the point is the underlying data differs
-        # in principle when the preference is off (documented as a
-        # conservative interpretation in CALCULATION_CONTRACT.md) -- at
-        # minimum, confirm the function actually reads the flag without
-        # erroring and produces a comparable card set.
-        assert cards_on and cards_off
+        result_on = recommend_rebalance_actions(classified, current, comparison, p, pending_contribution=30000)
+        result_off = recommend_rebalance_actions(classified, current, comparison, {**p, "use_contributions_before_sales": False}, pending_contribution=30000)
+        sells_on = [a for a in result_on["rebalance_actions"] if a["action"] == "sell"]
+        sells_off = [a for a in result_off["rebalance_actions"] if a["action"] == "sell"]
+        assert sells_on == []  # the contribution alone closed the gap -- no sale needed
+        assert sells_off and sells_off[0]["amount"] == 30000  # raw deviation still triggers a sale
+        assert rebalance_recommendations(result_on) != rebalance_recommendations(result_off)
 
     def test_taxable_sale_card_has_medium_or_low_confidence(self):
         accs = [account(1, "taxable")]

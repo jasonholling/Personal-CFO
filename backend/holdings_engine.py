@@ -576,10 +576,22 @@ def recommend_rebalance_actions(
     if prefer_no_taxable_sale is None:
         prefer_no_taxable_sale = True
 
+    # use_contributions_before_sales: when True (default), a pending
+    # contribution's own effect is credited against the underweight need
+    # BEFORE any sale is considered -- an underweight class a
+    # contribution can already close never triggers a sale (reference
+    # test #4). When a household sets this False, contributions and
+    # sales are calculated independently instead: the sell/exchange plan
+    # is sized off the RAW deviation, ignoring pending contributions
+    # entirely -- e.g. a household deliberately rebalancing via sales
+    # now (tax-loss harvesting, an account closure) regardless of
+    # whatever new money happens to be arriving this period. External
+    # review finding (2026-09-12, commit 4812d84): this flag used to be
+    # read into a variable and never actually used anywhere below.
     remaining_deviation = {}
     for asset_class, d in comparison["by_class"].items():
         dollars = d["deviation_dollars"]
-        if dollars < 0:
+        if dollars < 0 and prefer_no_taxable_sale:
             dollars = min(0.0, dollars + contribution_by_class.get(asset_class, 0.0))
         remaining_deviation[asset_class] = dollars
 

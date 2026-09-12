@@ -29,10 +29,15 @@ const TABS = [
   { id: 'options', label: 'Account Investment Options' },
 ]
 
+const EMPTY_HOLDING_FORM = {
+  account_id: '', security_name: '', ticker: '', market_value: '', asset_class: 'us_large_cap',
+  expense_ratio: '', cost_basis: '', multiAsset: false, exposures: [{ asset_class: 'us_large_cap', weight_pct: '' }],
+}
+
 function HoldingsTab({ accounts }) {
   const [groups, setGroups] = useState([])
   const [loading, setLoading] = useState(true)
-  const [form, setForm] = useState({ account_id: '', security_name: '', ticker: '', market_value: '', asset_class: 'us_large_cap', expense_ratio: '', cost_basis: '' })
+  const [form, setForm] = useState(EMPTY_HOLDING_FORM)
   const [saving, setSaving] = useState(false)
 
   const load = () => axios.get('/api/holdings/grouped').then(r => setGroups(r.data.groups)).finally(() => setLoading(false))
@@ -43,16 +48,26 @@ function HoldingsTab({ accounts }) {
     if (!form.account_id || !form.security_name || !form.market_value) return
     setSaving(true)
     try {
+      const exposures = form.multiAsset
+        ? form.exposures.filter(x => x.asset_class && x.weight_pct).map(x => ({ asset_class: x.asset_class, weight_pct: parseFloat(x.weight_pct) }))
+        : []
       await axios.post('/api/holdings', {
         account_id: parseInt(form.account_id, 10), security_name: form.security_name, ticker: form.ticker || null,
-        market_value: parseFloat(form.market_value), asset_class: form.asset_class,
+        market_value: parseFloat(form.market_value), asset_class: form.asset_class, exposures,
         expense_ratio: form.expense_ratio ? parseFloat(form.expense_ratio) / 100 : null,
         cost_basis: form.cost_basis ? parseFloat(form.cost_basis) : null,
       })
-      setForm({ account_id: '', security_name: '', ticker: '', market_value: '', asset_class: 'us_large_cap', expense_ratio: '', cost_basis: '' })
+      setForm(EMPTY_HOLDING_FORM)
       await load()
     } finally { setSaving(false) }
   }
+
+  const updateExposureRow = (i, field, value) => {
+    setForm(f => ({ ...f, exposures: f.exposures.map((row, idx) => idx === i ? { ...row, [field]: value } : row) }))
+  }
+  const addExposureRow = () => setForm(f => ({ ...f, exposures: [...f.exposures, { asset_class: 'us_bonds', weight_pct: '' }] }))
+  const removeExposureRow = i => setForm(f => ({ ...f, exposures: f.exposures.filter((_, idx) => idx !== i) }))
+  const exposureTotal = form.exposures.reduce((sum, x) => sum + (parseFloat(x.weight_pct) || 0), 0)
 
   const remove = async id => { await axios.delete(`/api/holdings/${id}`); await load() }
 
@@ -68,12 +83,40 @@ function HoldingsTab({ accounts }) {
         <input className="input" placeholder="Security name" value={form.security_name} onChange={e => setForm(f => ({ ...f, security_name: e.target.value }))} style={{ minWidth: 160 }} />
         <input className="input" placeholder="Ticker (optional)" value={form.ticker} onChange={e => setForm(f => ({ ...f, ticker: e.target.value }))} style={{ maxWidth: 100 }} />
         <input className="input" type="number" placeholder="Market value" value={form.market_value} onChange={e => setForm(f => ({ ...f, market_value: e.target.value }))} style={{ maxWidth: 140 }} />
-        <select className="input" value={form.asset_class} onChange={e => setForm(f => ({ ...f, asset_class: e.target.value }))} style={{ minWidth: 160 }}>
-          {ASSET_CLASSES.map(c => <option key={c} value={c}>{c.replace(/_/g, ' ')}</option>)}
-        </select>
+        {!form.multiAsset && (
+          <select className="input" value={form.asset_class} onChange={e => setForm(f => ({ ...f, asset_class: e.target.value }))} style={{ minWidth: 160 }}>
+            {ASSET_CLASSES.map(c => <option key={c} value={c}>{c.replace(/_/g, ' ')}</option>)}
+          </select>
+        )}
         <input className="input" type="number" placeholder="Expense ratio %" value={form.expense_ratio} onChange={e => setForm(f => ({ ...f, expense_ratio: e.target.value }))} style={{ maxWidth: 130 }} />
         <input className="input" type="number" placeholder="Cost basis" value={form.cost_basis} onChange={e => setForm(f => ({ ...f, cost_basis: e.target.value }))} style={{ maxWidth: 130 }} />
+        <label style={{ fontSize: 12, display: 'flex', gap: 4, alignItems: 'center' }}>
+          <input type="checkbox" checked={form.multiAsset} onChange={e => setForm(f => ({ ...f, multiAsset: e.target.checked }))} />
+          Multi-asset (target-date / balanced fund)
+        </label>
         <button className="btn-primary" disabled={saving} type="submit">Add holding</button>
+
+        {form.multiAsset && (
+          <div style={{ width: '100%', marginTop: 4 }}>
+            <div style={{ fontSize: 12, color: 'var(--muted)', marginBottom: 6 }}>
+              This fund's own asset-class composition (must sum to 100%) — used for look-through instead of forcing it into one category.
+            </div>
+            {form.exposures.map((row, i) => (
+              <div key={i} style={{ display: 'flex', gap: 8, marginBottom: 6 }}>
+                <select className="input" value={row.asset_class} onChange={e => updateExposureRow(i, 'asset_class', e.target.value)} style={{ minWidth: 160 }}>
+                  {ASSET_CLASSES.map(c => <option key={c} value={c}>{c.replace(/_/g, ' ')}</option>)}
+                </select>
+                <input className="input" type="number" placeholder="Weight %" value={row.weight_pct}
+                       onChange={e => updateExposureRow(i, 'weight_pct', e.target.value)} style={{ maxWidth: 120 }} />
+                <button type="button" className="btn-secondary" onClick={() => removeExposureRow(i)}>Remove</button>
+              </div>
+            ))}
+            <button type="button" className="btn-secondary" onClick={addExposureRow}>+ Add asset class</button>
+            <span style={{ marginLeft: 10, fontSize: 12, color: exposureTotal === 100 ? 'var(--green)' : 'var(--amber)' }}>
+              Total: {exposureTotal}% {exposureTotal !== 100 && '— should sum to 100%'}
+            </span>
+          </div>
+        )}
       </form>
 
       {groups.map(g => (
@@ -91,7 +134,12 @@ function HoldingsTab({ accounts }) {
           {g.holdings.length === 0 && <div style={{ color: 'var(--muted)', fontSize: 13 }}>No holdings entered for this account.</div>}
           {g.holdings.map(h => (
             <div key={h.id} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, padding: '5px 0', borderTop: '1px solid var(--border)' }}>
-              <span>{h.security_name} {h.ticker ? `(${h.ticker})` : ''} — {h.asset_class.replace(/_/g, ' ')}</span>
+              <span>
+                {h.security_name} {h.ticker ? `(${h.ticker})` : ''} —{' '}
+                {h.exposures?.length > 0
+                  ? h.exposures.map(x => `${x.weight_pct}% ${x.asset_class.replace(/_/g, ' ')}`).join(' / ')
+                  : h.asset_class.replace(/_/g, ' ')}
+              </span>
               <span>
                 {fmt(h.market_value)}
                 <button className="btn-secondary" style={{ marginLeft: 10, padding: '2px 8px', fontSize: 11 }} onClick={() => remove(h.id)}>Remove</button>
@@ -108,6 +156,7 @@ function PolicyTab() {
   const [policy, setPolicy] = useState(null)
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
+  const [saveError, setSaveError] = useState(null)
 
   const load = () => axios.get('/api/investment-policy').then(r => {
     setPolicy(r.data.has_policy ? r.data.policy : {
@@ -122,10 +171,24 @@ function PolicyTab() {
   if (loading || !policy) return <div className="loading">Loading policy...</div>
 
   const total = POLICY_TARGET_FIELDS.reduce((sum, [field]) => sum + (parseFloat(policy[field]) || 0), 0)
+  const hasNegative = POLICY_TARGET_FIELDS.some(([field]) => (parseFloat(policy[field]) || 0) < 0)
+  // Same 0.5-point tolerance the backend's InvestmentPolicy validator
+  // enforces (external review finding #6) -- keep these in sync.
+  const totalValid = Math.abs(total - 100) <= 0.5
+  const canSave = totalValid && !hasNegative
 
   const save = async () => {
+    if (!canSave) return
     setSaving(true)
-    try { await axios.post('/api/investment-policy', policy); await load() } finally { setSaving(false) }
+    setSaveError(null)
+    try {
+      await axios.post('/api/investment-policy', policy)
+      await load()
+    } catch (e) {
+      setSaveError(e.response?.data?.detail ? JSON.stringify(e.response.data.detail) : 'Could not save policy.')
+    } finally {
+      setSaving(false)
+    }
   }
 
   return (
@@ -140,9 +203,12 @@ function PolicyTab() {
           </div>
         ))}
       </div>
-      <div style={{ marginTop: 10, fontSize: 13, color: total === 100 ? 'var(--green)' : 'var(--amber)' }}>
-        Total: {total}% {total !== 100 && '— targets should sum to 100%'}
+      <div style={{ marginTop: 10, fontSize: 13, color: totalValid ? 'var(--green)' : 'var(--red)' }}>
+        Total: {total.toFixed(1)}% {!totalValid && '— targets must sum to 100% (±0.5) before saving'}
       </div>
+      {hasNegative && (
+        <div style={{ fontSize: 13, color: 'var(--red)' }}>Target percentages cannot be negative.</div>
+      )}
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 1fr))', gap: 10, marginTop: 16 }}>
         <div>
           <label style={{ fontSize: 12, color: 'var(--muted)' }}>Drift band (±%)</label>
@@ -169,7 +235,8 @@ function PolicyTab() {
           <label style={{ fontSize: 12 }}>Prefer contributions/exchanges before any taxable sale</label>
         </div>
       </div>
-      <button className="btn-primary" style={{ marginTop: 16 }} disabled={saving} onClick={save}>Save policy</button>
+      {saveError && <div style={{ fontSize: 13, color: 'var(--red)', marginTop: 8 }}>{saveError}</div>}
+      <button className="btn-primary" style={{ marginTop: 16 }} disabled={saving || !canSave} onClick={save}>Save policy</button>
     </div>
   )
 }

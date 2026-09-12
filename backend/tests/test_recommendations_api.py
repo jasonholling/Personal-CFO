@@ -33,6 +33,44 @@ def _save_policy(client, **overrides):
     return r.json()
 
 
+class TestInvestmentPolicyValidation:
+    """External review finding #6: a policy with negative targets or
+    targets not summing to 100% used to save without error and feed
+    straight into every downstream recommendation calculation."""
+
+    def test_targets_not_summing_to_100_rejected(self, client):
+        r = client.post("/api/investment-policy", json={
+            "target_us_large_cap_pct": 50, "target_us_bonds_pct": 30,  # sums to 80
+        })
+        assert r.status_code == 422
+
+    def test_targets_over_100_rejected(self, client):
+        r = client.post("/api/investment-policy", json={
+            "target_us_large_cap_pct": 80, "target_us_bonds_pct": 40,  # sums to 120
+        })
+        assert r.status_code == 422
+
+    def test_negative_target_rejected(self, client):
+        r = client.post("/api/investment-policy", json={
+            "target_us_large_cap_pct": 120, "target_us_bonds_pct": -20,  # sums to 100 but negative
+        })
+        assert r.status_code == 422
+
+    def test_valid_100_total_accepted(self, client):
+        r = client.post("/api/investment-policy", json={
+            "target_us_large_cap_pct": 60, "target_us_bonds_pct": 40,
+        })
+        assert r.status_code == 200, r.text
+
+    def test_small_rounding_tolerance_accepted(self, client):
+        """99.7%/100.3% from real-world rounded entries shouldn't be
+        rejected outright -- the tolerance is 0.5, not exact-100 only."""
+        r = client.post("/api/investment-policy", json={
+            "target_us_large_cap_pct": 60.2, "target_us_bonds_pct": 39.6,  # 99.8
+        })
+        assert r.status_code == 200, r.text
+
+
 class TestRecommendationsGenerate:
     def test_no_policy_yields_establish_policy_card(self, client):
         _create_account(client)

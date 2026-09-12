@@ -744,6 +744,7 @@ def init_portfolio_coach_tables():
             shares REAL,
             market_value REAL NOT NULL DEFAULT 0 CHECK (market_value >= 0),
             asset_class TEXT NOT NULL DEFAULT 'unclassified',
+            exposures_json TEXT,
             expense_ratio REAL,
             cost_basis REAL,
             as_of_date TEXT,
