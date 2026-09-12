@@ -1,0 +1,113 @@
+import React, { act } from 'react'
+import { createRoot } from 'react-dom/client'
+import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest'
+import axios from 'axios'
+import PortfolioSetup from './PortfolioSetup'
+
+vi.mock('axios', () => ({ default: { get: vi.fn(), post: vi.fn(), delete: vi.fn() } }))
+globalThis.IS_REACT_ACT_ENVIRONMENT = true
+
+let container, root
+const flush = async () => { await act(async () => { await Promise.resolve(); await Promise.resolve() }) }
+const setInput = async (el, value) => act(async () => {
+  Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(el, value)
+  el.dispatchEvent(new Event('input', { bubbles: true }))
+})
+
+beforeEach(() => {
+  vi.clearAllMocks()
+  container = document.createElement('div')
+  document.body.appendChild(container)
+  root = createRoot(container)
+  axios.get.mockImplementation((url) => {
+    if (url === '/api/accounts') return Promise.resolve({ data: [{ id: 1, name: '401k' }] })
+    if (url === '/api/holdings/grouped') return Promise.resolve({ data: { groups: [] } })
+    if (url === '/api/account-investment-options') return Promise.resolve({ data: [] })
+    if (url === '/api/investment-policy') return Promise.resolve({ data: { has_policy: false } })
+    if (url === '/api/securities/search') return Promise.resolve({ data: { candidates: [{
+      provider_identifier: 'MOCK:BND', ticker: 'BND', security_name: 'Bond Index',
+      exchange: 'NASDAQ', currency: 'USD', security_type: 'etf', status: 'active',
+      asset_class: 'us_bonds', asset_class_source: 'provider',
+    }] } })
+    return Promise.resolve({ data: {} })
+  })
+})
+
+afterEach(async () => {
+  await act(async () => root.unmount())
+  container.remove()
+})
+
+describe('PortfolioSetup workflows', () => {
+  it('searches for a ticker and confirms the selected candidate', async () => {
+    axios.post.mockResolvedValue({ data: { security_id: 1 } })
+    await act(async () => root.render(<PortfolioSetup />))
+    await flush()
+    const ticker = container.querySelector('input[placeholder="Ticker (optional)"]')
+    await setInput(ticker, 'BND')
+    const lookup = [...container.querySelectorAll('button')].find(b => b.textContent === 'Look up ticker')
+    await act(async () => { lookup.click(); await Promise.resolve(); await Promise.resolve() })
+    const use = [...container.querySelectorAll('button')].find(b => b.textContent.includes('Use BND'))
+    await act(async () => { use.click(); await Promise.resolve() })
+    expect(axios.post).toHaveBeenCalledWith('/api/securities/confirm', expect.objectContaining({ ticker: 'BND' }))
+    expect(container.querySelector('input[placeholder="Security name"]').value).toBe('Bond Index')
+  })
+
+  it('previews and commits only valid CSV rows', async () => {
+    axios.post.mockImplementation(url => {
+      if (url === '/api/holdings/import/preview') return Promise.resolve({ data: {
+        rows: [{ account_id: 1, security_name: 'Fund', market_value: 100, asset_class: 'us_bonds', valid: true }],
+        errors: [], valid_count: 1, invalid_count: 0,
+      } })
+      if (url === '/api/holdings/import/commit') return Promise.resolve({ data: { created: 1 } })
+      return Promise.resolve({ data: {} })
+    })
+    await act(async () => root.render(<PortfolioSetup />))
+    await flush()
+    const input = container.querySelector('input[aria-label="Holdings CSV"]')
+    const file = new File(['account_id,security_name,market_value,asset_class\n1,Fund,100,us_bonds'], 'holdings.csv', { type: 'text/csv' })
+    await act(async () => { Object.defineProperty(input, 'files', { value: [file] }); input.dispatchEvent(new Event('change', { bubbles: true })); await Promise.resolve() })
+    const commit = [...container.querySelectorAll('button')].find(b => b.textContent.includes('Import 1 valid row'))
+    await act(async () => { commit.click(); await Promise.resolve() })
+    expect(axios.post).toHaveBeenCalledWith('/api/holdings/import/commit', [expect.objectContaining({ security_name: 'Fund' })])
+  })
+
+  it('shows the account-option limits and restrictions controls', async () => {
+    await act(async () => root.render(<PortfolioSetup />))
+    await flush()
+    const optionsTab = [...container.querySelectorAll('button')].find(b => b.textContent === 'Account Investment Options')
+    await act(async () => optionsTab.click())
+    await flush()
+    const account = container.querySelector('select')
+    await act(async () => { account.value = '1'; account.dispatchEvent(new Event('change', { bubbles: true })) })
+    await flush()
+    expect(container.querySelector('input[placeholder="Minimum $"]')).not.toBeNull()
+    expect(container.querySelector('input[placeholder="Max allocation %"]')).not.toBeNull()
+    expect(container.querySelector('input[placeholder="Trading fee $"]')).not.toBeNull()
+    expect(container.querySelector('input[placeholder="Redemption restriction"]')).not.toBeNull()
+  })
+
+  it('saves a cash-only account as excluded from investing advice', async () => {
+    axios.get.mockImplementation((url) => {
+      if (url === '/api/accounts') return Promise.resolve({ data: [
+        { id: 1, name: '401k', account_type: 'traditional_401k', balance: 100000 },
+        { id: 2, name: 'Checking', account_type: 'checking', balance: 25000 },
+      ] })
+      if (url === '/api/holdings/grouped') return Promise.resolve({ data: { groups: [] } })
+      if (url === '/api/investment-policy') return Promise.resolve({ data: { has_policy: true, policy: {
+        target_us_large_cap_pct: 60, target_us_bonds_pct: 40, excluded_accounts: [],
+      } } })
+      return Promise.resolve({ data: [] })
+    })
+    axios.post.mockResolvedValue({ data: {} })
+    await act(async () => root.render(<PortfolioSetup />))
+    await flush()
+    await act(async () => [...container.querySelectorAll('button')].find(b => b.textContent === 'Investment Policy').click())
+    await flush()
+    const checking = container.querySelector('input[aria-label="Exclude Checking from investing advice"]')
+    expect(checking).not.toBeNull()
+    await act(async () => checking.click())
+    await act(async () => { [...container.querySelectorAll('button')].find(b => b.textContent === 'Save policy').click(); await Promise.resolve() })
+    expect(axios.post).toHaveBeenCalledWith('/api/investment-policy', expect.objectContaining({ excluded_accounts: [2] }))
+  })
+})

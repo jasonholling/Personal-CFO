@@ -857,6 +857,7 @@ def init_portfolio_coach_tables():
             decision_date TEXT,
             decision_notes TEXT,
             decision_reason TEXT,
+            review_date TEXT,
             resulting_allocation_json TEXT,
             created_at TEXT DEFAULT (datetime('now')),
             updated_at TEXT DEFAULT (datetime('now'))
@@ -871,6 +872,9 @@ def init_portfolio_coach_tables():
             created_at TEXT DEFAULT (datetime('now'))
         );
     """)
+    recommendation_cols = [r[1] for r in conn.execute("PRAGMA table_info(recommendations)").fetchall()]
+    if "review_date" not in recommendation_cols:
+        conn.execute("ALTER TABLE recommendations ADD COLUMN review_date TEXT")
     conn.execute("PRAGMA optimize")
     conn.commit(); conn.close()
 

@@ -45,6 +45,7 @@ function ActionCard({ card, onDecide, busy, onNavigate }) {
   const p = card.payload
   const [notes, setNotes] = useState('')
   const [showDecide, setShowDecide] = useState(false)
+  const [reviewDate, setReviewDate] = useState('')
   // Contextual link: a data-quality card about an account's own type
   // being unresolved should jump straight to where that gets fixed
   // (Accounts), not just describe the problem.
@@ -89,6 +90,7 @@ function ActionCard({ card, onDecide, busy, onNavigate }) {
           <div style={{ fontSize: 11, marginTop: 4, color: 'var(--muted)' }}>
             Confidence: {p.confidence} · Status: {card.status}
             {card.decision_date ? ` · Last decision: ${card.decision_date}` : ''}
+            {card.review_date ? ` · Review again: ${card.review_date}` : ''}
           </div>
         </div>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 6, minWidth: 140 }}>
@@ -101,7 +103,8 @@ function ActionCard({ card, onDecide, busy, onNavigate }) {
           {card.status === 'accepted' && (
             <button className="btn-primary" disabled={busy} onClick={() => onDecide(card.id, 'completed', notes)}>Mark complete</button>
           )}
-          <button className="btn-secondary" disabled={busy} onClick={() => onDecide(card.id, 'deferred', notes)}>Defer</button>
+          <input aria-label="Review date" className="input" type="date" value={reviewDate} onChange={e => setReviewDate(e.target.value)} />
+          <button className="btn-secondary" disabled={busy || !reviewDate} onClick={() => onDecide(card.id, 'deferred', notes, reviewDate)}>Defer until date</button>
           <button className="btn-secondary" disabled={busy} onClick={() => setShowDecide(v => !v)}>Reject…</button>
         </div>
       </div>
@@ -122,6 +125,7 @@ export default function PortfolioCoach({ onNavigate }) {
   const [busy, setBusy] = useState(false)
   const [contribAmount, setContribAmount] = useState('')
   const [contribResult, setContribResult] = useState(null)
+  const [rebalanceResult, setRebalanceResult] = useState(null)
   const [filterCategory, setFilterCategory] = useState('all')
 
   const load = (pending = 0) => {
@@ -137,10 +141,10 @@ export default function PortfolioCoach({ onNavigate }) {
 
   useEffect(() => { load() }, [])
 
-  const decide = async (id, status, notes) => {
+  const decide = async (id, status, notes, reviewDate = null) => {
     setBusy(true)
     try {
-      await axios.post(`/api/recommendations/${id}/decide`, { status, notes: notes || null })
+      await axios.post(`/api/recommendations/${id}/decide`, { status, notes: notes || null, review_date: reviewDate })
       load()
     } finally {
       setBusy(false)
@@ -153,6 +157,14 @@ export default function PortfolioCoach({ onNavigate }) {
     setBusy(true)
     axios.post('/api/portfolio/contribution-destination', { amount })
       .then(r => setContribResult(r.data))
+      .finally(() => setBusy(false))
+  }
+
+  const runRebalance = () => {
+    setBusy(true)
+    setRebalanceResult(null)
+    axios.post('/api/portfolio/rebalance', { amount: parseFloat(contribAmount) || 0 })
+      .then(r => setRebalanceResult(r.data))
       .finally(() => setBusy(false))
   }
 
@@ -266,9 +278,8 @@ export default function PortfolioCoach({ onNavigate }) {
         <div className="card" style={{ marginBottom: 24 }}>
           <div className="label" style={{ marginBottom: 10 }}>What would this policy's target mix do to my retirement plan?</div>
           <p style={{ fontSize: 12, color: 'var(--muted)', marginTop: -4, marginBottom: 10 }}>
-            Compares your saved retirement assumptions against the blended expected return of your policy's target
-            mix, using the same retirement/Monte Carlo/SWR engines the rest of the app uses — nothing here is
-            re-derived.
+            Compares your saved retirement assumptions against the blended expected return and volatility of your
+            policy's target mix, using the same retirement/Monte Carlo/SWR engines the rest of the app uses.
           </p>
           <button className="btn-primary" disabled={busy} onClick={runPlanningComparison}>Compare planning outcomes</button>
           {planningResult && (
@@ -306,7 +317,8 @@ export default function PortfolioCoach({ onNavigate }) {
               </table>
               <div style={{ fontSize: 11, color: 'var(--muted)', marginTop: 8 }}>
                 Assumes the target mix's blended expected return ({(planningResult.proposed_blended_expected_return * 100).toFixed(2)}%)
-                is held statically through both pre- and post-retirement phases — not a post-retirement glide path.
+                and annualized volatility ({planningResult.proposed_portfolio_volatility == null ? 'unavailable' : `${(planningResult.proposed_portfolio_volatility * 100).toFixed(2)}%`})
+                are held statically through both pre- and post-retirement phases — not a post-retirement glide path.
               </div>
             </div>
           )}
@@ -317,7 +329,7 @@ export default function PortfolioCoach({ onNavigate }) {
         <div className="label" style={{ marginBottom: 10 }}>Where should new money go?</div>
         <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
           <input className="input" type="number" placeholder="Amount to invest" value={contribAmount}
-                 onChange={e => setContribAmount(e.target.value)} style={{ maxWidth: 200 }} />
+                 onChange={e => { setContribAmount(e.target.value); setContribResult(null); setRebalanceResult(null) }} style={{ maxWidth: 200 }} />
           <button className="btn-primary" disabled={busy} onClick={runContribution}>Get contribution recommendation</button>
         </div>
         {contribResult && (
@@ -331,6 +343,26 @@ export default function PortfolioCoach({ onNavigate }) {
                 ) : a.asset_class && (
                   <span style={{ color: 'var(--amber)' }}> — no eligible investment option recorded for this asset class in any account yet</span>
                 )}
+                <div style={{ color: 'var(--muted)', fontSize: 12 }}>{a.reason}</div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <div className="card" style={{ marginBottom: 24 }}>
+        <div className="label" style={{ marginBottom: 10 }}>Build a rebalance checklist</div>
+        <p style={{ fontSize: 12, color: 'var(--muted)' }}>Uses new money first when your policy requests it, keeps exchanges inside the funding account, and flags taxable sales.</p>
+        <button className="btn-primary" disabled={busy || !allocation?.has_policy} onClick={runRebalance}>Generate rebalance checklist</button>
+        {rebalanceResult && (
+          <div style={{ marginTop: 12 }}>
+            {(rebalanceResult.rebalance_actions || []).length === 0 && <div style={{ color: 'var(--muted)', fontSize: 13 }}>No rebalance trades are needed or no eligible same-account destination is recorded.</div>}
+            {(rebalanceResult.rebalance_actions || []).map((a, i) => (
+              <div key={i} style={{ borderTop: i ? '1px solid var(--border)' : 'none', padding: '7px 0', fontSize: 13 }}>
+                <strong>{a.action === 'buy' ? 'Buy' : a.action === 'sell' ? 'Sell' : 'Invest'} {fmt(a.amount)}</strong>
+                {' '}{a.holding_name || a.asset_class?.replace(/_/g, ' ')}
+                {a.destination && <> in <strong>{a.destination.account_name}</strong> using <strong>{a.destination.option_name}</strong>{a.destination.ticker ? ` (${a.destination.ticker})` : ''}</>}
+                {a.tax_warning && <div style={{ color: 'var(--amber)', fontSize: 12 }}>⚠ {a.tax_warning.message}</div>}
                 <div style={{ color: 'var(--muted)', fontSize: 12 }}>{a.reason}</div>
               </div>
             ))}

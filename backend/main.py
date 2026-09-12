@@ -335,6 +335,21 @@ class AccountInvestmentOption(BaseModel):
             raise ValueError(f"Unknown asset_class '{v}' — must be one of {ASSET_CLASSES}")
         return v
 
+    @model_validator(mode="after")
+    def _option_limits_must_be_valid(self):
+        for field in ("expense_ratio", "minimum_investment", "trading_fee"):
+            value = getattr(self, field)
+            if value is not None and value < 0:
+                raise ValueError(f"{field} cannot be negative")
+        for field in ("minimum_allocation_pct", "maximum_allocation_pct"):
+            value = getattr(self, field)
+            if value is not None and not 0 <= value <= 100:
+                raise ValueError(f"{field} must be between 0 and 100")
+        if (self.minimum_allocation_pct is not None and self.maximum_allocation_pct is not None
+                and self.minimum_allocation_pct > self.maximum_allocation_pct):
+            raise ValueError("minimum_allocation_pct cannot exceed maximum_allocation_pct")
+        return self
+
 class InvestmentPolicy(BaseModel):
     id: Optional[int] = None
     name: str = "Household Policy"
@@ -379,6 +394,24 @@ class InvestmentPolicy(BaseModel):
         total = sum(values)
         if abs(total - 100) > 0.5:
             raise ValueError(f"Target percentages must sum to 100% (got {total:.2f}%)")
+        if not 0 <= self.drift_band_pct <= 100:
+            raise ValueError("drift_band_pct must be between 0 and 100")
+        if self.max_single_security_pct is not None and not 0 < self.max_single_security_pct <= 100:
+            raise ValueError("max_single_security_pct must be greater than 0 and no more than 100")
+        if self.minimum_cash_reserve < 0:
+            raise ValueError("minimum_cash_reserve cannot be negative")
+        from holdings_engine import ASSET_CLASSES
+        known_classes = set(ASSET_CLASSES)
+        for constraint in self.account_constraints:
+            if constraint.get("account_id") is None:
+                raise ValueError("Every account constraint requires account_id")
+            allowed = constraint.get("allowed_asset_classes")
+            denied = constraint.get("excluded_asset_classes") or []
+            unknown = (set(allowed or []) | set(denied)) - known_classes
+            if unknown:
+                raise ValueError(f"Unknown asset classes in account constraint: {', '.join(sorted(unknown))}")
+            if allowed is not None and set(allowed) & set(denied):
+                raise ValueError("An asset class cannot be both allowed and excluded for one account")
         return self
 
 class PortfolioContributionRequest(BaseModel):
@@ -418,6 +451,7 @@ class RecommendationDecision(BaseModel):
     notes: Optional[str] = None
     reason: Optional[str] = None
     resulting_allocation: Optional[Dict] = None
+    review_date: Optional[str] = None
 
 class ScenarioSave(BaseModel):
     name: str
@@ -900,7 +934,9 @@ def compare_account_investment_options(req: OptionMixRequest):
     account) — never another account's, never a candidate merely found
     via search. Defaults target_weights to the saved household policy's
     own targets when the caller supplies none."""
-    from holdings_engine import eligible_options_for_account, propose_account_option_mix, is_closed_menu_account, resolve_portfolio_account_type, policy_targets_by_class
+    from holdings_engine import (eligible_options_for_account, propose_account_option_mix, is_closed_menu_account,
+                                 resolve_portfolio_account_type, policy_targets_by_class, holding_exposure_weights,
+                                 option_allowed_by_policy)
     conn = get_db()
     acc = conn.execute("SELECT * FROM accounts WHERE id=?", (req.account_id,)).fetchone()
     if not acc:
@@ -910,15 +946,23 @@ def compare_account_investment_options(req: OptionMixRequest):
     options = [_option_row_to_dict(r) for r in conn.execute(
         "SELECT * FROM account_investment_options WHERE account_id=?", (req.account_id,)
     ).fetchall()]
+    policy_row = conn.execute("SELECT * FROM investment_policies ORDER BY id DESC LIMIT 1").fetchone()
+    policy = _policy_row_to_dict(policy_row) if policy_row else None
+    if policy and req.account_id in set(policy.get("excluded_accounts") or []):
+        conn.close()
+        raise HTTPException(status_code=400, detail="This account is excluded from the investment policy.")
     target_weights = req.target_weights
     if target_weights is None:
-        policy_row = conn.execute("SELECT * FROM investment_policies ORDER BY id DESC LIMIT 1").fetchone()
         if not policy_row:
             conn.close()
             raise HTTPException(status_code=400, detail="No investment policy saved and no target_weights supplied — set a policy or pass explicit targets.")
         target_weights = policy_targets_by_class(_policy_row_to_dict(policy_row))
     conn.close()
     eligible = eligible_options_for_account(options, for_new_contribution=req.for_new_contribution)
+    eligible = [opt for opt in eligible if all(
+        option_allowed_by_policy(opt, req.account_id, asset_class, policy)
+        for asset_class in holding_exposure_weights(opt)
+    )]
     result = propose_account_option_mix(eligible, target_weights)
     portfolio_type = resolve_portfolio_account_type(acc)
     result["account_id"] = req.account_id
@@ -1105,7 +1149,9 @@ def get_portfolio_allocation():
     from holdings_engine import (
         classify_holdings, compute_current_allocation, compare_to_target,
         concentration_flags, expense_ratio_flags, duplicate_exposure_flags, unclassified_flags,
+        policy_included_holdings,
     )
+    holdings = policy_included_holdings(holdings, policy)
     classified = classify_holdings(accounts, holdings)
     current = compute_current_allocation(classified["household"])
     result = {
@@ -1115,7 +1161,12 @@ def get_portfolio_allocation():
         "liquidity_total": round(sum(h.get("market_value", 0) or 0 for h in classified["liquidity"]), 2),
         "blocked_holdings": [{"holding_id": h.get("id"), "account_id": h.get("account_id"), "name": h.get("security_name")} for h in classified["blocked"]],
         "review_required_accounts": sorted({h["account_id"] for h in classified["review_required"]}),
-        "concentration_flags": concentration_flags(classified["household"]),
+        "concentration_flags": concentration_flags(
+            classified["household"],
+            threshold_pct=(policy.get("max_single_security_pct") if policy and policy.get("max_single_security_pct") is not None else 10),
+            severe_threshold_pct=(policy.get("max_single_security_pct") if policy and policy.get("max_single_security_pct") is not None else 25),
+            policy=policy,
+        ),
         "expense_ratio_flags": expense_ratio_flags(classified["household"]),
         "duplicate_exposure_flags": duplicate_exposure_flags(classified["household"] + classified["hsa"] + classified["child_specific"]),
         "unclassified_flags": unclassified_flags(classified["household"]),
@@ -1145,9 +1196,10 @@ def portfolio_contribution_destination(req: PortfolioContributionRequest):
     if not policy:
         raise HTTPException(status_code=400, detail="No investment policy saved yet — set target allocation before requesting a contribution recommendation.")
     from holdings_engine import (
-        classify_holdings, compute_current_allocation, compare_to_target,
+        classify_holdings, compute_current_allocation, compare_to_target, policy_included_holdings,
         recommend_contribution_destination, resolve_new_money_destinations,
     )
+    holdings = policy_included_holdings(holdings, policy)
     classified = classify_holdings(accounts, holdings)
     current = compute_current_allocation(classified["household"])
     comparison = compare_to_target(current, policy)
@@ -1155,7 +1207,7 @@ def portfolio_contribution_destination(req: PortfolioContributionRequest):
     options_by_account: Dict[int, List[Dict]] = {}
     for r in option_rows:
         options_by_account.setdefault(r["account_id"], []).append(_option_row_to_dict(r))
-    resolved = resolve_new_money_destinations(actions, options_by_account)
+    resolved = resolve_new_money_destinations(actions, options_by_account, policy)
     account_names = {a["id"]: a["name"] for a in accounts}
     for action in resolved:
         if action.get("destination"):
@@ -1178,12 +1230,34 @@ def portfolio_multi_account_contribution_destination(req: MultiAccountContributi
         raise HTTPException(status_code=400, detail="No holdings entered yet — add holdings before requesting a contribution recommendation.")
     if not policy:
         raise HTTPException(status_code=400, detail="No investment policy saved yet — set target allocation before requesting a contribution recommendation.")
-    from holdings_engine import classify_holdings, compute_current_allocation, compare_to_target, recommend_multi_account_contribution_destination
+    from holdings_engine import (classify_holdings, compute_current_allocation, compare_to_target,
+                                 recommend_multi_account_contribution_destination, policy_included_holdings)
+    holdings = policy_included_holdings(holdings, policy)
     classified = classify_holdings(accounts, holdings)
     current = compute_current_allocation(classified["household"])
     comparison = compare_to_target(current, policy)
-    pools = [p.dict() for p in req.pools]
+    excluded_accounts = set(policy.get("excluded_accounts") or [])
+    constraints = {c.get("account_id"): c for c in (policy.get("account_constraints") or [])}
+    pools = []
+    policy_blocked = []
+    for submitted in req.pools:
+        pool = submitted.dict()
+        if pool["account_id"] in excluded_accounts:
+            policy_blocked.append({"account_id": pool["account_id"], "amount": round(pool["amount"], 2),
+                                   "reason": "Account is excluded from the investment policy."})
+            continue
+        constraint = constraints.get(pool["account_id"], {})
+        allowed = constraint.get("allowed_asset_classes")
+        denied = set(constraint.get("excluded_asset_classes") or [])
+        if pool["eligible_classes"] is None:
+            pool["eligible_classes"] = allowed
+        elif allowed is not None:
+            pool["eligible_classes"] = [c for c in pool["eligible_classes"] if c in allowed]
+        if pool["eligible_classes"] is not None:
+            pool["eligible_classes"] = [c for c in pool["eligible_classes"] if c not in denied]
+        pools.append(pool)
     result = recommend_multi_account_contribution_destination(comparison, pools)
+    result["unallocated"].extend(policy_blocked)
     result["current_allocation"] = current
     result["comparison"] = comparison
     return result
@@ -1196,16 +1270,26 @@ def portfolio_rebalance(req: PortfolioContributionRequest):
     endpoints below, not here (this endpoint is a pure preview)."""
     conn = get_db()
     accounts, holdings, policy = _load_portfolio_context(conn)
+    option_rows = conn.execute("SELECT * FROM account_investment_options").fetchall()
     conn.close()
     if not holdings:
         raise HTTPException(status_code=400, detail="No holdings entered yet — add holdings before requesting a rebalance plan.")
     if not policy:
         raise HTTPException(status_code=400, detail="No investment policy saved yet — set target allocation before requesting a rebalance plan.")
-    from holdings_engine import classify_holdings, compute_current_allocation, compare_to_target, recommend_rebalance_actions
+    from holdings_engine import (classify_holdings, compute_current_allocation, compare_to_target,
+                                 recommend_rebalance_actions, policy_included_holdings)
+    holdings = policy_included_holdings(holdings, policy)
     classified = classify_holdings(accounts, holdings)
     current = compute_current_allocation(classified["household"])
     comparison = compare_to_target(current, policy)
-    return recommend_rebalance_actions(classified["household"], current, comparison, policy, pending_contribution=req.amount)
+    options_by_account: Dict[int, List[Dict]] = {}
+    for row in option_rows:
+        options_by_account.setdefault(row["account_id"], []).append(_option_row_to_dict(row))
+    return recommend_rebalance_actions(
+        classified["household"], current, comparison, policy, pending_contribution=req.amount,
+        options_by_account=options_by_account,
+        account_names={a["id"]: a["name"] for a in accounts},
+    )
 
 # ── Planning integration (retirement projection / Monte Carlo / SWR) ────
 
@@ -1213,11 +1297,12 @@ def portfolio_rebalance(req: PortfolioContributionRequest):
 def portfolio_planning_comparison(req: PlanningComparisonRequest):
     """Compares retirement-planning outcomes between the household's
     currently SAVED assumptions and a proposed allocation's blended
-    expected return -- by calling projection_engine.run_retirement_
+    expected return and volatility -- by calling projection_engine.run_retirement_
     projection / simulation_engine.run_monte_carlo / run_swr_analysis
-    DIRECTLY, twice, with ONLY expected_return_pre_retirement and
-    expected_return_post_retirement overridden on the "proposed" side
-    (both phases get the same blended figure -- this does not model a
+    DIRECTLY, twice, with expected_return_pre_retirement,
+    expected_return_post_retirement, and Monte Carlo portfolio_std
+    overridden on the "proposed" side (both return phases get the same
+    blended figure -- this does not model a
     post-retirement glide-path shift; the proposed mix is assumed held
     statically through both phases). Never rebuilds any retirement
     formula here, per the brief's explicit "do not duplicate calculation
@@ -1229,7 +1314,7 @@ def portfolio_planning_comparison(req: PlanningComparisonRequest):
     in that case, not an empty/zeroed comparison object."""
     from projection_engine import run_retirement_projection
     from simulation_engine import run_monte_carlo, run_swr_analysis
-    from holdings_engine import blended_expected_return
+    from holdings_engine import blended_expected_return, blended_portfolio_volatility
     conn = get_db()
     inputs_row = conn.execute("SELECT * FROM planning_inputs WHERE id=1").fetchone()
     accounts = [dict(r) for r in conn.execute("SELECT * FROM accounts").fetchall()]
@@ -1240,10 +1325,12 @@ def portfolio_planning_comparison(req: PlanningComparisonRequest):
         raise HTTPException(status_code=400, detail="Planning inputs not set yet")
     baseline_inputs = dict(inputs_row)
 
-    def run_all(inputs):
+    def run_all(inputs, portfolio_std=None):
         retirement = run_retirement_projection(inputs, accounts, ret_ages=[req.ret_age], life_events=life_events, surplus_allocations=surplus_allocations)
         scenario = next(iter(retirement["scenarios"]), {})
-        monte_carlo = run_monte_carlo(inputs, accounts, req.ret_age, req.ss_timing, life_events=life_events, surplus_allocations=surplus_allocations)
+        monte_carlo = run_monte_carlo(inputs, accounts, req.ret_age, req.ss_timing,
+                                      life_events=life_events, surplus_allocations=surplus_allocations,
+                                      portfolio_std=portfolio_std)
         swr = run_swr_analysis(inputs, accounts, ret_age=req.ret_age, ss_timing=req.ss_timing, life_events=life_events, surplus_allocations=surplus_allocations)
         return {
             "projected_surplus": scenario.get("projected_surplus"),
@@ -1266,18 +1353,22 @@ def portfolio_planning_comparison(req: PlanningComparisonRequest):
     }
     if req.proposed_allocation:
         blended = blended_expected_return(req.proposed_allocation)
+        proposed_std = blended_portfolio_volatility(req.proposed_allocation)
         if blended is None:
             raise HTTPException(status_code=400, detail="Could not compute a blended expected return from the proposed allocation -- every class is unclassified or the allocation is empty.")
         proposed_inputs = dict(baseline_inputs)
         proposed_inputs["expected_return_pre_retirement"] = blended
         proposed_inputs["expected_return_post_retirement"] = blended
-        result["proposed"] = run_all(proposed_inputs)
+        result["proposed"] = run_all(proposed_inputs, proposed_std)
         result["proposed_blended_expected_return"] = blended
+        result["proposed_portfolio_volatility"] = proposed_std
     return result
 
 # ── Recommendation engine: generate/list/decide (decision lifecycle) ────
 
-def _generate_candidate_cards(accounts, holdings, policy, pending_contribution: float = 0.0) -> List[Dict]:
+def _generate_candidate_cards(accounts, holdings, policy, pending_contribution: float = 0.0,
+                              options_by_account: Optional[Dict[int, List[Dict]]] = None,
+                              goal_context: Optional[Dict] = None) -> List[Dict]:
     """Runs every coach_engine tier over already-loaded data and returns
     a single prioritized candidate list. Never re-derives a calculation
     holdings_engine.py already owns — this only classifies/compares/
@@ -1285,20 +1376,24 @@ def _generate_candidate_cards(accounts, holdings, policy, pending_contribution: 
     import coach_engine as ce
     from holdings_engine import (
         classify_holdings, compute_current_allocation, compare_to_target,
-        recommend_rebalance_actions, reconcile_account_holdings,
+        recommend_rebalance_actions, reconcile_account_holdings, policy_included_holdings,
     )
+    all_holdings = holdings
+    holdings = policy_included_holdings(holdings, policy)
     classified = classify_holdings(accounts, holdings)
     by_account: Dict[int, List[Dict]] = {}
-    for h in holdings:
+    for h in all_holdings:
         by_account.setdefault(h["account_id"], []).append(h)
-    reconciliations = [reconcile_account_holdings(acc, by_account.get(acc["id"], [])) for acc in accounts]
+    excluded_accounts = set((policy or {}).get("excluded_accounts") or [])
+    reconciliations = [reconcile_account_holdings(acc, by_account.get(acc["id"], [])) for acc in accounts
+                       if acc.get("id") not in excluded_accounts]
     cards = list(ce.data_quality_recommendations(classified, reconciliations))
 
     current = compute_current_allocation(classified["household"])
     household_cash = current["by_class"].get("cash")
     cards += ce.concentration_and_liquidity_recommendations(classified["household"], policy, household_cash)
     cards += ce.high_cost_or_redundant_recommendations(classified["household"])
-    cards += ce.minor_optimization_recommendations(classified["household"], {})
+    cards += ce.minor_optimization_recommendations(classified["household"], goal_context or {})
 
     if not policy:
         cards.append(ce.no_policy_recommendation())
@@ -1316,10 +1411,56 @@ def _generate_candidate_cards(accounts, holdings, policy, pending_contribution: 
 
     comparison = compare_to_target(current, policy)
     cards += ce.policy_violation_recommendations(comparison, policy)
-    rebalance_result = recommend_rebalance_actions(classified["household"], current, comparison, policy, pending_contribution=pending_contribution)
+    rebalance_result = recommend_rebalance_actions(
+        classified["household"], current, comparison, policy, pending_contribution=pending_contribution,
+        options_by_account=options_by_account,
+        account_names={a["id"]: a["name"] for a in accounts},
+    )
     cards += ce.new_money_recommendations(rebalance_result["contribution_actions"])
     cards += ce.rebalance_recommendations(rebalance_result)
     return ce.prioritize(cards)
+
+
+def _portfolio_goal_context(conn, accounts: List[Dict], policy: Optional[Dict]) -> Dict:
+    """Build Coach planning context from the same production engines used
+    by the planning pages. A latest saved scenario supplies the review age
+    when available; current household data supplies the actual results."""
+    context = {"policy": policy or {}}
+    inputs_row = conn.execute("SELECT * FROM planning_inputs WHERE id=1").fetchone()
+    if not inputs_row:
+        return context
+    saved = conn.execute("SELECT retirement_age, ss_timing, id, created_at FROM saved_scenarios ORDER BY id DESC LIMIT 1").fetchone()
+    review = conn.execute("SELECT id, created_at FROM assumption_reviews ORDER BY id DESC LIMIT 1").fetchone()
+    ret_age = int(saved["retirement_age"]) if saved else 60
+    ss_timing = saved["ss_timing"] if saved and saved["ss_timing"] in ("early", "delayed") else "early"
+    inputs = dict(inputs_row)
+    try:
+        from projection_engine import run_retirement_projection
+        from simulation_engine import run_monte_carlo
+        life_events = _get_active_life_events(conn)
+        surplus = _get_relevant_surplus_allocations(conn)
+        projection = run_retirement_projection(inputs, accounts, ret_ages=[ret_age],
+                                               life_events=life_events, surplus_allocations=surplus)
+        scenario = next((s for s in projection.get("scenarios", []) if s.get("retirement_age") == ret_age),
+                        next(iter(projection.get("scenarios", [])), {}))
+        monte_carlo = run_monte_carlo(inputs, accounts, ret_age=ret_age, ss_timing=ss_timing,
+                                      life_events=life_events, surplus_allocations=surplus)
+        context.update({
+            "retirement_age": ret_age,
+            "years_to_retirement": max(0, ret_age - inputs.get("jason_age", ret_age)),
+            "percent_funded": scenario.get("percent_funded"),
+            "on_track": scenario.get("on_track"),
+            "monte_carlo_success_rate": monte_carlo.get("success_rate"),
+            "median_depletion_age": monte_carlo.get("median_depletion_age"),
+            "saved_scenario_id": saved["id"] if saved else None,
+            "latest_assumption_review_id": review["id"] if review else None,
+            "latest_assumption_review_date": review["created_at"] if review else None,
+        })
+    except (KeyError, ValueError, TypeError):
+        # Incomplete planning inputs should produce data-quality/setup
+        # recommendations, not make the Coach page itself fail.
+        pass
+    return context
 
 def _reconcile_and_persist_recommendations(conn, candidates: List[Dict]) -> None:
     """Syncs freshly-generated candidates against existing DB rows via
@@ -1377,7 +1518,13 @@ def get_recommendations(pending_contribution: float = 0.0):
     the "What should I do next?" list — sorted by priority."""
     conn = get_db()
     accounts, holdings, policy = _load_portfolio_context(conn)
-    candidates = _generate_candidate_cards(accounts, holdings, policy, pending_contribution)
+    options_by_account: Dict[int, List[Dict]] = {}
+    for row in conn.execute("SELECT * FROM account_investment_options").fetchall():
+        options_by_account.setdefault(row["account_id"], []).append(_option_row_to_dict(row))
+    goal_context = _portfolio_goal_context(conn, accounts, policy)
+    candidates = _generate_candidate_cards(accounts, holdings, policy, pending_contribution,
+                                            options_by_account=options_by_account,
+                                            goal_context=goal_context)
     _reconcile_and_persist_recommendations(conn, candidates)
     active_statuses = ("proposed", "reviewing", "accepted")
     placeholders = ",".join("?" * len(active_statuses))
@@ -1412,17 +1559,28 @@ def decide_recommendation(recommendation_id: int, decision: RecommendationDecisi
     if decision.status not in ("reviewing", "accepted", "deferred", "rejected", "completed"):
         raise HTTPException(status_code=400, detail=f"Unknown status '{decision.status}' — must be one of reviewing/accepted/deferred/rejected/completed")
     conn = get_db()
-    row = conn.execute("SELECT id FROM recommendations WHERE id=?", (recommendation_id,)).fetchone()
+    row = conn.execute("SELECT * FROM recommendations WHERE id=?", (recommendation_id,)).fetchone()
     if not row:
         conn.close()
         raise HTTPException(status_code=404, detail="Recommendation not found")
     conn.execute(
-        "UPDATE recommendations SET status=?, decision_date=datetime('now'), decision_notes=?, decision_reason=?, "
+        "UPDATE recommendations SET status=?, decision_date=datetime('now'), decision_notes=?, decision_reason=?, review_date=?, "
         "resulting_allocation_json=?, updated_at=datetime('now') WHERE id=?",
-        (decision.status, decision.notes, decision.reason,
+        (decision.status, decision.notes, decision.reason, decision.review_date,
          json.dumps(decision.resulting_allocation) if decision.resulting_allocation is not None else None,
          recommendation_id),
     )
+    task_key = f"portfolio_coach_{recommendation_id}"
+    if decision.status == "accepted":
+        if not conn.execute("SELECT 1 FROM tasks WHERE auto_key=? LIMIT 1", (task_key,)).fetchone():
+            conn.execute(
+                "INSERT INTO tasks (section,title,description,task_type,recurrence,auto_key,due_year) "
+                "VALUES ('investments',?,?, 'calculated','once',?,CAST(strftime('%Y','now') AS INTEGER))",
+                (row["title"], row["action_text"], task_key),
+            )
+    elif decision.status == "completed":
+        conn.execute("UPDATE tasks SET completed=1, completed_date=date('now'), updated_at=datetime('now') WHERE auto_key=?",
+                     (task_key,))
     conn.execute(
         "INSERT INTO recommendation_events (recommendation_id, event_type, notes) VALUES (?,?,?)",
         (recommendation_id, decision.status, decision.notes),

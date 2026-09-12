@@ -750,3 +750,24 @@ this household today).
       changes.
 6. Do not merge to `main` without Jason's explicit go-ahead — none has
    been given for this branch as of this writing.
+
+## 2026-09-12 addendum — Portfolio Coach follow-up branch
+
+Branch `codex/portfolio-coach-finish` starts from the merged Coach work
+on `main` at `3a39f62` and closes the remaining review findings 2, 7, 8,
+9, 10, and 12. Full behavior and boundaries are recorded in
+`CALCULATION_CONTRACT.md` section 78.
+
+The earlier addendum's statements that policy exceptions were ignored,
+planning comparison changed expected return only, and Coach did not
+integrate with tasks/saved scenarios/assumption reviews are superseded
+by this branch. Rebalance buys now name a same-account option; policy
+exclusions and constraints are enforced; proposed volatility reaches
+Monte Carlo; Coach receives production planning context and writes
+accepted work into the Action Plan; Portfolio Setup and Coach expose the
+missing workflows with rendered-DOM coverage.
+
+Cash-only operational accounts are handled explicitly: selecting an
+account under “Accounts excluded from investing advice” removes it from
+allocation, reconciliation, contribution destinations, and rebalance
+advice while retaining it everywhere else in the CFO application.

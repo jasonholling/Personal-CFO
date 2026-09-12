@@ -23,6 +23,7 @@ from holdings_engine import (
     parse_holdings_csv, blended_expected_return, blended_expense_ratio, ASSET_CLASSES,
     is_closed_menu_account, eligible_options_for_account, is_option_actionable,
     CLOSED_MENU_TYPES, OPEN_UNIVERSE_TYPES, propose_account_option_mix,
+    policy_included_holdings, blended_portfolio_volatility,
 )
 
 
@@ -840,6 +841,64 @@ class TestBlendedExpectedReturn:
 
     def test_empty_returns_none(self):
         assert blended_expected_return({}) is None
+
+
+class TestPortfolioCoachFinish:
+    def test_rebalance_buy_names_same_account_option(self):
+        accounts = [account(1, "401k", balance=100000)]
+        household = classify_holdings(accounts, [
+            holding(1, 1, security_name="Stock Fund", market_value=80000, asset_class="us_large_cap"),
+            holding(2, 1, security_name="Bond Fund", market_value=20000, asset_class="us_bonds"),
+        ])["household"]
+        current = compute_current_allocation(household)
+        p = policy(target_us_large_cap_pct=50, target_us_mid_cap_pct=0, target_us_small_cap_pct=0,
+                   target_us_bonds_pct=50, target_cash_pct=0)
+        result = recommend_rebalance_actions(
+            household, current, compare_to_target(current, p), p,
+            options_by_account={1: [option(10, 1, option_name="Low Cost Bond", ticker="BND",
+                                                    asset_class="us_bonds", available_for_exchange=True)]},
+            account_names={1: "Workplace 401k"},
+        )
+        buy = next(a for a in result["rebalance_actions"] if a["action"] == "buy")
+        assert buy["account_id"] == 1
+        assert buy["holding_name"] == "Low Cost Bond"
+        assert buy["destination"] == {"account_id": 1, "account_name": "Workplace 401k",
+                                      "option_id": 10, "option_name": "Low Cost Bond", "ticker": "BND"}
+
+    def test_rebalance_does_not_sell_without_same_account_destination(self):
+        accounts = [account(1, "401k", balance=100000)]
+        household = classify_holdings(accounts, [holding(1, 1, market_value=100000, asset_class="us_large_cap")])["household"]
+        current = compute_current_allocation(household)
+        p = policy(target_us_large_cap_pct=50, target_us_mid_cap_pct=0, target_us_small_cap_pct=0,
+                   target_us_bonds_pct=50, target_cash_pct=0)
+        result = recommend_rebalance_actions(household, current, compare_to_target(current, p), p,
+                                             options_by_account={1: []})
+        assert result["rebalance_actions"] == []
+
+    def test_policy_exclusions_remove_only_named_records(self):
+        rows = [holding(1, 10), holding(2, 10), holding(3, 11)]
+        assert [h["id"] for h in policy_included_holdings(rows, {
+            "excluded_accounts": [11], "excluded_holdings": [2]
+        })] == [1]
+
+    def test_excluded_account_and_account_constraint_block_destinations(self):
+        options = {1: [option(10, 1, option_name="Bond Index", asset_class="us_bonds")],
+                   2: [option(20, 2, option_name="Other Bond", asset_class="us_bonds")]}
+        actions = [{"asset_class": "us_bonds", "amount": 1000, "reason": "underweight"}]
+        policy_row = {
+            "excluded_accounts": [1],
+            "account_constraints": [{"account_id": 2, "allowed_asset_classes": ["us_large_cap"]}],
+        }
+        assert resolve_new_money_destinations(actions, options, policy_row)[0]["destination"] is None
+
+    def test_policy_concentration_limit_and_exception(self):
+        rows = [holding(1, 1, market_value=60000, ticker="EMP"), holding(2, 1, market_value=40000, ticker="INDEX")]
+        assert concentration_flags(rows, threshold_pct=50, severe_threshold_pct=50)[0]["holding_id"] == 1
+        assert concentration_flags(rows, threshold_pct=50, severe_threshold_pct=50,
+                                   policy={"employer_stock_exceptions": [{"ticker": "EMP"}]}) == []
+
+    def test_all_bond_mix_has_less_volatility_than_all_stock(self):
+        assert blended_portfolio_volatility({"us_bonds": 100}) < blended_portfolio_volatility({"us_large_cap": 100})
 
 
 class TestBlendedExpenseRatio:

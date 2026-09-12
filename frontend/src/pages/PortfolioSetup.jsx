@@ -39,6 +39,9 @@ function HoldingsTab({ accounts }) {
   const [loading, setLoading] = useState(true)
   const [form, setForm] = useState(EMPTY_HOLDING_FORM)
   const [saving, setSaving] = useState(false)
+  const [searchResults, setSearchResults] = useState([])
+  const [importPreview, setImportPreview] = useState(null)
+  const [importError, setImportError] = useState(null)
 
   const load = () => axios.get('/api/holdings/grouped').then(r => setGroups(r.data.groups)).finally(() => setLoading(false))
   useEffect(() => { load() }, [])
@@ -71,6 +74,34 @@ function HoldingsTab({ accounts }) {
 
   const remove = async id => { await axios.delete(`/api/holdings/${id}`); await load() }
 
+  const searchTicker = async () => {
+    if (!form.ticker.trim()) return
+    const r = await axios.get('/api/securities/search', { params: { q: form.ticker.trim() } })
+    setSearchResults(r.data.candidates || [])
+  }
+  const chooseSecurity = async candidate => {
+    await axios.post('/api/securities/confirm', candidate)
+    setForm(f => ({ ...f, ticker: candidate.ticker || '', security_name: candidate.security_name,
+      asset_class: candidate.asset_class || 'unclassified' }))
+    setSearchResults([])
+  }
+  const previewCsv = async file => {
+    if (!file) return
+    const body = new FormData()
+    body.append('file', file)
+    setImportError(null)
+    try {
+      const r = await axios.post('/api/holdings/import/preview', body)
+      setImportPreview(r.data)
+    } catch (e) { setImportError(e.response?.data?.detail || 'Could not preview this CSV.') }
+  }
+  const commitCsv = async () => {
+    const valid = (importPreview?.rows || []).filter(r => r.valid)
+    await axios.post('/api/holdings/import/commit', valid)
+    setImportPreview(null)
+    await load()
+  }
+
   if (loading) return <div className="loading">Loading holdings...</div>
 
   return (
@@ -81,7 +112,8 @@ function HoldingsTab({ accounts }) {
           {accounts.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
         </select>
         <input className="input" placeholder="Security name" value={form.security_name} onChange={e => setForm(f => ({ ...f, security_name: e.target.value }))} style={{ minWidth: 160 }} />
-        <input className="input" placeholder="Ticker (optional)" value={form.ticker} onChange={e => setForm(f => ({ ...f, ticker: e.target.value }))} style={{ maxWidth: 100 }} />
+        <input className="input" placeholder="Ticker (optional)" value={form.ticker} onChange={e => { setForm(f => ({ ...f, ticker: e.target.value })); setSearchResults([]) }} style={{ maxWidth: 100 }} />
+        <button type="button" className="btn-secondary" onClick={searchTicker}>Look up ticker</button>
         <input className="input" type="number" placeholder="Market value" value={form.market_value} onChange={e => setForm(f => ({ ...f, market_value: e.target.value }))} style={{ maxWidth: 140 }} />
         {!form.multiAsset && (
           <select className="input" value={form.asset_class} onChange={e => setForm(f => ({ ...f, asset_class: e.target.value }))} style={{ minWidth: 160 }}>
@@ -117,7 +149,33 @@ function HoldingsTab({ accounts }) {
             </span>
           </div>
         )}
+        {searchResults.length > 0 && (
+          <div style={{ width: '100%', fontSize: 12 }}>
+            {searchResults.map((candidate, i) => (
+              <button key={`${candidate.provider_identifier}-${i}`} type="button" className="btn-secondary"
+                      style={{ marginRight: 6, marginTop: 4 }} onClick={() => chooseSecurity(candidate)}>
+                Use {candidate.ticker || candidate.security_name} — {candidate.security_name}
+              </button>
+            ))}
+          </div>
+        )}
       </form>
+
+      <div className="card" style={{ marginBottom: 20 }}>
+        <div className="label">Import holdings from CSV</div>
+        <p style={{ fontSize: 12, color: 'var(--muted)' }}>Preview and validate every row before anything is saved.</p>
+        <input aria-label="Holdings CSV" type="file" accept=".csv,text/csv" onChange={e => previewCsv(e.target.files?.[0])} />
+        {importError && <div style={{ color: 'var(--red)', fontSize: 12 }}>{importError}</div>}
+        {importPreview && (
+          <div style={{ marginTop: 10, fontSize: 12 }}>
+            <div>{importPreview.valid_count} valid · {importPreview.invalid_count} need attention</div>
+            {(importPreview.errors || []).map((e, i) => <div key={i} style={{ color: 'var(--red)' }}>Row {e.row}: {e.message}</div>)}
+            <button className="btn-primary" disabled={!importPreview.valid_count} onClick={commitCsv} style={{ marginTop: 8 }}>
+              Import {importPreview.valid_count} valid row{importPreview.valid_count === 1 ? '' : 's'}
+            </button>
+          </div>
+        )}
+      </div>
 
       {groups.map(g => (
         <div key={g.account_id} className="card" style={{ marginBottom: 14 }}>
@@ -152,7 +210,7 @@ function HoldingsTab({ accounts }) {
   )
 }
 
-function PolicyTab() {
+function PolicyTab({ accounts }) {
   const [policy, setPolicy] = useState(null)
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
@@ -164,6 +222,7 @@ function PolicyTab() {
       target_international_developed_pct: 0, target_emerging_markets_pct: 0, target_us_bonds_pct: 0,
       target_international_bonds_pct: 0, target_cash_pct: 0, target_real_estate_pct: 0, target_alternatives_pct: 0,
       drift_band_pct: 5, minimum_cash_reserve: 0, rebalance_cadence: 'annual', use_contributions_before_sales: true,
+      excluded_accounts: [], excluded_holdings: [], employer_stock_exceptions: [], legacy_holding_exceptions: [], account_constraints: [],
     })
   }).finally(() => setLoading(false))
   useEffect(() => { load() }, [])
@@ -221,6 +280,11 @@ function PolicyTab() {
                  onChange={e => setPolicy(p => ({ ...p, minimum_cash_reserve: parseFloat(e.target.value) || 0 }))} />
         </div>
         <div>
+          <label style={{ fontSize: 12, color: 'var(--muted)' }}>Maximum single security (%)</label>
+          <input className="input" type="number" min="0" max="100" value={policy.max_single_security_pct ?? ''}
+                 onChange={e => setPolicy(p => ({ ...p, max_single_security_pct: e.target.value === '' ? null : parseFloat(e.target.value) }))} />
+        </div>
+        <div>
           <label style={{ fontSize: 12, color: 'var(--muted)' }}>Rebalance cadence</label>
           <select className="input" value={policy.rebalance_cadence || 'annual'}
                   onChange={e => setPolicy(p => ({ ...p, rebalance_cadence: e.target.value }))}>
@@ -235,6 +299,27 @@ function PolicyTab() {
           <label style={{ fontSize: 12 }}>Prefer contributions/exchanges before any taxable sale</label>
         </div>
       </div>
+      <div style={{ marginTop: 20, paddingTop: 16, borderTop: '1px solid var(--border)' }}>
+        <div className="label" style={{ marginBottom: 4 }}>Accounts excluded from investing advice</div>
+        <div style={{ fontSize: 12, color: 'var(--muted)', marginBottom: 10 }}>
+          Use this for checking, bill-pay cash, or any account the Coach should leave alone. The account still counts in net worth and cash planning.
+        </div>
+        <div style={{ display: 'grid', gap: 7 }}>
+          {accounts.map(account => {
+            const excluded = (policy.excluded_accounts || []).includes(account.id)
+            return (
+              <label key={account.id} style={{ display: 'flex', alignItems: 'center', gap: 7, fontSize: 13 }}>
+                <input aria-label={`Exclude ${account.name} from investing advice`} type="checkbox" checked={excluded}
+                       onChange={e => setPolicy(p => ({ ...p, excluded_accounts: e.target.checked
+                         ? [...new Set([...(p.excluded_accounts || []), account.id])]
+                         : (p.excluded_accounts || []).filter(id => id !== account.id) }))} />
+                {account.name} <span style={{ color: 'var(--muted)' }}>({account.account_type || 'account'}{account.balance != null ? ` · ${fmt(account.balance)}` : ''})</span>
+              </label>
+            )
+          })}
+          {!accounts.length && <div style={{ fontSize: 12, color: 'var(--muted)' }}>No accounts entered yet.</div>}
+        </div>
+      </div>
       {saveError && <div style={{ fontSize: 13, color: 'var(--red)', marginTop: 8 }}>{saveError}</div>}
       <button className="btn-primary" style={{ marginTop: 16 }} disabled={saving || !canSave} onClick={save}>Save policy</button>
     </div>
@@ -244,7 +329,10 @@ function PolicyTab() {
 function OptionsTab({ accounts }) {
   const [accountId, setAccountId] = useState('')
   const [options, setOptions] = useState([])
-  const [form, setForm] = useState({ option_name: '', ticker: '', asset_class: 'us_large_cap', available_for_new_contributions: true, available_for_exchange: true })
+  const emptyOption = { option_name: '', ticker: '', asset_class: 'us_large_cap', expense_ratio: '', minimum_investment: '',
+    minimum_allocation_pct: '', maximum_allocation_pct: '', employer_match_eligible: '', trading_fee: '',
+    redemption_restriction: '', settlement_restriction: '', available_for_new_contributions: true, available_for_exchange: true }
+  const [form, setForm] = useState(emptyOption)
   const [mixResult, setMixResult] = useState(null)
   const [mixError, setMixError] = useState(null)
 
@@ -264,8 +352,13 @@ function OptionsTab({ accounts }) {
   const submit = async e => {
     e.preventDefault()
     if (!accountId || !form.option_name) return
-    await axios.post('/api/account-investment-options', { account_id: parseInt(accountId, 10), ...form, ticker: form.ticker || null })
-    setForm({ option_name: '', ticker: '', asset_class: 'us_large_cap', available_for_new_contributions: true, available_for_exchange: true })
+    const numeric = key => form[key] === '' ? null : parseFloat(form[key])
+    await axios.post('/api/account-investment-options', { account_id: parseInt(accountId, 10), ...form, ticker: form.ticker || null,
+      expense_ratio: form.expense_ratio === '' ? null : parseFloat(form.expense_ratio) / 100,
+      minimum_investment: numeric('minimum_investment'), minimum_allocation_pct: numeric('minimum_allocation_pct'),
+      maximum_allocation_pct: numeric('maximum_allocation_pct'), trading_fee: numeric('trading_fee'),
+      employer_match_eligible: form.employer_match_eligible === '' ? null : form.employer_match_eligible === 'yes' })
+    setForm(emptyOption)
     load(accountId)
   }
   const remove = async id => { await axios.delete(`/api/account-investment-options/${id}`); load(accountId) }
@@ -285,6 +378,16 @@ function OptionsTab({ accounts }) {
             <select className="input" value={form.asset_class} onChange={e => setForm(f => ({ ...f, asset_class: e.target.value }))} style={{ minWidth: 160 }}>
               {ASSET_CLASSES.map(c => <option key={c} value={c}>{c.replace(/_/g, ' ')}</option>)}
             </select>
+            <input className="input" type="number" placeholder="Expense ratio %" value={form.expense_ratio} onChange={e => setForm(f => ({ ...f, expense_ratio: e.target.value }))} style={{ maxWidth: 130 }} />
+            <input className="input" type="number" placeholder="Minimum $" value={form.minimum_investment} onChange={e => setForm(f => ({ ...f, minimum_investment: e.target.value }))} style={{ maxWidth: 120 }} />
+            <input className="input" type="number" placeholder="Min allocation %" value={form.minimum_allocation_pct} onChange={e => setForm(f => ({ ...f, minimum_allocation_pct: e.target.value }))} style={{ maxWidth: 140 }} />
+            <input className="input" type="number" placeholder="Max allocation %" value={form.maximum_allocation_pct} onChange={e => setForm(f => ({ ...f, maximum_allocation_pct: e.target.value }))} style={{ maxWidth: 140 }} />
+            <input className="input" type="number" placeholder="Trading fee $" value={form.trading_fee} onChange={e => setForm(f => ({ ...f, trading_fee: e.target.value }))} style={{ maxWidth: 120 }} />
+            <select className="input" aria-label="Employer match eligibility" value={form.employer_match_eligible} onChange={e => setForm(f => ({ ...f, employer_match_eligible: e.target.value }))}>
+              <option value="">Match eligibility unknown</option><option value="yes">Match eligible</option><option value="no">Not match eligible</option>
+            </select>
+            <input className="input" placeholder="Redemption restriction" value={form.redemption_restriction} onChange={e => setForm(f => ({ ...f, redemption_restriction: e.target.value }))} />
+            <input className="input" placeholder="Settlement restriction" value={form.settlement_restriction} onChange={e => setForm(f => ({ ...f, settlement_restriction: e.target.value }))} />
             <label style={{ fontSize: 12, display: 'flex', gap: 4, alignItems: 'center' }}>
               <input type="checkbox" checked={form.available_for_new_contributions} onChange={e => setForm(f => ({ ...f, available_for_new_contributions: e.target.checked }))} />
               New contributions
@@ -303,6 +406,13 @@ function OptionsTab({ accounts }) {
                 <span>
                   {o.option_name} {o.ticker ? `(${o.ticker})` : '(no ticker)'} — {o.asset_class.replace(/_/g, ' ')}
                   {!o.available_for_new_contributions && <span style={{ color: 'var(--muted)' }}> · closed to new money</span>}
+                  {o.expense_ratio != null && <span> · {(o.expense_ratio * 100).toFixed(2)}% fee</span>}
+                  {o.minimum_investment != null && <span> · {fmt(o.minimum_investment)} minimum</span>}
+                  {o.maximum_allocation_pct != null && <span> · max {o.maximum_allocation_pct}%</span>}
+                  {o.trading_fee != null && <span> · {fmt(o.trading_fee)} trade fee</span>}
+                  {o.employer_match_eligible === true && <span> · match eligible</span>}
+                  {o.redemption_restriction && <div style={{ color: 'var(--amber)' }}>Redemption: {o.redemption_restriction}</div>}
+                  {o.settlement_restriction && <div style={{ color: 'var(--amber)' }}>Settlement: {o.settlement_restriction}</div>}
                 </span>
                 <button className="btn-secondary" style={{ padding: '2px 8px', fontSize: 11 }} onClick={() => remove(o.id)}>Remove</button>
               </div>
@@ -360,7 +470,7 @@ export default function PortfolioSetup() {
         ))}
       </div>
       {tab === 'holdings' && <HoldingsTab accounts={accounts} />}
-      {tab === 'policy' && <PolicyTab />}
+      {tab === 'policy' && <PolicyTab accounts={accounts} />}
       {tab === 'options' && <OptionsTab accounts={accounts} />}
     </div>
   )

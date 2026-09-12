@@ -232,7 +232,11 @@ def concentration_and_liquidity_recommendations(household_holdings: List[Dict], 
     policy's own minimum_cash_reserve -- never invented from an age or
     a rule of thumb."""
     cards = []
-    for f in concentration_flags(household_holdings):
+    configured_limit = (policy or {}).get("max_single_security_pct")
+    threshold = configured_limit if configured_limit is not None else 10
+    severe_threshold = configured_limit if configured_limit is not None else 25
+    for f in concentration_flags(household_holdings, threshold_pct=threshold,
+                                 severe_threshold_pct=severe_threshold, policy=policy):
         if f["severity"] != "severe":
             continue
         holding = next((h for h in household_holdings if h.get("id") == f["holding_id"]), None)
@@ -247,7 +251,8 @@ def concentration_and_liquidity_recommendations(household_holdings: List[Dict], 
             f"(e.g. employer stock) — this is evidence for a decision, not an automatic sell.",
             [f["account_id"]], [f["holding_id"]], current_value=f["pct_of_portfolio"], target_value=None,
             proposed_change="Review for a possible diversification plan", expected_effect="Reduced single-security risk, if acted on.",
-            tax_impact=tax_impact, assumptions=["Concentration measured against total household investable assets."],
+            tax_impact=tax_impact,
+            assumptions=[f"Concentration measured against total household investable assets; limit is {threshold}% from the saved policy."],
             confidence="high", assumptions_hash_input=f, value_unit="percent",
         ))
     if policy and policy.get("minimum_cash_reserve") and household_cash_value is not None:
@@ -384,12 +389,17 @@ def rebalance_recommendations(rebalance_result: Dict) -> List[Dict]:
     for i, a in enumerate(rebalance_result["rebalance_actions"]):
         is_taxable = bool(a.get("is_taxable_sale"))
         category = "taxable_rebalance" if is_taxable else "tax_advantaged_rebalance"
+        destination = a.get("destination") or {}
+        destination_text = ""
+        if destination:
+            account_label = destination.get("account_name") or "account {}".format(destination.get("account_id"))
+            destination_text = f" in {account_label} using {destination.get('option_name')}"
         cards.append(_card(
             category, recommendation_key("rebalance_action", account_id=a.get("account_id"), holding_id=a.get("holding_id"), asset_class=a["asset_class"], extra=a["action"]),
             i, f"{a['action'].title()} {a.get('holding_name') or a['asset_class'].replace('_', ' ')}",
             a["reason"], [a.get("account_id")] if a.get("account_id") else [], [a.get("holding_id")] if a.get("holding_id") else [],
             current_value=None, target_value=None,
-            proposed_change=f"{a['action']} ${a['amount']:,.0f}", expected_effect="Reduces household allocation drift toward target.",
+            proposed_change=f"{a['action']} ${a['amount']:,.0f}{destination_text}", expected_effect="Reduces household allocation drift toward target.",
             tax_impact=a.get("tax_warning"), assumptions=[a.get("confidence_note")] if a.get("confidence_note") else [],
             confidence="high" if not is_taxable else ("medium" if (a.get("tax_warning") or {}).get("has_cost_basis") else "low"),
             invalidates_on=["Holdings or the saved policy change before this is acted on."],
@@ -407,11 +417,16 @@ def minor_optimization_recommendations(household_holdings: List[Dict], goal_cont
     context built from ALREADY-COMPUTED figures (years to retirement,
     Monte Carlo success rate, downside depletion age) -- this function
     performs no retirement-math of its own; every number in
-    `goal_context` comes from run_retirement_projection/run_monte_carlo/
-    run_swr_analysis in main.py, per the brief's "do not duplicate
+    `goal_context` comes from run_retirement_projection and
+    run_monte_carlo in main.py, per the brief's "do not duplicate
     calculation formulas already present in the retirement engine.\""""
     cards = []
-    for f in concentration_flags(household_holdings):
+    policy = (goal_context or {}).get("policy") or {}
+    configured_limit = policy.get("max_single_security_pct")
+    threshold = configured_limit if configured_limit is not None else 10
+    severe_threshold = configured_limit if configured_limit is not None else 25
+    for f in concentration_flags(household_holdings, threshold_pct=threshold,
+                                 severe_threshold_pct=severe_threshold, policy=policy):
         if f["severity"] == "severe":
             continue  # already surfaced at tier 2
         cards.append(_card(
