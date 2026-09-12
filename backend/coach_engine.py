@@ -18,23 +18,50 @@ from typing import Dict, List, Optional
 
 from holdings_engine import (
     TAXABLE_GAIN_TYPES, concentration_flags, expense_ratio_flags,
-    duplicate_exposure_flags, unclassified_flags, ASSET_CLASSES,
+    duplicate_exposure_flags, ASSET_CLASSES,
     estimate_taxable_gain_warning,
 )
 
 # ── Decision lifecycle ────────────────────────────────────────────────────
 STATUSES = ("proposed", "reviewing", "accepted", "deferred", "rejected", "completed", "invalidated")
 
-CATEGORIES = ("data_quality", "allocation_drift", "rebalance", "fund_quality", "goal_aware")
+# The controlling product clarification's explicit 8-tier priority order
+# (verbatim, most urgent first):
+#   1) Missing/unreliable data preventing valid analysis.
+#   2) Dangerous concentration or liquidity problem.
+#   3) Material investment-policy violation.
+#   4) High-cost or materially redundant holding.
+#   5) New-money direction.
+#   6) Tax-advantaged rebalance.
+#   7) Taxable rebalance.
+#   8) Minor optimization.
+# Supersedes an earlier internal 5-category draft (data_quality/
+# allocation_drift/rebalance/fund_quality/goal_aware) that didn't
+# distinguish urgent concentration from routine fund-quality review, or
+# new-money direction from an in-place rebalance, or a tax-advantaged
+# exchange from a taxable sale.
+CATEGORIES = (
+    "missing_data", "concentration_or_liquidity_risk", "policy_violation",
+    "high_cost_or_redundant", "new_money", "tax_advantaged_rebalance",
+    "taxable_rebalance", "minor_optimization",
+)
+CATEGORY_BASE_PRIORITY = {name: i + 1 for i, name in enumerate(CATEGORIES)}
 
-# Lower number = more urgent. Data quality gates everything else (a
-# recommendation built on unreconciled/unclassified data is worth less
-# than fixing the data first), drift/rebalance are paired at the next
-# tier, fund quality and goal-aware context are review-only, not urgent
-# by themselves.
-CATEGORY_BASE_PRIORITY = {
-    "data_quality": 1, "allocation_drift": 2, "rebalance": 2,
-    "fund_quality": 3, "goal_aware": 3,
+# The brief's separate classification axis ("The engine must distinguish:
+# data-quality problem / policy violation / permitted exception /
+# optimization opportunity / urgent risk / ordinary review item") is NOT
+# the same thing as priority order -- two cards can share a
+# classification while sitting at different priority tiers. Every card's
+# `classification` field is derived from its category below.
+CATEGORY_CLASSIFICATION = {
+    "missing_data": "data_quality_problem",
+    "concentration_or_liquidity_risk": "urgent_risk",
+    "policy_violation": "policy_violation",
+    "high_cost_or_redundant": "optimization_opportunity",
+    "new_money": "optimization_opportunity",
+    "tax_advantaged_rebalance": "optimization_opportunity",
+    "taxable_rebalance": "optimization_opportunity",
+    "minor_optimization": "ordinary_review_item",
 }
 
 
@@ -66,6 +93,7 @@ def _card(category, key, priority_offset, title, action_text, accounts, holdings
     return {
         "recommendation_key": key,
         "category": category,
+        "classification": CATEGORY_CLASSIFICATION[category],
         "priority": CATEGORY_BASE_PRIORITY[category] * 1000 + priority_offset,
         "title": title,
         "action_text": action_text,
@@ -84,13 +112,13 @@ def _card(category, key, priority_offset, title, action_text, accounts, holdings
     }
 
 
-# ── Category A: data quality ──────────────────────────────────────────────
+# ── Tier 1: missing/unreliable data ─────────────────────────────────────
 
 def data_quality_recommendations(classified: Dict, reconciliations: List[Dict]) -> List[Dict]:
     cards = []
     for h in classified["blocked"]:
         cards.append(_card(
-            "data_quality", recommendation_key("missing_account_type", account_id=h.get("account_id"), holding_id=h.get("id")),
+            "missing_data", recommendation_key("missing_account_type", account_id=h.get("account_id"), holding_id=h.get("id")),
             0, "Account type needs classification",
             f"Set a real account type for this account before its holdings can be included in any allocation recommendation.",
             [h.get("account_id")], [h.get("id")], current_value=None, target_value=None,
@@ -101,7 +129,7 @@ def data_quality_recommendations(classified: Dict, reconciliations: List[Dict]) 
     for recon in reconciliations:
         if recon["has_warning"]:
             cards.append(_card(
-                "data_quality", recommendation_key("unreconciled_remainder", account_id=recon["account_id"]),
+                "missing_data", recommendation_key("unreconciled_remainder", account_id=recon["account_id"]),
                 1, "Holdings don't reconcile to the account balance",
                 recon["warning"], [recon["account_id"]], [],
                 current_value=recon["holdings_total"], target_value=recon["account_balance"],
@@ -113,7 +141,7 @@ def data_quality_recommendations(classified: Dict, reconciliations: List[Dict]) 
     for h in classified["household"] + classified["hsa"] + classified["child_specific"]:
         if (h.get("asset_class") or "unclassified") == "unclassified" or h.get("asset_class") not in ASSET_CLASSES:
             cards.append(_card(
-                "data_quality", recommendation_key("unclassified_security", account_id=h.get("account_id"), holding_id=h.get("id")),
+                "missing_data", recommendation_key("unclassified_security", account_id=h.get("account_id"), holding_id=h.get("id")),
                 2, f"{h.get('security_name') or h.get('ticker') or 'This holding'} needs an asset class",
                 "Set an asset class for this holding so it counts toward your real allocation instead of the unclassified bucket.",
                 [h.get("account_id")], [h.get("id")], current_value=h.get("asset_class"), target_value=None,
@@ -123,7 +151,7 @@ def data_quality_recommendations(classified: Dict, reconciliations: List[Dict]) 
             ))
         if h.get("_portfolio_account_type") in TAXABLE_GAIN_TYPES and h.get("cost_basis") is None and (h.get("market_value", 0) or 0) > 0:
             cards.append(_card(
-                "data_quality", recommendation_key("missing_cost_basis", account_id=h.get("account_id"), holding_id=h.get("id")),
+                "missing_data", recommendation_key("missing_cost_basis", account_id=h.get("account_id"), holding_id=h.get("id")),
                 3, f"Missing cost basis on {h.get('security_name') or 'a taxable holding'}",
                 "Add cost basis so any future sale of this taxable holding can show a real estimated gain/loss instead of an unknown.",
                 [h.get("account_id")], [h.get("id")], current_value=None, target_value=None,
@@ -133,7 +161,7 @@ def data_quality_recommendations(classified: Dict, reconciliations: List[Dict]) 
             ))
         if h.get("expense_ratio") is None and (h.get("market_value", 0) or 0) > 0:
             cards.append(_card(
-                "data_quality", recommendation_key("missing_expense_ratio", account_id=h.get("account_id"), holding_id=h.get("id")),
+                "missing_data", recommendation_key("missing_expense_ratio", account_id=h.get("account_id"), holding_id=h.get("id")),
                 4, f"Missing expense ratio on {h.get('security_name') or 'a holding'}",
                 "Add the expense ratio so fee-drag comparisons include this holding.",
                 [h.get("account_id")], [h.get("id")], current_value=None, target_value=None,
@@ -143,7 +171,7 @@ def data_quality_recommendations(classified: Dict, reconciliations: List[Dict]) 
             ))
         if h.get("data_source") == "manual" or h.get("confidence") == "low":
             cards.append(_card(
-                "data_quality", recommendation_key("low_confidence_entry", account_id=h.get("account_id"), holding_id=h.get("id")),
+                "missing_data", recommendation_key("low_confidence_entry", account_id=h.get("account_id"), holding_id=h.get("id")),
                 5, f"{h.get('security_name') or 'A holding'} was entered manually",
                 "Confirm this manually-entered holding against a real statement, or resolve it against the security lookup for higher-confidence data.",
                 [h.get("account_id")], [h.get("id")], current_value=h.get("confidence"), target_value="high",
@@ -154,9 +182,58 @@ def data_quality_recommendations(classified: Dict, reconciliations: List[Dict]) 
     return cards
 
 
-# ── Category B: allocation drift ──────────────────────────────────────────
+# ── Tier 2: dangerous concentration or liquidity problem ────────────────
 
-def allocation_drift_recommendations(comparison: Dict, policy: Dict) -> List[Dict]:
+def concentration_and_liquidity_recommendations(household_holdings: List[Dict], policy: Optional[Dict] = None,
+                                                  household_cash_value: Optional[float] = None) -> List[Dict]:
+    """Only the SEVERE concentration tier belongs at tier 2 (a dangerous
+    single-security risk) -- moderate concentration is an ordinary
+    review item, handled at tier 8 by minor_optimization_recommendations
+    below, to avoid two different urgency levels sharing one priority.
+    Liquidity: flags only when household cash is measurably below the
+    policy's own minimum_cash_reserve -- never invented from an age or
+    a rule of thumb."""
+    cards = []
+    for f in concentration_flags(household_holdings):
+        if f["severity"] != "severe":
+            continue
+        holding = next((h for h in household_holdings if h.get("id") == f["holding_id"]), None)
+        tax_impact = None
+        if holding and holding.get("_portfolio_account_type") in TAXABLE_GAIN_TYPES:
+            tax_impact = estimate_taxable_gain_warning(holding, holding.get("market_value", 0) or 0)
+        cards.append(_card(
+            "concentration_or_liquidity_risk", recommendation_key("severe_concentration", account_id=f["account_id"], holding_id=f["holding_id"]),
+            0, f"{f['name']} is a dangerously concentrated position",
+            f"{f['name']} is {f['pct_of_portfolio']}% of your investable assets — a single-security risk large enough "
+            f"to materially affect household net worth on its own. Review whether this concentration is intentional "
+            f"(e.g. employer stock) — this is evidence for a decision, not an automatic sell.",
+            [f["account_id"]], [f["holding_id"]], current_value=f["pct_of_portfolio"], target_value=None,
+            proposed_change="Review for a possible diversification plan", expected_effect="Reduced single-security risk, if acted on.",
+            tax_impact=tax_impact, assumptions=["Concentration measured against total household investable assets."],
+            confidence="high", assumptions_hash_input=f,
+        ))
+    if policy and policy.get("minimum_cash_reserve") and household_cash_value is not None:
+        minimum = policy["minimum_cash_reserve"]
+        if household_cash_value < minimum:
+            cards.append(_card(
+                "concentration_or_liquidity_risk", recommendation_key("liquidity_shortfall"),
+                1, "Cash reserve is below your policy's minimum",
+                f"Household investable cash is ${household_cash_value:,.0f}, below the "
+                f"${minimum:,.0f} minimum cash reserve set in your investment policy.",
+                [], [], current_value=household_cash_value, target_value=minimum,
+                proposed_change="Rebuild the cash reserve before directing new money elsewhere",
+                expected_effect="Restores the policy's own minimum liquidity buffer.",
+                tax_impact=None, assumptions=["minimum_cash_reserve comes from the saved investment policy."],
+                confidence="high",
+                invalidates_on=["The saved policy's minimum_cash_reserve changes.", "Cash holdings change enough to close the shortfall."],
+                assumptions_hash_input={"household_cash_value": household_cash_value, "minimum": minimum},
+            ))
+    return cards
+
+
+# ── Tier 3: material investment-policy violation ─────────────────────────
+
+def policy_violation_recommendations(comparison: Dict, policy: Dict) -> List[Dict]:
     """Never recommends "invest more in X" without a target, a measured
     current exposure, and the size of the gap — per the brief's explicit
     guard. Requires a real policy (caller must check has_policy first;
@@ -167,7 +244,7 @@ def allocation_drift_recommendations(comparison: Dict, policy: Dict) -> List[Dic
             continue
         direction = "overweight" if d["deviation_dollars"] > 0 else "underweight"
         cards.append(_card(
-            "allocation_drift", recommendation_key("drift", asset_class=asset_class),
+            "policy_violation", recommendation_key("drift", asset_class=asset_class),
             0, f"{asset_class.replace('_', ' ').title()} is {direction} vs. target",
             (
                 f"Current {d['current_pct']}% vs. target {d['target_pct']}% "
@@ -185,54 +262,23 @@ def allocation_drift_recommendations(comparison: Dict, policy: Dict) -> List[Dic
         ))
     return cards
 
+# Backwards-compatible alias -- earlier internal draft's name.
+allocation_drift_recommendations = policy_violation_recommendations
 
-# ── Category D: account-aware rebalancing ─────────────────────────────────
 
-def rebalance_recommendations(rebalance_result: Dict) -> List[Dict]:
-    """Wraps holdings_engine.recommend_rebalance_actions' own output
-    into full recommendation cards (that function already implements
-    the contribution-first/tax-advantaged-first priority order and the
-    missing-cost-basis warning — this only reformats it, never
-    re-derives it)."""
+# ── Tier 4: high-cost or materially redundant holding ────────────────────
+
+def high_cost_or_redundant_recommendations(household_holdings: List[Dict]) -> List[Dict]:
+    """Deliberately does NOT re-flag unclassified holdings -- that's
+    already a tier-1 missing_data card (data_quality_recommendations'
+    "needs an asset class" card, keyed on the same holding_id) and
+    re-surfacing it here would be a duplicate recommendation for the
+    same underlying problem, which the brief explicitly says to avoid."""
     cards = []
-    for i, a in enumerate(rebalance_result["rebalance_actions"]):
-        cards.append(_card(
-            "rebalance", recommendation_key("rebalance_action", account_id=a.get("account_id"), holding_id=a.get("holding_id"), asset_class=a["asset_class"], extra=a["action"]),
-            i, f"{a['action'].title()} {a.get('holding_name') or a['asset_class'].replace('_', ' ')}",
-            a["reason"], [a.get("account_id")] if a.get("account_id") else [], [a.get("holding_id")] if a.get("holding_id") else [],
-            current_value=None, target_value=None,
-            proposed_change=f"{a['action']} ${a['amount']:,.0f}", expected_effect="Reduces household allocation drift toward target.",
-            tax_impact=a.get("tax_warning"), assumptions=[a.get("confidence_note")] if a.get("confidence_note") else [],
-            confidence="high" if not a.get("is_taxable_sale") else ("medium" if (a.get("tax_warning") or {}).get("has_cost_basis") else "low"),
-            invalidates_on=["Holdings or the saved policy change before this is acted on."],
-            assumptions_hash_input=a,
-        ))
-    return cards
-
-
-# ── Category E: fund quality (review, never an automatic sell) ──────────
-
-def fund_quality_recommendations(household_holdings: List[Dict]) -> List[Dict]:
-    cards = []
-    for f in concentration_flags(household_holdings):
-        holding = next((h for h in household_holdings if h.get("id") == f["holding_id"]), None)
-        tax_impact = None
-        if holding and holding.get("_portfolio_account_type") in TAXABLE_GAIN_TYPES:
-            tax_impact = estimate_taxable_gain_warning(holding, holding.get("market_value", 0) or 0)
-        cards.append(_card(
-            "fund_quality", recommendation_key("concentration", account_id=f["account_id"], holding_id=f["holding_id"]),
-            0 if f["severity"] == "severe" else 1, f"{f['name']} is a concentrated position",
-            f"{f['name']} is {f['pct_of_portfolio']}% of your investable assets ({f['severity']}). "
-            f"Review whether this concentration is intentional — this is evidence for a decision, not an automatic sell.",
-            [f["account_id"]], [f["holding_id"]], current_value=f["pct_of_portfolio"], target_value=None,
-            proposed_change="Review for a possible diversification plan", expected_effect="Reduced single-security risk, if acted on.",
-            tax_impact=tax_impact, assumptions=["Concentration measured against total household investable assets."],
-            confidence="high", assumptions_hash_input=f,
-        ))
     for f in expense_ratio_flags(household_holdings):
         cards.append(_card(
-            "fund_quality", recommendation_key("high_expense_ratio", account_id=f["account_id"], holding_id=f["holding_id"]),
-            2, f"{f['name']} has a high expense ratio",
+            "high_cost_or_redundant", recommendation_key("high_expense_ratio", account_id=f["account_id"], holding_id=f["holding_id"]),
+            0, f"{f['name']} has a high expense ratio",
             f"{f['name']} charges {f['expense_ratio_pct']}% (~${f['annual_fee_dollars']:,.0f}/yr). "
             f"Review for a lower-cost equivalent — this is evidence for a decision, not an automatic sell.",
             [f["account_id"]], [f["holding_id"]], current_value=f["expense_ratio_pct"], target_value=None,
@@ -241,37 +287,104 @@ def fund_quality_recommendations(household_holdings: List[Dict]) -> List[Dict]:
         ))
     for f in duplicate_exposure_flags(household_holdings):
         cards.append(_card(
-            "fund_quality", recommendation_key("duplicate_exposure", extra=f["name"]),
-            3, f"{f['name']} held across {len(f['accounts'])} accounts",
+            "high_cost_or_redundant", recommendation_key("duplicate_exposure", extra=f["name"]),
+            1, f"{f['name']} held across {len(f['accounts'])} accounts",
             f"${f['total_market_value']:,.0f} of {f['name']} is spread across {len(f['accounts'])} accounts — not necessarily "
             f"wrong, but worth reviewing for redundant exposure or a consolidation opportunity.",
             f["accounts"], f["holding_ids"], current_value=f["total_market_value"], target_value=None,
             proposed_change="Review for consolidation", expected_effect="Simplified holdings, if acted on.",
             tax_impact=None, assumptions=[], confidence="medium", assumptions_hash_input=f,
         ))
-    for f in unclassified_flags(household_holdings):
+    return cards
+
+# Backwards-compatible alias -- earlier internal draft's name (dropped
+# the unclassified-fund card, which duplicated a tier-1 missing_data
+# card; see the docstring above).
+fund_quality_recommendations = high_cost_or_redundant_recommendations
+
+
+# ── Tier 5: new-money direction ──────────────────────────────────────────
+
+def new_money_recommendations(contribution_actions: List[Dict]) -> List[Dict]:
+    """Wraps holdings_engine.recommend_contribution_destination's own
+    output (already the drift-minimizing destination choice) into full
+    recommendation cards -- this only reformats it, never re-derives
+    the allocation math."""
+    cards = []
+    for i, a in enumerate(contribution_actions):
+        if not a.get("asset_class") or not a.get("amount"):
+            continue
         cards.append(_card(
-            "fund_quality", recommendation_key("unclassified_fund", account_id=f["account_id"], holding_id=f["holding_id"]),
-            4, f"{f['name']} is unclassified",
-            "This holding has no asset class and doesn't count toward any target — classify it to include it in allocation math.",
-            [f["account_id"]], [f["holding_id"]], current_value=f["market_value"], target_value=None,
-            proposed_change="Classify the asset class", expected_effect="Included in allocation drift/rebalance math.",
-            tax_impact=None, assumptions=[], confidence="high", assumptions_hash_input=f,
+            "new_money", recommendation_key("new_money", asset_class=a["asset_class"]),
+            i, f"Direct new contributions toward {a['asset_class'].replace('_', ' ')}",
+            a.get("reason") or f"New money reduces the {a['asset_class'].replace('_', ' ')} underweight without any sale.",
+            [], [], current_value=None, target_value=None,
+            proposed_change=f"Direct ${a['amount']:,.0f} of new contributions to {a['asset_class'].replace('_', ' ')}",
+            expected_effect="Reduces household allocation drift using new money, before any exchange or sale.",
+            tax_impact=None, assumptions=["Assumes the pending contribution amount supplied for this run."],
+            confidence="high",
+            invalidates_on=["Holdings or the saved policy change before this is acted on."],
+            assumptions_hash_input=a,
         ))
     return cards
 
 
-# ── Category F: goal-aware actions ────────────────────────────────────────
+# ── Tiers 6/7: account-aware rebalancing (tax-advantaged vs. taxable) ────
 
-def goal_aware_recommendations(goal_context: Dict) -> List[Dict]:
-    """Builds contextual review cards from ALREADY-COMPUTED planning
-    figures (years to retirement, Monte Carlo success rate, downside
-    depletion age, safe-spending cushion) — this function performs no
-    retirement-math of its own; every number in `goal_context` comes
-    from run_retirement_projection/run_monte_carlo/run_swr_analysis in
-    main.py, per the brief's "do not duplicate calculation formulas
-    already present in the retirement engine.\""""
+def rebalance_recommendations(rebalance_result: Dict) -> List[Dict]:
+    """Wraps holdings_engine.recommend_rebalance_actions' own output
+    into full recommendation cards (that function already implements
+    the contribution-first/idle-cash/tax-advantaged-first/taxable-last
+    priority order and the missing-cost-basis warning — this only
+    reformats it, never re-derives it). Each action is tagged tier 6
+    (tax_advantaged_rebalance) unless it is a taxable sale, which is
+    tier 7 (taxable_rebalance) — the two are never the same tier, since
+    the brief lists them as separate priority levels."""
     cards = []
+    for i, a in enumerate(rebalance_result["rebalance_actions"]):
+        is_taxable = bool(a.get("is_taxable_sale"))
+        category = "taxable_rebalance" if is_taxable else "tax_advantaged_rebalance"
+        cards.append(_card(
+            category, recommendation_key("rebalance_action", account_id=a.get("account_id"), holding_id=a.get("holding_id"), asset_class=a["asset_class"], extra=a["action"]),
+            i, f"{a['action'].title()} {a.get('holding_name') or a['asset_class'].replace('_', ' ')}",
+            a["reason"], [a.get("account_id")] if a.get("account_id") else [], [a.get("holding_id")] if a.get("holding_id") else [],
+            current_value=None, target_value=None,
+            proposed_change=f"{a['action']} ${a['amount']:,.0f}", expected_effect="Reduces household allocation drift toward target.",
+            tax_impact=a.get("tax_warning"), assumptions=[a.get("confidence_note")] if a.get("confidence_note") else [],
+            confidence="high" if not is_taxable else ("medium" if (a.get("tax_warning") or {}).get("has_cost_basis") else "low"),
+            invalidates_on=["Holdings or the saved policy change before this is acted on."],
+            assumptions_hash_input=a,
+        ))
+    return cards
+
+
+# ── Tier 8: minor optimization / ordinary review items ───────────────────
+
+def minor_optimization_recommendations(household_holdings: List[Dict], goal_context: Optional[Dict] = None) -> List[Dict]:
+    """Everything that's worth a look but isn't urgent, a policy
+    violation, a cost/redundancy problem, or an actionable money move:
+    moderate (non-severe) concentration, and goal-aware planning
+    context built from ALREADY-COMPUTED figures (years to retirement,
+    Monte Carlo success rate, downside depletion age) -- this function
+    performs no retirement-math of its own; every number in
+    `goal_context` comes from run_retirement_projection/run_monte_carlo/
+    run_swr_analysis in main.py, per the brief's "do not duplicate
+    calculation formulas already present in the retirement engine.\""""
+    cards = []
+    for f in concentration_flags(household_holdings):
+        if f["severity"] == "severe":
+            continue  # already surfaced at tier 2
+        cards.append(_card(
+            "minor_optimization", recommendation_key("moderate_concentration", account_id=f["account_id"], holding_id=f["holding_id"]),
+            0, f"{f['name']} is a moderately large position",
+            f"{f['name']} is {f['pct_of_portfolio']}% of your investable assets. Not urgent, but worth reviewing "
+            f"for diversification — this is evidence for a decision, not an automatic sell.",
+            [f["account_id"]], [f["holding_id"]], current_value=f["pct_of_portfolio"], target_value=None,
+            proposed_change="Review for a possible diversification plan", expected_effect="Reduced single-security risk, if acted on.",
+            tax_impact=None, assumptions=["Concentration measured against total household investable assets."],
+            confidence="medium", assumptions_hash_input=f,
+        ))
+    goal_context = goal_context or {}
     years_to_retirement = goal_context.get("years_to_retirement")
     depletion_age = goal_context.get("median_depletion_age")
     retirement_age = goal_context.get("retirement_age")
@@ -279,8 +392,8 @@ def goal_aware_recommendations(goal_context: Dict) -> List[Dict]:
     if years_to_retirement is not None and depletion_age is not None and retirement_age is not None:
         if years_to_retirement <= 10 and depletion_age < retirement_age + 30:
             cards.append(_card(
-                "goal_aware", recommendation_key("near_term_depletion_risk"),
-                0, "Review near-term spending reserve before increasing equity exposure",
+                "minor_optimization", recommendation_key("near_term_depletion_risk"),
+                1, "Review near-term spending reserve before increasing equity exposure",
                 (
                     f"Retirement is {years_to_retirement} years away and the downside Monte Carlo scenario "
                     f"depletes the portfolio at age {depletion_age}. Review whether your near-term spending "
@@ -297,8 +410,8 @@ def goal_aware_recommendations(goal_context: Dict) -> List[Dict]:
             ))
     if success_rate is not None and success_rate < 80:
         cards.append(_card(
-            "goal_aware", recommendation_key("low_success_rate"),
-            1, "Monte Carlo success rate is below 80%",
+            "minor_optimization", recommendation_key("low_success_rate"),
+            2, "Monte Carlo success rate is below 80%",
             f"Your plan's Monte Carlo success rate is {success_rate}%. Review spending, savings rate, or retirement "
             f"age assumptions before treating any allocation change as the primary fix.",
             [], [], current_value=success_rate, target_value=80,
@@ -308,6 +421,13 @@ def goal_aware_recommendations(goal_context: Dict) -> List[Dict]:
             assumptions_hash_input=goal_context,
         ))
     return cards
+
+# Backwards-compatible alias -- earlier internal draft's name. Signature
+# differs (household_holdings is now required, goal_context optional) so
+# old call sites (goal_context only) must be updated, not silently
+# reinterpreted.
+def goal_aware_recommendations(goal_context: Dict) -> List[Dict]:
+    return minor_optimization_recommendations([], goal_context)
 
 
 # ── Priority ordering ──────────────────────────────────────────────────────
