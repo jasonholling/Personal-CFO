@@ -41,10 +41,14 @@ const CATEGORY_COLORS = {
   taxable_rebalance: 'var(--amber)', minor_optimization: 'var(--muted)',
 }
 
-function ActionCard({ card, onDecide, busy }) {
+function ActionCard({ card, onDecide, busy, onNavigate }) {
   const p = card.payload
   const [notes, setNotes] = useState('')
   const [showDecide, setShowDecide] = useState(false)
+  // Contextual link: a data-quality card about an account's own type
+  // being unresolved should jump straight to where that gets fixed
+  // (Accounts), not just describe the problem.
+  const isAccountTypeIssue = card.category === 'missing_data' && p.recommendation_key?.startsWith('missing_account_type')
   return (
     <div className="card" style={{ marginBottom: 12, borderLeft: `3px solid ${CATEGORY_COLORS[card.category] || 'var(--border)'}` }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
@@ -88,6 +92,9 @@ function ActionCard({ card, onDecide, busy }) {
           </div>
         </div>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 6, minWidth: 140 }}>
+          {isAccountTypeIssue && (
+            <button className="btn-primary" onClick={() => onNavigate?.('accounts')}>Review account type →</button>
+          )}
           {card.status !== 'accepted' && (
             <button className="btn-secondary" disabled={busy} onClick={() => onDecide(card.id, 'accepted', notes)}>Accept</button>
           )}
@@ -108,7 +115,7 @@ function ActionCard({ card, onDecide, busy }) {
   )
 }
 
-export default function PortfolioCoach() {
+export default function PortfolioCoach({ onNavigate }) {
   const [data, setData] = useState(null)
   const [allocation, setAllocation] = useState(null)
   const [loading, setLoading] = useState(true)
@@ -181,10 +188,20 @@ export default function PortfolioCoach() {
       </div>
 
       {!data?.has_policy && (
-        <div className="card" style={{ marginBottom: 20, borderLeft: '3px solid var(--red)' }}>
-          <strong>No investment policy saved yet.</strong> The Coach won't manufacture a target allocation from your
-          age or a generic model — set a target allocation, drift band, and rebalance preferences on the Investment
-          Policy page before drift, new-money, or rebalance recommendations can be generated.
+        <div className="card" style={{ marginBottom: 20, borderLeft: '3px solid var(--red)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 12 }}>
+          <div>
+            <strong>No investment policy saved yet.</strong> The Coach won't manufacture a target allocation from your
+            age or a generic model — set a target allocation, drift band, and rebalance preferences before drift,
+            new-money, or rebalance recommendations can be generated.
+          </div>
+          <button className="btn-primary" onClick={() => onNavigate?.('portfoliosetup')}>Set investment policy →</button>
+        </div>
+      )}
+
+      {allocation && allocation.has_holdings === false && (
+        <div className="card" style={{ marginBottom: 20, borderLeft: '3px solid var(--amber)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 12 }}>
+          <div><strong>No holdings entered yet.</strong> The Coach needs your account holdings before it can evaluate allocation, drift, or rebalancing.</div>
+          <button className="btn-primary" onClick={() => onNavigate?.('portfoliosetup')}>Add holdings →</button>
         </div>
       )}
 
@@ -332,7 +349,7 @@ export default function PortfolioCoach() {
         </div>
       )}
       {visible.map(card => (
-        <ActionCard key={card.id} card={card} onDecide={decide} busy={busy} />
+        <ActionCard key={card.id} card={card} onDecide={decide} busy={busy} onNavigate={onNavigate} />
       ))}
     </div>
   )

@@ -37,65 +37,81 @@ import { usePrivacyMode } from './hooks/usePrivacyMode'
 import './App.css'
 
 // Milestone 3 (navigation consolidation, 2026-09-09): restructured from
-// topic-based groups (WEALTH/RETIREMENT/EDUCATION & KIDS/PROTECTION/
-// ESTATE & PLANNING) into activity-based groups (Household/Plan/
-// Compare/Protect/Review), approved via a navigation-map proposal
-// before any code changed (see CALCULATION_CONTRACT.md's Milestone 3
-// section for the full map and the reasoning per page). Two concrete
-// changes fell out of drafting that map, not just relabeling:
-//   - Side by Side and Sensitivity moved out of RetirementProjection's
-//     own tabs into a new Compare.jsx page (both are comparison views,
-//     not plan-building) -- no calculation change, same components.
-//   - PlanOperatingSystem.jsx's estate-document tracker (a second,
-//     disconnected copy of what Estate.jsx already tracked, under
-//     different keys) was removed in favor of Estate Planning being
-//     the single canonical place -- see that file's own comment.
-// Dashboard and Annual Report stay pinned outside the 5 groups (an
-// entry point and a report aren't themselves one of the 5 activities).
+// Restructured (2026-09-12, user-proposed navigation map) from
+// activity-based groups (Household/Plan/Compare/Protect/Review) into
+// workflow-stage groups (Overview/Plan/Manage/Setup & Data). The prior
+// structure mixed planning/decision tools with data-entry/maintenance
+// pages at the same visual level, competing for attention -- this
+// version pulls every pure data-entry/maintenance page into a single
+// "Setup & Data" group, collapsed by default, so the main nav surfaces
+// only outputs and decision surfaces. Portfolio Coach is an output
+// (a recommendation queue), so it stays in Overview; the data it reads
+// from (Portfolio Setup) moves to Setup & Data.
 const NAV = [
+  { group:'OVERVIEW' },
   { id:'dashboard',  label:'Dashboard',      icon:'◈' },
-  { group:'HOUSEHOLD' },
-  { id:'accounts',   label:'Accounts',       icon:'⊞' },
-  { id:'networth',   label:'Net Worth',      icon:'◬' },
-  { id:'debt',       label:'Debt Payoff',    icon:'⊝' },
-  { id:'cashflow',   label:'Monthly Cash Flow', icon:'≋' },
-  { id:'settings',   label:'Planning Inputs',icon:'≡' },
-  { id:'backup', label:'Backup & Restore', icon:'⇩' },
+  { id:'annualplan', label:'Action Tracker', icon:'✓' },
+  { id:'annualreview', label:'Annual Review Checklist', icon:'↻' },
+  { id:'operating', label:'Review & Decision Rules', icon:'◉' },
+  { id:'coach',      label:'Portfolio Coach', icon:'◈' },
+
   { group:'PLAN' },
   { id:'retirement', label:'Retirement Projection', icon:'◎' },
+  { id:'stresstest',  label:'Monte Carlo / Stress Tests / SWR', icon:'⊘' },
   { id:'roth',       label:'Roth Conversion', icon:'⟳' },
   { id:'tax',        label:'Tax Planning',   icon:'⊛' },
   { id:'rettools',   label:'Retirement Tools', icon:'⊚' },
   { id:'education',  label:'Education',      icon:'◇' },
   { id:'kids',       label:'Kids',           icon:'◉' },
   { id:'goals',      label:'Goals & Funding', icon:'◇' },
-  { id:'surplus',    label:'Assign Surplus', icon:'+' },
-  { id:'portfoliosetup', label:'Portfolio Setup', icon:'⊞' },
-  { id:'coach',      label:'Portfolio Coach', icon:'◈' },
   { id:'lifeevents', label:'Life-Event Planning', icon:'◇' },
+  { id:'estate',     label:'Estate Planning',icon:'⊙' },
+  { id:'insurance',  label:'Insurance',      icon:'⊕' },
+  { id:'risk',       label:'Risk Management',icon:'⊗' },
+  { id:'protection', label:'Protection Scorecard',icon:'✓' },
   // 'allocation' (Concentration Risk) intentionally not in the nav —
   // with Asset Allocation/Rebalancing and Investment Fee Audit already
   // hidden as not worth showing without real per-account data, the one
   // remaining section (concentration risk) wasn't judged worthwhile
   // either. Route/import/page component all still present below, so
   // this is a one-line re-enable if that changes.
-  { group:'COMPARE' },
-  { id:'compare',    label:'Compare Scenarios', icon:'◫' },
-  { id:'stresstest',  label:'Stress Test & What-If', icon:'⊘' },
+
+  { group:'MANAGE' },
+  { id:'cashflow',   label:'Monthly Cash Flow', icon:'≋' },
+  { id:'surplus',    label:'Assign Surplus', icon:'+' },
+  { id:'networth',   label:'Net Worth',      icon:'◬' },
+  { id:'debt',       label:'Debt Payoff',    icon:'⊝' },
   { id:'scenarios', label:'Saved Scenarios', icon:'◫' },
-  { group:'PROTECT' },
-  { id:'insurance',  label:'Insurance',      icon:'⊕' },
-  { id:'risk',       label:'Risk Management',icon:'⊗' },
-  { id:'protection', label:'Protection Scorecard',icon:'✓' },
-  { id:'estate',     label:'Estate Planning',icon:'⊙' },
-  { group:'REVIEW' },
-  { id:'annualplan', label:'Action Tracker', icon:'✓' },
-  { id:'annualreview', label:'Annual Review Checklist', icon:'↻' },
-  { id:'operating', label:'Review & Decision Rules', icon:'◉' },
+  { id:'compare',    label:'Compare Scenarios', icon:'◫' },
+
+  // Collapsed by default -- pure data-entry/maintenance, not a planning
+  // or decision surface. See the group-header click handler below.
+  { group:'SETUP & DATA', collapsible:true },
+  { id:'settings',   label:'Household Settings',icon:'≡' },
+  { id:'accounts',   label:'Accounts',       icon:'⊞' },
+  { id:'portfoliosetup', label:'Portfolio Setup', icon:'⊞' },
+  { id:'backup', label:'Backup & Restore', icon:'⇩' },
 ]
 
 export default function App() {
   const [page, setPage] = useState('dashboard')
+  // Collapsible nav groups (currently only 'SETUP & DATA') -- collapsed
+  // by default per the 2026-09-12 navigation restructuring; persisted
+  // across reloads via localStorage the same way privacy mode is, so a
+  // household that opens it once doesn't have to re-expand it every visit.
+  const [collapsedGroups, setCollapsedGroups] = useState(() => {
+    try {
+      const saved = localStorage.getItem('pcfo_collapsed_nav_groups')
+      if (saved) return new Set(JSON.parse(saved))
+    } catch { /* ignore */ }
+    return new Set(['SETUP & DATA'])
+  })
+  const toggleGroup = name => setCollapsedGroups(prev => {
+    const next = new Set(prev)
+    next.has(name) ? next.delete(name) : next.add(name)
+    try { localStorage.setItem('pcfo_collapsed_nav_groups', JSON.stringify([...next])) } catch { /* ignore */ }
+    return next
+  })
   const { privacyMode, toggle: togglePrivacy } = usePrivacyMode()
   const [authState, setAuthState] = useState(null) // null = checking
   const [showWelcome, setShowWelcome] = useState(false)
@@ -190,21 +206,38 @@ export default function App() {
           </div>
         )}
         <nav className="sidebar-nav">
-          {NAV.map((n, i) => n.group ? (
-            // Dashboard now sits at index 0 (pinned above the 5 groups,
-            // not itself one of them), so the FIRST group header is
-            // index 1, not 0 -- tighter top margin there, same as
-            // before Dashboard was pulled out of the group list.
-            <div key={i} style={{ marginTop: i===1 ? 4 : 14, marginBottom:2 }}>
-              <div style={{ fontSize:9, fontWeight:700, letterSpacing:'0.1em', color:'var(--text3)', padding:'0 16px', textTransform:'uppercase' }}>{n.group}</div>
-              <div style={{ height:1, background:'var(--border)', margin:'4px 12px 2px' }} />
-            </div>
-          ) : (
-            <button key={n.id} className={`nav-item ${page===n.id?'active':''}`} onClick={() => setPage(n.id)}>
-              <span className="nav-icon">{n.icon}</span>
-              <span className="nav-label">{n.label}</span>
-            </button>
-          ))}
+          {(() => {
+            let currentGroup = null
+            return NAV.map((n, i) => {
+              if (n.group) {
+                currentGroup = n
+                const collapsed = n.collapsible && collapsedGroups.has(n.group)
+                const header = (
+                  <div style={{ fontSize:9, fontWeight:700, letterSpacing:'0.1em', color:'var(--text3)', padding:'0 16px', textTransform:'uppercase', display:'flex', alignItems:'center', justifyContent:'space-between', cursor: n.collapsible ? 'pointer' : 'default' }}>
+                    <span>{n.group}</span>
+                    {n.collapsible && <span style={{ fontSize:10 }}>{collapsed ? '▸' : '▾'}</span>}
+                  </div>
+                )
+                return (
+                  <div key={i} style={{ marginTop: i===0 ? 4 : 14, marginBottom:2 }}>
+                    {n.collapsible ? (
+                      <button onClick={() => toggleGroup(n.group)} style={{ all:'unset', width:'100%', display:'block', cursor:'pointer' }}>
+                        {header}
+                      </button>
+                    ) : header}
+                    <div style={{ height:1, background:'var(--border)', margin:'4px 12px 2px' }} />
+                  </div>
+                )
+              }
+              if (currentGroup?.collapsible && collapsedGroups.has(currentGroup.group)) return null
+              return (
+                <button key={n.id} className={`nav-item ${page===n.id?'active':''}`} onClick={() => setPage(n.id)}>
+                  <span className="nav-icon">{n.icon}</span>
+                  <span className="nav-label">{n.label}</span>
+                </button>
+              )
+            })
+          })()}
           <div style={{ marginTop:'auto', paddingTop:4 }}>
             <div style={{ fontSize:9, fontWeight:700, letterSpacing:'0.1em', color:'var(--text3)', padding:'0 16px', textTransform:'uppercase' }}>REPORTS</div>
             <div style={{ height:1, background:'var(--border)', margin:'4px 12px 2px' }} />
