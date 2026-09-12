@@ -38,7 +38,7 @@ app = FastAPI(title="Personal CFO API")
 # Coach, codex/portfolio-coach-recommendations) -- same "predates this
 # line -> rejected, not silently incomplete" precedent as every earlier
 # table added to this list.
-_BACKUP_TABLES = ("accounts", "planning_inputs", "insurance_policies", "property_policies", "snapshots", "tasks", "cash_flow_items", "surplus_allocations", "saved_scenarios", "life_events", "estate_documents", "estate_beneficiaries", "assumption_reviews", "kids", "holdings", "investment_policies", "securities", "security_snapshots", "recommendations", "recommendation_events")
+_BACKUP_TABLES = ("accounts", "planning_inputs", "insurance_policies", "property_policies", "snapshots", "tasks", "cash_flow_items", "surplus_allocations", "saved_scenarios", "life_events", "estate_documents", "estate_beneficiaries", "assumption_reviews", "kids", "holdings", "account_investment_options", "investment_policies", "securities", "security_snapshots", "recommendations", "recommendation_events")
 
 app.add_middleware(
     CORSMiddleware,
@@ -284,6 +284,47 @@ class HoldingImportRow(BaseModel):
     expense_ratio: Optional[float] = None
     cost_basis: Optional[float] = None
     notes: Optional[str] = None
+
+class AccountInvestmentOption(BaseModel):
+    """A general account-specific investment-option menu entry. NOT a
+    401(k)-fund-menu-only model — this same table/model describes what
+    is buyable/exchangeable in ANY account: a closed employer-plan menu,
+    an open-universe brokerage, an HSA's cash-plus-fund lineup, a 529's
+    age-based portfolios, etc. An option is not an owned Holding until
+    it is separately recorded as one — see holdings_engine.py's
+    docstring for the closed-menu vs. open-universe distinction this
+    feeds."""
+    id: Optional[int] = None
+    account_id: int
+    ticker: Optional[str] = None
+    option_name: str
+    provider_identifier: Optional[str] = None
+    security_type: Optional[str] = None
+    asset_class: str = "unclassified"
+    exposures: List[Dict] = []
+    expense_ratio: Optional[float] = None
+    currently_owned: bool = False
+    available_for_new_contributions: bool = True
+    available_for_exchange: bool = True
+    minimum_investment: Optional[float] = None
+    minimum_allocation_pct: Optional[float] = None
+    maximum_allocation_pct: Optional[float] = None
+    employer_match_eligible: Optional[bool] = None
+    trading_fee: Optional[float] = None
+    redemption_restriction: Optional[str] = None
+    settlement_restriction: Optional[str] = None
+    data_source: str = "manual"
+    as_of_date: Optional[str] = None
+    confidence: str = "low"
+    notes: Optional[str] = None
+
+    @field_validator("asset_class")
+    @classmethod
+    def _option_asset_class_must_be_known(cls, v):
+        from holdings_engine import ASSET_CLASSES
+        if v not in ASSET_CLASSES:
+            raise ValueError(f"Unknown asset_class '{v}' — must be one of {ASSET_CLASSES}")
+        return v
 
 class InvestmentPolicy(BaseModel):
     id: Optional[int] = None
@@ -720,6 +761,87 @@ def delete_holding(holding_id: int):
     conn.commit()
     conn.close()
     return {"deleted": holding_id}
+
+def _option_row_to_dict(row) -> Dict:
+    d = dict(row)
+    d["exposures"] = json.loads(d.pop("exposures_json") or "[]")
+    for flag in ("currently_owned", "available_for_new_contributions", "available_for_exchange"):
+        d[flag] = bool(d[flag])
+    if d["employer_match_eligible"] is not None:
+        d["employer_match_eligible"] = bool(d["employer_match_eligible"])
+    return d
+
+@app.get("/api/account-investment-options")
+def get_account_investment_options(account_id: Optional[int] = None):
+    conn = get_db()
+    if account_id is not None:
+        rows = conn.execute(
+            "SELECT * FROM account_investment_options WHERE account_id=? ORDER BY option_name", (account_id,)
+        ).fetchall()
+    else:
+        rows = conn.execute("SELECT * FROM account_investment_options ORDER BY account_id, option_name").fetchall()
+    conn.close()
+    return [_option_row_to_dict(r) for r in rows]
+
+@app.post("/api/account-investment-options")
+def create_account_investment_option(option: AccountInvestmentOption):
+    conn = get_db()
+    acc = conn.execute("SELECT id FROM accounts WHERE id=?", (option.account_id,)).fetchone()
+    if not acc:
+        conn.close()
+        raise HTTPException(status_code=400, detail=f"account_id {option.account_id} does not exist")
+    cur = conn.execute(
+        "INSERT INTO account_investment_options (account_id, ticker, option_name, provider_identifier, security_type, "
+        "asset_class, exposures_json, expense_ratio, currently_owned, available_for_new_contributions, "
+        "available_for_exchange, minimum_investment, minimum_allocation_pct, maximum_allocation_pct, "
+        "employer_match_eligible, trading_fee, redemption_restriction, settlement_restriction, data_source, "
+        "as_of_date, confidence, notes, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,datetime('now'))",
+        (option.account_id, option.ticker, option.option_name, option.provider_identifier, option.security_type,
+         option.asset_class, json.dumps(option.exposures), option.expense_ratio, int(option.currently_owned),
+         int(option.available_for_new_contributions), int(option.available_for_exchange), option.minimum_investment,
+         option.minimum_allocation_pct, option.maximum_allocation_pct,
+         None if option.employer_match_eligible is None else int(option.employer_match_eligible),
+         option.trading_fee, option.redemption_restriction, option.settlement_restriction, option.data_source,
+         option.as_of_date, option.confidence, option.notes)
+    )
+    conn.commit()
+    option.id = cur.lastrowid
+    conn.close()
+    return option
+
+@app.put("/api/account-investment-options/{option_id}")
+def update_account_investment_option(option_id: int, option: AccountInvestmentOption):
+    conn = get_db()
+    acc = conn.execute("SELECT id FROM accounts WHERE id=?", (option.account_id,)).fetchone()
+    if not acc:
+        conn.close()
+        raise HTTPException(status_code=400, detail=f"account_id {option.account_id} does not exist")
+    conn.execute(
+        "UPDATE account_investment_options SET account_id=?, ticker=?, option_name=?, provider_identifier=?, "
+        "security_type=?, asset_class=?, exposures_json=?, expense_ratio=?, currently_owned=?, "
+        "available_for_new_contributions=?, available_for_exchange=?, minimum_investment=?, minimum_allocation_pct=?, "
+        "maximum_allocation_pct=?, employer_match_eligible=?, trading_fee=?, redemption_restriction=?, "
+        "settlement_restriction=?, data_source=?, as_of_date=?, confidence=?, notes=?, updated_at=datetime('now') "
+        "WHERE id=?",
+        (option.account_id, option.ticker, option.option_name, option.provider_identifier, option.security_type,
+         option.asset_class, json.dumps(option.exposures), option.expense_ratio, int(option.currently_owned),
+         int(option.available_for_new_contributions), int(option.available_for_exchange), option.minimum_investment,
+         option.minimum_allocation_pct, option.maximum_allocation_pct,
+         None if option.employer_match_eligible is None else int(option.employer_match_eligible),
+         option.trading_fee, option.redemption_restriction, option.settlement_restriction, option.data_source,
+         option.as_of_date, option.confidence, option.notes, option_id)
+    )
+    conn.commit()
+    conn.close()
+    return {**option.dict(), "id": option_id}
+
+@app.delete("/api/account-investment-options/{option_id}")
+def delete_account_investment_option(option_id: int):
+    conn = get_db()
+    conn.execute("DELETE FROM account_investment_options WHERE id=?", (option_id,))
+    conn.commit()
+    conn.close()
+    return {"deleted": option_id}
 
 @app.post("/api/holdings/import/preview")
 async def preview_holdings_import(file: UploadFile = File(...)):

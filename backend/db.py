@@ -6,6 +6,15 @@ DB_PATH = os.environ.get("CFO_DB_PATH") or os.path.join(os.path.dirname(__file__
 def get_db():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
+    # SQLite ignores "REFERENCES ... ON DELETE CASCADE" unless foreign key
+    # enforcement is turned on per-connection (it's OFF by default).
+    # holdings.account_id / account_investment_options.account_id /
+    # recommendation_events.recommendation_id all declare ON DELETE CASCADE
+    # (see init_portfolio_coach_tables()) specifically so that deleting an
+    # account or a recommendation doesn't silently orphan Portfolio Coach
+    # rows pointing at it -- an orphaned holding would corrupt
+    # classify_holdings()/reconciliation without ever raising an error.
+    conn.execute("PRAGMA foreign_keys = ON")
     return conn
 
 def init_db():
@@ -745,6 +754,35 @@ def init_portfolio_coach_tables():
             updated_at TEXT DEFAULT (datetime('now'))
         );
         CREATE INDEX IF NOT EXISTS idx_holdings_account_id ON holdings(account_id);
+
+        CREATE TABLE IF NOT EXISTS account_investment_options (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+            ticker TEXT,
+            option_name TEXT NOT NULL,
+            provider_identifier TEXT,
+            security_type TEXT,
+            asset_class TEXT NOT NULL DEFAULT 'unclassified',
+            exposures_json TEXT,
+            expense_ratio REAL,
+            currently_owned INTEGER NOT NULL DEFAULT 0,
+            available_for_new_contributions INTEGER NOT NULL DEFAULT 1,
+            available_for_exchange INTEGER NOT NULL DEFAULT 1,
+            minimum_investment REAL,
+            minimum_allocation_pct REAL,
+            maximum_allocation_pct REAL,
+            employer_match_eligible INTEGER,
+            trading_fee REAL,
+            redemption_restriction TEXT,
+            settlement_restriction TEXT,
+            data_source TEXT NOT NULL DEFAULT 'manual',
+            as_of_date TEXT,
+            confidence TEXT NOT NULL DEFAULT 'low',
+            notes TEXT,
+            created_at TEXT DEFAULT (datetime('now')),
+            updated_at TEXT DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_account_investment_options_account_id ON account_investment_options(account_id);
 
         CREATE TABLE IF NOT EXISTS investment_policies (
             id INTEGER PRIMARY KEY AUTOINCREMENT,

@@ -86,6 +86,62 @@ def is_allocation_blocked(portfolio_type: str) -> bool:
     return portfolio_type not in PORTFOLIO_ACCOUNT_TYPES or portfolio_type in BLOCKED_TYPES
 
 
+# ── Closed-menu vs. open-universe accounts ───────────────────────────────
+# General account-specific model, NOT a 401(k)-only fund-menu model — the
+# same account_investment_options table/logic covers every account type.
+# Closed-menu: the Coach may recommend only options explicitly recorded
+# as available for that specific account (401(k)/Roth 401(k), many HSAs,
+# many 529 plans, certain employer/trust plans — collective trusts and
+# age-based/static 529 portfolios routinely have no public ticker at
+# all, so "recorded" never requires a ticker, only a name + asset class).
+# Open-universe: the Coach may search for candidates (traditional/Roth
+# IRA, taxable brokerage, many custodial accounts), but a candidate is
+# never presented as ACTIONABLE until it is confirmed available at the
+# account's own institution — which, in this schema, means it has been
+# recorded as an account_investment_options row for that account. Search
+# results alone never make a recommendation actionable in either case.
+CLOSED_MENU_TYPES   = {"traditional_401k", "roth_401k", "hsa", "529", "trust"}
+OPEN_UNIVERSE_TYPES  = {"traditional_ira", "roth_ira", "brokerage", "custodial"}
+
+
+def is_closed_menu_account(portfolio_type: str) -> bool:
+    """True for account types whose investable universe is limited to
+    what the plan itself offers (see CLOSED_MENU_TYPES docstring above).
+    An HSA/529/trust not otherwise flagged closed is treated as
+    open-universe by default -- a household can override this per
+    account via account.account_constraints if a specific plan is
+    actually closed-menu, but no such override exists in this schema
+    yet, so the type-level default is what's used."""
+    return portfolio_type in CLOSED_MENU_TYPES
+
+
+def eligible_options_for_account(options: List[Dict], *, for_new_contribution: bool = True) -> List[Dict]:
+    """Filters `options` (this account's OWN account_investment_options
+    rows only -- never another account's) down to ones actually
+    receivable right now. Pass for_new_contribution=False to filter for
+    exchange-eligibility instead of new-contribution-eligibility."""
+    flag = "available_for_new_contributions" if for_new_contribution else "available_for_exchange"
+    return [o for o in options if o.get(flag)]
+
+
+def is_option_actionable(option: Optional[Dict], *, for_new_contribution: bool = True) -> bool:
+    """A candidate is presentable as an ACTIONABLE recommendation only
+    once it is recorded as an available option for the specific
+    account in question -- true for both closed-menu and open-universe
+    accounts. The distinction between the two is upstream of this
+    check: a closed-menu account is never offered a candidate that
+    isn't already recorded here; an open-universe account MAY be
+    offered a ticker-search candidate as a tentative suggestion, but
+    that suggestion must still pass this same check (i.e. get recorded
+    as an account_investment_options row, confirming availability at
+    the account's institution) before it is shown as actionable rather
+    than exploratory."""
+    if not option:
+        return False
+    flag = "available_for_new_contributions" if for_new_contribution else "available_for_exchange"
+    return bool(option.get(flag))
+
+
 # 11 asset classes -- superseded per the controlling product
 # clarification (2026-09-12): US stock split into large/mid/small-cap,
 # international split into developed/emerging, bonds split into US/

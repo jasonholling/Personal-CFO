@@ -19,7 +19,16 @@ from holdings_engine import (
     recommend_contribution_destination, recommend_rebalance_actions,
     concentration_flags, expense_ratio_flags, duplicate_exposure_flags, unclassified_flags,
     parse_holdings_csv, blended_expected_return, blended_expense_ratio, ASSET_CLASSES,
+    is_closed_menu_account, eligible_options_for_account, is_option_actionable,
+    CLOSED_MENU_TYPES, OPEN_UNIVERSE_TYPES,
 )
+
+
+def option(id, account_id, option_name="Fund", ticker=None, asset_class="us_large_cap",
+           available_for_new_contributions=True, available_for_exchange=True, exposures=None):
+    return {"id": id, "account_id": account_id, "option_name": option_name, "ticker": ticker,
+            "asset_class": asset_class, "available_for_new_contributions": available_for_new_contributions,
+            "available_for_exchange": available_for_exchange, "exposures": exposures}
 
 
 def account(id, account_type=None, portfolio_account_type=None, balance=0, owner="jason"):
@@ -555,3 +564,64 @@ class TestBlendedExpenseRatio:
 
     def test_no_data_returns_none(self):
         assert blended_expense_ratio([holding(1, 1, market_value=50000, expense_ratio=None)]) is None
+
+
+class TestAccountInvestmentOptionEligibility:
+    """Closed-menu vs. open-universe account behavior (reference tests
+    #8, #9, #10, #13)."""
+
+    def test_closed_menu_types_cover_401k_hsa_529_trust(self):
+        assert CLOSED_MENU_TYPES == {"traditional_401k", "roth_401k", "hsa", "529", "trust"}
+        for t in CLOSED_MENU_TYPES:
+            assert is_closed_menu_account(t)
+
+    def test_open_universe_types_not_closed_menu(self):
+        for t in OPEN_UNIVERSE_TYPES:
+            assert not is_closed_menu_account(t)
+
+    def test_reference_case_8_same_fund_available_in_one_account_not_another(self):
+        """A fund recorded as available in account 1 does not become
+        available in account 2 just because it exists somewhere."""
+        acct1_options = [option(1, 1, option_name="Low-Cost Bond Index", available_for_new_contributions=True)]
+        acct2_options = []  # same fund never recorded for account 2
+        assert eligible_options_for_account(acct1_options)
+        assert eligible_options_for_account(acct2_options) == []
+
+    def test_reference_case_9_closed_menu_never_receives_unavailable_option(self):
+        """A closed-menu account (401k) must never be offered an option
+        that isn't recorded as available for new contributions in that
+        SAME account, even if the option row exists (e.g. it was closed
+        to new money by the plan)."""
+        opts = [option(1, 1, option_name="Legacy Fund (closed to new money)", available_for_new_contributions=False)]
+        assert is_closed_menu_account("traditional_401k")
+        assert eligible_options_for_account(opts) == []
+        assert not is_option_actionable(opts[0])
+
+    def test_reference_case_10_open_universe_requires_recorded_availability(self):
+        """An open-universe account (e.g. a Roth IRA) may search
+        broadly, but a candidate found via ticker search alone --
+        never recorded as an account_investment_options row for THIS
+        account -- is not actionable. is_option_actionable(None)
+        models "found via search, not yet confirmed available.\""""
+        assert not is_closed_menu_account("roth_ira")
+        search_candidate_not_yet_recorded = None
+        assert not is_option_actionable(search_candidate_not_yet_recorded)
+        recorded_and_confirmed = option(1, 5, option_name="Total Market Index", available_for_new_contributions=True)
+        assert is_option_actionable(recorded_and_confirmed)
+
+    def test_reference_case_13_no_ticker_collective_trust_classified_and_recommended(self):
+        """A 401(k) collective investment trust has no public ticker but
+        can still be recorded (name + asset class only) and is fully
+        eligible -- ticker is optional, never required."""
+        opts = [option(1, 1, option_name="Stable Value Collective Trust", ticker=None,
+                        asset_class="us_bonds", available_for_new_contributions=True)]
+        assert opts[0]["ticker"] is None
+        assert eligible_options_for_account(opts) == opts
+        assert is_option_actionable(opts[0])
+
+    def test_exchange_eligibility_is_a_separate_flag_from_new_contributions(self):
+        opts = [option(1, 1, available_for_new_contributions=False, available_for_exchange=True)]
+        assert eligible_options_for_account(opts, for_new_contribution=True) == []
+        assert eligible_options_for_account(opts, for_new_contribution=False) == opts
+        assert not is_option_actionable(opts[0], for_new_contribution=True)
+        assert is_option_actionable(opts[0], for_new_contribution=False)
