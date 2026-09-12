@@ -361,6 +361,57 @@ def recommend_contribution_destination(comparison: Dict, contribution_amount: fl
     return actions
 
 
+def resolve_new_money_destinations(contribution_actions: List[Dict], options_by_account: Dict[int, List[Dict]]) -> List[Dict]:
+    """External review finding #1 (2026-09-12, commit 4812d84):
+    recommend_contribution_destination's own output stops at "$X ->
+    an asset class" -- never an eligible account or fund, even though
+    account_investment_options already exists. This attaches an actual
+    destination to each of that function's actions by searching across
+    EVERY household account's own account_investment_options rows,
+    restricted to ones RECORDED as available_for_new_contributions
+    (never a candidate merely found via ticker search -- see
+    is_option_actionable's own docstring for why).
+
+    Selection mirrors propose_account_option_mix's own order: a
+    single-asset-class option is preferred over a multi-exposure one,
+    then the lowest expense_ratio (unknown fee sorts last), then
+    option_name for determinism.
+
+    `options_by_account`: {account_id: [account_investment_options
+    rows]} for every household account -- not just one.
+
+    Each action gets a `destination` key: {"account_id", "option_id",
+    "option_name", "ticker"} when an eligible option exists anywhere,
+    or None when it doesn't -- an unresolvable asset class is reported
+    explicitly, NEVER silently assigned to an arbitrary account or
+    left implying any account will do."""
+    def sort_key(opt, is_single):
+        er = opt.get("expense_ratio")
+        return (0 if is_single else 1, er if er is not None else float("inf"), opt.get("option_name") or "")
+
+    resolved = []
+    for action in contribution_actions:
+        asset_class = action.get("asset_class")
+        if not asset_class:
+            resolved.append({**action, "destination": None})
+            continue
+        candidates = []
+        for account_id, options in options_by_account.items():
+            for opt in eligible_options_for_account(options, for_new_contribution=True):
+                weights = holding_exposure_weights(opt)
+                if asset_class in weights:
+                    candidates.append((account_id, opt, len(weights) == 1))
+        if not candidates:
+            resolved.append({**action, "destination": None})
+            continue
+        account_id, opt, is_single = sorted(candidates, key=lambda c: sort_key(c[1], c[2]))[0]
+        resolved.append({**action, "destination": {
+            "account_id": account_id, "option_id": opt.get("id"), "option_name": opt.get("option_name"),
+            "ticker": opt.get("ticker"), "is_single_class": is_single,
+        }})
+    return resolved
+
+
 def recommend_multi_account_contribution_destination(comparison: Dict, account_pools: List[Dict]) -> Dict:
     """The brief's three new-money workflows (a specific account, several
     accounts' contributions this period, a household cash lump sum split

@@ -325,7 +325,13 @@ export default function PortfolioCoach({ onNavigate }) {
             {(contribResult.actions || []).length === 0 && <div style={{ color: 'var(--muted)', fontSize: 13 }}>No underweight asset classes to fund — allocation is already at or above target everywhere.</div>}
             {(contribResult.actions || []).map((a, i) => (
               <div key={i} style={{ fontSize: 13, padding: '6px 0', borderTop: i ? '1px solid var(--border)' : 'none' }}>
-                <strong>{fmt(a.amount)}</strong> → {a.asset_class?.replace(/_/g, ' ')} — {a.reason}
+                <strong>{fmt(a.amount)}</strong> → {a.asset_class?.replace(/_/g, ' ')}
+                {a.destination ? (
+                  <> — <strong>{a.destination.option_name}</strong>{a.destination.ticker ? ` (${a.destination.ticker})` : ''} in {a.destination.account_name}</>
+                ) : a.asset_class && (
+                  <span style={{ color: 'var(--amber)' }}> — no eligible investment option recorded for this asset class in any account yet</span>
+                )}
+                <div style={{ color: 'var(--muted)', fontSize: 12 }}>{a.reason}</div>
               </div>
             ))}
           </div>

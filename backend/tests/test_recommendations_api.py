@@ -209,6 +209,40 @@ class TestRecommendationsDecisionLifecycle:
         assert r.status_code == 404
 
 
+class TestContributionDestinationNamesAccountAndFund:
+    """External review finding #1 (2026-09-12, commit 4812d84):
+    "Where should new money go?" must name an actual account and fund,
+    not stop at the asset class."""
+
+    def test_names_the_recorded_eligible_option(self, client):
+        acc = _create_account(client, account_type="401k", name="401k")
+        client.post("/api/holdings", json={
+            "account_id": acc["id"], "security_name": "All Stock", "market_value": 100000, "asset_class": "us_large_cap",
+        })
+        client.post("/api/account-investment-options", json={
+            "account_id": acc["id"], "option_name": "Stable Value Fund", "asset_class": "us_bonds",
+        })
+        _save_policy(client, target_us_large_cap_pct=60, target_us_bonds_pct=40)
+        r = client.post("/api/portfolio/contribution-destination", json={"amount": 10000})
+        assert r.status_code == 200, r.text
+        actions = r.json()["actions"]
+        bonds_action = next(a for a in actions if a["asset_class"] == "us_bonds")
+        assert bonds_action["destination"]["option_name"] == "Stable Value Fund"
+        assert bonds_action["destination"]["account_id"] == acc["id"]
+        assert bonds_action["destination"]["account_name"] == "401k"
+
+    def test_no_recorded_option_reports_destination_as_none(self, client):
+        acc = _create_account(client)
+        client.post("/api/holdings", json={
+            "account_id": acc["id"], "security_name": "All Stock", "market_value": 100000, "asset_class": "us_large_cap",
+        })
+        _save_policy(client, target_us_large_cap_pct=60, target_us_bonds_pct=40)
+        r = client.post("/api/portfolio/contribution-destination", json={"amount": 10000})
+        actions = r.json()["actions"]
+        bonds_action = next(a for a in actions if a["asset_class"] == "us_bonds")
+        assert bonds_action["destination"] is None
+
+
 class TestMultiAccountContributionDestination:
     """Reference test #18: multiple-account new money reduces household
     drift, via /api/portfolio/contribution-destination/multi-account."""

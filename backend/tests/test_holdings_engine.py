@@ -16,7 +16,8 @@ from holdings_engine import (
     resolve_portfolio_account_type, is_allocation_blocked, PORTFOLIO_ACCOUNT_TYPES,
     reconcile_account_holdings, classify_holdings, compute_current_allocation,
     holding_exposure_weights, policy_targets_by_class, compare_to_target,
-    recommend_contribution_destination, recommend_multi_account_contribution_destination,
+    recommend_contribution_destination, resolve_new_money_destinations,
+    recommend_multi_account_contribution_destination,
     recommend_rebalance_actions,
     concentration_flags, expense_ratio_flags, duplicate_exposure_flags, unclassified_flags,
     parse_holdings_csv, blended_expected_return, blended_expense_ratio, ASSET_CLASSES,
@@ -297,6 +298,63 @@ class TestRecommendContributionDestination:
     def test_zero_contribution_returns_no_actions(self):
         current = compute_current_allocation([holding(1, 1, market_value=100000, asset_class="us_large_cap")])
         assert recommend_contribution_destination(compare_to_target(current, policy()), 0) == []
+
+
+class TestResolveNewMoneyDestinations:
+    """External review finding #1 (2026-09-12, commit 4812d84):
+    "Where should new money go?" must name an actual account and fund,
+    not stop at the asset class."""
+
+    def test_names_the_eligible_account_and_fund(self):
+        actions = [{"asset_class": "us_bonds", "amount": 5000, "reason": "underweight"}]
+        options_by_account = {
+            1: [mix_option(1, "Total Bond Index", ticker="BND", asset_class="us_bonds", expense_ratio=0.0005)],
+        }
+        resolved = resolve_new_money_destinations(actions, options_by_account)
+        assert resolved[0]["destination"]["account_id"] == 1
+        assert resolved[0]["destination"]["option_name"] == "Total Bond Index"
+        assert resolved[0]["destination"]["ticker"] == "BND"
+        assert resolved[0]["amount"] == 5000  # underlying dollar amount untouched
+
+    def test_prefers_lower_cost_eligible_option_across_accounts(self):
+        actions = [{"asset_class": "us_large_cap", "amount": 1000, "reason": "underweight"}]
+        options_by_account = {
+            1: [mix_option(1, "Pricier Index", asset_class="us_large_cap", expense_ratio=0.005)],
+            2: [mix_option(2, "Cheaper Index", asset_class="us_large_cap", expense_ratio=0.0003)],
+        }
+        resolved = resolve_new_money_destinations(actions, options_by_account)
+        assert resolved[0]["destination"]["account_id"] == 2
+        assert resolved[0]["destination"]["option_name"] == "Cheaper Index"
+
+    def test_prefers_single_class_option_over_multi_exposure(self):
+        actions = [{"asset_class": "us_bonds", "amount": 1000, "reason": "underweight"}]
+        options_by_account = {
+            1: [mix_option(1, "Target Date 2050", expense_ratio=0.0003,
+                            exposures=[{"asset_class": "us_large_cap", "weight_pct": 60}, {"asset_class": "us_bonds", "weight_pct": 40}])],
+            2: [mix_option(2, "Pure Bond Index", asset_class="us_bonds", expense_ratio=0.002)],
+        }
+        resolved = resolve_new_money_destinations(actions, options_by_account)
+        assert resolved[0]["destination"]["option_name"] == "Pure Bond Index"
+
+    def test_no_eligible_destination_anywhere_is_explicit_not_silent(self):
+        actions = [{"asset_class": "real_estate", "amount": 1000, "reason": "underweight"}]
+        options_by_account = {1: [mix_option(1, "Bond Index", asset_class="us_bonds")]}
+        resolved = resolve_new_money_destinations(actions, options_by_account)
+        assert resolved[0]["destination"] is None
+
+    def test_closed_to_new_contributions_option_never_selected(self):
+        """Reference tests #9/#10's counterpart for new-money."""
+        actions = [{"asset_class": "us_large_cap", "amount": 1000, "reason": "underweight"}]
+        options_by_account = {
+            1: [mix_option(1, "Closed Fund", asset_class="us_large_cap", available_for_new_contributions=False)],
+        }
+        resolved = resolve_new_money_destinations(actions, options_by_account)
+        assert resolved[0]["destination"] is None
+
+    def test_action_with_no_asset_class_gets_no_destination(self):
+        actions = [{"asset_class": None, "amount": 500, "reason": "no gap to correct"}]
+        resolved = resolve_new_money_destinations(actions, {1: [mix_option(1, "Any Fund", asset_class="us_large_cap")]})
+        assert resolved[0]["destination"] is None
 
 
 class TestRecommendMultiAccountContributionDestination:
@@ -656,9 +714,12 @@ class TestParseHoldingsCsv:
         assert "asset_class" in result["errors"][0]["message"]
 
 
-def mix_option(id, option_name="Fund", ticker=None, asset_class="us_large_cap", expense_ratio=None, exposures=None):
+def mix_option(id, option_name="Fund", ticker=None, asset_class="us_large_cap", expense_ratio=None, exposures=None,
+               available_for_new_contributions=True, available_for_exchange=True):
     return {"id": id, "option_name": option_name, "ticker": ticker, "asset_class": asset_class,
-            "expense_ratio": expense_ratio, "exposures": exposures}
+            "expense_ratio": expense_ratio, "exposures": exposures,
+            "available_for_new_contributions": available_for_new_contributions,
+            "available_for_exchange": available_for_exchange}
 
 
 class TestProposeAccountOptionMix:
