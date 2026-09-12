@@ -1,0 +1,1026 @@
+"""
+Portfolio holdings and allocation — pure calculation module
+(codex/portfolio-coach-recommendations).
+
+Decision support only. Nothing here places a trade, connects to a
+brokerage, or presents a recommendation as guaranteed or fiduciary
+advice.
+
+Deliberately independent of the existing allocation_engine.py
+(account-level stock_allocation_pct guess, still used by the Net Worth
+page's own allocation/fee/concentration cards — untouched by this
+branch). When real holdings exist for an account, THIS module's
+per-holding asset_class data is authoritative for that account;
+allocation_engine.py's account-level guess is never consulted here.
+"""
+from typing import Dict, List, Optional, Set
+import csv
+import io
+
+# ── Account-type model ──────────────────────────────────────────────────
+# Deliberately separate from net_worth_engine.VALID_ACCOUNT_TYPES / the
+# existing `accounts.account_type` column — see db.py's
+# init_portfolio_coach_tables() docstring for the full rationale.
+PORTFOLIO_ACCOUNT_TYPES = frozenset({
+    "brokerage", "traditional_401k", "roth_401k", "traditional_ira",
+    "roth_ira", "hsa", "529", "custodial", "checking", "savings",
+    "trust", "other",
+})
+
+# Legacy accounts.account_type -> this module's own enum. Lossy in one
+# direction: a single legacy "401k" account_type covers BOTH traditional
+# and Roth 401k dollars, split only by a HOUSEHOLD-WIDE percentage
+# (planning_inputs.pretax_401k_pct) that projection_engine.py/
+# simulation_engine.py already use for retirement-withdrawal math —
+# there is no per-account distinction to derive from. Defaults every
+# plain "401k" row to "traditional_401k" (the majority case), NOT a
+# guess masquerading as certainty — a household with a genuine separate
+# Roth 401k account sets portfolio_account_type="roth_401k" explicitly
+# via the override column.
+_LEGACY_TO_PORTFOLIO_TYPE = {
+    "taxable":   "brokerage",
+    "401k":      "traditional_401k",
+    "ira":       "traditional_ira",
+    "roth_ira":  "roth_ira",
+    "hsa":       "hsa",
+    "529":       "529",
+    "custodial": "custodial",
+    "checking":  "checking",
+    "savings":   "savings",
+}
+
+
+def resolve_portfolio_account_type(account: Dict) -> str:
+    """account.portfolio_account_type override if explicitly set, else
+    derived from the legacy account_type, else "other" (real_estate/
+    business/insurance/daf/debt/an unrecognized legacy type, or no
+    account_type at all — every one of these BLOCKS recommendations for
+    that account per the brief, exactly like a missing type would)."""
+    override = account.get("portfolio_account_type")
+    if override:
+        return override
+    return _LEGACY_TO_PORTFOLIO_TYPE.get(account.get("account_type"), "other")
+
+
+TAXABLE_GAIN_TYPES    = {"brokerage"}
+PRETAX_RMD_TYPES      = {"traditional_401k", "traditional_ira"}
+ROTH_TYPES            = {"roth_401k", "roth_ira"}
+HSA_TYPES             = {"hsa"}
+CHILD_SPECIFIC_TYPES  = {"529", "custodial"}
+LIQUIDITY_TYPES       = {"checking", "savings"}
+REVIEW_REQUIRED_TYPES = {"trust"}
+BLOCKED_TYPES         = {"other"}
+
+# Household allocation includes every type EXCEPT the three carve-outs
+# the brief calls out explicitly (HSA reported separately, 529/
+# custodial excluded as child-specific, checking/savings excluded as a
+# liquidity reserve). "other"/unresolvable is excluded via
+# is_allocation_blocked below, not this set, since trust IS eligible
+# (flagged for review, not excluded).
+HOUSEHOLD_ALLOCATION_TYPES = PORTFOLIO_ACCOUNT_TYPES - HSA_TYPES - CHILD_SPECIFIC_TYPES - LIQUIDITY_TYPES - BLOCKED_TYPES
+
+
+def is_allocation_blocked(portfolio_type: str) -> bool:
+    """"other" or an unresolvable type blocks recommendations for that
+    account until it's classified — per the brief verbatim."""
+    return portfolio_type not in PORTFOLIO_ACCOUNT_TYPES or portfolio_type in BLOCKED_TYPES
+
+
+# ── Closed-menu vs. open-universe accounts ───────────────────────────────
+# General account-specific model, NOT a 401(k)-only fund-menu model — the
+# same account_investment_options table/logic covers every account type.
+# Closed-menu: the Coach may recommend only options explicitly recorded
+# as available for that specific account (401(k)/Roth 401(k), many HSAs,
+# many 529 plans, certain employer/trust plans — collective trusts and
+# age-based/static 529 portfolios routinely have no public ticker at
+# all, so "recorded" never requires a ticker, only a name + asset class).
+# Open-universe: the Coach may search for candidates (traditional/Roth
+# IRA, taxable brokerage, many custodial accounts), but a candidate is
+# never presented as ACTIONABLE until it is confirmed available at the
+# account's own institution — which, in this schema, means it has been
+# recorded as an account_investment_options row for that account. Search
+# results alone never make a recommendation actionable in either case.
+CLOSED_MENU_TYPES   = {"traditional_401k", "roth_401k", "hsa", "529", "trust"}
+OPEN_UNIVERSE_TYPES  = {"traditional_ira", "roth_ira", "brokerage", "custodial"}
+
+
+def is_closed_menu_account(portfolio_type: str) -> bool:
+    """True for account types whose investable universe is limited to
+    what the plan itself offers (see CLOSED_MENU_TYPES docstring above).
+    An HSA/529/trust not otherwise flagged closed is treated as
+    open-universe by default -- a household can override this per
+    account via account.account_constraints if a specific plan is
+    actually closed-menu, but no such override exists in this schema
+    yet, so the type-level default is what's used."""
+    return portfolio_type in CLOSED_MENU_TYPES
+
+
+def eligible_options_for_account(options: List[Dict], *, for_new_contribution: bool = True) -> List[Dict]:
+    """Filters `options` (this account's OWN account_investment_options
+    rows only -- never another account's) down to ones actually
+    receivable right now. Pass for_new_contribution=False to filter for
+    exchange-eligibility instead of new-contribution-eligibility."""
+    flag = "available_for_new_contributions" if for_new_contribution else "available_for_exchange"
+    return [o for o in options if o.get(flag)]
+
+
+def is_option_actionable(option: Optional[Dict], *, for_new_contribution: bool = True) -> bool:
+    """A candidate is presentable as an ACTIONABLE recommendation only
+    once it is recorded as an available option for the specific
+    account in question -- true for both closed-menu and open-universe
+    accounts. The distinction between the two is upstream of this
+    check: a closed-menu account is never offered a candidate that
+    isn't already recorded here; an open-universe account MAY be
+    offered a ticker-search candidate as a tentative suggestion, but
+    that suggestion must still pass this same check (i.e. get recorded
+    as an account_investment_options row, confirming availability at
+    the account's institution) before it is shown as actionable rather
+    than exploratory."""
+    if not option:
+        return False
+    flag = "available_for_new_contributions" if for_new_contribution else "available_for_exchange"
+    return bool(option.get(flag))
+
+
+# 11 asset classes -- superseded per the controlling product
+# clarification (2026-09-12): US stock split into large/mid/small-cap,
+# international split into developed/emerging, bonds split into US/
+# international. An earlier internal draft used a coarser 8-class model
+# (us_large_cap/us_mid_small_cap/international_stock/bonds/...); this
+# is the one the engine and every policy/recommendation now uses.
+ASSET_CLASSES = (
+    "us_large_cap", "us_mid_cap", "us_small_cap",
+    "international_developed", "emerging_markets",
+    "us_bonds", "international_bonds",
+    "cash", "real_estate", "alternatives", "unclassified",
+)
+
+
+# ── Reconciliation ───────────────────────────────────────────────────────
+
+def reconcile_account_holdings(account: Dict, account_holdings: List[Dict]) -> Dict:
+    """Compares an account's own balance against the sum of its
+    holdings' market_value. Never invents missing holdings data — a
+    mismatch is an explicit unclassified remainder (positive: holdings
+    under-total the account; negative: over-total, e.g. stale data
+    after a withdrawal) plus a warning."""
+    account_balance = account.get("balance", 0) or 0
+    holdings_total = sum(h.get("market_value", 0) or 0 for h in account_holdings)
+    remainder = round(account_balance - holdings_total, 2)
+    RECONCILIATION_TOLERANCE = 1.0
+    has_warning = abs(remainder) > RECONCILIATION_TOLERANCE
+    return {
+        "account_id": account.get("id"),
+        "account_balance": round(account_balance, 2),
+        "holdings_total": round(holdings_total, 2),
+        "unreconciled_remainder": remainder,
+        "has_warning": has_warning,
+        "warning": (
+            f"Holdings total ${holdings_total:,.0f} does not match the account balance "
+            f"${account_balance:,.0f} -- ${remainder:,.0f} is shown as an unclassified remainder "
+            f"rather than assumed." if has_warning else None
+        ),
+    }
+
+
+# ── Classification ───────────────────────────────────────────────────────
+
+def classify_holdings(accounts: List[Dict], holdings: List[Dict]) -> Dict:
+    """Groups every holding by its parent account's resolved portfolio
+    account type into the behavior buckets the brief defines. Returns
+    holdings augmented with `_portfolio_account_type`/`_account` (new
+    dicts, originals untouched). Holdings inside 529/custodial accounts
+    retain their child owner (via `_account["owner"]`) and never land in
+    `household`."""
+    accounts_by_id = {a["id"]: a for a in accounts}
+    household, hsa, child_specific, liquidity, blocked, review_required = [], [], [], [], [], []
+    for h in holdings:
+        account = accounts_by_id.get(h.get("account_id"))
+        if account is None:
+            blocked.append({**h, "_portfolio_account_type": None, "_account": None})
+            continue
+        ptype = resolve_portfolio_account_type(account)
+        enriched = {**h, "_portfolio_account_type": ptype, "_account": account}
+        if is_allocation_blocked(ptype):
+            blocked.append(enriched)
+        elif ptype in HSA_TYPES:
+            hsa.append(enriched)
+        elif ptype in CHILD_SPECIFIC_TYPES:
+            child_specific.append(enriched)
+        elif ptype in LIQUIDITY_TYPES:
+            liquidity.append(enriched)
+        else:
+            household.append(enriched)
+            if ptype in REVIEW_REQUIRED_TYPES:
+                review_required.append(enriched)
+    return {
+        "household": household, "hsa": hsa, "child_specific": child_specific,
+        "liquidity": liquidity, "blocked": blocked, "review_required": review_required,
+    }
+
+
+# ── Current allocation ───────────────────────────────────────────────────
+
+def holding_exposure_weights(holding: Dict) -> Dict[str, float]:
+    """Fractional (sums to 1.0) asset-class exposure for a single
+    holding. A multi-asset holding (a target-date/balanced fund with
+    reliable component weights) carries its own `exposures` list --
+    [{"asset_class": ..., "weight_pct": ...}, ...] -- normalized here
+    to sum to exactly 1.0 (rounding-safe: any residual goes to the
+    largest-weight entry) rather than trusting the caller's own
+    percentages to already sum to 100. A holding with no `exposures` at
+    all falls back to its single `asset_class` field at 100% -- the
+    single-asset case is just exposures=[{asset_class, 100}], so every
+    existing single-class holding/test is unaffected. Per the brief:
+    "must not be forced into one category when reliable component
+    weights are available" -- this is the mechanism that satisfies it."""
+    exposures = holding.get("exposures")
+    if not exposures:
+        asset_class = holding.get("asset_class") or "unclassified"
+        if asset_class not in ASSET_CLASSES:
+            asset_class = "unclassified"
+        return {asset_class: 1.0}
+    raw = {}
+    for e in exposures:
+        ac = e.get("asset_class") or "unclassified"
+        if ac not in ASSET_CLASSES:
+            ac = "unclassified"
+        raw[ac] = raw.get(ac, 0.0) + (e.get("weight_pct", 0) or 0)
+    total_weight = sum(raw.values())
+    if total_weight <= 0:
+        return {"unclassified": 1.0}
+    normalized = {ac: w / total_weight for ac, w in raw.items()}
+    # Rounding-safe: force the exact sum to 1.0 by adjusting the
+    # largest-weight entry with whatever residual float error remains,
+    # so compute_current_allocation's own total never silently drifts.
+    residual = 1.0 - sum(normalized.values())
+    if residual and normalized:
+        largest = max(normalized, key=normalized.get)
+        normalized[largest] += residual
+    return normalized
+
+
+def compute_current_allocation(classified_holdings: List[Dict]) -> Dict:
+    """Current dollar/percentage allocation by asset class, using each
+    holding's own (possibly multi-class) exposure weights -- see
+    holding_exposure_weights(). An unclassified/unrecognized asset_class
+    is counted in its own "unclassified" bucket, never dropped or
+    guessed into a real class."""
+    by_class = {c: 0.0 for c in ASSET_CLASSES}
+    total = 0.0
+    for h in classified_holdings:
+        value = h.get("market_value", 0) or 0
+        for asset_class, weight in holding_exposure_weights(h).items():
+            by_class[asset_class] += value * weight
+        total += value
+    pct_by_class = {c: (round(v / total * 100, 2) if total > 0 else 0.0) for c, v in by_class.items()}
+    return {"total": round(total, 2), "by_class": {c: round(v, 2) for c, v in by_class.items()}, "pct_by_class": pct_by_class}
+
+
+# ── Policy comparison ─────────────────────────────────────────────────────
+
+POLICY_TARGET_FIELD_TO_ASSET_CLASS = {
+    "target_us_large_cap_pct":           "us_large_cap",
+    "target_us_mid_cap_pct":             "us_mid_cap",
+    "target_us_small_cap_pct":           "us_small_cap",
+    "target_international_developed_pct": "international_developed",
+    "target_emerging_markets_pct":       "emerging_markets",
+    "target_us_bonds_pct":               "us_bonds",
+    "target_international_bonds_pct":    "international_bonds",
+    "target_cash_pct":                   "cash",
+    "target_real_estate_pct":            "real_estate",
+    "target_alternatives_pct":           "alternatives",
+}
+
+
+def policy_targets_by_class(policy: Dict) -> Dict[str, float]:
+    targets = {c: 0.0 for c in ASSET_CLASSES}
+    for field, asset_class in POLICY_TARGET_FIELD_TO_ASSET_CLASS.items():
+        targets[asset_class] = policy.get(field, 0) or 0
+    return targets
+
+
+def compare_to_target(current_allocation: Dict, policy: Dict) -> Dict:
+    """Current vs. target, drift-band-aware. deviation_pct is signed:
+    positive = overweight, negative = underweight."""
+    targets = policy_targets_by_class(policy)
+    drift_band = policy.get("drift_band_pct", 5) or 5
+    total = current_allocation["total"]
+    deviations = {}
+    for asset_class in ASSET_CLASSES:
+        current_pct = current_allocation["pct_by_class"].get(asset_class, 0.0)
+        target_pct = targets.get(asset_class, 0.0)
+        deviation_pct = round(current_pct - target_pct, 2)
+        deviation_dollars = round(deviation_pct / 100 * total, 2)
+        deviations[asset_class] = {
+            "current_pct": current_pct, "target_pct": round(target_pct, 2),
+            "deviation_pct": deviation_pct, "deviation_dollars": deviation_dollars,
+            "within_drift_band": abs(deviation_pct) <= drift_band,
+        }
+    return {"drift_band_pct": drift_band, "by_class": deviations,
+            "any_outside_band": any(not d["within_drift_band"] for d in deviations.values())}
+
+
+# ── Contribution-first destination ───────────────────────────────────────
+
+def recommend_contribution_destination(comparison: Dict, contribution_amount: float) -> List[Dict]:
+    """New money goes exclusively to the most-underweight classes first,
+    up to each one's own dollar gap — never an already-at-or-above-
+    target class."""
+    if contribution_amount <= 0:
+        return []
+    underweight = [
+        (asset_class, -d["deviation_dollars"])
+        for asset_class, d in comparison["by_class"].items()
+        if d["deviation_dollars"] < 0 and asset_class != "unclassified"
+    ]
+    underweight.sort(key=lambda pair: pair[1], reverse=True)
+    remaining = contribution_amount
+    actions = []
+    for asset_class, gap in underweight:
+        if remaining <= 0:
+            break
+        amount = min(remaining, gap)
+        if amount <= 0:
+            continue
+        actions.append({
+            "asset_class": asset_class, "amount": round(amount, 2),
+            "reason": f"Underweight by ${gap:,.0f} against target -- directing new contributions here closes the gap without selling anything.",
+        })
+        remaining -= amount
+    if remaining > 0.01 and actions:
+        actions.append({
+            "asset_class": None, "amount": round(remaining, 2),
+            "reason": "Every underweight asset class is now fully funded to target -- the remainder has no drift to correct.",
+        })
+    elif not actions:
+        actions.append({
+            "asset_class": None, "amount": round(contribution_amount, 2),
+            "reason": "No asset class is currently underweight -- this contribution doesn't need to be targeted for rebalancing purposes.",
+        })
+    return actions
+
+
+def recommend_multi_account_contribution_destination(comparison: Dict, account_pools: List[Dict]) -> Dict:
+    """The brief's three new-money workflows (a specific account, several
+    accounts' contributions this period, a household cash lump sum split
+    across eligible accounts) collapse to the same shape here: one or
+    more independent (account, dollars, eligible classes) pools to
+    allocate. "Calculate the allocation of new money that minimizes
+    remaining household drift. Do not merely allocate new money
+    according to target percentages" -- this is NOT a fixed-percentage
+    split. Each round, greedily funds whichever (pool, asset class) pair
+    represents the LARGEST remaining household gap that pool is actually
+    eligible to buy, repeating until every pool is exhausted or every
+    gap is closed. A pool with eligible_classes=None may fund any
+    underweight class (an open-universe account with no closed-menu
+    restriction modeled); a pool with an explicit list is constrained to
+    it (e.g. a 401(k) whose only underweight-covering option is bonds).
+
+    account_pools: [{"account_id":, "amount":, "eligible_classes": [...] or None}]
+
+    Returns {"actions": [...], "unallocated": [...], "remaining_drift": {...}}
+    -- unallocated pools/remaining_drift are surfaced explicitly, never
+    silently dropped, when a pool's eligible classes can't fully use its
+    own dollars (e.g. every gap it can address is already closed)."""
+    remaining_gap = {
+        asset_class: -d["deviation_dollars"]
+        for asset_class, d in comparison["by_class"].items()
+        if d["deviation_dollars"] < 0 and asset_class != "unclassified"
+    }
+    pools = [
+        {"account_id": p["account_id"], "remaining": p.get("amount", 0) or 0, "eligible_classes": p.get("eligible_classes")}
+        for p in account_pools if (p.get("amount", 0) or 0) > 0
+    ]
+    actions = []
+    while True:
+        best = None  # (gap, pool, asset_class)
+        for pool in pools:
+            if pool["remaining"] <= 0.01:
+                continue
+            eligible = pool["eligible_classes"]
+            for asset_class, gap in remaining_gap.items():
+                if gap <= 0.01:
+                    continue
+                if eligible is not None and asset_class not in eligible:
+                    continue
+                if best is None or gap > best[0]:
+                    best = (gap, pool, asset_class)
+        if best is None:
+            break
+        gap, pool, asset_class = best
+        amount = min(pool["remaining"], gap)
+        actions.append({
+            "account_id": pool["account_id"], "asset_class": asset_class, "amount": round(amount, 2),
+            "reason": (
+                f"Largest remaining household underweight ({asset_class.replace('_', ' ')}) this account's "
+                f"contribution can actually fund -- minimizes remaining household drift rather than following a "
+                f"fixed percentage split."
+            ),
+        })
+        pool["remaining"] -= amount
+        remaining_gap[asset_class] -= amount
+    unallocated = [{"account_id": p["account_id"], "amount": round(p["remaining"], 2)} for p in pools if p["remaining"] > 0.01]
+    return {
+        "actions": actions,
+        "unallocated": unallocated,
+        "remaining_drift": {c: round(v, 2) for c, v in remaining_gap.items() if v > 0.01},
+    }
+
+
+# ── Fund/option comparison ("which mix best implements my policy?") ──────
+
+def propose_account_option_mix(options: List[Dict], target_weights_by_class: Dict[str, float]) -> Dict:
+    """"Given the investments available in this account, which mix best
+    implements my household allocation with reasonable fees and limited
+    overlap?"
+
+    `options` must already be the ELIGIBLE options for this specific
+    account (see eligible_options_for_account -- this function never
+    searches beyond what's passed in, and never assumes a candidate not
+    recorded here is actually available). `target_weights_by_class` is
+    an asset-class -> weight dict the caller wants implemented in this
+    account (may be the full household policy, or just this account's
+    own share of a missing exposure).
+
+    Selection order per class: prefer a SINGLE-asset-class option
+    (purer, easier to reason about) over a multi-exposure one; among
+    options tying on that, the lowest expense_ratio wins (None/unknown
+    sorts last -- an unknown fee is never assumed cheap), then
+    option_name for determinism. A class with no single-class candidate
+    falls back to the best available multi-exposure (target-date/
+    balanced-fund) option that covers it via look-through, never by
+    forcing that fund into one category.
+
+    The proposed mix's percentages are normalized over only the classes
+    that COULD be covered by an available option, and always sum to
+    exactly 100% of that coverable total (rounding residual assigned to
+    the largest single entry) -- never diluted by classes this account
+    simply has no option for. Classes with no candidate at all are
+    reported separately in `unavailable_classes`, never silently
+    dropped, so the caller can flag that another account may need to
+    hold that exposure instead.
+
+    Never ranks by recent performance and never claims a fund will
+    outperform -- selection is cost/purity/coverage only."""
+    target = {c: w for c, w in target_weights_by_class.items() if w and w > 0 and c != "unclassified"}
+    if not target or not options:
+        return {"mix": [], "unavailable_classes": sorted(target.keys()), "alternatives_considered": {}}
+
+    def sort_key(opt, is_single):
+        er = opt.get("expense_ratio")
+        return (0 if is_single else 1, er if er is not None else float("inf"), opt.get("option_name") or "")
+
+    candidates_by_class: Dict[str, List[Dict]] = {c: [] for c in target}
+    for opt in options:
+        weights = holding_exposure_weights(opt)
+        is_single = len(weights) == 1
+        for asset_class in weights:
+            if asset_class in candidates_by_class:
+                candidates_by_class[asset_class].append((opt, is_single, weights))
+
+    unavailable_classes = []
+    selected_by_option_id: Dict[int, Dict] = {}
+    alternatives_considered: Dict[str, List[str]] = {}
+    for asset_class in sorted(target, key=lambda c: -target[c]):
+        pool = candidates_by_class.get(asset_class, [])
+        if not pool:
+            unavailable_classes.append(asset_class)
+            continue
+        pool_sorted = sorted(pool, key=lambda triple: sort_key(triple[0], triple[1]))
+        chosen_opt, chosen_is_single, chosen_weights = pool_sorted[0]
+        others = [p[0] for p in pool_sorted[1:]]
+        if others:
+            alternatives_considered[asset_class] = [
+                f"{o.get('option_name')} (expense ratio {o.get('expense_ratio')}) -- higher cost or a diluted (multi-exposure) match"
+                for o in others
+            ]
+        oid = chosen_opt.get("id") or id(chosen_opt)
+        if oid not in selected_by_option_id:
+            selected_by_option_id[oid] = {
+                "option_id": chosen_opt.get("id"), "option_name": chosen_opt.get("option_name"),
+                "ticker": chosen_opt.get("ticker"), "expense_ratio": chosen_opt.get("expense_ratio"),
+                "asset_classes_covered": [], "is_single_class": chosen_is_single, "exposures": chosen_weights,
+            }
+        selected_by_option_id[oid]["asset_classes_covered"].append(asset_class)
+
+    covered_classes = [c for c in target if c not in unavailable_classes]
+    covered_target_total = sum(target[c] for c in covered_classes)
+    mix = []
+    if covered_target_total > 0 and selected_by_option_id:
+        # Normalize the target over only the coverable classes, THEN
+        # solve for the portfolio weights that best reproduce that
+        # sub-target using the selected options' OWN FULL exposure
+        # vectors -- not a naive target[c]*exposure[c] sum, which
+        # double-counts/under-counts whenever a multi-exposure option
+        # covers more than one target class at once (external review
+        # finding #3, 2026-09-12, commit 4812d84: this exact bug
+        # produced 22.5%/77.5% stock/bond exposure for a 50/50 target
+        # using a 60/40 balanced fund + a pure bond fund, instead of the
+        # correct ~83.3%/16.7% mix that actually reproduces 50/50).
+        entries = list(selected_by_option_id.values())
+        class_list = sorted(covered_classes)
+        target_vec = [target[c] / covered_target_total for c in class_list]
+        weights = _solve_option_mix_weights([e["exposures"] for e in entries], class_list, target_vec)
+        for entry, w in zip(entries, weights):
+            if w <= 1e-6:
+                continue
+            covered_desc = ', '.join(c.replace('_', ' ') for c in entry['asset_classes_covered'])
+            reason = (
+                f"Lowest-cost eligible option covering {covered_desc}"
+                if entry["is_single_class"]
+                else f"Covers {covered_desc} via look-through of its own recorded exposures"
+            )
+            mix.append({
+                "option_id": entry["option_id"], "option_name": entry["option_name"], "ticker": entry["ticker"],
+                "expense_ratio": entry["expense_ratio"], "asset_classes_covered": entry["asset_classes_covered"],
+                "pct": round(w * 100, 2), "reason": reason,
+            })
+        residual = round(100 - sum(m["pct"] for m in mix), 2)
+        if residual and mix:
+            largest = max(mix, key=lambda m: m["pct"])
+            largest["pct"] = round(largest["pct"] + residual, 2)
+    return {
+        "mix": sorted(mix, key=lambda m: -m["pct"]),
+        "unavailable_classes": sorted(unavailable_classes),
+        "alternatives_considered": alternatives_considered,
+    }
+
+
+def _gaussian_solve(matrix: List[List[float]], vector: List[float]) -> Optional[List[float]]:
+    """Solves a square linear system via Gaussian elimination with
+    partial pivoting. Returns None if the matrix is singular (caller
+    falls back to an equal split -- see _solve_option_mix_weights)."""
+    n = len(matrix)
+    if n == 0:
+        return []
+    aug = [row[:] + [vector[i]] for i, row in enumerate(matrix)]
+    for col in range(n):
+        pivot_row = max(range(col, n), key=lambda r: abs(aug[r][col]))
+        if abs(aug[pivot_row][col]) < 1e-10:
+            return None
+        aug[col], aug[pivot_row] = aug[pivot_row], aug[col]
+        pivot_val = aug[col][col]
+        aug[col] = [x / pivot_val for x in aug[col]]
+        for r in range(n):
+            if r != col:
+                factor = aug[r][col]
+                if factor:
+                    aug[r] = [aug[r][c] - factor * aug[col][c] for c in range(n + 1)]
+    return [aug[i][n] for i in range(n)]
+
+
+def _solve_option_mix_weights(option_exposures: List[Dict[str, float]], class_list: List[str],
+                               target_vec: List[float]) -> List[float]:
+    """Finds portfolio weights w (one per option, sum to 1, each >= 0)
+    that minimize squared error to `target_vec` across `class_list`,
+    given each option's own exposure vector -- a proper (small) active-
+    set constrained least-squares solve, not a per-class independent
+    approximation. Correctly reproduces an EXACT feasible mix when one
+    exists (e.g. a 60/40 balanced fund + a pure bond fund hitting a
+    50/50 stock/bond target needs ~83.3%/16.7%, not a naive 37.5%/62.5%
+    that actually delivers 22.5%/77.5% -- external review finding #3).
+
+    Pure Python (no numpy/scipy dependency) -- the option/class counts
+    here are always small (a handful of investment options across up to
+    11 asset classes), so plain Gaussian elimination is more than fast
+    enough."""
+    n = len(option_exposures)
+    if n == 0:
+        return []
+    if n == 1:
+        return [1.0]
+
+    def exposure_column(i):
+        return [option_exposures[i].get(c, 0.0) for c in class_list]
+
+    active = list(range(n))
+    while True:
+        k = len(active)
+        if k == 1:
+            solved = {active[0]: 1.0}
+        else:
+            pivot = active[-1]
+            free = active[:-1]
+            pivot_col = exposure_column(pivot)
+            b_cols = [[exposure_column(i)[m] - pivot_col[m] for m in range(len(class_list))] for i in free]
+            target_prime = [target_vec[m] - pivot_col[m] for m in range(len(class_list))]
+            kk = len(free)
+            btb = [[sum(b_cols[i][m] * b_cols[j][m] for m in range(len(class_list))) for j in range(kk)] for i in range(kk)]
+            btt = [sum(b_cols[i][m] * target_prime[m] for m in range(len(class_list))) for i in range(kk)]
+            x = _gaussian_solve(btb, btt)
+            if x is None:
+                x = [1.0 / k] * kk  # singular system (e.g. duplicate exposure vectors) -- equal split fallback
+            solved = {free[i]: x[i] for i in range(kk)}
+            solved[pivot] = 1.0 - sum(x)
+        most_negative_idx, most_negative_val = None, -1e-9
+        for idx, val in solved.items():
+            if val < most_negative_val:
+                most_negative_idx, most_negative_val = idx, val
+        if most_negative_idx is None:
+            break
+        active = [i for i in active if i != most_negative_idx]
+        if not active:
+            solved = {}
+            break
+    weights = [0.0] * n
+    for idx, val in solved.items():
+        weights[idx] = max(0.0, val)
+    return weights
+
+
+# ── Rebalance actions ─────────────────────────────────────────────────────
+
+def estimate_taxable_gain_warning(holding: Dict, sell_amount: float) -> Optional[Dict]:
+    """A taxable sale's tax impact can only be ESTIMATED when cost_basis
+    is known -- missing cost basis is flagged explicitly, never assumed
+    to be zero or equal to market value."""
+    cost_basis = holding.get("cost_basis")
+    market_value = holding.get("market_value", 0) or 0
+    if cost_basis is None:
+        return {
+            "has_cost_basis": False,
+            "message": "Cost basis is not on file for this holding -- the taxable gain/loss on this sale cannot be estimated. Set cost basis before relying on any tax figure here.",
+        }
+    gain_fraction = 0.0 if market_value <= 0 else max(0.0, (market_value - cost_basis) / market_value)
+    estimated_gain = round(sell_amount * gain_fraction, 2)
+    return {
+        "has_cost_basis": True, "estimated_gain": estimated_gain,
+        "message": (
+            f"Estimated taxable gain on this sale: ${estimated_gain:,.0f} (based on this holding's overall "
+            f"unrealized-gain fraction, not the tax lot actually sold)." if estimated_gain > 0 else
+            "This holding is at or below cost basis -- no taxable gain expected on this sale."
+        ),
+    }
+
+
+def recommend_rebalance_actions(
+    classified_household_holdings: List[Dict],
+    current_allocation: Dict,
+    comparison: Dict,
+    policy: Dict,
+    pending_contribution: float = 0.0,
+) -> Dict:
+    """Contribution-first, then exchange inside tax-advantaged accounts,
+    then taxable sales only when the tax-advantaged supply in an
+    overweight class is exhausted and drift remains. Only sells enough
+    to fund the household's REMAINING underweight need (after crediting
+    the contribution's own effect) -- never an overweight class's own
+    full excess in isolation, which would recommend a sale with no
+    destination once a contribution already closed every gap."""
+    contribution_actions = recommend_contribution_destination(comparison, pending_contribution)
+    contribution_by_class = {a["asset_class"]: a["amount"] for a in contribution_actions if a["asset_class"]}
+
+    prefer_no_taxable_sale = policy.get("use_contributions_before_sales", True)
+    if prefer_no_taxable_sale is None:
+        prefer_no_taxable_sale = True
+
+    # use_contributions_before_sales: when True (default), a pending
+    # contribution's own effect is credited against the underweight need
+    # BEFORE any sale is considered -- an underweight class a
+    # contribution can already close never triggers a sale (reference
+    # test #4). When a household sets this False, contributions and
+    # sales are calculated independently instead: the sell/exchange plan
+    # is sized off the RAW deviation, ignoring pending contributions
+    # entirely -- e.g. a household deliberately rebalancing via sales
+    # now (tax-loss harvesting, an account closure) regardless of
+    # whatever new money happens to be arriving this period. External
+    # review finding (2026-09-12, commit 4812d84): this flag used to be
+    # read into a variable and never actually used anywhere below.
+    remaining_deviation = {}
+    for asset_class, d in comparison["by_class"].items():
+        dollars = d["deviation_dollars"]
+        if dollars < 0 and prefer_no_taxable_sale:
+            dollars = min(0.0, dollars + contribution_by_class.get(asset_class, 0.0))
+        remaining_deviation[asset_class] = dollars
+
+    underweight = sorted(
+        [(c, -v) for c, v in remaining_deviation.items() if v < -0.01 and c != "unclassified"], key=lambda p: -p[1])
+
+    rebalance_actions = []
+    # Multi-exposure holdings (a target-date/balanced fund spanning more
+    # than one asset class) are excluded from the sell-candidate pool --
+    # "selling only the bond portion" of one security isn't a real
+    # single transaction. They still count correctly toward current
+    # allocation (compute_current_allocation), just never toward a
+    # BUY/SELL action here. Documented limitation, not a silent gap.
+    holdings_by_class: Dict[str, List[Dict]] = {c: [] for c in ASSET_CLASSES}
+    for h in classified_household_holdings:
+        weights = holding_exposure_weights(h)
+        if len(weights) > 1:
+            continue
+        asset_class = next(iter(weights))
+        if asset_class in holdings_by_class:
+            holdings_by_class[asset_class].append(h)
+
+    remaining_underweight_need = sum(gap for _, gap in underweight)
+
+    # Step 2 of the rebalance order (1. redirect contributions -- above;
+    # 2. invest idle cash already sitting in an investment account; 3.
+    # exchange inside tax-advantaged accounts; 4. taxable sale last):
+    # ONLY the portion of cash that's actually OVERWEIGHT vs. the
+    # policy's own cash target counts as "idle" -- cash held deliberately
+    # to meet minimum_cash_reserve/the policy's own target_cash_pct is
+    # not idle, and must never be swept away to fund another class. Caps
+    # total redeployment at remaining_deviation["cash"] (only positive
+    # when cash itself is overweight), not each holding's full balance.
+    cash_available_to_redeploy = max(0.0, remaining_deviation.get("cash", 0.0))
+    idle_cash_holdings = sorted(holdings_by_class.get("cash", []), key=lambda h: -(h.get("market_value", 0) or 0))
+    for h in idle_cash_holdings:
+        if remaining_underweight_need <= 0.01 or cash_available_to_redeploy <= 0.01:
+            break
+        available = min(h.get("market_value", 0) or 0, cash_available_to_redeploy)
+        if available <= 0:
+            continue
+        for asset_class, gap in underweight:
+            if remaining_underweight_need <= 0.01 or available <= 0.01:
+                break
+            amount = min(available, gap, remaining_underweight_need)
+            if amount <= 0:
+                continue
+            rebalance_actions.append({
+                "account_id": h.get("account_id"), "holding_id": h.get("id"), "holding_name": h.get("security_name"),
+                "action": "invest_idle_cash", "asset_class": asset_class, "amount": round(amount, 2),
+                "pct_of_holding": round(amount / (h.get("market_value") or 1) * 100, 1),
+                "reason": f"Idle cash already in this account can fund the {asset_class.replace('_', ' ')} underweight directly, before any exchange or sale.",
+                "is_taxable_sale": False, "tax_warning": None,
+                "confidence_note": "Redeploying idle cash already inside an investment account -- no sale, no tax consequence.",
+            })
+            available -= amount
+            cash_available_to_redeploy -= amount
+            remaining_underweight_need -= amount
+            gap_remaining = gap - amount
+            underweight = [(c, gap_remaining if c == asset_class else g) for c, g in underweight if not (c == asset_class and gap_remaining <= 0.01)]
+
+    # Recompute overweight AFTER idle-cash deployment -- cash itself is
+    # excluded (already handled above, and further "selling" idle cash
+    # to fund itself is meaningless).
+    remaining_deviation["cash"] = 0.0  # idle cash step already applied its own full available balance above
+    overweight = sorted(
+        [(c, v) for c, v in remaining_deviation.items() if v > 0.01 and c not in ("unclassified", "cash")], key=lambda p: -p[1])
+
+    for asset_class, excess_dollars in overweight:
+        if remaining_underweight_need <= 0.01:
+            break
+        target_sell = min(excess_dollars, remaining_underweight_need)
+        candidates = sorted(
+            holdings_by_class.get(asset_class, []),
+            key=lambda h: (h.get("_portfolio_account_type") in TAXABLE_GAIN_TYPES, -(h.get("market_value", 0) or 0)),
+        )
+        to_sell = target_sell
+        for h in candidates:
+            if to_sell <= 0.01:
+                break
+            is_taxable = h.get("_portfolio_account_type") in TAXABLE_GAIN_TYPES
+            amount = min(to_sell, h.get("market_value", 0) or 0)
+            if amount <= 0:
+                continue
+            rebalance_actions.append({
+                "account_id": h.get("account_id"), "holding_id": h.get("id"), "holding_name": h.get("security_name"),
+                "action": "sell", "asset_class": asset_class, "amount": round(amount, 2),
+                "pct_of_holding": round(amount / (h.get("market_value") or 1) * 100, 1),
+                "reason": (
+                    f"{asset_class.replace('_', ' ').title()} is overweight by ${excess_dollars:,.0f} against target; "
+                    f"selling to fund the household's remaining underweight class(es)."
+                ),
+                "is_taxable_sale": is_taxable,
+                "tax_warning": estimate_taxable_gain_warning(h, amount) if is_taxable else None,
+                "confidence_note": (
+                    "Tax-advantaged account -- no tax consequence from this sale." if not is_taxable else
+                    "Taxable brokerage account -- see tax_warning for the estimated gain."
+                ),
+            })
+            to_sell -= amount
+            remaining_underweight_need -= amount
+
+    proceeds = sum(a["amount"] for a in rebalance_actions if a["action"] == "sell")
+    for asset_class, gap in underweight:
+        if proceeds <= 0.01:
+            break
+        amount = min(proceeds, gap)
+        if amount <= 0:
+            continue
+        rebalance_actions.append({
+            "account_id": None, "holding_id": None, "holding_name": None,
+            "action": "buy", "asset_class": asset_class, "amount": round(amount, 2), "pct_of_holding": None,
+            "reason": f"Underweight by ${gap:,.0f} against target -- funded by proceeds from the overweight sale(s) above.",
+            "is_taxable_sale": False, "tax_warning": None,
+            "confidence_note": "Destination account left to the household's own preference among its tax-advantaged accounts.",
+        })
+        proceeds -= amount
+
+    projected_by_class = dict(current_allocation["by_class"])
+    for a in contribution_actions:
+        if a["asset_class"]:
+            projected_by_class[a["asset_class"]] = projected_by_class.get(a["asset_class"], 0) + a["amount"]
+    for a in rebalance_actions:
+        if a["action"] == "buy":
+            delta = a["amount"]
+        elif a["action"] == "invest_idle_cash":
+            # Money moves FROM cash TO the destination class -- both
+            # sides of the transfer must move, or total would silently
+            # drift (this is the exact bug a mutation check below
+            # verifies is actually caught).
+            projected_by_class["cash"] = projected_by_class.get("cash", 0) - a["amount"]
+            delta = a["amount"]
+        else:  # "sell"
+            delta = -a["amount"]
+        projected_by_class[a["asset_class"]] = projected_by_class.get(a["asset_class"], 0) + delta
+    new_total = sum(projected_by_class.values())
+    projected_pct = {c: (round(v / new_total * 100, 2) if new_total > 0 else 0.0) for c, v in projected_by_class.items()}
+
+    return {
+        "contribution_actions": contribution_actions,
+        "rebalance_actions": rebalance_actions,
+        "projected_allocation": {
+            "total": round(new_total, 2),
+            "by_class": {c: round(v, 2) for c, v in projected_by_class.items()},
+            "pct_by_class": projected_pct,
+        },
+    }
+
+
+# ── Fund-quality flags ────────────────────────────────────────────────────
+
+CONCENTRATION_THRESHOLD_PCT = 10
+CONCENTRATION_SEVERE_PCT = 25
+HIGH_EXPENSE_RATIO_THRESHOLD = 0.01
+
+
+def concentration_flags(household_holdings: List[Dict], threshold_pct: float = CONCENTRATION_THRESHOLD_PCT) -> List[Dict]:
+    total = sum(h.get("market_value", 0) or 0 for h in household_holdings)
+    if total <= 0:
+        return []
+    flagged = []
+    for h in household_holdings:
+        value = h.get("market_value", 0) or 0
+        pct = value / total * 100
+        if pct >= threshold_pct:
+            flagged.append({
+                "holding_id": h.get("id"), "account_id": h.get("account_id"),
+                "name": h.get("security_name"), "market_value": round(value, 2), "pct_of_portfolio": round(pct, 1),
+                "severity": "severe" if pct >= CONCENTRATION_SEVERE_PCT else "moderate",
+            })
+    flagged.sort(key=lambda f: -f["pct_of_portfolio"])
+    return flagged
+
+
+def expense_ratio_flags(household_holdings: List[Dict], threshold: float = HIGH_EXPENSE_RATIO_THRESHOLD) -> List[Dict]:
+    flagged = []
+    for h in household_holdings:
+        er = h.get("expense_ratio")
+        if er is None or er < threshold:
+            continue
+        value = h.get("market_value", 0) or 0
+        flagged.append({
+            "holding_id": h.get("id"), "account_id": h.get("account_id"), "name": h.get("security_name"),
+            "expense_ratio_pct": round(er * 100, 3), "annual_fee_dollars": round(value * er, 2),
+        })
+    flagged.sort(key=lambda f: -f["annual_fee_dollars"])
+    return flagged
+
+
+def duplicate_exposure_flags(household_holdings: List[Dict]) -> List[Dict]:
+    by_name: Dict[str, List[Dict]] = {}
+    for h in household_holdings:
+        name = (h.get("security_name") or h.get("ticker") or "").strip().lower()
+        if not name:
+            continue
+        by_name.setdefault(name, []).append(h)
+    flagged = []
+    for name, group in by_name.items():
+        account_ids = {h.get("account_id") for h in group}
+        if len(account_ids) > 1:
+            flagged.append({
+                "name": group[0].get("security_name") or group[0].get("ticker"),
+                "total_market_value": round(sum(h.get("market_value", 0) or 0 for h in group), 2),
+                "accounts": sorted(account_ids), "holding_ids": [h.get("id") for h in group],
+            })
+    flagged.sort(key=lambda f: -f["total_market_value"])
+    return flagged
+
+
+def unclassified_flags(household_holdings: List[Dict]) -> List[Dict]:
+    flagged = []
+    for h in household_holdings:
+        asset_class = h.get("asset_class") or "unclassified"
+        if asset_class not in ASSET_CLASSES or asset_class == "unclassified":
+            flagged.append({
+                "holding_id": h.get("id"), "account_id": h.get("account_id"),
+                "name": h.get("security_name"), "market_value": round(h.get("market_value", 0) or 0, 2),
+            })
+    flagged.sort(key=lambda f: -f["market_value"])
+    return flagged
+
+
+# ── CSV import (preview/validate, no writes) ──────────────────────────────
+
+REQUIRED_CSV_COLUMNS = {"account_id", "security_name", "market_value", "asset_class"}
+
+
+def _parse_optional_float(raw_row: Dict, key: str, row_errors: List[str]) -> Optional[float]:
+    value = (raw_row.get(key) or "").strip()
+    if not value:
+        return None
+    try:
+        return float(value)
+    except ValueError:
+        row_errors.append(f"{key} must be a number if provided")
+        return None
+
+
+def parse_holdings_csv(csv_text: str, valid_account_ids: Set[int]) -> Dict:
+    """Parses a holdings CSV into validated rows WITHOUT writing
+    anything. Required: account_id, security_name, market_value,
+    asset_class. Optional: ticker, description/notes, shares,
+    expense_ratio, cost_basis."""
+    reader = csv.DictReader(io.StringIO(csv_text))
+    if reader.fieldnames is None:
+        return {"rows": [], "errors": [{"row": 0, "message": "Empty file or no header row."}], "valid_count": 0, "invalid_count": 0}
+    missing_cols = REQUIRED_CSV_COLUMNS - {c.strip() for c in reader.fieldnames if c}
+    if missing_cols:
+        return {"rows": [], "errors": [{"row": 0, "message": f"Missing required column(s): {', '.join(sorted(missing_cols))}"}],
+                "valid_count": 0, "invalid_count": 0}
+
+    rows, errors = [], []
+    for i, raw in enumerate(reader, start=2):
+        row_errors: List[str] = []
+        account_id_raw = (raw.get("account_id") or "").strip()
+        account_id = None
+        try:
+            account_id = int(account_id_raw)
+            if account_id not in valid_account_ids:
+                row_errors.append(f"account_id {account_id} does not match any existing account")
+        except ValueError:
+            row_errors.append("account_id must be a whole number")
+
+        security_name = (raw.get("security_name") or "").strip()
+        if not security_name:
+            row_errors.append("security_name is required")
+
+        market_value_raw = (raw.get("market_value") or "").strip()
+        market_value = None
+        try:
+            market_value = float(market_value_raw)
+            if market_value < 0:
+                row_errors.append("market_value cannot be negative")
+        except ValueError:
+            row_errors.append("market_value must be a number")
+
+        asset_class = (raw.get("asset_class") or "").strip()
+        if asset_class not in ASSET_CLASSES:
+            row_errors.append(f"asset_class must be one of: {', '.join(ASSET_CLASSES)}")
+
+        shares = _parse_optional_float(raw, "shares", row_errors)
+        expense_ratio = _parse_optional_float(raw, "expense_ratio", row_errors)
+        cost_basis = _parse_optional_float(raw, "cost_basis", row_errors)
+
+        rows.append({
+            "row": i, "account_id": account_id, "ticker": (raw.get("ticker") or "").strip() or None,
+            "security_name": security_name or None, "shares": shares, "market_value": market_value,
+            "asset_class": asset_class or None, "expense_ratio": expense_ratio, "cost_basis": cost_basis,
+            "notes": (raw.get("notes") or "").strip() or None,
+            "valid": not row_errors, "errors": row_errors,
+        })
+        if row_errors:
+            errors.append({"row": i, "message": "; ".join(row_errors)})
+
+    return {"rows": rows, "errors": errors, "valid_count": sum(1 for r in rows if r["valid"]),
+            "invalid_count": sum(1 for r in rows if not r["valid"])}
+
+
+# ── Planning integration (Milestone 7) ────────────────────────────────────
+
+ASSET_CLASS_EXPECTED_RETURNS = {
+    "us_large_cap": 0.09, "us_mid_cap": 0.095, "us_small_cap": 0.10,
+    "international_developed": 0.08, "emerging_markets": 0.085,
+    "us_bonds": 0.045, "international_bonds": 0.04,
+    "cash": 0.02, "real_estate": 0.07, "alternatives": 0.06, "unclassified": None,
+}
+
+
+def blended_expected_return(pct_by_class: Dict[str, float]) -> Optional[float]:
+    """Weighted-average expected nominal return -- documented,
+    conservative planning assumption, NOT a guarantee. Excludes
+    "unclassified" from both the weighted sum and denominator, so a
+    partially-unclassified allocation isn't dragged toward 0%."""
+    known = [(c, pct) for c, pct in pct_by_class.items()
+             if c != "unclassified" and ASSET_CLASS_EXPECTED_RETURNS.get(c) is not None and pct]
+    total_known_weight = sum(pct for _, pct in known)
+    if total_known_weight <= 0:
+        return None
+    weighted = sum(pct * ASSET_CLASS_EXPECTED_RETURNS[c] for c, pct in known)
+    return round(weighted / total_known_weight, 4)
+
+
+def blended_expense_ratio(household_holdings: List[Dict]) -> Optional[Dict]:
+    """Real, holdings-weighted current expense ratio -- no proposed-side
+    equivalent exists from asset-class targets alone."""
+    total_value = sum(h.get("market_value", 0) or 0 for h in household_holdings)
+    rated = [h for h in household_holdings if h.get("expense_ratio") is not None]
+    if not rated or total_value <= 0:
+        return None
+    weighted_ratio = sum((h.get("market_value", 0) or 0) * h["expense_ratio"] for h in rated) / total_value
+    annual_fee = sum((h.get("market_value", 0) or 0) * h["expense_ratio"] for h in rated)
+    return {"blended_expense_ratio_pct": round(weighted_ratio * 100, 3), "annual_fee_dollars": round(annual_fee, 2),
+            "holdings_with_expense_ratio": len(rated), "holdings_total": len(household_holdings)}

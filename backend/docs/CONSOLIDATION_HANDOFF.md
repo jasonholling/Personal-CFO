@@ -657,3 +657,96 @@ check.
 6. Education/Kids' drawdown/timeline consolidation remains available if
    a real bug is ever found there (not for consolidation's own sake —
    see Phase 5 above).
+
+## 2026-09-12 addendum — Portfolio Coach, a separate feature, NOT part of the consolidation above
+
+Full detail lives in `CALCULATION_CONTRACT.md` section 77. This is an
+independent, unrelated feature (holdings/allocation/investment-policy
+tracking plus an explainable, decision-support-only recommendation
+engine) built entirely on its own branch, `codex/portfolio-coach-
+recommendations`, branched from `origin/main` — it shares no code or
+git history with the consolidation work above, or with the separate,
+also-unmerged `codex/portfolio-holdings-allocation` branch (an earlier,
+differently-scoped holdings feature built against a superseded spec).
+
+**Status: feature-complete against the controlling product spec's 22
+numbered reference tests and 5 required end-to-end acceptance
+scenarios, NOT merged to main, awaiting independent review.**
+
+**Commits on this branch** (chronological; earlier checkpoint commits
+`2ba0453`/`01967c5`/`43d4ebe` predate the controlling-spec clarification
+and are superseded by the ones below, not separately summarized here):
+
+- `5d88273` — 11-asset-class rebalance engine rework + idle-cash step;
+  fixed a test-authoring bug in the idle-cash test's own hand-calculated
+  expected value.
+- `851f3aa` — reconciled `investment_policies` DB schema/Pydantic model
+  to the 10-target-field model.
+- `54a1044` — `account_investment_options` (closed-menu vs.
+  open-universe); fixed a real latent bug — `ON DELETE CASCADE` was
+  declared in the schema but SQLite foreign-key enforcement was never
+  turned on, so deleting an account silently orphaned its holdings.
+- `03eab38` — reworked `coach_engine.py` to the 8-tier priority order;
+  fixed a duplicate-recommendation bug (unclassified holdings were
+  flagged at two different tiers for the same underlying problem).
+- `17a69f2` — wired the recommendation engine to the DB
+  (generate/list/decide endpoints); fixed a real gap where a
+  recommendation whose condition fully resolved (no candidate at all
+  shared its key) was never invalidated and stayed active forever.
+- `ca26ff2` — Portfolio Coach + Portfolio Setup frontend pages (first
+  UI this branch had).
+- `3d19bda` — fund/option comparison workflow ("which mix best
+  implements my policy?").
+- `bd613a3` — closed reference tests #11 (HSA cash isolation), #18
+  (multi-account new-money, drift-minimizing, not a fixed split), #22
+  (frontend privacy-mode masking).
+- `4db4e88` — planning integration (retirement projection/Monte
+  Carlo/SWR comparison against a proposed allocation's blended expected
+  return; byte-identical to the underlying engines when no proposed
+  allocation is supplied).
+
+**Test counts**: full backend suite **1612 passed, 1 skipped** (up from
+1545 before this branch's work began this session). Frontend: **71
+passed**, `npm run build` succeeds. Every new pure function in
+`holdings_engine.py`/`coach_engine.py` has at least one mutation check
+recorded in its own commit message.
+
+**Known limitations / unresolved findings** (see section 77 for full
+detail, not repeated here): `employer_stock_exceptions`/
+`legacy_holding_exceptions` policy fields exist but aren't yet consulted
+by rebalance sell-candidate selection; no per-account override of the
+closed-menu/open-universe type-level default; `task_engine.py`/
+`assumption_reviews`/annual-review/`saved_scenarios`/life-events
+integration described in the original spec is not wired up (the
+Coach's own decision lifecycle is self-contained); planning-comparison
+applies one blended return to both retirement phases (no glide-path
+modeling); no live security-data provider is configured (by design for
+this household today).
+
+**Exact manual review steps**:
+
+1. `git checkout codex/portfolio-coach-recommendations && git pull`.
+2. `cd backend && source venv/bin/activate && pip install -r
+   requirements-dev.txt && pytest -v` — expect 1612 passed, 1 skipped.
+3. `cd frontend && npm install && npm test && npm run build` — expect
+   71 passed, build succeeds.
+4. `python scripts/check_sensitive_data.py` (or let CI's `secrets` job
+   run it) — expect clean, no new findings.
+5. Start the app (`./start.sh`) and walk the 5 acceptance scenarios by
+   hand in the browser — **this has NOT been done as a live session
+   this branch's own development, only verified via the backend
+   TestClient suite against the same routes**:
+   a. Add a few holdings and an investment policy on the new "Portfolio
+      Setup" page; confirm "Portfolio Coach" shows a "does my portfolio
+      match policy" drift card when it doesn't.
+   b. Use the "Where should new money go?" panel with a dollar amount.
+   c. On Portfolio Setup's Account Investment Options tab, add a couple
+      of options for one account and run "Compare eligible options."
+   d. Confirm a rebalance recommendation on an account with a taxable
+      and a tax-advantaged holding never proposes a taxable sale before
+      exhausting the tax-advantaged option.
+   e. Accept a recommendation on the Coach page, then mark it complete,
+      and confirm it does not reappear unless the underlying data
+      changes.
+6. Do not merge to `main` without Jason's explicit go-ahead — none has
+   been given for this branch as of this writing.

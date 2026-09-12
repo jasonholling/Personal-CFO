@@ -1,7 +1,7 @@
 from fastapi import FastAPI, HTTPException, UploadFile, File, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response as FastAPIResponse
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, field_validator, model_validator
 from typing import Optional, List, Dict
 import sqlite3
 import json
@@ -33,7 +33,12 @@ app = FastAPI(title="Personal CFO API")
 # from the start; now backed by a real table (see its own schema
 # comment in db.py), same "predates this line -> rejected, not silently
 # incomplete" behavior as kids above applies to it too.
-_BACKUP_TABLES = ("accounts", "planning_inputs", "insurance_policies", "property_policies", "snapshots", "tasks", "cash_flow_items", "surplus_allocations", "saved_scenarios", "life_events", "estate_documents", "estate_beneficiaries", "assumption_reviews", "kids")
+# "holdings"/"investment_policies"/"securities"/"security_snapshots"/
+# "recommendations"/"recommendation_events" added 2026-09-11 (Portfolio
+# Coach, codex/portfolio-coach-recommendations) -- same "predates this
+# line -> rejected, not silently incomplete" precedent as every earlier
+# table added to this list.
+_BACKUP_TABLES = ("accounts", "planning_inputs", "insurance_policies", "property_policies", "snapshots", "tasks", "cash_flow_items", "surplus_allocations", "saved_scenarios", "life_events", "estate_documents", "estate_beneficiaries", "assumption_reviews", "kids", "holdings", "account_investment_options", "investment_policies", "securities", "security_snapshots", "recommendations", "recommendation_events")
 
 app.add_middleware(
     CORSMiddleware,
@@ -182,6 +187,21 @@ class Account(BaseModel):
     expense_ratio: float = 0       # annual fraction, e.g. 0.0004 for 0.04% — investment accounts only
     monthly_rental_income: float = 0    # real_estate accounts only, rental properties
     monthly_rental_expenses: float = 0  # real_estate accounts only, rental properties (taxes, insurance, maintenance, etc — not the mortgage payment, which lives on the separate mortgage liability account)
+    # Portfolio Coach (codex/portfolio-coach-recommendations) — nullable
+    # override of holdings_engine.resolve_portfolio_account_type's own
+    # legacy-account_type mapping. None (every existing account) means
+    # "derive it from account_type."
+    portfolio_account_type: Optional[str] = None
+
+    @field_validator("portfolio_account_type")
+    @classmethod
+    def _portfolio_account_type_must_be_known(cls, v):
+        if v is None:
+            return v
+        from holdings_engine import PORTFOLIO_ACCOUNT_TYPES
+        if v not in PORTFOLIO_ACCOUNT_TYPES:
+            raise ValueError(f"Unknown portfolio_account_type '{v}' — must be one of {sorted(PORTFOLIO_ACCOUNT_TYPES)} or unset")
+        return v
 
     # account_type used to be an unchecked str: a value outside
     # net_worth_engine.VALID_ACCOUNT_TYPES (a typo, a legacy value, a name
@@ -214,6 +234,191 @@ class SurplusAllocation(BaseModel):
     goal: str
     monthly_amount: float = 0
     notes: Optional[str] = None
+
+# Portfolio Coach (codex/portfolio-coach-recommendations). Decision
+# support only.
+class Holding(BaseModel):
+    id: Optional[int] = None
+    account_id: int
+    ticker: Optional[str] = None
+    security_name: str
+    provider_identifier: Optional[str] = None
+    exchange: Optional[str] = None
+    security_type: Optional[str] = None
+    shares: Optional[float] = None
+    market_value: float
+    asset_class: str = "unclassified"
+    # External review finding #4 (2026-09-12, commit 4812d84): the
+    # calculation engine's holding_exposure_weights() already supports a
+    # multi-asset `exposures` list, but a real owned Holding had nowhere
+    # to persist one -- a target-date/balanced fund entered as a real
+    # holding was forced into a single asset_class regardless of its
+    # real composition. This field is the holdings-table counterpart to
+    # account_investment_options.exposures, added for the exact same
+    # reason. Optional list of {"asset_class": ..., "weight_pct": ...}.
+    exposures: List[Dict] = []
+    expense_ratio: Optional[float] = None
+    cost_basis: Optional[float] = None
+    as_of_date: Optional[str] = None
+    data_source: str = "manual"
+    confidence: str = "low"
+    notes: Optional[str] = None
+
+    @field_validator("asset_class")
+    @classmethod
+    def _asset_class_must_be_known(cls, v):
+        from holdings_engine import ASSET_CLASSES
+        if v not in ASSET_CLASSES:
+            raise ValueError(f"Unknown asset_class '{v}' — must be one of {ASSET_CLASSES}")
+        return v
+
+    @field_validator("market_value")
+    @classmethod
+    def _market_value_non_negative(cls, v):
+        if v < 0:
+            raise ValueError("market_value cannot be negative")
+        return v
+
+class HoldingImportRow(BaseModel):
+    """Deliberately NOT the Holding model — asset_class isn't validated
+    here so an invalid preview row can round-trip through preview ->
+    edit -> commit without a 422 before the user gets a chance to fix
+    it (commit re-validates server-side before writing)."""
+    account_id: int
+    ticker: Optional[str] = None
+    security_name: str
+    shares: Optional[float] = None
+    market_value: float
+    asset_class: str
+    expense_ratio: Optional[float] = None
+    cost_basis: Optional[float] = None
+    notes: Optional[str] = None
+
+class AccountInvestmentOption(BaseModel):
+    """A general account-specific investment-option menu entry. NOT a
+    401(k)-fund-menu-only model — this same table/model describes what
+    is buyable/exchangeable in ANY account: a closed employer-plan menu,
+    an open-universe brokerage, an HSA's cash-plus-fund lineup, a 529's
+    age-based portfolios, etc. An option is not an owned Holding until
+    it is separately recorded as one — see holdings_engine.py's
+    docstring for the closed-menu vs. open-universe distinction this
+    feeds."""
+    id: Optional[int] = None
+    account_id: int
+    ticker: Optional[str] = None
+    option_name: str
+    provider_identifier: Optional[str] = None
+    security_type: Optional[str] = None
+    asset_class: str = "unclassified"
+    exposures: List[Dict] = []
+    expense_ratio: Optional[float] = None
+    currently_owned: bool = False
+    available_for_new_contributions: bool = True
+    available_for_exchange: bool = True
+    minimum_investment: Optional[float] = None
+    minimum_allocation_pct: Optional[float] = None
+    maximum_allocation_pct: Optional[float] = None
+    employer_match_eligible: Optional[bool] = None
+    trading_fee: Optional[float] = None
+    redemption_restriction: Optional[str] = None
+    settlement_restriction: Optional[str] = None
+    data_source: str = "manual"
+    as_of_date: Optional[str] = None
+    confidence: str = "low"
+    notes: Optional[str] = None
+
+    @field_validator("asset_class")
+    @classmethod
+    def _option_asset_class_must_be_known(cls, v):
+        from holdings_engine import ASSET_CLASSES
+        if v not in ASSET_CLASSES:
+            raise ValueError(f"Unknown asset_class '{v}' — must be one of {ASSET_CLASSES}")
+        return v
+
+class InvestmentPolicy(BaseModel):
+    id: Optional[int] = None
+    name: str = "Household Policy"
+    target_us_large_cap_pct: float = 0
+    target_us_mid_cap_pct: float = 0
+    target_us_small_cap_pct: float = 0
+    target_international_developed_pct: float = 0
+    target_emerging_markets_pct: float = 0
+    target_us_bonds_pct: float = 0
+    target_international_bonds_pct: float = 0
+    target_cash_pct: float = 0
+    target_real_estate_pct: float = 0
+    target_alternatives_pct: float = 0
+    drift_band_pct: float = 5
+    max_single_security_pct: Optional[float] = None
+    minimum_cash_reserve: float = 0
+    rebalance_cadence: str = "annual"
+    use_contributions_before_sales: bool = True
+    taxable_sale_preference: Optional[str] = None
+    excluded_accounts: List[int] = []
+    excluded_holdings: List[int] = []
+    employer_stock_exceptions: List[Dict] = []
+    legacy_holding_exceptions: List[Dict] = []
+    risk_profile: Optional[str] = None
+    account_constraints: List[Dict] = []
+    effective_date: Optional[str] = None
+    review_date: Optional[str] = None
+    notes: Optional[str] = None
+
+    @model_validator(mode="after")
+    def _targets_must_be_valid_percentages(self):
+        # Review finding (2026-09-12, external review of commit 4812d84,
+        # finding #6): a policy with negative targets or targets that
+        # don't sum to 100% used to save without error and feed straight
+        # into every drift/rebalance/new-money calculation downstream.
+        from holdings_engine import POLICY_TARGET_FIELD_TO_ASSET_CLASS
+        fields = list(POLICY_TARGET_FIELD_TO_ASSET_CLASS.keys())
+        values = [getattr(self, f) for f in fields]
+        negative = [f for f, v in zip(fields, values) if v < 0]
+        if negative:
+            raise ValueError(f"Target percentages cannot be negative: {', '.join(negative)}")
+        total = sum(values)
+        if abs(total - 100) > 0.5:
+            raise ValueError(f"Target percentages must sum to 100% (got {total:.2f}%)")
+        return self
+
+class PortfolioContributionRequest(BaseModel):
+    amount: float = 0
+
+class ContributionPool(BaseModel):
+    account_id: int
+    amount: float = 0
+    eligible_classes: Optional[List[str]] = None  # None = open universe, any underweight class
+
+class MultiAccountContributionRequest(BaseModel):
+    pools: List[ContributionPool]
+
+class OptionMixRequest(BaseModel):
+    account_id: int
+    target_weights: Optional[Dict[str, float]] = None  # defaults to the saved household policy's own targets
+    for_new_contribution: bool = True
+
+class PlanningComparisonRequest(BaseModel):
+    proposed_allocation: Optional[Dict[str, float]] = None  # pct_by_class -- e.g. a policy's target mix
+    ret_age: int = 60
+    ss_timing: str = "early"
+
+class SecurityConfirmRequest(BaseModel):
+    provider_identifier: Optional[str] = None
+    ticker: Optional[str] = None
+    security_name: str
+    exchange: Optional[str] = None
+    currency: Optional[str] = None
+    security_type: Optional[str] = None
+    status: str = "active"
+    asset_class: Optional[str] = None
+    asset_class_source: Optional[str] = None  # "provider" | "user_supplied"
+
+class RecommendationDecision(BaseModel):
+    status: str  # reviewing | accepted | deferred | rejected | completed
+    notes: Optional[str] = None
+    reason: Optional[str] = None
+    resulting_allocation: Optional[Dict] = None
+
 class ScenarioSave(BaseModel):
     name: str
     retirement_age: int = 60
@@ -487,10 +692,10 @@ def get_account_freshness():
 def create_account(account: Account):
     conn = get_db()
     cur = conn.execute(
-        "INSERT INTO accounts (name, account_type, owner, institution, balance, notes, interest_rate, minimum_payment, term_months, stock_allocation_pct, expense_ratio, monthly_rental_income, monthly_rental_expenses) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO accounts (name, account_type, owner, institution, balance, notes, interest_rate, minimum_payment, term_months, stock_allocation_pct, expense_ratio, monthly_rental_income, monthly_rental_expenses, portfolio_account_type) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (account.name, account.account_type, account.owner, account.institution, account.balance, account.notes,
          account.interest_rate, account.minimum_payment, account.term_months, account.stock_allocation_pct, account.expense_ratio,
-         account.monthly_rental_income, account.monthly_rental_expenses)
+         account.monthly_rental_income, account.monthly_rental_expenses, account.portfolio_account_type)
     )
     conn.commit()
     account.id = cur.lastrowid
@@ -501,10 +706,10 @@ def create_account(account: Account):
 def update_account(account_id: int, account: Account):
     conn = get_db()
     conn.execute(
-        "UPDATE accounts SET name=?, account_type=?, owner=?, institution=?, balance=?, notes=?, interest_rate=?, minimum_payment=?, term_months=?, stock_allocation_pct=?, expense_ratio=?, monthly_rental_income=?, monthly_rental_expenses=? WHERE id=?",
+        "UPDATE accounts SET name=?, account_type=?, owner=?, institution=?, balance=?, notes=?, interest_rate=?, minimum_payment=?, term_months=?, stock_allocation_pct=?, expense_ratio=?, monthly_rental_income=?, monthly_rental_expenses=?, portfolio_account_type=? WHERE id=?",
         (account.name, account.account_type, account.owner, account.institution, account.balance, account.notes,
          account.interest_rate, account.minimum_payment, account.term_months, account.stock_allocation_pct, account.expense_ratio,
-         account.monthly_rental_income, account.monthly_rental_expenses, account_id)
+         account.monthly_rental_income, account.monthly_rental_expenses, account.portfolio_account_type, account_id)
     )
     conn.commit()
     conn.close()
@@ -517,6 +722,698 @@ def delete_account(account_id: int):
     conn.commit()
     conn.close()
     return {"deleted": account_id}
+
+# ══════════════════════════════════════════════════════════════════════
+# Portfolio Coach (codex/portfolio-coach-recommendations). Decision
+# support only — see holdings_engine.py/coach_engine.py's own module
+# docstrings. Holdings entry/import, the security lookup adapter, the
+# investment policy, allocation reads, the two named workflows, the
+# recommendation decision lifecycle, and planning integration.
+# ══════════════════════════════════════════════════════════════════════
+
+def _holding_row_to_dict(row) -> Dict:
+    d = dict(row)
+    d["exposures"] = json.loads(d.pop("exposures_json") or "[]")
+    return d
+
+@app.get("/api/holdings")
+def get_holdings():
+    conn = get_db()
+    rows = conn.execute("SELECT * FROM holdings ORDER BY account_id, security_name").fetchall()
+    conn.close()
+    return [_holding_row_to_dict(r) for r in rows]
+
+@app.get("/api/holdings/grouped")
+def get_holdings_grouped():
+    conn = get_db()
+    accounts = [dict(r) for r in conn.execute("SELECT * FROM accounts").fetchall()]
+    holdings = [_holding_row_to_dict(r) for r in conn.execute("SELECT * FROM holdings ORDER BY security_name").fetchall()]
+    conn.close()
+    from holdings_engine import resolve_portfolio_account_type, reconcile_account_holdings, is_allocation_blocked
+    by_account: Dict[int, List[Dict]] = {}
+    for h in holdings:
+        by_account.setdefault(h["account_id"], []).append(h)
+    groups = []
+    for acc in accounts:
+        acc_holdings = by_account.get(acc["id"], [])
+        ptype = resolve_portfolio_account_type(acc)
+        groups.append({
+            "account_id": acc["id"], "account_name": acc["name"], "account_type": acc["account_type"],
+            "owner": acc["owner"], "portfolio_account_type": ptype, "allocation_blocked": is_allocation_blocked(ptype),
+            "holdings": acc_holdings, **reconcile_account_holdings(acc, acc_holdings),
+        })
+    return {"groups": groups}
+
+@app.post("/api/holdings")
+def create_holding(holding: Holding):
+    conn = get_db()
+    acc = conn.execute("SELECT id FROM accounts WHERE id=?", (holding.account_id,)).fetchone()
+    if not acc:
+        conn.close()
+        raise HTTPException(status_code=400, detail=f"account_id {holding.account_id} does not exist")
+    cur = conn.execute(
+        "INSERT INTO holdings (account_id, ticker, security_name, provider_identifier, exchange, security_type, shares, "
+        "market_value, asset_class, exposures_json, expense_ratio, cost_basis, as_of_date, data_source, confidence, "
+        "notes, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,datetime('now'))",
+        (holding.account_id, holding.ticker, holding.security_name, holding.provider_identifier, holding.exchange,
+         holding.security_type, holding.shares, holding.market_value, holding.asset_class, json.dumps(holding.exposures),
+         holding.expense_ratio, holding.cost_basis, holding.as_of_date, holding.data_source, holding.confidence, holding.notes)
+    )
+    conn.commit()
+    holding.id = cur.lastrowid
+    conn.close()
+    return holding
+
+@app.put("/api/holdings/{holding_id}")
+def update_holding(holding_id: int, holding: Holding):
+    conn = get_db()
+    acc = conn.execute("SELECT id FROM accounts WHERE id=?", (holding.account_id,)).fetchone()
+    if not acc:
+        conn.close()
+        raise HTTPException(status_code=400, detail=f"account_id {holding.account_id} does not exist")
+    conn.execute(
+        "UPDATE holdings SET account_id=?, ticker=?, security_name=?, provider_identifier=?, exchange=?, security_type=?, "
+        "shares=?, market_value=?, asset_class=?, exposures_json=?, expense_ratio=?, cost_basis=?, as_of_date=?, "
+        "data_source=?, confidence=?, notes=?, updated_at=datetime('now') WHERE id=?",
+        (holding.account_id, holding.ticker, holding.security_name, holding.provider_identifier, holding.exchange,
+         holding.security_type, holding.shares, holding.market_value, holding.asset_class, json.dumps(holding.exposures),
+         holding.expense_ratio, holding.cost_basis, holding.as_of_date, holding.data_source, holding.confidence, holding.notes, holding_id)
+    )
+    conn.commit()
+    conn.close()
+    return {**holding.dict(), "id": holding_id}
+
+@app.delete("/api/holdings/{holding_id}")
+def delete_holding(holding_id: int):
+    conn = get_db()
+    conn.execute("DELETE FROM holdings WHERE id=?", (holding_id,))
+    conn.commit()
+    conn.close()
+    return {"deleted": holding_id}
+
+def _option_row_to_dict(row) -> Dict:
+    d = dict(row)
+    d["exposures"] = json.loads(d.pop("exposures_json") or "[]")
+    for flag in ("currently_owned", "available_for_new_contributions", "available_for_exchange"):
+        d[flag] = bool(d[flag])
+    if d["employer_match_eligible"] is not None:
+        d["employer_match_eligible"] = bool(d["employer_match_eligible"])
+    return d
+
+@app.get("/api/account-investment-options")
+def get_account_investment_options(account_id: Optional[int] = None):
+    conn = get_db()
+    if account_id is not None:
+        rows = conn.execute(
+            "SELECT * FROM account_investment_options WHERE account_id=? ORDER BY option_name", (account_id,)
+        ).fetchall()
+    else:
+        rows = conn.execute("SELECT * FROM account_investment_options ORDER BY account_id, option_name").fetchall()
+    conn.close()
+    return [_option_row_to_dict(r) for r in rows]
+
+@app.post("/api/account-investment-options")
+def create_account_investment_option(option: AccountInvestmentOption):
+    conn = get_db()
+    acc = conn.execute("SELECT id FROM accounts WHERE id=?", (option.account_id,)).fetchone()
+    if not acc:
+        conn.close()
+        raise HTTPException(status_code=400, detail=f"account_id {option.account_id} does not exist")
+    cur = conn.execute(
+        "INSERT INTO account_investment_options (account_id, ticker, option_name, provider_identifier, security_type, "
+        "asset_class, exposures_json, expense_ratio, currently_owned, available_for_new_contributions, "
+        "available_for_exchange, minimum_investment, minimum_allocation_pct, maximum_allocation_pct, "
+        "employer_match_eligible, trading_fee, redemption_restriction, settlement_restriction, data_source, "
+        "as_of_date, confidence, notes, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,datetime('now'))",
+        (option.account_id, option.ticker, option.option_name, option.provider_identifier, option.security_type,
+         option.asset_class, json.dumps(option.exposures), option.expense_ratio, int(option.currently_owned),
+         int(option.available_for_new_contributions), int(option.available_for_exchange), option.minimum_investment,
+         option.minimum_allocation_pct, option.maximum_allocation_pct,
+         None if option.employer_match_eligible is None else int(option.employer_match_eligible),
+         option.trading_fee, option.redemption_restriction, option.settlement_restriction, option.data_source,
+         option.as_of_date, option.confidence, option.notes)
+    )
+    conn.commit()
+    option.id = cur.lastrowid
+    conn.close()
+    return option
+
+@app.put("/api/account-investment-options/{option_id}")
+def update_account_investment_option(option_id: int, option: AccountInvestmentOption):
+    conn = get_db()
+    acc = conn.execute("SELECT id FROM accounts WHERE id=?", (option.account_id,)).fetchone()
+    if not acc:
+        conn.close()
+        raise HTTPException(status_code=400, detail=f"account_id {option.account_id} does not exist")
+    conn.execute(
+        "UPDATE account_investment_options SET account_id=?, ticker=?, option_name=?, provider_identifier=?, "
+        "security_type=?, asset_class=?, exposures_json=?, expense_ratio=?, currently_owned=?, "
+        "available_for_new_contributions=?, available_for_exchange=?, minimum_investment=?, minimum_allocation_pct=?, "
+        "maximum_allocation_pct=?, employer_match_eligible=?, trading_fee=?, redemption_restriction=?, "
+        "settlement_restriction=?, data_source=?, as_of_date=?, confidence=?, notes=?, updated_at=datetime('now') "
+        "WHERE id=?",
+        (option.account_id, option.ticker, option.option_name, option.provider_identifier, option.security_type,
+         option.asset_class, json.dumps(option.exposures), option.expense_ratio, int(option.currently_owned),
+         int(option.available_for_new_contributions), int(option.available_for_exchange), option.minimum_investment,
+         option.minimum_allocation_pct, option.maximum_allocation_pct,
+         None if option.employer_match_eligible is None else int(option.employer_match_eligible),
+         option.trading_fee, option.redemption_restriction, option.settlement_restriction, option.data_source,
+         option.as_of_date, option.confidence, option.notes, option_id)
+    )
+    conn.commit()
+    conn.close()
+    return {**option.dict(), "id": option_id}
+
+@app.delete("/api/account-investment-options/{option_id}")
+def delete_account_investment_option(option_id: int):
+    conn = get_db()
+    conn.execute("DELETE FROM account_investment_options WHERE id=?", (option_id,))
+    conn.commit()
+    conn.close()
+    return {"deleted": option_id}
+
+@app.post("/api/account-investment-options/compare")
+def compare_account_investment_options(req: OptionMixRequest):
+    """"Given the investments available in this account, which mix
+    best implements my household policy?" Options are pre-filtered to
+    this account's own ELIGIBLE rows only (see eligible_options_for_
+    account) — never another account's, never a candidate merely found
+    via search. Defaults target_weights to the saved household policy's
+    own targets when the caller supplies none."""
+    from holdings_engine import eligible_options_for_account, propose_account_option_mix, is_closed_menu_account, resolve_portfolio_account_type, policy_targets_by_class
+    conn = get_db()
+    acc = conn.execute("SELECT * FROM accounts WHERE id=?", (req.account_id,)).fetchone()
+    if not acc:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Account not found")
+    acc = dict(acc)
+    options = [_option_row_to_dict(r) for r in conn.execute(
+        "SELECT * FROM account_investment_options WHERE account_id=?", (req.account_id,)
+    ).fetchall()]
+    target_weights = req.target_weights
+    if target_weights is None:
+        policy_row = conn.execute("SELECT * FROM investment_policies ORDER BY id DESC LIMIT 1").fetchone()
+        if not policy_row:
+            conn.close()
+            raise HTTPException(status_code=400, detail="No investment policy saved and no target_weights supplied — set a policy or pass explicit targets.")
+        target_weights = policy_targets_by_class(_policy_row_to_dict(policy_row))
+    conn.close()
+    eligible = eligible_options_for_account(options, for_new_contribution=req.for_new_contribution)
+    result = propose_account_option_mix(eligible, target_weights)
+    portfolio_type = resolve_portfolio_account_type(acc)
+    result["account_id"] = req.account_id
+    result["is_closed_menu_account"] = is_closed_menu_account(portfolio_type)
+    result["eligible_option_count"] = len(eligible)
+    result["recorded_option_count"] = len(options)
+    return result
+
+@app.post("/api/holdings/import/preview")
+async def preview_holdings_import(file: UploadFile = File(...)):
+    content = await file.read()
+    try:
+        text = content.decode("utf-8-sig")
+    except Exception:
+        text = content.decode("latin-1")
+    conn = get_db()
+    valid_account_ids = {r[0] for r in conn.execute("SELECT id FROM accounts").fetchall()}
+    conn.close()
+    from holdings_engine import parse_holdings_csv
+    return parse_holdings_csv(text, valid_account_ids)
+
+@app.post("/api/holdings/import/commit")
+def commit_holdings_import(rows: List[HoldingImportRow]):
+    from holdings_engine import ASSET_CLASSES
+    conn = get_db()
+    valid_account_ids = {r[0] for r in conn.execute("SELECT id FROM accounts").fetchall()}
+    created = 0
+    skipped = []
+    for row in rows:
+        if row.account_id not in valid_account_ids:
+            skipped.append({"security_name": row.security_name, "reason": f"account_id {row.account_id} does not exist"})
+            continue
+        if row.asset_class not in ASSET_CLASSES:
+            skipped.append({"security_name": row.security_name, "reason": f"asset_class '{row.asset_class}' is not one of {sorted(ASSET_CLASSES)}"})
+            continue
+        conn.execute(
+            "INSERT INTO holdings (account_id, ticker, security_name, shares, market_value, asset_class, expense_ratio, "
+            "cost_basis, notes, data_source, confidence, updated_at) VALUES (?,?,?,?,?,?,?,?,?,'manual','low',datetime('now'))",
+            (row.account_id, row.ticker, row.security_name, row.shares, row.market_value, row.asset_class,
+             row.expense_ratio, row.cost_basis, row.notes)
+        )
+        created += 1
+    conn.commit()
+    conn.close()
+    return {"created": created, "skipped": skipped}
+
+# ── Security lookup (Milestone 2) ────────────────────────────────────────
+# Never called directly from the browser for the actual provider request
+# — the frontend only ever talks to these backend endpoints, which hold
+# any real provider credential server-side (an env var, never committed;
+# no live provider is configured on this branch, see security_provider.py).
+
+@app.get("/api/securities/search")
+def search_securities(q: str = ""):
+    from security_provider import get_active_provider
+    from dataclasses import asdict
+    candidates = get_active_provider().search(q)
+    return {"candidates": [asdict(c) for c in candidates]}
+
+@app.post("/api/securities/confirm")
+def confirm_security(body: SecurityConfirmRequest):
+    """User confirms one search candidate (or supplies metadata
+    manually) — stores/updates the canonical securities row and returns
+    its id. Does NOT create a holding; the frontend uses the returned
+    security to populate a holding create/update call."""
+    conn = get_db()
+    existing = None
+    if body.provider_identifier:
+        existing = conn.execute("SELECT id FROM securities WHERE provider_identifier=?", (body.provider_identifier,)).fetchone()
+    if existing:
+        conn.execute(
+            "UPDATE securities SET ticker=?, security_name=?, exchange=?, currency=?, security_type=?, status=?, "
+            "asset_class=?, asset_class_source=?, updated_at=datetime('now') WHERE id=?",
+            (body.ticker, body.security_name, body.exchange, body.currency, body.security_type, body.status,
+             body.asset_class, body.asset_class_source, existing["id"])
+        )
+        security_id = existing["id"]
+    else:
+        cur = conn.execute(
+            "INSERT INTO securities (provider_identifier, ticker, security_name, exchange, currency, security_type, "
+            "status, asset_class, asset_class_source) VALUES (?,?,?,?,?,?,?,?,?)",
+            (body.provider_identifier, body.ticker, body.security_name, body.exchange, body.currency,
+             body.security_type, body.status, body.asset_class, body.asset_class_source)
+        )
+        security_id = cur.lastrowid
+    conn.commit()
+    conn.close()
+    return {"security_id": security_id, **body.dict()}
+
+@app.get("/api/securities/{security_id}/quote")
+def get_security_quote(security_id: int, holding_id: Optional[int] = None):
+    """Fetches a quote ONLY when requested (never automatically) and
+    stores a DATED snapshot tied to the specific holding it was fetched
+    for, so a later price change never silently rewrites what a past
+    recommendation was actually based on."""
+    conn = get_db()
+    security = conn.execute("SELECT * FROM securities WHERE id=?", (security_id,)).fetchone()
+    if not security:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Security not found")
+    from security_provider import get_active_provider
+    from dataclasses import asdict
+    quote = get_active_provider().get_quote(security["provider_identifier"]) if security["provider_identifier"] else None
+    if quote is None:
+        conn.close()
+        return {"quote": None, "message": "No quote available for this security."}
+    cur = conn.execute(
+        "INSERT INTO security_snapshots (security_id, holding_id, price, as_of_date, data_source, raw_json) VALUES (?,?,?,?,?,?)",
+        (security_id, holding_id, quote.price, quote.as_of, quote.data_source, json.dumps(asdict(quote)))
+    )
+    conn.commit()
+    snapshot_id = cur.lastrowid
+    conn.close()
+    return {"quote": asdict(quote), "snapshot_id": snapshot_id}
+
+# ── Investment policy (Milestone 3) ──────────────────────────────────────
+
+_POLICY_JSON_LIST_FIELDS = (
+    "account_constraints", "excluded_accounts", "excluded_holdings",
+    "employer_stock_exceptions", "legacy_holding_exceptions",
+)
+
+def _policy_row_to_dict(row) -> Dict:
+    d = dict(row)
+    for field in _POLICY_JSON_LIST_FIELDS:
+        d[field] = json.loads(d.pop(f"{field}_json") or "[]")
+    d["use_contributions_before_sales"] = bool(d["use_contributions_before_sales"])
+    return d
+
+@app.get("/api/investment-policy")
+def get_investment_policy():
+    conn = get_db()
+    row = conn.execute("SELECT * FROM investment_policies ORDER BY id DESC LIMIT 1").fetchone()
+    conn.close()
+    if not row:
+        return {"has_policy": False}
+    return {"has_policy": True, "policy": _policy_row_to_dict(row)}
+
+@app.post("/api/investment-policy")
+def save_investment_policy(policy: InvestmentPolicy):
+    conn = get_db()
+    cur = conn.execute(
+        "INSERT INTO investment_policies (name, target_us_large_cap_pct, target_us_mid_cap_pct, "
+        "target_us_small_cap_pct, target_international_developed_pct, target_emerging_markets_pct, "
+        "target_us_bonds_pct, target_international_bonds_pct, target_cash_pct, target_real_estate_pct, "
+        "target_alternatives_pct, drift_band_pct, max_single_security_pct, minimum_cash_reserve, "
+        "rebalance_cadence, use_contributions_before_sales, taxable_sale_preference, "
+        "excluded_accounts_json, excluded_holdings_json, employer_stock_exceptions_json, "
+        "legacy_holding_exceptions_json, risk_profile, account_constraints_json, effective_date, "
+        "review_date, notes) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (policy.name, policy.target_us_large_cap_pct, policy.target_us_mid_cap_pct,
+         policy.target_us_small_cap_pct, policy.target_international_developed_pct,
+         policy.target_emerging_markets_pct, policy.target_us_bonds_pct,
+         policy.target_international_bonds_pct, policy.target_cash_pct,
+         policy.target_real_estate_pct, policy.target_alternatives_pct, policy.drift_band_pct,
+         policy.max_single_security_pct, policy.minimum_cash_reserve, policy.rebalance_cadence,
+         int(policy.use_contributions_before_sales), policy.taxable_sale_preference,
+         json.dumps(policy.excluded_accounts), json.dumps(policy.excluded_holdings),
+         json.dumps(policy.employer_stock_exceptions), json.dumps(policy.legacy_holding_exceptions),
+         policy.risk_profile, json.dumps(policy.account_constraints), policy.effective_date,
+         policy.review_date, policy.notes)
+    )
+    conn.commit()
+    policy.id = cur.lastrowid
+    conn.close()
+    return policy
+
+# ── Allocation reads + workflows (Milestone 4) ───────────────────────────
+
+def _load_portfolio_context(conn):
+    accounts = [dict(r) for r in conn.execute("SELECT * FROM accounts").fetchall()]
+    holdings = [_holding_row_to_dict(r) for r in conn.execute("SELECT * FROM holdings").fetchall()]
+    policy_row = conn.execute("SELECT * FROM investment_policies ORDER BY id DESC LIMIT 1").fetchone()
+    policy = _policy_row_to_dict(policy_row) if policy_row else None
+    return accounts, holdings, policy
+
+@app.get("/api/portfolio/allocation")
+def get_portfolio_allocation():
+    conn = get_db()
+    accounts, holdings, policy = _load_portfolio_context(conn)
+    conn.close()
+    if not holdings:
+        return {"has_holdings": False}
+    from holdings_engine import (
+        classify_holdings, compute_current_allocation, compare_to_target,
+        concentration_flags, expense_ratio_flags, duplicate_exposure_flags, unclassified_flags,
+    )
+    classified = classify_holdings(accounts, holdings)
+    current = compute_current_allocation(classified["household"])
+    result = {
+        "has_holdings": True, "current_allocation": current,
+        "hsa_allocation": compute_current_allocation(classified["hsa"]),
+        "child_specific_total": round(sum(h.get("market_value", 0) or 0 for h in classified["child_specific"]), 2),
+        "liquidity_total": round(sum(h.get("market_value", 0) or 0 for h in classified["liquidity"]), 2),
+        "blocked_holdings": [{"holding_id": h.get("id"), "account_id": h.get("account_id"), "name": h.get("security_name")} for h in classified["blocked"]],
+        "review_required_accounts": sorted({h["account_id"] for h in classified["review_required"]}),
+        "concentration_flags": concentration_flags(classified["household"]),
+        "expense_ratio_flags": expense_ratio_flags(classified["household"]),
+        "duplicate_exposure_flags": duplicate_exposure_flags(classified["household"] + classified["hsa"] + classified["child_specific"]),
+        "unclassified_flags": unclassified_flags(classified["household"]),
+    }
+    if not policy:
+        result["has_policy"] = False
+        return result
+    result["has_policy"] = True
+    result["comparison"] = compare_to_target(current, policy)
+    return result
+
+@app.post("/api/portfolio/contribution-destination")
+def portfolio_contribution_destination(req: PortfolioContributionRequest):
+    """"Where should my next contribution go?" — the Available Funds
+    workflow's own recommendation step."""
+    conn = get_db()
+    accounts, holdings, policy = _load_portfolio_context(conn)
+    conn.close()
+    if not holdings:
+        raise HTTPException(status_code=400, detail="No holdings entered yet — add holdings before requesting a contribution recommendation.")
+    if not policy:
+        raise HTTPException(status_code=400, detail="No investment policy saved yet — set target allocation before requesting a contribution recommendation.")
+    from holdings_engine import classify_holdings, compute_current_allocation, compare_to_target, recommend_contribution_destination
+    classified = classify_holdings(accounts, holdings)
+    current = compute_current_allocation(classified["household"])
+    comparison = compare_to_target(current, policy)
+    return {"actions": recommend_contribution_destination(comparison, req.amount),
+            "current_allocation": current, "comparison": comparison}
+
+@app.post("/api/portfolio/contribution-destination/multi-account")
+def portfolio_multi_account_contribution_destination(req: MultiAccountContributionRequest):
+    """The "multiple accounts" and "household cash lump sum" new-money
+    workflows -- both are one or more (account, dollars, eligible
+    classes) pools. Calculates the allocation that minimizes remaining
+    household drift; never a fixed percentage split (reference test
+    #18). The user must confirm each account's own contribution
+    eligibility (income limits, employer-match windows, etc.) before
+    calling this — it is never assumed here."""
+    conn = get_db()
+    accounts, holdings, policy = _load_portfolio_context(conn)
+    conn.close()
+    if not holdings:
+        raise HTTPException(status_code=400, detail="No holdings entered yet — add holdings before requesting a contribution recommendation.")
+    if not policy:
+        raise HTTPException(status_code=400, detail="No investment policy saved yet — set target allocation before requesting a contribution recommendation.")
+    from holdings_engine import classify_holdings, compute_current_allocation, compare_to_target, recommend_multi_account_contribution_destination
+    classified = classify_holdings(accounts, holdings)
+    current = compute_current_allocation(classified["household"])
+    comparison = compare_to_target(current, policy)
+    pools = [p.dict() for p in req.pools]
+    result = recommend_multi_account_contribution_destination(comparison, pools)
+    result["current_allocation"] = current
+    result["comparison"] = comparison
+    return result
+
+@app.post("/api/portfolio/rebalance")
+def portfolio_rebalance(req: PortfolioContributionRequest):
+    """"I want to rebalance" — shows proposed trades/exchanges, flags
+    taxable sales, and both account-level and household-level results.
+    Marking an action complete happens via the recommendation decision
+    endpoints below, not here (this endpoint is a pure preview)."""
+    conn = get_db()
+    accounts, holdings, policy = _load_portfolio_context(conn)
+    conn.close()
+    if not holdings:
+        raise HTTPException(status_code=400, detail="No holdings entered yet — add holdings before requesting a rebalance plan.")
+    if not policy:
+        raise HTTPException(status_code=400, detail="No investment policy saved yet — set target allocation before requesting a rebalance plan.")
+    from holdings_engine import classify_holdings, compute_current_allocation, compare_to_target, recommend_rebalance_actions
+    classified = classify_holdings(accounts, holdings)
+    current = compute_current_allocation(classified["household"])
+    comparison = compare_to_target(current, policy)
+    return recommend_rebalance_actions(classified["household"], current, comparison, policy, pending_contribution=req.amount)
+
+# ── Planning integration (retirement projection / Monte Carlo / SWR) ────
+
+@app.post("/api/portfolio/planning-comparison")
+def portfolio_planning_comparison(req: PlanningComparisonRequest):
+    """Compares retirement-planning outcomes between the household's
+    currently SAVED assumptions and a proposed allocation's blended
+    expected return -- by calling projection_engine.run_retirement_
+    projection / simulation_engine.run_monte_carlo / run_swr_analysis
+    DIRECTLY, twice, with ONLY expected_return_pre_retirement and
+    expected_return_post_retirement overridden on the "proposed" side
+    (both phases get the same blended figure -- this does not model a
+    post-retirement glide-path shift; the proposed mix is assumed held
+    statically through both phases). Never rebuilds any retirement
+    formula here, per the brief's explicit "do not duplicate calculation
+    formulas already present in the retirement engine" constraint.
+
+    If no proposed_allocation is supplied, only the baseline runs --
+    with COMPLETELY UNMODIFIED inputs, so this is byte-identical to
+    calling /api/projections/whatif (etc.) directly. `proposed` is null
+    in that case, not an empty/zeroed comparison object."""
+    from projection_engine import run_retirement_projection
+    from simulation_engine import run_monte_carlo, run_swr_analysis
+    from holdings_engine import blended_expected_return
+    conn = get_db()
+    inputs_row = conn.execute("SELECT * FROM planning_inputs WHERE id=1").fetchone()
+    accounts = [dict(r) for r in conn.execute("SELECT * FROM accounts").fetchall()]
+    life_events = _get_active_life_events(conn)
+    surplus_allocations = _get_relevant_surplus_allocations(conn)
+    conn.close()
+    if not inputs_row:
+        raise HTTPException(status_code=400, detail="Planning inputs not set yet")
+    baseline_inputs = dict(inputs_row)
+
+    def run_all(inputs):
+        retirement = run_retirement_projection(inputs, accounts, ret_ages=[req.ret_age], life_events=life_events, surplus_allocations=surplus_allocations)
+        scenario = next(iter(retirement["scenarios"]), {})
+        monte_carlo = run_monte_carlo(inputs, accounts, req.ret_age, req.ss_timing, life_events=life_events, surplus_allocations=surplus_allocations)
+        swr = run_swr_analysis(inputs, accounts, ret_age=req.ret_age, ss_timing=req.ss_timing, life_events=life_events, surplus_allocations=surplus_allocations)
+        return {
+            "projected_surplus": scenario.get("projected_surplus"),
+            "percent_funded": scenario.get("percent_funded"),
+            "on_track": scenario.get("on_track"),
+            "monte_carlo_success_rate": monte_carlo.get("success_rate"),
+            "monte_carlo_median_final_balance": monte_carlo.get("median_final_balance"),
+            "monte_carlo_median_depletion_age": monte_carlo.get("median_depletion_age"),
+            "safe_withdrawal_annual": swr.get("safe_withdrawal_annual"),
+            "swr_cushion_pct": swr.get("cushion_pct"),
+            "swr_total_safe_spend": swr.get("total_safe_spend"),
+            "swr_on_track": swr.get("on_track"),
+        }
+
+    result = {
+        "baseline": run_all(baseline_inputs),
+        "baseline_expected_return_pre_retirement": baseline_inputs.get("expected_return_pre_retirement"),
+        "baseline_expected_return_post_retirement": baseline_inputs.get("expected_return_post_retirement"),
+        "proposed": None,
+    }
+    if req.proposed_allocation:
+        blended = blended_expected_return(req.proposed_allocation)
+        if blended is None:
+            raise HTTPException(status_code=400, detail="Could not compute a blended expected return from the proposed allocation -- every class is unclassified or the allocation is empty.")
+        proposed_inputs = dict(baseline_inputs)
+        proposed_inputs["expected_return_pre_retirement"] = blended
+        proposed_inputs["expected_return_post_retirement"] = blended
+        result["proposed"] = run_all(proposed_inputs)
+        result["proposed_blended_expected_return"] = blended
+    return result
+
+# ── Recommendation engine: generate/list/decide (decision lifecycle) ────
+
+def _generate_candidate_cards(accounts, holdings, policy, pending_contribution: float = 0.0) -> List[Dict]:
+    """Runs every coach_engine tier over already-loaded data and returns
+    a single prioritized candidate list. Never re-derives a calculation
+    holdings_engine.py already owns — this only classifies/compares/
+    wraps."""
+    import coach_engine as ce
+    from holdings_engine import (
+        classify_holdings, compute_current_allocation, compare_to_target,
+        recommend_rebalance_actions, reconcile_account_holdings,
+    )
+    classified = classify_holdings(accounts, holdings)
+    by_account: Dict[int, List[Dict]] = {}
+    for h in holdings:
+        by_account.setdefault(h["account_id"], []).append(h)
+    reconciliations = [reconcile_account_holdings(acc, by_account.get(acc["id"], [])) for acc in accounts]
+    cards = list(ce.data_quality_recommendations(classified, reconciliations))
+
+    current = compute_current_allocation(classified["household"])
+    household_cash = current["by_class"].get("cash")
+    cards += ce.concentration_and_liquidity_recommendations(classified["household"], policy, household_cash)
+    cards += ce.high_cost_or_redundant_recommendations(classified["household"])
+    cards += ce.minor_optimization_recommendations(classified["household"], {})
+
+    if not policy:
+        cards.append(ce.no_policy_recommendation())
+        return ce.prioritize(cards)
+
+    # Reference test #21: a material unreconciled discrepancy on any
+    # household-allocation account blocks the high-confidence drift/
+    # new-money/rebalance recommendations that would otherwise be built
+    # on top of a wrong total — the data-quality card above already
+    # surfaces the mismatch itself; nothing downstream compounds it.
+    household_account_ids = {h.get("account_id") for h in classified["household"]}
+    material_discrepancy = any(r["has_warning"] and r["account_id"] in household_account_ids for r in reconciliations)
+    if material_discrepancy:
+        return ce.prioritize(cards)
+
+    comparison = compare_to_target(current, policy)
+    cards += ce.policy_violation_recommendations(comparison, policy)
+    rebalance_result = recommend_rebalance_actions(classified["household"], current, comparison, policy, pending_contribution=pending_contribution)
+    cards += ce.new_money_recommendations(rebalance_result["contribution_actions"])
+    cards += ce.rebalance_recommendations(rebalance_result)
+    return ce.prioritize(cards)
+
+def _reconcile_and_persist_recommendations(conn, candidates: List[Dict]) -> None:
+    """Syncs freshly-generated candidates against existing DB rows via
+    coach_engine.reconcile_recommendation_queue's pure logic, then
+    performs the actual writes (main.py owns all DB I/O; coach_engine.py
+    stays pure)."""
+    import coach_engine as ce
+    keys = {c["recommendation_key"] for c in candidates}
+    # Fetches every row matching a fresh candidate's key (for the
+    # suppression/reuse checks below) PLUS every currently-active row
+    # regardless of key (so a recommendation whose condition fully
+    # resolved -- no candidate at all this round -- is still found and
+    # invalidated, not left stale forever; see reconcile_recommendation_
+    # queue's own docstring for why this case needs special handling).
+    if keys:
+        placeholders = ",".join("?" * len(keys))
+        rows = conn.execute(
+            f"SELECT * FROM recommendations WHERE recommendation_key IN ({placeholders}) "
+            "OR status IN ('proposed','reviewing','accepted') ORDER BY id DESC",
+            tuple(keys),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT * FROM recommendations WHERE status IN ('proposed','reviewing','accepted') ORDER BY id DESC"
+        ).fetchall()
+    existing_by_key: Dict[str, List[Dict]] = {}
+    for r in rows:
+        existing_by_key.setdefault(r["recommendation_key"], []).append(dict(r))
+    result = ce.reconcile_recommendation_queue(candidates, existing_by_key)
+    for c in result["to_insert"]:
+        conn.execute(
+            "INSERT INTO recommendations (recommendation_key, category, priority, title, action_text, payload_json, "
+            "assumptions_hash, status, updated_at) VALUES (?,?,?,?,?,?,?,?,datetime('now'))",
+            (c["recommendation_key"], c["category"], c["priority"], c["title"], c["action_text"],
+             json.dumps(c), c["assumptions_hash"], "proposed"),
+        )
+    for rid in result["invalidate_ids"]:
+        conn.execute("UPDATE recommendations SET status='invalidated', updated_at=datetime('now') WHERE id=?", (rid,))
+        conn.execute(
+            "INSERT INTO recommendation_events (recommendation_id, event_type, notes) VALUES (?,?,?)",
+            (rid, "invalidated", "Underlying holdings, policy, or contribution input changed before this was acted on."),
+        )
+    conn.commit()
+
+def _recommendation_row_to_dict(row) -> Dict:
+    d = dict(row)
+    d["payload"] = json.loads(d.pop("payload_json"))
+    return d
+
+@app.get("/api/recommendations")
+def get_recommendations(pending_contribution: float = 0.0):
+    """Generates fresh candidates, reconciles them against the decision
+    lifecycle (never resurfaces a rejected/deferred recommendation whose
+    underlying facts haven't changed), and returns the active queue —
+    the "What should I do next?" list — sorted by priority."""
+    conn = get_db()
+    accounts, holdings, policy = _load_portfolio_context(conn)
+    candidates = _generate_candidate_cards(accounts, holdings, policy, pending_contribution)
+    _reconcile_and_persist_recommendations(conn, candidates)
+    active_statuses = ("proposed", "reviewing", "accepted")
+    placeholders = ",".join("?" * len(active_statuses))
+    rows = conn.execute(
+        f"SELECT * FROM recommendations WHERE status IN ({placeholders}) ORDER BY priority ASC", active_statuses,
+    ).fetchall()
+    conn.close()
+    return {"recommendations": [_recommendation_row_to_dict(r) for r in rows], "has_policy": policy is not None}
+
+@app.get("/api/recommendations/{recommendation_id}")
+def get_recommendation_detail(recommendation_id: int):
+    conn = get_db()
+    row = conn.execute("SELECT * FROM recommendations WHERE id=?", (recommendation_id,)).fetchone()
+    if not row:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Recommendation not found")
+    d = _recommendation_row_to_dict(row)
+    d["events"] = [dict(r) for r in conn.execute(
+        "SELECT * FROM recommendation_events WHERE recommendation_id=? ORDER BY id", (recommendation_id,)
+    ).fetchall()]
+    conn.close()
+    return d
+
+@app.post("/api/recommendations/{recommendation_id}/decide")
+def decide_recommendation(recommendation_id: int, decision: RecommendationDecision):
+    """Records a decision-lifecycle transition. Status is never
+    validated against the PRIOR status here (e.g. accepted -> completed
+    is fine, rejected -> accepted is fine if the user changes their
+    mind) — coach_engine's reconcile logic is what prevents a rejected
+    recommendation from silently reappearing, not a status state
+    machine here."""
+    if decision.status not in ("reviewing", "accepted", "deferred", "rejected", "completed"):
+        raise HTTPException(status_code=400, detail=f"Unknown status '{decision.status}' — must be one of reviewing/accepted/deferred/rejected/completed")
+    conn = get_db()
+    row = conn.execute("SELECT id FROM recommendations WHERE id=?", (recommendation_id,)).fetchone()
+    if not row:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Recommendation not found")
+    conn.execute(
+        "UPDATE recommendations SET status=?, decision_date=datetime('now'), decision_notes=?, decision_reason=?, "
+        "resulting_allocation_json=?, updated_at=datetime('now') WHERE id=?",
+        (decision.status, decision.notes, decision.reason,
+         json.dumps(decision.resulting_allocation) if decision.resulting_allocation is not None else None,
+         recommendation_id),
+    )
+    conn.execute(
+        "INSERT INTO recommendation_events (recommendation_id, event_type, notes) VALUES (?,?,?)",
+        (recommendation_id, decision.status, decision.notes),
+    )
+    conn.commit()
+    updated = _recommendation_row_to_dict(conn.execute("SELECT * FROM recommendations WHERE id=?", (recommendation_id,)).fetchone())
+    conn.close()
+    return updated
 
 # Monthly cash flow — recurring amounts, deliberately separate from balances.
 @app.get("/api/cash-flow")

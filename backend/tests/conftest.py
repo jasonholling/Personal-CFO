@@ -99,6 +99,7 @@ def temp_db(tmp_path, monkeypatch):
     db_module.init_life_events_table()
     db_module.init_cfo_operating_tables()
     db_module.init_kids_table()
+    db_module.init_portfolio_coach_tables()
     yield db_path
 
 
