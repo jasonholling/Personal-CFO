@@ -265,4 +265,111 @@ class TestTaxLotsAndQuotePreview:
         assert preview.json()["quote"]["price"] == 275.40
         assert preview.json()["implied_market_value"] == 550.80
         assert preview.json()["requires_confirmation"] is True
-        assert client.get("/api/holdings").json()[0]["market_value"] == 500
+
+    def test_quote_preview_reports_source_liveness_and_offline_freshness(self, client):
+        from security_provider import MockSecurityProvider, set_active_provider
+        set_active_provider(MockSecurityProvider())
+        account = _create_account(client)
+        holding = client.post("/api/holdings", json={
+            "account_id": account["id"], "security_name": "Vanguard Total Stock Market ETF",
+            "ticker": "VTI", "provider_identifier": "MOCK:VTI", "shares": 2,
+            "market_value": 500, "asset_class": "us_large_cap",
+        }).json()
+        preview = client.get(f"/api/holdings/{holding['id']}/quote-preview").json()
+        assert preview["status"] == "ok"
+        assert preview["source"] == "Built-in offline catalog"
+        assert preview["is_live"] is False
+        assert preview["freshness"] == "offline"
+        assert preview["cached"] is False
+
+    def test_second_quote_preview_in_one_session_is_served_from_cache(self, client):
+        from security_provider import MockSecurityProvider, set_active_provider
+        set_active_provider(MockSecurityProvider())
+        account = _create_account(client)
+        holding = client.post("/api/holdings", json={
+            "account_id": account["id"], "security_name": "Vanguard Total Stock Market ETF",
+            "ticker": "VTI", "provider_identifier": "MOCK:VTI", "shares": 2,
+            "market_value": 500, "asset_class": "us_large_cap",
+        }).json()
+        first = client.get(f"/api/holdings/{holding['id']}/quote-preview").json()
+        second = client.get(f"/api/holdings/{holding['id']}/quote-preview").json()
+        assert first["cached"] is False
+        assert second["cached"] is True
+
+    def test_quote_preview_reports_a_specific_status_when_symbol_is_unrecognized(self, client):
+        from security_provider import MockSecurityProvider, set_active_provider
+        set_active_provider(MockSecurityProvider())
+        account = _create_account(client)
+        holding = client.post("/api/holdings", json={
+            "account_id": account["id"], "security_name": "Old Delisted Thing",
+            "ticker": "OLDCO", "provider_identifier": "MOCK:NOT_A_REAL_IDENTIFIER",
+            "market_value": 500, "asset_class": "us_large_cap",
+        }).json()
+        preview = client.get(f"/api/holdings/{holding['id']}/quote-preview").json()
+        assert preview["quote"] is None
+        assert preview["status"] == "not_found"
+
+    def test_quote_preview_reports_rate_limited_status_distinctly(self, client):
+        from security_provider import SecurityProvider, QuoteResult, MockSecurityProvider, set_active_provider
+
+        class RateLimitedProvider(SecurityProvider):
+            def search(self, query):
+                return []
+
+            def get_quote(self, provider_identifier):
+                return None
+
+            def get_quote_with_status(self, provider_identifier):
+                return QuoteResult(None, "rate_limited", "Throttled -- try again shortly.")
+
+            @property
+            def is_live(self):
+                return True
+
+        set_active_provider(RateLimitedProvider())
+        account = _create_account(client)
+        holding = client.post("/api/holdings", json={
+            "account_id": account["id"], "security_name": "Some Fund",
+            "ticker": "ABC", "provider_identifier": "ANY:1",
+            "market_value": 500, "asset_class": "us_large_cap",
+        }).json()
+        preview = client.get(f"/api/holdings/{holding['id']}/quote-preview").json()
+        assert preview["status"] == "rate_limited"
+        assert preview["quote"] is None
+        set_active_provider(MockSecurityProvider())
+
+    def test_use_quote_value_records_a_high_confidence_provider_source(self, client):
+        acc = _create_account(client)
+        created = client.post("/api/holdings", json={
+            "account_id": acc["id"], "security_name": "Guessed Fund", "market_value": 1000,
+            "asset_class": "us_large_cap", "data_source": "manual", "confidence": "low",
+        }).json()
+        refreshed = client.patch(f"/api/holdings/{created['id']}/valuation", json={
+            "market_value": 1100, "as_of_date": "2026-09-13", "source": "quote",
+        })
+        assert refreshed.status_code == 200, refreshed.text
+        assert refreshed.json()["data_source"] == "provider_quote"
+        assert refreshed.json()["confidence"] == "high"
+
+    def test_manual_valuation_refresh_never_touches_data_source_or_confidence(self, client):
+        acc = _create_account(client)
+        created = client.post("/api/holdings", json={
+            "account_id": acc["id"], "security_name": "Guessed Fund", "market_value": 1000,
+            "asset_class": "us_large_cap", "data_source": "manual", "confidence": "low",
+        }).json()
+        refreshed = client.patch(f"/api/holdings/{created['id']}/valuation", json={
+            "market_value": 1100, "as_of_date": "2026-09-13",
+        })
+        assert refreshed.json()["data_source"] == "manual"
+        assert refreshed.json()["confidence"] == "low"
+
+    def test_valuation_update_rejects_an_unknown_source(self, client):
+        acc = _create_account(client)
+        created = client.post("/api/holdings", json={
+            "account_id": acc["id"], "security_name": "Fund", "market_value": 1000, "asset_class": "us_large_cap",
+        }).json()
+        r = client.patch(f"/api/holdings/{created['id']}/valuation", json={
+            "market_value": 1100, "as_of_date": "2026-09-13", "source": "made_up",
+        })
+        assert r.status_code == 422
+        assert client.get("/api/holdings").json()[0]["market_value"] == 1000

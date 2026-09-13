@@ -314,9 +314,30 @@ class HoldingManagementModeUpdate(BaseModel):
 
 class HoldingValuationUpdate(BaseModel):
     """Refresh only the facts that change with a statement or quote.
-    Classification, cost basis, and the management decision stay intact."""
+    Classification, cost basis, and the management decision stay intact.
+
+    `source` is an honest label for WHERE this refreshed value came
+    from, not a trigger for any different behavior beyond the
+    data_source/confidence recorded alongside it:
+    - "manual" (default): a person typed a new number. data_source/
+      confidence are left exactly as they were -- this endpoint has
+      never claimed manual entry is either higher or lower confidence
+      than whatever was already on file, and changing that here would
+      be an unannounced behavior change.
+    - "quote": this value came from an explicitly-confirmed provider
+      quote (the "Use quote value" button, never automatic). Recorded
+      as data_source="provider_quote", confidence="high" so Coach's own
+      low-confidence-entry check reflects that a real quote, not a
+      guess, backs this number.
+    - "statement": reserved for a future explicit "confirm from
+      statement" action; behaves like "quote" (data_source="statement",
+      confidence="high") since a statement is also an authoritative
+      source, not a guess. Not yet exposed by an endpoint on this
+      branch — CSV import (a different endpoint) uses "statement" for
+      HoldingImportRow's own reasoning, not this model."""
     market_value: float
     as_of_date: str
+    source: str = "manual"
 
     @field_validator("market_value")
     @classmethod
@@ -332,6 +353,13 @@ class HoldingValuationUpdate(BaseModel):
             datetime.strptime(v, "%Y-%m-%d")
         except (TypeError, ValueError):
             raise ValueError("as_of_date must be YYYY-MM-DD")
+        return v
+
+    @field_validator("source")
+    @classmethod
+    def _source_must_be_known(cls, v):
+        if v not in {"manual", "quote", "statement"}:
+            raise ValueError("source must be 'manual', 'quote', or 'statement'")
         return v
 
 class TaxLot(BaseModel):
@@ -982,10 +1010,20 @@ def update_holding_management_mode(holding_id: int, update: HoldingManagementMod
 @app.patch("/api/holdings/{holding_id}/valuation")
 def update_holding_valuation(holding_id: int, update: HoldingValuationUpdate):
     conn = get_db()
-    cur = conn.execute(
-        "UPDATE holdings SET market_value=?, as_of_date=?, updated_at=datetime('now') WHERE id=?",
-        (update.market_value, update.as_of_date, holding_id),
-    )
+    if update.source in ("quote", "statement"):
+        data_source = "provider_quote" if update.source == "quote" else "statement"
+        cur = conn.execute(
+            "UPDATE holdings SET market_value=?, as_of_date=?, data_source=?, confidence='high', updated_at=datetime('now') WHERE id=?",
+            (update.market_value, update.as_of_date, data_source, holding_id),
+        )
+    else:
+        # "manual": never touches data_source/confidence -- this
+        # endpoint has always preserved whatever those already were for
+        # a plain manual value refresh, and that behavior is unchanged.
+        cur = conn.execute(
+            "UPDATE holdings SET market_value=?, as_of_date=?, updated_at=datetime('now') WHERE id=?",
+            (update.market_value, update.as_of_date, holding_id),
+        )
     if cur.rowcount == 0:
         conn.close()
         raise HTTPException(status_code=404, detail="Holding not found")
@@ -1031,12 +1069,45 @@ def delete_tax_lot(lot_id: int):
         raise HTTPException(status_code=404, detail="Tax lot not found")
     return {"deleted": lot_id}
 
+def _quote_freshness(is_live: bool, as_of: Optional[str]) -> "tuple[Optional[int], str]":
+    """Classifies a quote's price age into a plain freshness label the
+    UI can show without the caller having to reason about dates itself.
+    An offline/mock provider is always labeled "offline" regardless of
+    its own dated timestamp, since it was never a real market price to
+    begin with -- never implied as live just because it carries a date.
+    Thresholds (documented, not hidden): same/previous day is "live",
+    up to 5 calendar days is "delayed" (covers a provider's own
+    end-of-day/previous-close convention over a weekend), anything
+    older is "stale". An unparseable/missing date is "unknown" rather
+    than assumed fresh."""
+    if not is_live:
+        return None, "offline"
+    try:
+        price_date = datetime.strptime(str(as_of)[:10], "%Y-%m-%d").date()
+    except (TypeError, ValueError):
+        return None, "unknown"
+    age_days = (datetime.now().date() - price_date).days
+    if age_days < 0:
+        return age_days, "unknown"
+    if age_days <= 1:
+        return age_days, "live"
+    if age_days <= 5:
+        return age_days, "delayed"
+    return age_days, "stale"
+
+
 @app.get("/api/holdings/{holding_id}/quote-preview")
 def preview_holding_quote(holding_id: int):
     """Fetch a quote only when the user asks and never overwrite a holding.
 
     The response contains the value implied by the entered share count; the
     separate valuation endpoint is still an explicit user confirmation.
+
+    Reuses a still-fresh quote from earlier in this review session
+    (see security_provider.get_cached_or_fetch_quote) instead of always
+    hitting the provider again, and reports exactly why a quote could
+    not be produced (rate limit / provider error / symbol not found)
+    instead of one generic "no quote" message.
     """
     conn = get_db()
     row = conn.execute("SELECT * FROM holdings WHERE id=?", (holding_id,)).fetchone()
@@ -1047,17 +1118,27 @@ def preview_holding_quote(holding_id: int):
     if not holding.get("provider_identifier"):
         raise HTTPException(status_code=400, detail="Confirm this holding through ticker lookup before checking a provider quote.")
     from dataclasses import asdict
-    from security_provider import get_active_provider
-    quote = get_active_provider().get_quote(holding["provider_identifier"])
-    if quote is None:
-        return {"quote": None, "message": "No quote is available for this holding."}
+    from security_provider import get_active_provider, get_cached_or_fetch_quote
+    provider = get_active_provider()
+    result = get_cached_or_fetch_quote(holding["provider_identifier"])
+    base = {
+        "status": result.status, "source": provider.provider_name, "is_live": provider.is_live,
+        "cached": result.cached, "fetched_at": result.fetched_at,
+    }
+    if result.quote is None:
+        return {**base, "quote": None, "message": result.message}
+    quote = result.quote
     quoted = asdict(quote)
     implied_value = quote.price * holding["shares"] if holding.get("shares") is not None else None
+    price_age_days, freshness = _quote_freshness(provider.is_live, quote.as_of)
     return {
+        **base,
         "quote": quoted,
         "current_market_value": holding["market_value"],
         "implied_market_value": implied_value,
         "requires_confirmation": True,
+        "price_age_days": price_age_days,
+        "freshness": freshness,
         "message": "Review this quote before replacing the recorded holding value.",
     }
 
