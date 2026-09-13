@@ -224,7 +224,15 @@ def data_quality_recommendations(classified: Dict, reconciliations: List[Dict]) 
                 tax_impact=None, assumptions=[], confidence="high",
                 assumptions_hash_input={"holding_id": h.get("id"), "has_cost_basis": False},
             ))
-        if not is_managed_target_date and h.get("expense_ratio") is None and (h.get("market_value", 0) or 0) > 0:
+        # An expense ratio is a fund-level charge.  Do not create a bogus
+        # data-quality task for direct shares, cash, or a stable-value option;
+        # none has a fund expense ratio to enter in this field.
+        is_non_fund_position = (
+            h.get("security_type") in {"stock", "cash", "stable_value"}
+            or h.get("asset_class") == "cash"
+        )
+        if (not is_managed_target_date and not is_non_fund_position
+                and h.get("expense_ratio") is None and (h.get("market_value", 0) or 0) > 0):
             cards.append(_card(
                 "missing_data", recommendation_key("missing_expense_ratio", account_id=h.get("account_id"), holding_id=h.get("id")),
                 4, f"Missing expense ratio on {h.get('security_name') or 'a holding'}",

@@ -102,6 +102,17 @@ class TestDataQualityRecommendations:
         cards = data_quality_recommendations(classify_holdings(accs, [target_date]), [])
         assert not any("Target 2055" in card["title"] for card in cards)
 
+    @pytest.mark.parametrize("security_type,asset_class", [
+        ("stock", "us_large_cap"), ("cash", "cash"), ("stable_value", "cash"),
+    ])
+    def test_non_fund_position_is_not_asked_for_an_expense_ratio(self, security_type, asset_class):
+        holdings = [holding(1, 1, security_name="Direct position", market_value=1000,
+                            asset_class=asset_class, security_type=security_type,
+                            data_source="statement")]
+        cards = data_quality_recommendations(
+            classify_holdings([account(1, "ira")], holdings), [])
+        assert not any("Missing expense ratio" in card["title"] for card in cards)
+
     def test_low_confidence_manual_entry_flagged(self):
         accs = [account(1, "taxable")]
         hs = [holding(1, 1, market_value=50000, data_source="manual", confidence="low")]
