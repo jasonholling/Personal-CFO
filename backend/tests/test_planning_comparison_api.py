@@ -3,12 +3,10 @@
 recommendations). Via TestClient against an isolated temp db (see
 conftest.py's `client`/`temp_db` fixtures — never the real cfo.db).
 
-Covers the brief's planning-integration requirement: compares
-retirement projection / Monte Carlo / SWR outcomes between saved
-assumptions and a proposed allocation's blended expected return, by
-calling projection_engine.py/simulation_engine.py directly -- and must
-be byte-identical to the underlying engines' own output when no
-proposed allocation is supplied.
+Covers the planning-integration requirement: compares retirement
+projection / Monte Carlo / SWR outcomes between the current, classified
+portfolio and a proposed target allocation.  If there are no usable
+holdings, the endpoint explicitly falls back to saved assumptions.
 """
 import json
 
@@ -18,7 +16,45 @@ def _seed_planning_inputs(client, sample_inputs):
     assert r.status_code == 200, r.text
 
 
+def _seed_current_portfolio(client):
+    """A real current mix is required to prove this is a rebalance
+    comparison, rather than a disguised saved-return sensitivity test."""
+    account = client.post("/api/accounts", json={
+        "name": "Portfolio", "account_type": "taxable", "owner": "jason",
+        "institution": "Test", "balance": 100000,
+    })
+    assert account.status_code == 200, account.text
+    account_id = account.json()["id"]
+    for name, value, asset_class in (
+        ("US Equity", 80000, "us_large_cap"),
+        ("Bonds", 20000, "us_bonds"),
+    ):
+        created = client.post("/api/holdings", json={
+            "account_id": account_id, "security_name": name,
+            "market_value": value, "asset_class": asset_class,
+        })
+        assert created.status_code == 200, created.text
+
+
 class TestPlanningComparisonByteIdentical:
+    def test_defaults_to_latest_saved_scenario_instead_of_hidden_generic_defaults(self, client, sample_inputs):
+        _seed_planning_inputs(client, sample_inputs)
+        import db
+        conn = db.get_db()
+        conn.execute(
+            "INSERT INTO saved_scenarios (name, retirement_age, ss_timing, summary_json) VALUES (?,?,?,?)",
+            ("Retire at 58", 58, "delayed", "{}"),
+        )
+        conn.commit()
+        conn.close()
+
+        r = client.post("/api/portfolio/planning-comparison", json={})
+        assert r.status_code == 200, r.text
+        assert r.json()["scenario"] == {
+            "retirement_age": 58, "ss_timing": "delayed",
+            "saved_scenario_id": 1, "saved_scenario_name": "Retire at 58",
+        }
+
     def test_no_proposed_allocation_baseline_matches_direct_engine_call(self, client, sample_inputs):
         """Byte-identical requirement: with no proposed_allocation, the
         comparison endpoint's own baseline figures must exactly match
@@ -45,6 +81,24 @@ class TestPlanningComparisonByteIdentical:
         assert body["baseline"]["monte_carlo_median_final_balance"] == direct["median_final_balance"]
 
 class TestPlanningComparisonProposed:
+    def test_uses_current_holdings_not_saved_return_assumptions(self, client, sample_inputs):
+        _seed_planning_inputs(client, {**sample_inputs,
+                                       "expected_return_pre_retirement": 0.01,
+                                       "expected_return_post_retirement": 0.01})
+        _seed_current_portfolio(client)
+        r = client.post("/api/portfolio/planning-comparison", json={
+            "ret_age": 60, "ss_timing": "early",
+            "proposed_allocation": {"us_large_cap": 60, "us_bonds": 40},
+        })
+        assert r.status_code == 200, r.text
+        body = r.json()
+        # 80% at 9% plus 20% at 4.5% = the current portfolio's 8.1%,
+        # not the deliberately incompatible 1% saved planning assumption.
+        assert body["baseline_source"] == "current_portfolio_mix"
+        assert body["baseline_expected_return_pre_retirement"] == 0.081
+        assert body["baseline_expected_return_post_retirement"] == 0.081
+        assert body["baseline_classified_pct"] == 100
+
     def test_proposed_allocation_runs_a_second_comparison(self, client, sample_inputs):
         _seed_planning_inputs(client, sample_inputs)
         r = client.post("/api/portfolio/planning-comparison", json={

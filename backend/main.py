@@ -523,8 +523,10 @@ class OptionMixRequest(BaseModel):
 
 class PlanningComparisonRequest(BaseModel):
     proposed_allocation: Optional[Dict[str, float]] = None  # pct_by_class -- e.g. a policy's target mix
-    ret_age: int = 60
-    ss_timing: str = "early"
+    # When omitted, the comparison uses the most recent saved scenario.
+    # The Coach must not silently substitute a generic age-60/early-SS plan.
+    ret_age: Optional[int] = None
+    ss_timing: Optional[str] = None
 
 class SecurityConfirmRequest(BaseModel):
     provider_identifier: Optional[str] = None
@@ -1568,43 +1570,44 @@ def portfolio_rebalance(req: PortfolioContributionRequest):
 
 @app.post("/api/portfolio/planning-comparison")
 def portfolio_planning_comparison(req: PlanningComparisonRequest):
-    """Compares retirement-planning outcomes between the household's
-    currently SAVED assumptions and a proposed allocation's blended
-    expected return and volatility -- by calling projection_engine.run_retirement_
-    projection / simulation_engine.run_monte_carlo / run_swr_analysis
-    DIRECTLY, twice, with expected_return_pre_retirement,
-    expected_return_post_retirement, and Monte Carlo portfolio_std
-    overridden on the "proposed" side (both return phases get the same
-    blended figure -- this does not model a
-    post-retirement glide-path shift; the proposed mix is assumed held
-    statically through both phases). Never rebuilds any retirement
-    formula here, per the brief's explicit "do not duplicate calculation
-    formulas already present in the retirement engine" constraint.
+    """Compare the policy target with the portfolio actually held today.
 
-    If no proposed_allocation is supplied, only the baseline runs --
-    with COMPLETELY UNMODIFIED inputs, so this is byte-identical to
-    calling /api/projections/whatif (etc.) directly. `proposed` is null
-    in that case, not an empty/zeroed comparison object."""
+    Both sides use the same retirement/Monte Carlo/SWR engines.  For a
+    target-mix comparison, each side receives its own holdings-weighted
+    expected return and volatility, held static before and after retirement.
+    That is a sensitivity illustration, not a forecast or a glide path.
+
+    If there are no classified, policy-included holdings, the baseline keeps
+    the saved planning assumptions and says so explicitly.  Omitting the
+    scenario parameters uses the latest saved scenario rather than a hidden
+    generic age-60/early-SS scenario.
+    """
     from projection_engine import run_retirement_projection
     from simulation_engine import run_monte_carlo, run_swr_analysis
-    from holdings_engine import blended_expected_return, blended_portfolio_volatility
+    from holdings_engine import (
+        blended_expected_return, blended_portfolio_volatility,
+        classify_holdings, compute_current_allocation, policy_included_holdings,
+    )
     conn = get_db()
     inputs_row = conn.execute("SELECT * FROM planning_inputs WHERE id=1").fetchone()
-    accounts = [dict(r) for r in conn.execute("SELECT * FROM accounts").fetchall()]
+    accounts, holdings, policy = _load_portfolio_context(conn)
     life_events = _get_active_life_events(conn)
     surplus_allocations = _get_relevant_surplus_allocations(conn)
+    saved = conn.execute("SELECT id, name, retirement_age, ss_timing FROM saved_scenarios ORDER BY id DESC LIMIT 1").fetchone()
     conn.close()
     if not inputs_row:
         raise HTTPException(status_code=400, detail="Planning inputs not set yet")
     baseline_inputs = dict(inputs_row)
+    ret_age = req.ret_age if req.ret_age is not None else (int(saved["retirement_age"]) if saved else 60)
+    ss_timing = req.ss_timing if req.ss_timing in ("early", "delayed") else (saved["ss_timing"] if saved and saved["ss_timing"] in ("early", "delayed") else "early")
 
     def run_all(inputs, portfolio_std=None):
-        retirement = run_retirement_projection(inputs, accounts, ret_ages=[req.ret_age], life_events=life_events, surplus_allocations=surplus_allocations)
+        retirement = run_retirement_projection(inputs, accounts, ret_ages=[ret_age], life_events=life_events, surplus_allocations=surplus_allocations)
         scenario = next(iter(retirement["scenarios"]), {})
-        monte_carlo = run_monte_carlo(inputs, accounts, req.ret_age, req.ss_timing,
+        monte_carlo = run_monte_carlo(inputs, accounts, ret_age, ss_timing,
                                       life_events=life_events, surplus_allocations=surplus_allocations,
                                       portfolio_std=portfolio_std)
-        swr = run_swr_analysis(inputs, accounts, ret_age=req.ret_age, ss_timing=req.ss_timing, life_events=life_events, surplus_allocations=surplus_allocations)
+        swr = run_swr_analysis(inputs, accounts, ret_age=ret_age, ss_timing=ss_timing, life_events=life_events, surplus_allocations=surplus_allocations)
         return {
             "projected_surplus": scenario.get("projected_surplus"),
             "percent_funded": scenario.get("percent_funded"),
@@ -1622,6 +1625,13 @@ def portfolio_planning_comparison(req: PlanningComparisonRequest):
         "baseline": run_all(baseline_inputs),
         "baseline_expected_return_pre_retirement": baseline_inputs.get("expected_return_pre_retirement"),
         "baseline_expected_return_post_retirement": baseline_inputs.get("expected_return_post_retirement"),
+        "baseline_source": "saved_assumptions",
+        "scenario": {
+            "retirement_age": ret_age,
+            "ss_timing": ss_timing,
+            "saved_scenario_id": saved["id"] if saved else None,
+            "saved_scenario_name": saved["name"] if saved else None,
+        },
         "proposed": None,
     }
     if req.proposed_allocation:
@@ -1629,6 +1639,24 @@ def portfolio_planning_comparison(req: PlanningComparisonRequest):
         proposed_std = blended_portfolio_volatility(req.proposed_allocation)
         if blended is None:
             raise HTTPException(status_code=400, detail="Could not compute a blended expected return from the proposed allocation -- every class is unclassified or the allocation is empty.")
+        # A rebalance comparison must start with the actual portfolio, not
+        # unrelated saved return assumptions.  Only fall back when there is
+        # genuinely no usable current allocation to model.
+        included_holdings = policy_included_holdings(holdings, policy)
+        current = compute_current_allocation(classify_holdings(accounts, included_holdings)["household"])
+        current_return = blended_expected_return(current["pct_by_class"])
+        current_std = blended_portfolio_volatility(current["pct_by_class"])
+        if current_return is not None:
+            current_inputs = dict(baseline_inputs)
+            current_inputs["expected_return_pre_retirement"] = current_return
+            current_inputs["expected_return_post_retirement"] = current_return
+            result["baseline"] = run_all(current_inputs, current_std)
+            result["baseline_expected_return_pre_retirement"] = current_return
+            result["baseline_expected_return_post_retirement"] = current_return
+            result["baseline_portfolio_volatility"] = current_std
+            result["baseline_source"] = "current_portfolio_mix"
+            result["baseline_allocation"] = current["pct_by_class"]
+            result["baseline_classified_pct"] = round(100 - current["pct_by_class"].get("unclassified", 0), 2)
         proposed_inputs = dict(baseline_inputs)
         proposed_inputs["expected_return_pre_retirement"] = blended
         proposed_inputs["expected_return_post_retirement"] = blended

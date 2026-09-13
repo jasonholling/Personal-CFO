@@ -390,19 +390,23 @@ export default function PortfolioCoach({ onNavigate }) {
 
       {allocation?.has_policy && allocation?.comparison && (
         <details className="card" style={{ marginBottom: 24 }}>
-          <summary>Explore how your target mix affects retirement</summary>
+          <summary>Explore current mix versus target mix</summary>
           <p style={{ fontSize: 12, color: 'var(--muted)', marginTop: -4, marginBottom: 10 }}>
-            Compares your saved retirement assumptions against the blended expected return and volatility of your
-            policy's target mix, using the same retirement/Monte Carlo/SWR engines the rest of the app uses.
+            Uses the same retirement, Monte Carlo, and SWR engines to compare the blended return and volatility of
+            your policy-included holdings today with your policy target. It is a static-mix sensitivity check, not a forecast or glide path.
           </p>
           <button className="btn-primary" disabled={busy} onClick={runPlanningComparison}>Compare planning outcomes</button>
           {planningResult && (
             <div style={{ overflowX: 'auto', marginTop: 14 }}>
+              <div style={{ fontSize: 12, color: 'var(--muted)', marginBottom: 8 }}>
+                Scenario: {planningResult.scenario?.saved_scenario_name ? `saved scenario “${planningResult.scenario.saved_scenario_name}”` : 'default plan'}
+                {' '}· retire at {planningResult.scenario?.retirement_age} · Social Security: {planningResult.scenario?.ss_timing}
+              </div>
               <table style={{ width: '100%', fontSize: 13, borderCollapse: 'collapse' }}>
                 <thead>
                   <tr style={{ textAlign: 'left', color: 'var(--muted)' }}>
                     <th style={{ padding: '4px 8px' }}></th>
-                    <th style={{ padding: '4px 8px' }}>Saved assumptions</th>
+                    <th style={{ padding: '4px 8px' }}>{planningResult.baseline_source === 'current_portfolio_mix' ? 'Current portfolio mix' : 'Saved assumptions'}</th>
                     <th style={{ padding: '4px 8px' }}>Policy target mix</th>
                   </tr>
                 </thead>
@@ -430,9 +434,10 @@ export default function PortfolioCoach({ onNavigate }) {
                 </tbody>
               </table>
               <div style={{ fontSize: 11, color: 'var(--muted)', marginTop: 8 }}>
-                Assumes the target mix's blended expected return ({(planningResult.proposed_blended_expected_return * 100).toFixed(2)}%)
-                and annualized volatility ({planningResult.proposed_portfolio_volatility == null ? 'unavailable' : `${(planningResult.proposed_portfolio_volatility * 100).toFixed(2)}%`})
-                are held statically through both pre- and post-retirement phases — not a post-retirement glide path.
+                {planningResult.baseline_source === 'current_portfolio_mix'
+                  ? <>Current mix: {(planningResult.baseline_expected_return_pre_retirement * 100).toFixed(2)}% expected return / {planningResult.baseline_portfolio_volatility == null ? 'unavailable' : `${(planningResult.baseline_portfolio_volatility * 100).toFixed(2)}%`} volatility; target mix: {(planningResult.proposed_blended_expected_return * 100).toFixed(2)}% / {planningResult.proposed_portfolio_volatility == null ? 'unavailable' : `${(planningResult.proposed_portfolio_volatility * 100).toFixed(2)}%`}. {planningResult.baseline_classified_pct != null && `${planningResult.baseline_classified_pct}% of the current portfolio is classified.`}</>
+                  : <>No classified, policy-included holdings were available, so the left column uses your saved return assumptions.</>}
+                {' '}Both mixes are held statically before and after retirement; this does not model a glide path.
               </div>
             </div>
           )}
