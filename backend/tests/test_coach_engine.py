@@ -13,7 +13,7 @@ from coach_engine import (
     stable_hash, recommendation_key, data_quality_recommendations,
     concentration_and_liquidity_recommendations, policy_violation_recommendations,
     high_cost_or_redundant_recommendations, new_money_recommendations,
-    rebalance_recommendations, minor_optimization_recommendations,
+    rebalance_recommendations, minor_optimization_recommendations, asset_location_recommendations,
     no_policy_recommendation, _card,
     prioritize, reconcile_recommendation_queue, CATEGORY_BASE_PRIORITY, CATEGORIES,
 )
@@ -107,6 +107,25 @@ class TestDataQualityRecommendations:
         assert card["title"] == "Refresh the value of Fund"
         assert card["target_value"] == 35
         assert card["value_unit"] == "count"
+
+
+class TestAssetLocationRecommendations:
+    def test_taxable_bonds_get_a_review_card_without_becoming_a_trade_instruction(self):
+        classified = classify_holdings([account(1, "taxable")], [
+            holding(1, 1, market_value=20000, asset_class="us_bonds", data_source="statement", confidence="high"),
+        ])
+        cards = asset_location_recommendations(classified)
+        assert len(cards) == 1
+        assert cards[0]["category"] == "minor_optimization"
+        assert "location heuristic" in cards[0]["assumptions"][0]
+        assert "sell recommendation" in cards[0]["assumptions"][0]
+
+    def test_taxable_stock_and_tax_deferred_bonds_do_not_raise_a_location_card(self):
+        classified = classify_holdings([account(1, "taxable"), account(2, "ira")], [
+            holding(1, 1, market_value=20000, asset_class="us_large_cap"),
+            holding(2, 2, market_value=20000, asset_class="us_bonds"),
+        ])
+        assert asset_location_recommendations(classified) == []
 
 
 class TestPolicyViolationRecommendations:

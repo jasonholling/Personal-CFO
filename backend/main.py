@@ -1533,6 +1533,7 @@ def _generate_candidate_cards(accounts, holdings, policy, pending_contribution: 
     household_cash = current["by_class"].get("cash")
     cards += ce.concentration_and_liquidity_recommendations(classified["household"], policy, household_cash)
     cards += ce.high_cost_or_redundant_recommendations(classified["household"])
+    cards += ce.asset_location_recommendations(classified)
     cards += ce.minor_optimization_recommendations(classified["household"], goal_context or {})
 
     if not policy:

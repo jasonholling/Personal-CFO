@@ -392,6 +392,37 @@ def new_money_recommendations(contribution_actions: List[Dict]) -> List[Dict]:
     return cards
 
 
+# ── Asset location review ────────────────────────────────────────────────
+
+def asset_location_recommendations(classified: Dict) -> List[Dict]:
+    """Surface tax-location questions without pretending a heuristic is a
+    trade instruction.  This deliberately produces review cards only:
+    it does not model embedded gains, state tax, withdrawal timing, or an
+    account-specific replacement security."""
+    cards = []
+    taxable_types = {"taxable", "brokerage"}
+    tax_inefficient = {"us_bonds", "international_bonds", "real_estate"}
+    for holding in classified.get("household", []):
+        account_type = (holding.get("_account") or {}).get("account_type")
+        asset_class = holding.get("asset_class")
+        if account_type not in taxable_types or asset_class not in tax_inefficient:
+            continue
+        name = holding.get("security_name") or holding.get("ticker") or "This holding"
+        cards.append(_card(
+            "minor_optimization", recommendation_key("asset_location_review", account_id=holding.get("account_id"), holding_id=holding.get("id")),
+            5, f"Review tax location for {name}",
+            f"{asset_class.replace('_', ' ').title()} is held in a taxable account. Interest, distributions, or REIT income can be less tax-efficient there than in a tax-advantaged account.",
+            [holding.get("account_id")], [holding.get("id")], current_value=holding.get("market_value"), target_value=None,
+            proposed_change="Compare this holding with the bond or real-estate exposure already available in pretax, Roth, or HSA accounts before making any change.",
+            expected_effect="May reduce annual taxable distributions; any move still needs a gain, fee, and available-fund review.",
+            tax_impact="Selling in taxable may realize a gain or loss; Coach does not estimate it here without a complete replacement plan.",
+            assumptions=["This is a location heuristic, not a sell recommendation.", "Taxable account type and asset classification are correct."],
+            confidence="medium", invalidates_on=["Account type, tax status, holdings, or tax circumstances change."],
+            assumptions_hash_input={"holding_id": holding.get("id"), "account_type": account_type, "asset_class": asset_class, "market_value": holding.get("market_value")},
+        ))
+    return cards
+
+
 # ── Tiers 6/7: account-aware rebalancing (tax-advantaged vs. taxable) ────
 
 def rebalance_recommendations(rebalance_result: Dict) -> List[Dict]:
