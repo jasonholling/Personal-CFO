@@ -1444,7 +1444,7 @@ def _portfolio_goal_context(conn, accounts: List[Dict], policy: Optional[Dict]) 
         surplus = _get_relevant_surplus_allocations(conn)
         projection = run_retirement_projection(inputs, accounts, ret_ages=[ret_age],
                                                life_events=life_events, surplus_allocations=surplus)
-        scenario = next((s for s in projection.get("scenarios", []) if s.get("retirement_age") == ret_age),
+        scenario = next((s for s in projection.get("scenarios", []) if s.get("retirement_age") == ret_age and s.get("ss_timing") in (ss_timing, "custom")),
                         next(iter(projection.get("scenarios", [])), {}))
         monte_carlo = run_monte_carlo(inputs, accounts, ret_age=ret_age, ss_timing=ss_timing,
                                       life_events=life_events, surplus_allocations=surplus)
@@ -1492,7 +1492,7 @@ def _reconcile_and_persist_recommendations(conn, candidates: List[Dict]) -> None
     existing_by_key: Dict[str, List[Dict]] = {}
     for r in rows:
         existing_by_key.setdefault(r["recommendation_key"], []).append(dict(r))
-    result = ce.reconcile_recommendation_queue(candidates, existing_by_key)
+    result = ce.reconcile_recommendation_queue(candidates, existing_by_key, today=datetime.now().date().isoformat())
     for c in result["to_insert"]:
         conn.execute(
             "INSERT INTO recommendations (recommendation_key, category, priority, title, action_text, payload_json, "

@@ -496,10 +496,11 @@ def prioritize(cards: List[Dict]) -> List[Dict]:
 
 # ── Decision lifecycle: sync candidates against existing DB rows ────────
 
-def reconcile_recommendation_queue(candidates: List[Dict], existing_by_key: Dict[str, List[Dict]]) -> Dict:
+def reconcile_recommendation_queue(candidates: List[Dict], existing_by_key: Dict[str, List[Dict]], today: Optional[str] = None) -> Dict:
     """Pure sync logic (main.py does the actual DB reads/writes). For
     each freshly-generated candidate:
     - No existing row for this key -> insert a new "proposed" row.
+    - Deferred rows resurface on their review date when today is supplied.
     - Latest existing row is rejected/deferred:
         - SAME assumptions_hash -> suppress (do not resurface;
           "never silently disappear" is satisfied by the row itself
@@ -544,7 +545,10 @@ def reconcile_recommendation_queue(candidates: List[Dict], existing_by_key: Dict
         same_hash = latest["assumptions_hash"] == c["assumptions_hash"]
         status = latest["status"]
         if status in ("rejected", "deferred"):
-            if same_hash:
+            due = status == "deferred" and today and latest.get("review_date") and latest["review_date"] <= today
+            if due:
+                to_insert.append(c)
+            elif same_hash:
                 pass  # suppressed -- not resurfaced, not reinserted
             else:
                 to_insert.append(c)

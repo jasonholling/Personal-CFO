@@ -875,6 +875,72 @@ def init_portfolio_coach_tables():
     recommendation_cols = [r[1] for r in conn.execute("PRAGMA table_info(recommendations)").fetchall()]
     if "review_date" not in recommendation_cols:
         conn.execute("ALTER TABLE recommendations ADD COLUMN review_date TEXT")
+
+    # Migrate holdings/investment_policies: CREATE TABLE IF NOT EXISTS above
+    # is a no-op against a table that already exists, so a cfo.db created
+    # while Portfolio Coach still had its original three-bucket policy
+    # (target_us_stock_pct/target_international_stock_pct/target_bonds_pct)
+    # and name+description holdings shape never gained the ten-asset-class
+    # columns the current schema/UI/InvestmentPolicy model expect. Reported
+    # 2026-09-12: saving a policy only appeared to persist the fields whose
+    # names happen to be identical in both schemas (cash/real_estate/
+    # alternatives/drift_band/rebalance_cadence/minimum_cash_reserve/
+    # use_contributions_before_sales) -- every new asset-class field silently
+    # had nowhere to write to.
+    holdings_cols = [r[1] for r in conn.execute("PRAGMA table_info(holdings)").fetchall()]
+    holdings_migrations = [
+        ("ticker",              "TEXT"),
+        ("security_name",       "TEXT NOT NULL DEFAULT ''"),
+        ("provider_identifier", "TEXT"),
+        ("exchange",            "TEXT"),
+        ("security_type",       "TEXT"),
+        ("exposures_json",      "TEXT"),
+        ("as_of_date",          "TEXT"),
+        ("data_source",         "TEXT NOT NULL DEFAULT 'manual'"),
+        ("confidence",          "TEXT NOT NULL DEFAULT 'low'"),
+    ]
+    for col, typedef in holdings_migrations:
+        if col not in holdings_cols:
+            conn.execute(f"ALTER TABLE holdings ADD COLUMN {col} {typedef}")
+    if "name" in holdings_cols:
+        # Legacy rows kept their label in "name" -- carry it into the new
+        # required security_name column so it isn't blank.
+        conn.execute("UPDATE holdings SET security_name = name "
+                      "WHERE (security_name = '' OR security_name IS NULL) AND name IS NOT NULL")
+    conn.commit()
+
+    policy_cols = [r[1] for r in conn.execute("PRAGMA table_info(investment_policies)").fetchall()]
+    policy_migrations = [
+        ("target_us_large_cap_pct",           "REAL NOT NULL DEFAULT 0"),
+        ("target_us_mid_cap_pct",              "REAL NOT NULL DEFAULT 0"),
+        ("target_us_small_cap_pct",            "REAL NOT NULL DEFAULT 0"),
+        ("target_international_developed_pct", "REAL NOT NULL DEFAULT 0"),
+        ("target_emerging_markets_pct",        "REAL NOT NULL DEFAULT 0"),
+        ("target_us_bonds_pct",                "REAL NOT NULL DEFAULT 0"),
+        ("target_international_bonds_pct",     "REAL NOT NULL DEFAULT 0"),
+        ("max_single_security_pct",            "REAL"),
+        ("taxable_sale_preference",            "TEXT"),
+        ("excluded_accounts_json",             "TEXT"),
+        ("excluded_holdings_json",             "TEXT"),
+        ("employer_stock_exceptions_json",     "TEXT"),
+        ("legacy_holding_exceptions_json",     "TEXT"),
+        ("risk_profile",                       "TEXT"),
+        ("account_constraints_json",           "TEXT"),
+        ("effective_date",                     "TEXT"),
+        ("review_date",                        "TEXT"),
+    ]
+    for col, typedef in policy_migrations:
+        if col not in policy_cols:
+            conn.execute(f"ALTER TABLE investment_policies ADD COLUMN {col} {typedef}")
+    # Copy each legacy bucket only when its replacement is first added.
+    # Zero is a valid later allocation, not evidence that migration is needed.
+    for old, new in (
+        ("target_us_stock_pct", "target_us_large_cap_pct"),
+        ("target_international_stock_pct", "target_international_developed_pct"),
+        ("target_bonds_pct", "target_us_bonds_pct"),
+    ):
+        if old in policy_cols and new not in policy_cols:
+            conn.execute(f"UPDATE investment_policies SET {new} = COALESCE({old}, 0)")
     conn.execute("PRAGMA optimize")
     conn.commit(); conn.close()
 
