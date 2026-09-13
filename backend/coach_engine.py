@@ -394,12 +394,13 @@ def new_money_recommendations(contribution_actions: List[Dict]) -> List[Dict]:
 
 # ── Asset location review ────────────────────────────────────────────────
 
-def asset_location_recommendations(classified: Dict) -> List[Dict]:
+def asset_location_recommendations(classified: Dict, options_by_account: Optional[Dict[int, List[Dict]]] = None) -> List[Dict]:
     """Surface tax-location questions without pretending a heuristic is a
     trade instruction.  This deliberately produces review cards only:
     it does not model embedded gains, state tax, withdrawal timing, or an
     account-specific replacement security."""
     cards = []
+    options_by_account = options_by_account or {}
     taxable_types = {"taxable", "brokerage"}
     tax_inefficient = {"us_bonds", "international_bonds", "real_estate"}
     for holding in classified.get("household", []):
@@ -408,10 +409,19 @@ def asset_location_recommendations(classified: Dict) -> List[Dict]:
         if account_type not in taxable_types or asset_class not in tax_inefficient:
             continue
         name = holding.get("security_name") or holding.get("ticker") or "This holding"
+        alternatives = []
+        for candidate in classified.get("household", []) + classified.get("hsa", []):
+            candidate_type = (candidate.get("_account") or {}).get("account_type")
+            if candidate_type not in {"ira", "401k", "403b", "roth_ira", "hsa"}:
+                continue
+            for option in options_by_account.get(candidate.get("account_id"), []):
+                if option.get("asset_class") == asset_class and option.get("available_for_exchange"):
+                    alternatives.append(option.get("option_name") or option.get("ticker"))
+        alternative_note = (" Recorded alternatives: " + ", ".join(sorted(set(alternatives))[:3]) + ".") if alternatives else " No recorded tax-advantaged replacement option is available yet."
         cards.append(_card(
             "minor_optimization", recommendation_key("asset_location_review", account_id=holding.get("account_id"), holding_id=holding.get("id")),
             5, f"Review tax location for {name}",
-            f"{asset_class.replace('_', ' ').title()} is held in a taxable account. Interest, distributions, or REIT income can be less tax-efficient there than in a tax-advantaged account.",
+            f"{asset_class.replace('_', ' ').title()} is held in a taxable account. Interest, distributions, or REIT income can be less tax-efficient there than in a tax-advantaged account." + alternative_note,
             [holding.get("account_id")], [holding.get("id")], current_value=holding.get("market_value"), target_value=None,
             proposed_change="Compare this holding with the bond or real-estate exposure already available in pretax, Roth, or HSA accounts before making any change.",
             expected_effect="May reduce annual taxable distributions; any move still needs a gain, fee, and available-fund review.",
