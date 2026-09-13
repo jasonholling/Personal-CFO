@@ -412,7 +412,7 @@ function HoldingsTab({ accounts, excludedAccounts, onEditPolicy }) {
                 {quotePreviews[h.id].cached && ' · from earlier this session'}
                 {quotePreviews[h.id].implied_market_value != null && <> · {h.shares} shares implies {fmt(quotePreviews[h.id].implied_market_value)} <button className="btn-secondary" style={{ marginLeft: 6, padding: '2px 8px', fontSize: 11 }} onClick={() => useQuoteValue(h, quotePreviews[h.id])}>Use quote value</button></>}
                 {quotePreviews[h.id].implied_market_value == null && <> · Add shares to use this price for a value update.</>}
-              </> : <span style={{ color: quotePreviews[h.id].status === 'rate_limited' ? 'var(--amber)' : 'inherit' }}>{quotePreviews[h.id].message}</span>}
+              </> : <span style={{ color: ['rate_limited', 'provider_error'].includes(quotePreviews[h.id].status) ? 'var(--amber)' : 'inherit' }}>{quotePreviews[h.id].message}</span>}
             </div>}
             </div>
           ))}

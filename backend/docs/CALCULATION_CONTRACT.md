@@ -7503,10 +7503,166 @@ year transition can set `filing_status` to `"single"`/
 `"head_of_household"` automatically as a documented, overridable
 default, not a silent assumption baked into the death-year math.
 
-### Branch status note
+### Branch status note (superseded by section 80 below for item 2)
 
-Item 1 is fully implemented and tested on this branch. Items 2-5 were
-not reached in this pass — see the branch's own commit history and the
-final status reported alongside this contract update for exactly what
-remains, so this section is not read as claiming more than what the
-code actually does.
+Item 1 is fully implemented and tested on this branch. Item 2 (quote
+reliability and statement refresh) was completed in a follow-up pass —
+see section 80. Items 3-5 were not reached — see the branch's own
+commit history and the final status reported alongside this contract
+update for exactly what remains, so this section is not read as
+claiming more than what the code actually does.
+
+## 80. Quote reliability and statement refresh (item 2) (2026-09-13, `codex/portfolio-coach-next-backlog`)
+
+Builds on what already existed on `main` before this branch: a manual,
+explicit `GET /api/holdings/{id}/quote-preview` (a quote is only ever
+fetched when the user clicks "Check quote," never automatically) and a
+CSV statement-import preview/commit flow (`POST /api/holdings/import/
+preview` and `/commit`) that already matched a CSV row against an
+existing holding by account + ticker/name. This pass makes both more
+reliable and fixes several real overwrite bugs found in the existing
+CSV commit path, without making anything automatic.
+
+### Quote status, source, and freshness (`security_provider.py`)
+
+`QuoteResult` (new) reports WHY a quote could or could not be produced
+— `status` is one of `"ok"`, `"not_found"`, `"rate_limited"`,
+`"provider_error"` — instead of the previous bare `Optional[
+SecurityQuote]`, which collapsed every failure into the same `None`.
+`SecurityProvider.get_quote_with_status()` has a default implementation
+(for any provider, including test stubs, that only implements
+`get_quote()`); `AlphaVantageSecurityProvider` overrides it with the
+real reason, splitting `_request` into `_request_with_status` so a
+"Note"/"Information" rate-limit response is distinguishable from a
+network/parse error (previously both collapsed to the same empty
+dict). `MockSecurityProvider` never needed an override — the default
+`ok`/`not_found` split is exactly right for a deterministic offline
+catalog.
+
+`GET /api/holdings/{id}/quote-preview` returns, in addition to the
+existing `quote`/`implied_market_value`/`requires_confirmation`:
+`status`, `source` (provider display name), `is_live`, `cached`,
+`fetched_at`, and — only when a quote exists — `price_age_days` and a
+documented `freshness` classification (`_quote_freshness()` in
+`main.py`): `"live"` (same/previous day), `"delayed"` (up to 5 calendar
+days, covering an end-of-day/previous-close convention over a
+weekend), `"stale"` (older), `"offline"` (a non-live provider,
+regardless of its own dated timestamp — never implied live just
+because it carries a date), or `"unknown"` (unparseable/missing date,
+never assumed fresh). `PortfolioSetup.jsx` renders all of these as
+plain-language labels, never inferring freshness from a number's
+magnitude in the UI.
+
+### Session quote cache
+
+`get_cached_or_fetch_quote()` (a small in-process, TTL-based cache —
+15 minutes by default, `DEFAULT_QUOTE_CACHE_TTL_SECONDS`) avoids
+repeatedly calling the provider for the same identifier within one
+review session; the quote-preview endpoint now calls this instead of
+the provider directly. Only `"ok"`/`"not_found"` results are cached —
+a `rate_limited`/`provider_error` result is deliberately never cached,
+so the very next manual retry actually reaches the provider instead of
+replaying the same failure for the rest of the TTL. `set_active_
+provider()` clears the cache, so a stale quote from a previous provider
+can never be served as if it came from the new one (this matters for
+tests as much as a real provider swap). `peek_cached_quote()` is a
+read-only variant that NEVER calls the provider — used by CSV import
+preview (below), which must stay a pure "compare what's already known"
+step, never an automatic quote check.
+
+### "Use quote value" records an honest source (`HoldingValuationUpdate.source`)
+
+`PATCH /api/holdings/{id}/valuation` gained an optional `source` field
+(`"manual"` default, `"quote"`, or `"statement"` — the last reserved
+for a future explicit "confirm from statement" action, not yet exposed
+by an endpoint). `"manual"` preserves the exact previous behavior —
+`data_source`/`confidence` are left untouched, so no existing caller's
+assumptions change. `"quote"` (used by "Use quote value") records
+`data_source="provider_quote"`, `confidence="high"`, so a holding
+backed by an actual confirmed quote no longer trips Coach's
+low-confidence-manual-entry card (`coach_engine.py`'s `data_source ==
+"manual" or confidence == "low"` check) the same way a guessed manual
+number does. Still a single explicit PATCH call per confirmation —
+nothing here makes a value change automatic, and market_value/
+as_of_date are the only facts this endpoint ever touches (cost basis
+and classification are untouched, exactly as before).
+
+### CSV import: preserve facts, add value_date, flag quote drift
+
+**Before this pass** (undocumented in this contract until now, from
+the prior "Add tax lots and holding quote previews" branch):
+`commit_holdings_import` REQUIRED `asset_class` on every row (even a
+pure value refresh) and, on a matched row, unconditionally overwrote
+`ticker`/`shares`/`asset_class`/`expense_ratio`/`cost_basis`/`notes`
+from the CSV row — a CSV that only carried shares/value would silently
+blank out an existing cost basis, notes, or classification, and always
+stamped `data_source='manual', confidence='low'` even though a
+statement is an authoritative source, not a guess. `as_of_date` was
+never touched at all by an update, so a freshly-imported value could
+still trip Coach's 35-day stale-value card on data that was current
+that same day.
+
+**Now:**
+- `asset_class` is required only for a row that would CREATE a
+  brand-new holding (there is no existing classification to fall back
+  to) — enforced in `preview_holdings_import` (marks the row invalid
+  with a clear message) and re-checked defensively in
+  `commit_holdings_import`. `holdings_engine.parse_holdings_csv` no
+  longer requires an `asset_class` column at all.
+- A new optional `value_date` CSV column (validated as YYYY-MM-DD) sets
+  the holding's `as_of_date` on both create and update; when omitted,
+  `as_of_date` defaults to today rather than staying stale.
+- On a matched (update) row, `asset_class`, `expense_ratio`,
+  `cost_basis`, `notes`, and `shares` are each preserved from the
+  existing holding unless the row supplies a non-blank replacement —
+  never blanked out just because a column was absent or empty.
+  `management_mode` and tax lots are untouched by construction (the
+  UPDATE statement never mentions either column/table).
+- A confirmed `provider_identifier` (from ticker lookup) is preserved
+  when the row's ticker is unchanged or omitted, and cleared ONLY when
+  the row explicitly supplies a different, non-blank ticker — a stale
+  identifier left pointing at a ticker that no longer matches would
+  misattribute quotes to the wrong security. This is the concrete fix
+  for "ticker lookup, confirmed provider identifier, quote preview, and
+  imported statement values do not overwrite each other unexpectedly."
+- Both created and updated rows are recorded as `data_source=
+  'statement', confidence='high'` — a statement import is an
+  authoritative source and should not trip the low-confidence-manual-
+  entry card the way a typed guess does.
+- `preview_holdings_import` flags, without deciding which number is
+  right, when a matched holding's imported value differs from a quote
+  already checked earlier in this session by at least
+  `MATERIAL_QUOTE_DEVIATION_PCT` (5%, documented) — via `peek_cached_
+  quote`, so preview itself never triggers a fresh provider call. The
+  UI shows this as a neutral review message, never a correction.
+
+### Known limitations / deferred work
+
+- `"statement"` as a `HoldingValuationUpdate.source` value is modeled
+  (same `data_source`/`confidence` treatment as `"quote"`) but no
+  endpoint sets it yet — there is no dedicated "confirm from statement"
+  single-holding action distinct from the CSV import flow.
+- The quote-drift comparison in CSV preview only fires when a quote was
+  ALREADY checked this session (via the cache) — it never fetches one
+  itself, and does not persist across a backend restart or a long gap
+  between checking a quote and importing a statement.
+- `_quote_freshness`'s 1-day/5-day thresholds are a deliberate,
+  documented simplification (not a market-calendar-aware "is today a
+  trading day" check) — stated here rather than silently assumed
+  precise.
+
+### Verification
+
+Backend: `tests/test_security_provider.py` (`QuoteResult`, `get_quote_
+with_status` default + Alpha Vantage override, `get_cached_or_fetch_
+quote`, `peek_cached_quote`), `tests/test_holdings_api.py` (quote-
+preview status/freshness/cache fields, rate-limited state,
+`HoldingValuationUpdate.source` behavior, and a new `TestHoldingsCsvImport`
+class covering every case above), `tests/test_holdings_engine.py`
+(`parse_holdings_csv`'s optional `asset_class`/`value_date` handling).
+Frontend: `PortfolioSetup.test.jsx` covers the quote source/freshness/
+cache/rate-limit rendering, the "Use quote value" source-tagged PATCH
+call, and the CSV quote-drift review message. Exact pass counts and
+coverage are reported in this branch's final status report rather than
+restated here, since a contract section should not go stale the moment
+a later commit changes a number.
