@@ -1382,11 +1382,22 @@ def commit_holdings_import(rows: List[HoldingImportRow]):
             expense_ratio = row.expense_ratio if row.expense_ratio is not None else existing["expense_ratio"]
             cost_basis = row.cost_basis if row.cost_basis is not None else existing["cost_basis"]
             notes = row.notes if row.notes is not None else existing["notes"]
+            shares = row.shares if row.shares is not None else existing["shares"]
             as_of_date = row.value_date or today
+            # A confirmed provider_identifier (from ticker lookup) is
+            # tied to a SPECIFIC ticker -- if the import explicitly
+            # supplies a different, non-blank ticker, the old
+            # provider_identifier no longer describes the same
+            # security and must not be silently kept pointing at it.
+            # Omitting the ticker column (None) never touches either.
+            ticker = row.ticker if row.ticker is not None else existing["ticker"]
+            provider_identifier = existing["provider_identifier"]
+            if row.ticker is not None and existing["ticker"] and row.ticker.strip().upper() != existing["ticker"].strip().upper():
+                provider_identifier = None
             conn.execute(
-                "UPDATE holdings SET ticker=?, security_name=?, shares=?, market_value=?, asset_class=?, expense_ratio=?, "
+                "UPDATE holdings SET ticker=?, provider_identifier=?, security_name=?, shares=?, market_value=?, asset_class=?, expense_ratio=?, "
                 "cost_basis=?, notes=?, as_of_date=?, data_source='statement', confidence='high', updated_at=datetime('now') WHERE id=?",
-                (row.ticker, row.security_name, row.shares, row.market_value, asset_class, expense_ratio, cost_basis, notes, as_of_date, existing["id"]),
+                (ticker, provider_identifier, row.security_name, shares, row.market_value, asset_class, expense_ratio, cost_basis, notes, as_of_date, existing["id"]),
             )
             updated += 1
         else:

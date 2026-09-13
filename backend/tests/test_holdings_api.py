@@ -274,6 +274,43 @@ class TestHoldingsCsvImport:
         assert updated["management_mode"] == "externally_managed"
         assert client.get(f"/api/holdings/{holding['id']}/tax-lots").json()[0]["cost_basis"] == 900
 
+    def test_commit_preserves_shares_when_omitted(self, client):
+        acc = _create_account(client)
+        client.post("/api/holdings", json={
+            "account_id": acc["id"], "security_name": "Index Fund", "ticker": "IDX",
+            "market_value": 1000, "shares": 10, "asset_class": "us_large_cap",
+        })
+        client.post("/api/holdings/import/commit", json=[{
+            "account_id": acc["id"], "ticker": "IDX", "security_name": "Index Fund", "market_value": 1100,
+        }])
+        assert client.get("/api/holdings").json()[0]["shares"] == 10
+
+    def test_commit_preserves_a_confirmed_provider_identifier_when_ticker_is_unchanged(self, client):
+        acc = _create_account(client)
+        client.post("/api/holdings", json={
+            "account_id": acc["id"], "security_name": "Index Fund", "ticker": "IDX",
+            "provider_identifier": "MOCK:IDX", "market_value": 1000, "asset_class": "us_large_cap",
+        })
+        client.post("/api/holdings/import/commit", json=[{
+            "account_id": acc["id"], "ticker": "IDX", "security_name": "Index Fund", "market_value": 1100,
+        }])
+        assert client.get("/api/holdings").json()[0]["provider_identifier"] == "MOCK:IDX"
+
+    def test_commit_clears_provider_identifier_when_ticker_explicitly_changes(self, client):
+        acc = _create_account(client)
+        holding = client.post("/api/holdings", json={
+            "account_id": acc["id"], "security_name": "Index Fund", "ticker": "IDX",
+            "provider_identifier": "MOCK:IDX", "market_value": 1000, "asset_class": "us_large_cap",
+        }).json()
+        client.post("/api/holdings/import/commit", json=[{
+            "account_id": acc["id"], "ticker": "NEWTIX", "security_name": "Index Fund",
+            "market_value": 1100, "asset_class": "us_large_cap",
+        }])
+        holdings = client.get("/api/holdings").json()
+        assert len(holdings) == 1
+        assert holdings[0]["ticker"] == "NEWTIX"
+        assert holdings[0]["provider_identifier"] is None
+
     def test_commit_still_requires_asset_class_for_a_brand_new_holding(self, client):
         acc = _create_account(client)
         r = client.post("/api/holdings/import/commit", json=[{
