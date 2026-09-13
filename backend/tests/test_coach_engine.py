@@ -503,3 +503,11 @@ class TestReconcileRecommendationQueue:
         existing = {"k1": [{"id": 5, "status": "rejected", "assumptions_hash": "h1"}]}
         result = reconcile_recommendation_queue([], existing)
         assert result["invalidate_ids"] == []
+
+
+def test_deferred_recommendation_returns_on_review_date_only():
+    candidate = {"recommendation_key": "k", "assumptions_hash": "h"}
+    existing = {"k": [{"id": 1, "status": "deferred", "assumptions_hash": "h", "review_date": "2030-01-15"}]}
+    assert reconcile_recommendation_queue([candidate], existing, today="2030-01-14")["to_insert"] == []
+    assert reconcile_recommendation_queue([candidate], existing, today="2030-01-15")["to_insert"] == [candidate]
+    assert reconcile_recommendation_queue([candidate], existing, today="2030-01-16")["to_insert"] == [candidate]

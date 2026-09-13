@@ -70,6 +70,20 @@ class TestInvestmentPolicyValidation:
         })
         assert r.status_code == 200, r.text
 
+    def test_invalid_policy_limits_rejected(self, client):
+        assert client.post("/api/investment-policy", json={
+            "target_us_large_cap_pct": 60, "target_us_bonds_pct": 40,
+            "max_single_security_pct": 0,
+        }).status_code == 422
+        assert client.post("/api/investment-policy", json={
+            "target_us_large_cap_pct": 60, "target_us_bonds_pct": 40,
+            "minimum_cash_reserve": -1,
+        }).status_code == 422
+        assert client.post("/api/investment-policy", json={
+            "target_us_large_cap_pct": 60, "target_us_bonds_pct": 40,
+            "account_constraints": [{"account_id": 1, "allowed_asset_classes": ["made_up"]}],
+        }).status_code == 422
+
 
 class TestRecommendationsGenerate:
     def test_no_policy_yields_establish_policy_card(self, client):
@@ -123,6 +137,49 @@ class TestRecommendationsGenerate:
         assert "policy_violation" not in categories
         assert "tax_advantaged_rebalance" not in categories
         assert "taxable_rebalance" not in categories
+
+    def test_excluded_cash_only_account_does_not_trigger_missing_holdings(self, client):
+        invested = _create_account(client, name="Brokerage", balance=100000)
+        checking = _create_account(client, name="Checking", balance=25000)
+        client.post("/api/holdings", json={
+            "account_id": invested["id"], "security_name": "Stock", "market_value": 60000,
+            "asset_class": "us_large_cap",
+        })
+        client.post("/api/holdings", json={
+            "account_id": invested["id"], "security_name": "Bonds", "market_value": 40000,
+            "asset_class": "us_bonds",
+        })
+        _save_policy(client, excluded_accounts=[checking["id"]])
+        body = client.get("/api/recommendations").json()
+        # The invested holdings may still have their own missing cost-basis,
+        # fee, or confidence cards. The cash-only checking account must not
+        # create a holdings-reconciliation card of its own.
+        assert not any(
+            c["category"] == "missing_data" and checking["id"] in c.get("relevant_account_ids", [])
+            for c in body["recommendations"]
+        )
+
+    def test_production_planning_results_reach_goal_aware_queue(self, client, sample_inputs, monkeypatch):
+        """Finding 10: the production call path must not keep passing
+        the old empty {} into minor_optimization_recommendations."""
+        import projection_engine
+        import simulation_engine
+        assert client.put("/api/planning-inputs", json=sample_inputs).status_code == 200
+        acc = _create_account(client, balance=100000)
+        client.post("/api/holdings", json={
+            "account_id": acc["id"], "security_name": "Stock", "market_value": 100000,
+            "asset_class": "us_large_cap", "expense_ratio": 0.001, "cost_basis": 90000,
+            "confidence": "high",
+        })
+        _save_policy(client, target_us_large_cap_pct=100, target_us_bonds_pct=0)
+        monkeypatch.setattr(projection_engine, "run_retirement_projection", lambda *a, **k: {
+            "scenarios": [{"retirement_age": 60, "percent_funded": 70, "on_track": False}],
+        })
+        monkeypatch.setattr(simulation_engine, "run_monte_carlo", lambda *a, **k: {
+            "success_rate": 65, "median_depletion_age": 80,
+        })
+        body = client.get("/api/recommendations").json()
+        assert any(c["title"] == "Monte Carlo success rate is below 80%" for c in body["recommendations"])
 
 
 class TestRecommendationsDecisionLifecycle:
@@ -243,6 +300,44 @@ class TestContributionDestinationNamesAccountAndFund:
         assert bonds_action["destination"] is None
 
 
+class TestRebalanceDestinationAndDecisionWorkflow:
+    def test_rebalance_buy_names_same_account_and_fund(self, client):
+        acc = _create_account(client, account_type="401k", name="Workplace 401k", balance=100000)
+        client.post("/api/holdings", json={
+            "account_id": acc["id"], "security_name": "Stock Fund", "market_value": 100000,
+            "asset_class": "us_large_cap",
+        })
+        client.post("/api/account-investment-options", json={
+            "account_id": acc["id"], "option_name": "Bond Index", "ticker": "BND",
+            "asset_class": "us_bonds", "available_for_exchange": True,
+        })
+        _save_policy(client, target_us_large_cap_pct=50, target_us_bonds_pct=50)
+        response = client.post("/api/portfolio/rebalance", json={"amount": 0})
+        assert response.status_code == 200, response.text
+        buy = next(a for a in response.json()["rebalance_actions"] if a["action"] == "buy")
+        assert buy["destination"]["account_name"] == "Workplace 401k"
+        assert buy["destination"]["option_name"] == "Bond Index"
+
+    def test_accept_creates_task_complete_closes_it_and_defer_saves_review_date(self, client):
+        acc = _create_account(client, balance=10000)
+        client.post("/api/holdings", json={
+            "account_id": acc["id"], "security_name": "Fund", "market_value": 10000,
+            "asset_class": "us_large_cap",
+        })
+        rec_id = client.get("/api/recommendations").json()["recommendations"][0]["id"]
+        accepted = client.post(f"/api/recommendations/{rec_id}/decide", json={"status": "accepted"})
+        assert accepted.status_code == 200
+        tasks = client.get("/api/tasks").json()
+        task_rows = tasks if isinstance(tasks, list) else tasks.get("tasks", [])
+        assert any(t.get("auto_key") == f"portfolio_coach_{rec_id}" for t in task_rows)
+        completed = client.post(f"/api/recommendations/{rec_id}/decide", json={"status": "completed"})
+        assert completed.status_code == 200
+        deferred = client.post(f"/api/recommendations/{rec_id}/decide", json={
+            "status": "deferred", "review_date": "2030-01-15"
+        })
+        assert deferred.json()["review_date"] == "2030-01-15"
+
+
 class TestMultiAccountContributionDestination:
     """Reference test #18: multiple-account new money reduces household
     drift, via /api/portfolio/contribution-destination/multi-account."""
@@ -252,6 +347,22 @@ class TestMultiAccountContributionDestination:
             "pools": [{"account_id": 1, "amount": 1000, "eligible_classes": None}],
         })
         assert r.status_code == 400
+
+    def test_open_pool_honors_blocked_asset_classes(self, client):
+        account = _create_account(client, balance=10000)
+        client.post("/api/holdings", json={
+            "account_id": account["id"], "security_name": "Stock Fund",
+            "market_value": 10000, "asset_class": "us_large_cap",
+        })
+        _save_policy(client, target_us_large_cap_pct=40, target_us_bonds_pct=40,
+                     target_cash_pct=20, account_constraints=[{
+                         "account_id": account["id"], "excluded_asset_classes": ["us_bonds"],
+                     }])
+        response = client.post("/api/portfolio/contribution-destination/multi-account", json={
+            "pools": [{"account_id": account["id"], "amount": 1000, "eligible_classes": None}],
+        })
+        assert response.status_code == 200, response.text
+        assert [(a["asset_class"], a["amount"]) for a in response.json()["actions"]] == [("cash", 1000)]
 
     def test_bonds_only_pool_gets_bonds_open_pool_gets_next_largest_gap(self, client):
         acc1 = _create_account(client, name="401k")
@@ -274,6 +385,23 @@ class TestMultiAccountContributionDestination:
         assert by_account[acc2["id"]]["asset_class"] == "cash"
         assert by_account[acc2["id"]]["amount"] == 2000
         assert body["unallocated"] == []
+
+    def test_excluded_account_pool_is_left_unallocated(self, client):
+        invested = _create_account(client, name="Brokerage")
+        checking = _create_account(client, name="Checking", balance=5000)
+        client.post("/api/holdings", json={
+            "account_id": invested["id"], "security_name": "All Stock", "market_value": 100000,
+            "asset_class": "us_large_cap",
+        })
+        _save_policy(client, excluded_accounts=[checking["id"]])
+        body = client.post("/api/portfolio/contribution-destination/multi-account", json={
+            "pools": [{"account_id": checking["id"], "amount": 5000, "eligible_classes": None}],
+        }).json()
+        assert body["actions"] == []
+        assert body["unallocated"] == [{
+            "account_id": checking["id"], "amount": 5000.0,
+            "reason": "Account is excluded from the investment policy.",
+        }]
 
 
 class TestRecommendationsPrivacy:

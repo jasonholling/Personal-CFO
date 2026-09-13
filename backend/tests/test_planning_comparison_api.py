@@ -72,6 +72,7 @@ class TestPlanningComparisonProposed:
             "ret_age": 60, "proposed_allocation": {"us_bonds": 100},
         }).json()
         assert aggressive["proposed_blended_expected_return"] != conservative["proposed_blended_expected_return"]
+        assert aggressive["proposed_portfolio_volatility"] > conservative["proposed_portfolio_volatility"]
         assert aggressive["proposed"]["projected_surplus"] != conservative["proposed"]["projected_surplus"]
 
     def test_entirely_unclassified_allocation_errors_rather_than_inventing_a_return(self, client, sample_inputs):

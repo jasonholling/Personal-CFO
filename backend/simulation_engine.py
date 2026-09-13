@@ -1398,7 +1398,8 @@ def _require_both_two_age_or_neither(jason_ret_age, justin_ret_age):
 
 
 def _run_monte_carlo_two_age(inputs: Dict, accounts: List[Dict], jason_ret_age: int, justin_ret_age: int,
-                              ss_timing: str, life_events: List[Dict], surplus_allocations: List[Dict]) -> Dict:
+                              ss_timing: str, life_events: List[Dict], surplus_allocations: List[Dict],
+                              portfolio_std: float = None) -> Dict:
     """Two-age Monte Carlo -- explicit, independent retirement ages for
     both spouses instead of run_monte_carlo's single ret_age
     (CALCULATION_CONTRACT.md section 22). Mirrors run_monte_carlo's own
@@ -1459,8 +1460,9 @@ def _run_monte_carlo_two_age(inputs: Dict, accounts: List[Dict], jason_ret_age: 
     successes = 0
     all_balances = []
 
+    volatility = PORT_STD if portfolio_std is None else max(0.0, portfolio_std)
     for _ in range(N):
-        returns = [random.gauss(post_ret, PORT_STD) for _ in range(retire_yrs)]
+        returns = [random.gauss(post_ret, volatility) for _ in range(retire_yrs)]
         survived, balances, *_ = _run_single_two_age(
             pretax_at_start, roth_at_start, taxable_at_start, hsa_at_start,
             timeline, inputs,
@@ -1532,7 +1534,8 @@ def _run_monte_carlo_two_age(inputs: Dict, accounts: List[Dict], jason_ret_age: 
 def run_monte_carlo(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_timing: str = "early",
                      life_events: List[Dict] = None, surplus_allocations: List[Dict] = None,
                      jason_ret_age: int = None, justin_ret_age: int = None,
-                     jason_ss_claim_age: int = None, justin_ss_claim_age: int = None) -> Dict:
+                     jason_ss_claim_age: int = None, justin_ss_claim_age: int = None,
+                     portfolio_std: float = None) -> Dict:
     """Run 1000 Monte Carlo simulations.
 
     jason_ss_claim_age/justin_ss_claim_age (2026-09-08, CALCULATION_
@@ -1576,7 +1579,7 @@ def run_monte_carlo(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_ti
         if _jason_ss_claim_age is not None or _justin_ss_claim_age is not None:
             inputs = {**inputs, "jason_ss_claim_age": _jason_ss_claim_age, "justin_ss_claim_age": _justin_ss_claim_age}
         return _run_monte_carlo_two_age(inputs, accounts, jason_ret_age, justin_ret_age, ss_timing,
-                                         life_events, surplus_allocations)
+                                         life_events, surplus_allocations, portfolio_std)
 
     random.seed(42)  # reproducible
 
@@ -1676,8 +1679,9 @@ def run_monte_carlo(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_ti
         "healthcare_post":  inputs.get("healthcare_post_medicare", 0),
     }
 
+    volatility = PORT_STD if portfolio_std is None else max(0.0, portfolio_std)
     for _ in range(N):
-        returns = [random.gauss(post_ret, PORT_STD) for _ in range(retire_yrs)]
+        returns = [random.gauss(post_ret, volatility) for _ in range(retire_yrs)]
         survived, balances, *_ = _run_single(
             pretax_at_ret, roth_at_ret, taxable_at_ret, hsa_at_ret,
             ret_age, jason_age, justin_age,

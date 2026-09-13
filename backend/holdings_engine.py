@@ -219,6 +219,32 @@ def classify_holdings(accounts: List[Dict], holdings: List[Dict]) -> Dict:
     }
 
 
+def policy_included_holdings(holdings: List[Dict], policy: Optional[Dict]) -> List[Dict]:
+    """Remove only holdings/accounts the household explicitly excluded
+    from its investment policy. The records remain stored and visible in
+    Setup; they simply do not drive allocation or Coach actions."""
+    if not policy:
+        return list(holdings)
+    excluded_accounts = set(policy.get("excluded_accounts") or [])
+    excluded_holdings = set(policy.get("excluded_holdings") or [])
+    return [h for h in holdings if h.get("account_id") not in excluded_accounts and h.get("id") not in excluded_holdings]
+
+
+def holding_has_policy_exception(holding: Dict, policy: Optional[Dict]) -> bool:
+    """Match employer-stock/legacy exceptions using explicit identifiers.
+    Exceptions keep the position in allocation totals but prevent an
+    automatic concentration or sell recommendation."""
+    for exception in ((policy or {}).get("employer_stock_exceptions") or []) + ((policy or {}).get("legacy_holding_exceptions") or []):
+        if exception.get("holding_id") is not None and exception["holding_id"] == holding.get("id"):
+            return True
+        if exception.get("account_id") is not None and exception["account_id"] == holding.get("account_id"):
+            return True
+        ticker = (exception.get("ticker") or "").strip().upper()
+        if ticker and ticker == (holding.get("ticker") or "").strip().upper():
+            return True
+    return False
+
+
 # ── Current allocation ───────────────────────────────────────────────────
 
 def holding_exposure_weights(holding: Dict) -> Dict[str, float]:
@@ -361,7 +387,49 @@ def recommend_contribution_destination(comparison: Dict, contribution_amount: fl
     return actions
 
 
-def resolve_new_money_destinations(contribution_actions: List[Dict], options_by_account: Dict[int, List[Dict]]) -> List[Dict]:
+def _constraint_for_account(policy: Optional[Dict], account_id: int) -> Dict:
+    for constraint in (policy or {}).get("account_constraints", []) or []:
+        if constraint.get("account_id") == account_id:
+            return constraint
+    return {}
+
+
+def option_allowed_by_policy(option: Dict, account_id: int, asset_class: str,
+                             policy: Optional[Dict], amount: Optional[float] = None) -> bool:
+    """Apply the policy and option limits that can be evaluated without
+    inventing account eligibility or a post-trade balance."""
+    if account_id in set((policy or {}).get("excluded_accounts") or []):
+        return False
+    constraint = _constraint_for_account(policy, account_id)
+    allowed = constraint.get("allowed_asset_classes")
+    excluded = constraint.get("excluded_asset_classes") or []
+    if allowed is not None and asset_class not in allowed:
+        return False
+    if asset_class in excluded:
+        return False
+    if amount is not None and option.get("minimum_investment") is not None and amount < option["minimum_investment"]:
+        return False
+    return True
+
+
+def choose_account_option(options: List[Dict], asset_class: str, *, for_new_contribution: bool,
+                          account_id: int, policy: Optional[Dict] = None,
+                          amount: Optional[float] = None) -> Optional[Dict]:
+    """Return the best recorded, eligible option for one account/class."""
+    candidates = []
+    for opt in eligible_options_for_account(options, for_new_contribution=for_new_contribution):
+        weights = holding_exposure_weights(opt)
+        if asset_class not in weights or not option_allowed_by_policy(opt, account_id, asset_class, policy, amount):
+            continue
+        er = opt.get("expense_ratio")
+        candidates.append((0 if len(weights) == 1 else 1,
+                           er if er is not None else float("inf"),
+                           opt.get("option_name") or "", opt))
+    return sorted(candidates, key=lambda x: x[:3])[0][3] if candidates else None
+
+
+def resolve_new_money_destinations(contribution_actions: List[Dict], options_by_account: Dict[int, List[Dict]],
+                                   policy: Optional[Dict] = None) -> List[Dict]:
     """External review finding #1 (2026-09-12, commit 4812d84):
     recommend_contribution_destination's own output stops at "$X ->
     an asset class" -- never an eligible account or fund, even though
@@ -397,10 +465,10 @@ def resolve_new_money_destinations(contribution_actions: List[Dict], options_by_
             continue
         candidates = []
         for account_id, options in options_by_account.items():
-            for opt in eligible_options_for_account(options, for_new_contribution=True):
-                weights = holding_exposure_weights(opt)
-                if asset_class in weights:
-                    candidates.append((account_id, opt, len(weights) == 1))
+            opt = choose_account_option(options, asset_class, for_new_contribution=True,
+                                        account_id=account_id, policy=policy, amount=action.get("amount"))
+            if opt:
+                candidates.append((account_id, opt, len(holding_exposure_weights(opt)) == 1))
         if not candidates:
             resolved.append({**action, "destination": None})
             continue
@@ -711,6 +779,8 @@ def recommend_rebalance_actions(
     comparison: Dict,
     policy: Dict,
     pending_contribution: float = 0.0,
+    options_by_account: Optional[Dict[int, List[Dict]]] = None,
+    account_names: Optional[Dict[int, str]] = None,
 ) -> Dict:
     """Contribution-first, then exchange inside tax-advantaged accounts,
     then taxable sales only when the tax-advantaged supply in an
@@ -748,6 +818,8 @@ def recommend_rebalance_actions(
     underweight = sorted(
         [(c, -v) for c, v in remaining_deviation.items() if v < -0.01 and c != "unclassified"], key=lambda p: -p[1])
 
+    options_by_account = options_by_account or {}
+    account_names = account_names or {}
     rebalance_actions = []
     # Multi-exposure holdings (a target-date/balanced fund spanning more
     # than one asset class) are excluded from the sell-candidate pool --
@@ -757,6 +829,8 @@ def recommend_rebalance_actions(
     # BUY/SELL action here. Documented limitation, not a silent gap.
     holdings_by_class: Dict[str, List[Dict]] = {c: [] for c in ASSET_CLASSES}
     for h in classified_household_holdings:
+        if holding_has_policy_exception(h, policy):
+            continue
         weights = holding_exposure_weights(h)
         if len(weights) > 1:
             continue
@@ -787,6 +861,11 @@ def recommend_rebalance_actions(
             if remaining_underweight_need <= 0.01 or available <= 0.01:
                 break
             amount = min(available, gap, remaining_underweight_need)
+            destination = choose_account_option(options_by_account.get(h.get("account_id"), []), asset_class,
+                                                for_new_contribution=False, account_id=h.get("account_id"),
+                                                policy=policy, amount=amount) if options_by_account else None
+            if options_by_account and destination is None:
+                continue
             if amount <= 0:
                 continue
             rebalance_actions.append({
@@ -796,6 +875,9 @@ def recommend_rebalance_actions(
                 "reason": f"Idle cash already in this account can fund the {asset_class.replace('_', ' ')} underweight directly, before any exchange or sale.",
                 "is_taxable_sale": False, "tax_warning": None,
                 "confidence_note": "Redeploying idle cash already inside an investment account -- no sale, no tax consequence.",
+                "destination": ({"account_id": h.get("account_id"), "account_name": account_names.get(h.get("account_id")),
+                                 "option_id": destination.get("id"), "option_name": destination.get("option_name"),
+                                 "ticker": destination.get("ticker")} if destination else None),
             })
             available -= amount
             cash_available_to_redeploy -= amount
@@ -824,6 +906,17 @@ def recommend_rebalance_actions(
                 break
             is_taxable = h.get("_portfolio_account_type") in TAXABLE_GAIN_TYPES
             amount = min(to_sell, h.get("market_value", 0) or 0)
+            if options_by_account:
+                eligible_capacity = sum(
+                    target_gap for target_class, target_gap in underweight
+                    if target_gap > 0.01 and choose_account_option(
+                        options_by_account.get(h.get("account_id"), []), target_class,
+                        for_new_contribution=False, account_id=h.get("account_id"),
+                        policy=policy, amount=min(amount, target_gap))
+                )
+                if eligible_capacity <= 0.01:
+                    continue
+                amount = min(amount, eligible_capacity)
             if amount <= 0:
                 continue
             rebalance_actions.append({
@@ -844,21 +937,33 @@ def recommend_rebalance_actions(
             to_sell -= amount
             remaining_underweight_need -= amount
 
-    proceeds = sum(a["amount"] for a in rebalance_actions if a["action"] == "sell")
-    for asset_class, gap in underweight:
-        if proceeds <= 0.01:
-            break
-        amount = min(proceeds, gap)
-        if amount <= 0:
-            continue
-        rebalance_actions.append({
-            "account_id": None, "holding_id": None, "holding_name": None,
-            "action": "buy", "asset_class": asset_class, "amount": round(amount, 2), "pct_of_holding": None,
-            "reason": f"Underweight by ${gap:,.0f} against target -- funded by proceeds from the overweight sale(s) above.",
-            "is_taxable_sale": False, "tax_warning": None,
-            "confidence_note": "Destination account left to the household's own preference among its tax-advantaged accounts.",
-        })
-        proceeds -= amount
+    gaps = {asset_class: gap for asset_class, gap in underweight}
+    sell_actions = [a for a in rebalance_actions if a["action"] == "sell"]
+    for sale in sell_actions:
+        proceeds = sale["amount"]
+        account_id = sale["account_id"]
+        for asset_class in sorted(gaps, key=lambda c: -gaps[c]):
+            if proceeds <= 0.01:
+                break
+            amount = min(proceeds, gaps[asset_class])
+            destination = choose_account_option(options_by_account.get(account_id, []), asset_class,
+                                                for_new_contribution=False, account_id=account_id,
+                                                policy=policy, amount=amount) if options_by_account else None
+            if options_by_account and destination is None:
+                continue
+            rebalance_actions.append({
+                "account_id": account_id, "holding_id": None,
+                "holding_name": destination.get("option_name") if destination else None,
+                "action": "buy", "asset_class": asset_class, "amount": round(amount, 2), "pct_of_holding": None,
+                "reason": f"Underweight by ${gaps[asset_class]:,.0f} against target -- funded by the sale in this same account.",
+                "is_taxable_sale": False, "tax_warning": None,
+                "confidence_note": "Buy remains in the same account as its funding sale.",
+                "destination": ({"account_id": account_id, "account_name": account_names.get(account_id),
+                                 "option_id": destination.get("id"), "option_name": destination.get("option_name"),
+                                 "ticker": destination.get("ticker")} if destination else None),
+            })
+            proceeds -= amount
+            gaps[asset_class] -= amount
 
     projected_by_class = dict(current_allocation["by_class"])
     for a in contribution_actions:
@@ -898,19 +1003,23 @@ CONCENTRATION_SEVERE_PCT = 25
 HIGH_EXPENSE_RATIO_THRESHOLD = 0.01
 
 
-def concentration_flags(household_holdings: List[Dict], threshold_pct: float = CONCENTRATION_THRESHOLD_PCT) -> List[Dict]:
+def concentration_flags(household_holdings: List[Dict], threshold_pct: float = CONCENTRATION_THRESHOLD_PCT,
+                        severe_threshold_pct: float = CONCENTRATION_SEVERE_PCT,
+                        policy: Optional[Dict] = None) -> List[Dict]:
     total = sum(h.get("market_value", 0) or 0 for h in household_holdings)
     if total <= 0:
         return []
     flagged = []
     for h in household_holdings:
+        if holding_has_policy_exception(h, policy):
+            continue
         value = h.get("market_value", 0) or 0
         pct = value / total * 100
         if pct >= threshold_pct:
             flagged.append({
                 "holding_id": h.get("id"), "account_id": h.get("account_id"),
                 "name": h.get("security_name"), "market_value": round(value, 2), "pct_of_portfolio": round(pct, 1),
-                "severity": "severe" if pct >= CONCENTRATION_SEVERE_PCT else "moderate",
+                "severity": "severe" if pct >= severe_threshold_pct else "moderate",
             })
     flagged.sort(key=lambda f: -f["pct_of_portfolio"])
     return flagged
@@ -1048,6 +1157,48 @@ ASSET_CLASS_EXPECTED_RETURNS = {
     "us_bonds": 0.045, "international_bonds": 0.04,
     "cash": 0.02, "real_estate": 0.07, "alternatives": 0.06, "unclassified": None,
 }
+
+ASSET_CLASS_VOLATILITY = {
+    "us_large_cap": 0.17, "us_mid_cap": 0.20, "us_small_cap": 0.23,
+    "international_developed": 0.19, "emerging_markets": 0.24,
+    "us_bonds": 0.06, "international_bonds": 0.08, "cash": 0.01,
+    "real_estate": 0.20, "alternatives": 0.15, "unclassified": None,
+}
+
+
+def _asset_class_correlation(a: str, b: str) -> float:
+    if a == b:
+        return 1.0
+    equities = {"us_large_cap", "us_mid_cap", "us_small_cap", "international_developed", "emerging_markets"}
+    bonds = {"us_bonds", "international_bonds"}
+    if a == "cash" or b == "cash":
+        return 0.0
+    if a in equities and b in equities:
+        return 0.75
+    if a in bonds and b in bonds:
+        return 0.45
+    if (a in equities and b in bonds) or (b in equities and a in bonds):
+        return 0.10
+    if a == "real_estate" or b == "real_estate":
+        return 0.50 if (a in equities or b in equities) else 0.20
+    return 0.25
+
+
+def blended_portfolio_volatility(pct_by_class: Dict[str, float]) -> Optional[float]:
+    """Annualized volatility from documented class assumptions and a
+    small deterministic correlation model. Unknown classes are excluded
+    from both the weights and covariance calculation."""
+    known = [(c, float(pct)) for c, pct in pct_by_class.items()
+             if c != "unclassified" and ASSET_CLASS_VOLATILITY.get(c) is not None and pct]
+    total = sum(pct for _, pct in known)
+    if total <= 0:
+        return None
+    weights = {c: pct / total for c, pct in known}
+    variance = 0.0
+    for a, wa in weights.items():
+        for b, wb in weights.items():
+            variance += wa * wb * ASSET_CLASS_VOLATILITY[a] * ASSET_CLASS_VOLATILITY[b] * _asset_class_correlation(a, b)
+    return round(max(0.0, variance) ** 0.5, 4)
 
 
 def blended_expected_return(pct_by_class: Dict[str, float]) -> Optional[float]:

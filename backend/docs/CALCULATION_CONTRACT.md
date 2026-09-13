@@ -7113,3 +7113,85 @@ Branch: `codex/portfolio-coach-recommendations`, branched from
 `origin/main` (NOT from `codex/portfolio-holdings-allocation`, an
 unrelated, separately-scoped, already-complete-but-unmerged feature).
 Pushed for independent review. **Not merged into `main`.**
+
+## 78. Portfolio Coach follow-up — actionable destinations, policy enforcement, planning context, and UI completion (2026-09-12)
+
+Branch: `codex/portfolio-coach-finish`, from `origin/main` at `3a39f62`.
+
+This pass closes the six remaining review findings numbered 2, 7, 8,
+9, 10, and 12.
+
+### Rebalance destinations (finding 2)
+
+Every rebalance sale is now paired only with a buy that can be made in
+the **same account**. The buy row contains `account_id`, account name,
+option ID, fund/option name, and ticker. If that account has no recorded
+exchange-eligible option for an underweight class, the engine does not
+recommend the sale. This prevents a checklist from selling in a 401(k)
+and silently implying that the proceeds can be used in a different
+account.
+
+### Investment-policy enforcement (finding 7)
+
+- `excluded_accounts` and `excluded_holdings` are removed from the
+  investable allocation, drift, concentration, new-money, and rebalance
+  calculations. An excluded account is also omitted from holdings
+  reconciliation, so a cash-only checking or bill-pay account does not
+  generate a false “missing holdings” warning. It remains part of net
+  worth and cash planning.
+- The Investment Policy UI now exposes account exclusion as an explicit
+  checkbox for every account. Excluded contribution pools are returned
+  as `unallocated` with a policy reason and can never become a suggested
+  destination.
+- `account_constraints` restrict eligible asset classes for account
+  contribution pools and recorded investment options.
+- `employer_stock_exceptions` and `legacy_holding_exceptions` keep the
+  holding in allocation totals but suppress automatic concentration and
+  sell recommendations. They match explicit holding ID, account ID, or
+  ticker; the engine does not infer an exception.
+- `max_single_security_pct` replaces the old hard-coded concentration
+  trigger when set. Policy percentages, drift, reserve, and option limit
+  inputs are validated before persistence.
+
+### Setup UI and test coverage (findings 8 and 12)
+
+Portfolio Setup now exposes option minimums, min/max allocation,
+expense ratio, trading fee, employer-match eligibility, redemption and
+settlement restrictions. Holdings supports ticker candidate lookup with
+explicit confirmation and preview-before-commit CSV import. Portfolio
+Coach now renders a named rebalance checklist, clears stale results when
+the contribution amount changes, and persists a dated defer decision.
+Rendered-DOM tests exercise each of these workflows, including the
+cash-only account-exclusion checkbox and privacy masking.
+
+`maximum_allocation_pct` is captured and displayed but is not used as a
+trade cap yet: an investment-option row is not linked to the currently
+owned holding balance, so enforcing it would require guessing the
+post-trade option balance. The engine refuses to invent that link.
+
+### Planning comparison and Coach context (findings 9 and 10)
+
+A proposed allocation now changes Monte Carlo volatility as well as
+expected return. Volatility is calculated from documented asset-class
+standard-deviation assumptions and a deterministic correlation matrix;
+unknown exposure is excluded and the weights are renormalized. Both
+pre- and post-retirement expected returns still use the same static mix;
+no glide path is inferred.
+
+Coach generation now reads the latest saved scenario and assumption
+review, then calls the production retirement-projection and Monte Carlo
+engines with current accounts, life events, and surplus allocations.
+Goal-aware cards therefore receive funded status, success rate,
+depletion age, retirement timing, and review identifiers instead of an
+empty context. Accepting a recommendation creates one linked Action
+Plan task; completing the recommendation closes that task; deferring it
+stores a review date.
+
+### Retained boundaries
+
+The feature proposes and records decisions; it does not place trades.
+Ticker search still uses the configured security provider, which is the
+mock provider until a live data source is deliberately configured.
+Employer/legacy exception editing and holding-level exclusion are
+supported by the API policy model but this pass only adds the requested
+account-exclusion UI.

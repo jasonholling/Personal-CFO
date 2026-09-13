@@ -14,6 +14,10 @@ globalThis.IS_REACT_ACT_ENVIRONMENT = true
 
 let container, root
 const flush = async () => { await act(async () => { await Promise.resolve() }) }
+const setInput = async (el, value) => act(async () => {
+  Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(el, value)
+  el.dispatchEvent(new Event('input', { bubbles: true }))
+})
 
 const recommendationsResponse = {
   has_policy: true,
@@ -26,6 +30,7 @@ const recommendationsResponse = {
         expected_effect: 'Reduces drift.', confidence: 'medium',
         tax_impact: { has_cost_basis: true, estimated_gain: 9876 },
         assumptions: [], recommendation_key: 'k1',
+        affected_accounts: [1],
       },
     },
   ],
@@ -51,6 +56,7 @@ beforeEach(() => {
   axios.get.mockImplementation(url => {
     if (url === '/api/recommendations') return Promise.resolve({ data: recommendationsResponse })
     if (url === '/api/portfolio/allocation') return Promise.resolve({ data: allocationResponse })
+    if (url === '/api/accounts') return Promise.resolve({ data: [{ id: 1, name: 'Retirement IRA' }] })
     return Promise.resolve({ data: {} })
   })
 })
@@ -65,6 +71,7 @@ describe('PortfolioCoach', () => {
     await flush()
     expect(container.textContent).toContain('$543,210')
     expect(container.textContent).toContain('$9,876')
+    expect(container.textContent).toContain('Retirement IRA')
   })
 
   it('masks household total, tax-impact gain, and card figures in privacy mode', async () => {
@@ -84,6 +91,61 @@ describe('PortfolioCoach', () => {
     expect(container.textContent).not.toContain('65%')
     expect(container.textContent).not.toContain('50%')
     expect(container.textContent).toContain('••%')
+  })
+
+  it('renders an account-and-fund rebalance checklist with its tax warning', async () => {
+    axios.post.mockResolvedValueOnce({ data: { rebalance_actions: [{
+      action: 'buy', amount: 10000, asset_class: 'us_bonds', holding_name: 'Bond Index',
+      destination: { account_name: 'Workplace 401k', option_name: 'Bond Index', ticker: 'BND' },
+      reason: 'Closes the bond gap.', tax_warning: { message: 'Review tax lots.' },
+    }] } })
+    await act(async () => root.render(<PortfolioCoach />))
+    await flush()
+    const button = [...container.querySelectorAll('button')].find(b => b.textContent === 'Generate rebalance checklist')
+    await act(async () => { button.click(); await Promise.resolve() })
+    expect(container.textContent).toContain('Workplace 401k')
+    expect(container.textContent).toContain('Bond Index (BND)')
+    expect(container.textContent).toContain('Review tax lots')
+  })
+
+  it('clears a stale contribution result when the amount changes', async () => {
+    axios.post.mockResolvedValueOnce({ data: { actions: [{ amount: 1000, asset_class: 'us_bonds', reason: 'Gap' }] } })
+    await act(async () => root.render(<PortfolioCoach />))
+    await flush()
+    const amount = container.querySelector('input[placeholder="Amount to invest"]')
+    await setInput(amount, '1000')
+    const button = [...container.querySelectorAll('button')].find(b => b.textContent === 'Get contribution recommendation')
+    await act(async () => { button.click(); await Promise.resolve(); await Promise.resolve() })
+    expect(container.textContent).toContain('$1,000')
+    await setInput(amount, '2000')
+    expect(container.textContent).not.toContain('$1,000')
+  })
+
+  it('ignores an in-flight contribution response after the amount changes', async () => {
+    let finish
+    axios.post.mockImplementationOnce(() => new Promise(resolve => { finish = resolve }))
+    await act(async () => root.render(<PortfolioCoach />))
+    await flush()
+    const amount = container.querySelector('input[placeholder="Amount to invest"]')
+    await setInput(amount, '1000')
+    await act(async () => [...container.querySelectorAll('button')].find(b => b.textContent === 'Get contribution recommendation').click())
+    await setInput(amount, '2000')
+    await act(async () => finish({ data: { actions: [{ amount: 1000, asset_class: 'us_bonds', reason: 'Outdated advice' }] } }))
+    expect(container.textContent).not.toContain('Outdated advice')
+    expect(container.textContent).not.toContain('$1,000')
+  })
+
+  it('sends a review date when a recommendation is deferred', async () => {
+    axios.post.mockResolvedValue({ data: {} })
+    await act(async () => root.render(<PortfolioCoach />))
+    await flush()
+    const date = container.querySelector('input[aria-label="Review date"]')
+    await setInput(date, '2030-01-15')
+    const button = [...container.querySelectorAll('button')].find(b => b.textContent === 'Defer until date')
+    await act(async () => { button.click(); await Promise.resolve() })
+    expect(axios.post).toHaveBeenCalledWith('/api/recommendations/1/decide', expect.objectContaining({
+      status: 'deferred', review_date: '2030-01-15',
+    }))
   })
 })
 

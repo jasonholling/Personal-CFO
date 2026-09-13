@@ -330,3 +330,27 @@ class TestRepairDanglingLegacyEducationGoals:
         goals = {r["goal"]: r["monthly_amount"] for r in conn.execute("SELECT * FROM surplus_allocations").fetchall()}
         assert goals["Education funding - Abby"] == 250  # untouched the second time
         conn.close()
+
+
+def test_legacy_policy_migration_preserves_later_zero_allocations(temp_db):
+    conn = db_module.get_db()
+    conn.execute('ALTER TABLE investment_policies ADD COLUMN target_us_stock_pct REAL DEFAULT 60')
+    conn.execute('ALTER TABLE investment_policies ADD COLUMN target_international_stock_pct REAL DEFAULT 20')
+    conn.execute('ALTER TABLE investment_policies ADD COLUMN target_bonds_pct REAL DEFAULT 20')
+    for column in ('target_us_large_cap_pct', 'target_international_developed_pct', 'target_us_bonds_pct'):
+        conn.execute(f'ALTER TABLE investment_policies DROP COLUMN {column}')
+    conn.execute('INSERT INTO investment_policies (target_cash_pct) VALUES (0)')
+    conn.commit()
+    conn.close()
+    db_module.init_portfolio_coach_tables()
+    conn = db_module.get_db()
+    row = conn.execute('SELECT * FROM investment_policies ORDER BY id DESC LIMIT 1').fetchone()
+    assert (row['target_us_large_cap_pct'], row['target_international_developed_pct'], row['target_us_bonds_pct']) == (60, 20, 20)
+    conn.execute('UPDATE investment_policies SET target_us_large_cap_pct=0, target_international_developed_pct=0, target_us_bonds_pct=0, target_cash_pct=100')
+    conn.commit()
+    conn.close()
+    db_module.init_portfolio_coach_tables()
+    conn = db_module.get_db()
+    row = conn.execute('SELECT * FROM investment_policies ORDER BY id DESC LIMIT 1').fetchone()
+    assert (row['target_us_large_cap_pct'], row['target_international_developed_pct'], row['target_us_bonds_pct'], row['target_cash_pct']) == (0, 0, 0, 100)
+    conn.close()

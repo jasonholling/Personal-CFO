@@ -79,6 +79,17 @@ class TestAccountInvestmentOptionsCrud:
         })
         assert r.status_code == 422
 
+    def test_rejects_invalid_option_limits(self, client):
+        acc = _create_account(client)
+        assert client.post("/api/account-investment-options", json={
+            "account_id": acc["id"], "option_name": "Fund", "asset_class": "us_large_cap",
+            "minimum_allocation_pct": 60, "maximum_allocation_pct": 50,
+        }).status_code == 422
+        assert client.post("/api/account-investment-options", json={
+            "account_id": acc["id"], "option_name": "Fund", "asset_class": "us_large_cap",
+            "trading_fee": -1,
+        }).status_code == 422
+
     def test_ticker_optional_for_collective_trust(self, client):
         """Reference test #13: a no-ticker collective trust can be
         recorded and round-trips with ticker=None (never rejected or
@@ -208,3 +219,22 @@ class TestAccountInvestmentOptionsCompare:
             "account_id": 999999, "target_weights": {"us_large_cap": 100},
         })
         assert r.status_code == 404
+
+    def test_policy_exclusion_and_account_constraint_are_enforced(self, client):
+        excluded = _create_account(client, name="Checking")
+        constrained = _create_account(client, name="401k")
+        for account_id in (excluded["id"], constrained["id"]):
+            client.post("/api/account-investment-options", json={
+                "account_id": account_id, "option_name": "Bond Fund", "asset_class": "us_bonds",
+            })
+        _save_policy(client, excluded_accounts=[excluded["id"]], account_constraints=[{
+            "account_id": constrained["id"], "allowed_asset_classes": ["us_large_cap"],
+        }])
+        assert client.post("/api/account-investment-options/compare", json={
+            "account_id": excluded["id"], "target_weights": {"us_bonds": 100},
+        }).status_code == 400
+        constrained_result = client.post("/api/account-investment-options/compare", json={
+            "account_id": constrained["id"], "target_weights": {"us_bonds": 100},
+        }).json()
+        assert constrained_result["mix"] == []
+        assert constrained_result["eligible_option_count"] == 0
