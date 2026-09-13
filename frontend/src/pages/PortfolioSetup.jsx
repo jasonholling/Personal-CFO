@@ -68,6 +68,7 @@ function HoldingsTab({ accounts, excludedAccounts, onEditPolicy }) {
   const [saveNotice, setSaveNotice] = useState(null)
   const [optionsByAccount, setOptionsByAccount] = useState({})
   const [selectedOptionId, setSelectedOptionId] = useState('')
+  const [providerStatus, setProviderStatus] = useState(null)
 
   const load = () => axios.get('/api/holdings/grouped').then(r => setGroups(r.data.groups)).finally(() => setLoading(false))
   const loadOptions = () => axios.get('/api/account-investment-options').then(r => {
@@ -76,7 +77,10 @@ function HoldingsTab({ accounts, excludedAccounts, onEditPolicy }) {
       return byAccount
     }, {}))
   })
-  useEffect(() => { load(); loadOptions() }, [])
+  useEffect(() => {
+    load(); loadOptions()
+    axios.get('/api/securities/provider-status').then(response => setProviderStatus(response.data)).catch(() => setProviderStatus(null))
+  }, [])
 
   const applyRecordedOption = option => {
     if (!option) return
@@ -208,6 +212,9 @@ function HoldingsTab({ accounts, excludedAccounts, onEditPolicy }) {
           if (match) applyRecordedOption(match)
         }} style={{ maxWidth: 100 }} /></label>
         <button type="button" className="btn-secondary" onClick={searchTicker}>Look up ticker</button>
+        {providerStatus && <span className="setup-helper" style={{ alignSelf: 'end', marginBottom: 7 }}>
+          {providerStatus.is_live ? `Lookup: ${providerStatus.provider}` : `Lookup: ${providerStatus.provider} (offline)`}
+        </span>}
         <label>Current value ($)<input className="input" type="number" step="any" min="0" placeholder="Market value" value={form.market_value} onChange={e => setForm(f => ({ ...f, market_value: e.target.value }))} style={{ maxWidth: 140 }} /></label>
         {!form.multiAsset && (
           <label>Asset class<select className="input" value={form.asset_class} onChange={e => setForm(f => ({ ...f, asset_class: e.target.value }))} style={{ minWidth: 160 }}>

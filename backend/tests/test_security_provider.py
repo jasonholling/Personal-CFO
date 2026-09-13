@@ -7,12 +7,14 @@ bottom of this file, per the brief's "mock the provider in tests, add
 one optional live smoke test only when credentials are configured."
 """
 import os
+import json
+from unittest.mock import patch
 
 import pytest
 
 from security_provider import (
     SecurityProvider, SecurityCandidate, SecurityQuote,
-    MockSecurityProvider, get_active_provider, set_active_provider,
+    AlphaVantageSecurityProvider, MockSecurityProvider, get_active_provider, set_active_provider,
 )
 
 
@@ -99,6 +101,42 @@ class TestProviderRegistry:
         set_active_provider(StubProvider())
         results = get_active_provider().search("anything")
         assert results[0].ticker == "STUB"
+
+
+class TestAlphaVantageSecurityProvider:
+    class _Response:
+        def __init__(self, payload): self.payload = payload
+        def __enter__(self): return self
+        def __exit__(self, *args): return False
+        def read(self): return json.dumps(self.payload).encode("utf-8")
+
+    def test_search_maps_metadata_without_inventing_an_asset_class(self):
+        provider = AlphaVantageSecurityProvider("test-key")
+        payload = {"bestMatches": [{
+            "1. symbol": "FSPSX", "2. name": "Fidelity International Index Fund",
+            "3. type": "Mutual Fund", "4. region": "United States", "8. currency": "USD",
+        }]}
+        with patch("security_provider.urlopen", return_value=self._Response(payload)):
+            candidates = provider.search("FSPSX")
+        assert len(candidates) == 1
+        assert candidates[0].provider_identifier == "ALPHAVANTAGE:FSPSX"
+        assert candidates[0].security_type == "mutual_fund"
+        assert candidates[0].asset_class is None
+
+    def test_quote_maps_a_dated_price(self):
+        provider = AlphaVantageSecurityProvider("test-key")
+        payload = {"Global Quote": {"05. price": "123.45", "07. latest trading day": "2026-09-11"}}
+        with patch("security_provider.urlopen", return_value=self._Response(payload)):
+            quote = provider.get_quote("ALPHAVANTAGE:SPAB")
+        assert quote.price == 123.45
+        assert quote.as_of == "2026-09-11"
+        assert quote.data_source == "alpha_vantage"
+
+    def test_rate_limit_response_returns_no_fabricated_candidate_or_quote(self):
+        provider = AlphaVantageSecurityProvider("test-key")
+        with patch("security_provider.urlopen", return_value=self._Response({"Note": "rate limit"})):
+            assert provider.search("SPAB") == []
+            assert provider.get_quote("ALPHAVANTAGE:SPAB") is None
 
 
 # ── Optional live smoke test ────────────────────────────────────────────

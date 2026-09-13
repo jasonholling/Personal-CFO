@@ -27,8 +27,13 @@ guessing.
 """
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import Dict, List, Optional
 import datetime
+import json
+import os
+from urllib.error import URLError
+from urllib.parse import urlencode
+from urllib.request import urlopen
 
 
 @dataclass
@@ -71,6 +76,14 @@ class SecurityProvider(ABC):
         identifier. Returns None (not a fabricated price) if the
         identifier isn't recognized."""
 
+    @property
+    def provider_name(self) -> str:
+        return self.__class__.__name__
+
+    @property
+    def is_live(self) -> bool:
+        return False
+
 
 class MockSecurityProvider(SecurityProvider):
     """Deterministic, offline provider — no live vendor is configured.
@@ -109,6 +122,86 @@ class MockSecurityProvider(SecurityProvider):
             return None
         return SecurityQuote(provider_identifier, price, "USD", datetime.date.today().isoformat(), "mock")
 
+    @property
+    def provider_name(self) -> str:
+        return "Built-in offline catalog"
+
+
+class AlphaVantageSecurityProvider(SecurityProvider):
+    """Small, dependency-free Alpha Vantage adapter.
+
+    The provider is deliberately metadata/quote-only: it never assigns an
+    asset class, expense ratio, cost basis, or account availability. Those
+    require user confirmation because a ticker alone cannot establish them.
+    Alpha Vantage documents SYMBOL_SEARCH and GLOBAL_QUOTE for stock, ETF,
+    and mutual-fund symbols.  Transient network/rate-limit/provider errors
+    become an empty result rather than breaking the holdings form.
+    """
+    _BASE_URL = "https://www.alphavantage.co/query"
+
+    def __init__(self, api_key: str, timeout_seconds: float = 8.0):
+        self.api_key = api_key
+        self.timeout_seconds = timeout_seconds
+
+    def _request(self, **params) -> Dict:
+        query = urlencode({**params, "apikey": self.api_key})
+        try:
+            with urlopen(f"{self._BASE_URL}?{query}", timeout=self.timeout_seconds) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+        except (URLError, OSError, ValueError, json.JSONDecodeError):
+            return {}
+        # API "Note", "Information", and "Error Message" responses do
+        # not contain usable data. Never turn one into a fabricated result.
+        return payload if isinstance(payload, dict) and not any(k in payload for k in ("Note", "Information", "Error Message")) else {}
+
+    @staticmethod
+    def _security_type(instrument_type: Optional[str]) -> str:
+        normalized = (instrument_type or "").strip().lower()
+        if "mutual" in normalized:
+            return "mutual_fund"
+        if "etf" in normalized:
+            return "etf"
+        if "bond" in normalized:
+            return "bond"
+        return "stock" if normalized in {"equity", "stock"} else "other"
+
+    def search(self, query: str) -> List[SecurityCandidate]:
+        query = (query or "").strip()
+        if not query:
+            return []
+        matches = self._request(function="SYMBOL_SEARCH", keywords=query).get("bestMatches", [])
+        candidates = []
+        for match in matches[:10]:
+            symbol = match.get("1. symbol")
+            name = match.get("2. name")
+            if not symbol or not name:
+                continue
+            candidates.append(SecurityCandidate(
+                provider_identifier=f"ALPHAVANTAGE:{symbol}", ticker=symbol, security_name=name,
+                exchange=match.get("4. region"), currency=match.get("8. currency"),
+                security_type=self._security_type(match.get("3. type")), status="active",
+            ))
+        return candidates
+
+    def get_quote(self, provider_identifier: str) -> Optional[SecurityQuote]:
+        prefix = "ALPHAVANTAGE:"
+        if not provider_identifier or not provider_identifier.startswith(prefix):
+            return None
+        quote = self._request(function="GLOBAL_QUOTE", symbol=provider_identifier[len(prefix):]).get("Global Quote", {})
+        try:
+            price = float(quote["05. price"])
+        except (KeyError, TypeError, ValueError):
+            return None
+        return SecurityQuote(provider_identifier, price, None, quote.get("07. latest trading day"), "alpha_vantage")
+
+    @property
+    def provider_name(self) -> str:
+        return "Alpha Vantage"
+
+    @property
+    def is_live(self) -> bool:
+        return True
+
 
 _ACTIVE_PROVIDER: Optional[SecurityProvider] = None
 
@@ -120,7 +213,8 @@ def get_active_provider() -> SecurityProvider:
     env var) — no other code needs to change."""
     global _ACTIVE_PROVIDER
     if _ACTIVE_PROVIDER is None:
-        _ACTIVE_PROVIDER = MockSecurityProvider()
+        api_key = os.environ.get("ALPHAVANTAGE_API_KEY", "").strip()
+        _ACTIVE_PROVIDER = AlphaVantageSecurityProvider(api_key) if api_key else MockSecurityProvider()
     return _ACTIVE_PROVIDER
 
 

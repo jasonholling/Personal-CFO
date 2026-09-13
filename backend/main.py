@@ -1058,7 +1058,15 @@ def commit_holdings_import(rows: List[HoldingImportRow]):
 # Never called directly from the browser for the actual provider request
 # — the frontend only ever talks to these backend endpoints, which hold
 # any real provider credential server-side (an env var, never committed;
-# no live provider is configured on this branch, see security_provider.py).
+# provider behavior is reported to the UI, see security_provider.py).
+
+@app.get("/api/securities/provider-status")
+def security_provider_status():
+    """Expose the lookup source so the UI never implies that offline
+    catalog data is live market data."""
+    from security_provider import get_active_provider
+    provider = get_active_provider()
+    return {"provider": provider.provider_name, "is_live": provider.is_live}
 
 @app.get("/api/securities/search")
 def search_securities(q: str = ""):
