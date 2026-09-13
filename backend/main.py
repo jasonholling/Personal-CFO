@@ -798,6 +798,24 @@ def get_holdings_grouped():
         })
     return {"groups": groups}
 
+def _insert_holding(conn, values):
+    """Support databases retaining the original required `name` column.
+
+    The additive migration preserves that column and its NOT NULL constraint.
+    Both manual and CSV writes must populate it alongside security_name.
+    Values come only from the validated Holding/HoldingImportRow models.
+    """
+    values = dict(values)
+    if "exposures" in values:
+        values["exposures_json"] = json.dumps(values.pop("exposures"))
+    if any(row[1] == "name" for row in conn.execute("PRAGMA table_info(holdings)")):
+        values["name"] = values["security_name"]
+    columns = ", ".join(values)
+    placeholders = ", ".join("?" for _ in values)
+    return conn.execute(f"INSERT INTO holdings ({columns}, updated_at) "
+                        f"VALUES ({placeholders}, datetime('now'))", tuple(values.values()))
+
+
 @app.post("/api/holdings")
 def create_holding(holding: Holding):
     conn = get_db()
@@ -805,14 +823,7 @@ def create_holding(holding: Holding):
     if not acc:
         conn.close()
         raise HTTPException(status_code=400, detail=f"account_id {holding.account_id} does not exist")
-    cur = conn.execute(
-        "INSERT INTO holdings (account_id, ticker, security_name, provider_identifier, exchange, security_type, shares, "
-        "market_value, asset_class, exposures_json, expense_ratio, cost_basis, as_of_date, data_source, confidence, "
-        "notes, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,datetime('now'))",
-        (holding.account_id, holding.ticker, holding.security_name, holding.provider_identifier, holding.exchange,
-         holding.security_type, holding.shares, holding.market_value, holding.asset_class, json.dumps(holding.exposures),
-         holding.expense_ratio, holding.cost_basis, holding.as_of_date, holding.data_source, holding.confidence, holding.notes)
-    )
+    cur = _insert_holding(conn, holding.model_dump(exclude={"id"}))
     conn.commit()
     holding.id = cur.lastrowid
     conn.close()
@@ -998,12 +1009,7 @@ def commit_holdings_import(rows: List[HoldingImportRow]):
         if row.asset_class not in ASSET_CLASSES:
             skipped.append({"security_name": row.security_name, "reason": f"asset_class '{row.asset_class}' is not one of {sorted(ASSET_CLASSES)}"})
             continue
-        conn.execute(
-            "INSERT INTO holdings (account_id, ticker, security_name, shares, market_value, asset_class, expense_ratio, "
-            "cost_basis, notes, data_source, confidence, updated_at) VALUES (?,?,?,?,?,?,?,?,?,'manual','low',datetime('now'))",
-            (row.account_id, row.ticker, row.security_name, row.shares, row.market_value, row.asset_class,
-             row.expense_ratio, row.cost_basis, row.notes)
-        )
+        _insert_holding(conn, {**row.model_dump(), "data_source": "manual", "confidence": "low"})
         created += 1
     conn.commit()
     conn.close()

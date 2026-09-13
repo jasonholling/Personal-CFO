@@ -35,6 +35,40 @@ def _save_policy(client, **overrides):
 
 
 class TestHoldingsCrud:
+    def test_legacy_required_name_supports_manual_and_csv_saves(self, client, temp_db):
+        import db
+        account = _create_account(client, account_type="hsa")
+        conn = db.get_db()
+        conn.execute("DROP TABLE holdings")
+        conn.execute("""CREATE TABLE holdings (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            account_id INTEGER NOT NULL REFERENCES accounts(id),
+            name TEXT NOT NULL, description TEXT, shares REAL,
+            market_value REAL NOT NULL DEFAULT 0,
+            asset_class TEXT NOT NULL DEFAULT 'unclassified',
+            expense_ratio REAL, cost_basis REAL, notes TEXT,
+            created_at TEXT DEFAULT (datetime('now')),
+            updated_at TEXT DEFAULT (datetime('now'))
+        )""")
+        conn.execute("INSERT INTO holdings (account_id, name, market_value) VALUES (?, 'Existing fund', 75)", (account['id'],))
+        conn.commit()
+        conn.close()
+        db.init_portfolio_coach_tables()
+        row = dict(account_id=account['id'], security_name='Manual fund', ticker='TEST',
+                   market_value=123.45, asset_class='us_small_cap')
+        response = client.post('/api/holdings', json=row)
+        assert response.status_code == 200, response.text
+        response = client.post('/api/holdings/import/commit', json=[{**row, 'security_name': 'Imported fund'}])
+        assert response.status_code == 200, response.text
+        assert response.json() == {'created': 1, 'skipped': []}
+        db.init_portfolio_coach_tables()
+        conn = db.get_db()
+        saved = [tuple(r) for r in conn.execute('SELECT name, security_name, market_value FROM holdings ORDER BY id')]
+        conn.close()
+        assert saved == [('Existing fund', 'Existing fund', 75),
+                         ('Manual fund', 'Manual fund', 123.45),
+                         ('Imported fund', 'Imported fund', 123.45)]
+
     def test_fresh_install_has_zero_holdings(self, client):
         assert client.get("/api/holdings").json() == []
 

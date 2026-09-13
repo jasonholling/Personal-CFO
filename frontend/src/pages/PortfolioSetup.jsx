@@ -45,13 +45,20 @@ function HoldingsTab({ accounts, excludedAccounts, onEditPolicy }) {
   const [searchResults, setSearchResults] = useState([])
   const [importPreview, setImportPreview] = useState(null)
   const [importError, setImportError] = useState(null)
+  const [saveError, setSaveError] = useState(null)
+  const [saveNotice, setSaveNotice] = useState(null)
 
   const load = () => axios.get('/api/holdings/grouped').then(r => setGroups(r.data.groups)).finally(() => setLoading(false))
   useEffect(() => { load() }, [])
 
   const submit = async e => {
     e.preventDefault()
-    if (!form.account_id || !form.security_name || !form.market_value) return
+    setSaveError(null)
+    setSaveNotice(null)
+    if (!form.account_id || !form.security_name.trim() || form.market_value === '') {
+      setSaveError('Select an account and enter a fund name and current value.')
+      return
+    }
     setSaving(true)
     try {
       const exposures = form.multiAsset
@@ -64,7 +71,14 @@ function HoldingsTab({ accounts, excludedAccounts, onEditPolicy }) {
         cost_basis: form.cost_basis ? parseFloat(form.cost_basis) : null,
       })
       setForm(EMPTY_HOLDING_FORM)
-      await load()
+      setSaveNotice('Holding saved.')
+      try { await load() } catch {
+        setSaveError('Holding saved, but the list could not refresh. Reload the page before adding it again.')
+      }
+    } catch (err) {
+      const detail = err.response?.data?.detail
+      setSaveError(Array.isArray(detail) ? detail.map(x => x.msg).join('; ') :
+        (typeof detail === 'string' ? detail : 'Could not save this holding. Your entries have been kept; please try again.'))
     } finally { setSaving(false) }
   }
 
@@ -123,19 +137,21 @@ function HoldingsTab({ accounts, excludedAccounts, onEditPolicy }) {
         <label>Fund or security name<input className="input" placeholder="Security name" value={form.security_name} onChange={e => setForm(f => ({ ...f, security_name: e.target.value }))} style={{ minWidth: 160 }} /></label>
         <label>Ticker (optional)<input className="input" placeholder="Ticker (optional)" value={form.ticker} onChange={e => { setForm(f => ({ ...f, ticker: e.target.value })); setSearchResults([]) }} style={{ maxWidth: 100 }} /></label>
         <button type="button" className="btn-secondary" onClick={searchTicker}>Look up ticker</button>
-        <label>Current value ($)<input className="input" type="number" placeholder="Market value" value={form.market_value} onChange={e => setForm(f => ({ ...f, market_value: e.target.value }))} style={{ maxWidth: 140 }} /></label>
+        <label>Current value ($)<input className="input" type="number" step="any" min="0" placeholder="Market value" value={form.market_value} onChange={e => setForm(f => ({ ...f, market_value: e.target.value }))} style={{ maxWidth: 140 }} /></label>
         {!form.multiAsset && (
           <label>Asset class<select className="input" value={form.asset_class} onChange={e => setForm(f => ({ ...f, asset_class: e.target.value }))} style={{ minWidth: 160 }}>
             {ASSET_CLASSES.map(c => <option key={c} value={c}>{c.replace(/_/g, ' ')}</option>)}
           </select></label>
         )}
-        <label>Annual expense ratio (%)<input className="input" type="number" placeholder="Expense ratio %" value={form.expense_ratio} onChange={e => setForm(f => ({ ...f, expense_ratio: e.target.value }))} style={{ maxWidth: 130 }} /></label>
-        <label>Cost basis ($, optional)<input className="input" type="number" placeholder="Cost basis" value={form.cost_basis} onChange={e => setForm(f => ({ ...f, cost_basis: e.target.value }))} style={{ maxWidth: 130 }} /></label>
+        <label>Annual expense ratio (%)<input className="input" type="number" step="any" min="0" placeholder="Expense ratio %" value={form.expense_ratio} onChange={e => setForm(f => ({ ...f, expense_ratio: e.target.value }))} style={{ maxWidth: 130 }} /></label>
+        <label>Cost basis ($, optional)<input className="input" type="number" step="any" min="0" placeholder="Cost basis" value={form.cost_basis} onChange={e => setForm(f => ({ ...f, cost_basis: e.target.value }))} style={{ maxWidth: 130 }} /></label>
         <label style={{ fontSize: 12, display: 'flex', gap: 4, alignItems: 'center' }}>
           <input type="checkbox" checked={form.multiAsset} onChange={e => setForm(f => ({ ...f, multiAsset: e.target.checked }))} />
           Multi-asset (target-date / balanced fund)
         </label>
         <button className="btn-primary" disabled={saving} type="submit">Add holding</button>
+        {saveError && <div role="alert" style={{ width: '100%', color: 'var(--amber)' }}>{saveError}</div>}
+        {saveNotice && <div role="status" style={{ width: '100%' }}>{saveNotice}</div>}
 
         {form.multiAsset && (
           <div style={{ width: '100%', marginTop: 4 }}>
@@ -147,7 +163,7 @@ function HoldingsTab({ accounts, excludedAccounts, onEditPolicy }) {
                 <select className="input" value={row.asset_class} onChange={e => updateExposureRow(i, 'asset_class', e.target.value)} style={{ minWidth: 160 }}>
                   {ASSET_CLASSES.map(c => <option key={c} value={c}>{c.replace(/_/g, ' ')}</option>)}
                 </select>
-                <input className="input" type="number" placeholder="Weight %" value={row.weight_pct}
+                <input className="input" type="number" step="any" min="0" max="100" placeholder="Weight %" value={row.weight_pct}
                        onChange={e => updateExposureRow(i, 'weight_pct', e.target.value)} style={{ maxWidth: 120 }} />
                 <button type="button" className="btn-secondary" onClick={() => removeExposureRow(i)}>Remove</button>
               </div>

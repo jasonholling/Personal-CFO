@@ -40,6 +40,50 @@ afterEach(async () => {
 })
 
 describe('PortfolioSetup workflows', () => {
+  it('explains missing required fields instead of silently ignoring Add holding', async () => {
+    await act(async () => root.render(<PortfolioSetup />))
+    await flush()
+    await act(async () => [...container.querySelectorAll('button')].find(b => b.textContent === 'Add holding').click())
+    expect(container.querySelector('[role="alert"]').textContent).toContain('Select an account')
+    expect(axios.post).not.toHaveBeenCalled()
+  })
+
+  it('accepts decimal holding values and submits them through the real button', async () => {
+    axios.post.mockResolvedValue({ data: { id: 5 } })
+    await act(async () => root.render(<PortfolioSetup />))
+    await flush()
+    await act(async () => {
+      const account = container.querySelector('select')
+      account.value = '1'
+      account.dispatchEvent(new Event('change', { bubbles: true }))
+    })
+    await setInput(container.querySelector('[placeholder="Security name"]'), 'Test Index')
+    await setInput(container.querySelector('[placeholder="Market value"]'), '123.45')
+    await setInput(container.querySelector('[placeholder="Expense ratio %"]'), '0.015')
+    await setInput(container.querySelector('[placeholder="Cost basis"]'), '100.12')
+    expect(container.querySelector('form').checkValidity()).toBe(true)
+    await act(async () => [...container.querySelectorAll('button')].find(b => b.textContent === 'Add holding').click())
+    expect(axios.post).toHaveBeenCalledWith('/api/holdings', expect.objectContaining({
+      account_id: 1, market_value: 123.45, expense_ratio: 0.00015, cost_basis: 100.12,
+    }))
+  })
+
+  it('shows a save failure and keeps the entered holding available for correction', async () => {
+    axios.post.mockRejectedValue({ response: { data: { detail: 'Account unavailable' } } })
+    await act(async () => root.render(<PortfolioSetup />))
+    await flush()
+    await act(async () => {
+      const account = container.querySelector('select')
+      account.value = '1'
+      account.dispatchEvent(new Event('change', { bubbles: true }))
+    })
+    await setInput(container.querySelector('[placeholder="Security name"]'), 'Test Index')
+    await setInput(container.querySelector('[placeholder="Market value"]'), '123')
+    await act(async () => [...container.querySelectorAll('button')].find(b => b.textContent === 'Add holding').click())
+    expect(container.querySelector('[role="alert"]').textContent).toContain('Account unavailable')
+    expect(container.querySelector('[placeholder="Security name"]').value).toBe('Test Index')
+  })
+
   it('hides excluded accounts by default and reveals their preserved holdings without deleting them', async () => {
     axios.get.mockImplementation(url => Promise.resolve({ data:
       url === '/api/accounts' ? [{ id: 1, name: 'IRA' }, { id: 2, name: 'Reserve' }] :
