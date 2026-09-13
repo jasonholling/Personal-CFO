@@ -1639,9 +1639,43 @@ def portfolio_planning_comparison(req: PlanningComparisonRequest):
 
 # ── Recommendation engine: generate/list/decide (decision lifecycle) ────
 
+def _load_household_tax_lot_context(conn, holdings: List[Dict]):
+    """Loads every recorded tax lot for the given holdings, plus a
+    flattened household-wide list (ticker/name + account identity) used
+    only for the wash-sale same-ticker-purchase check -- that check
+    deliberately looks across ALL accounts (including retirement
+    accounts), since a wash sale can be triggered by a purchase in any
+    account the household actually recorded, not just the one being
+    reviewed for a loss."""
+    holdings_by_id = {h["id"]: h for h in holdings}
+    if not holdings_by_id:
+        return {}, []
+    placeholders = ",".join("?" * len(holdings_by_id))
+    rows = conn.execute(
+        f"SELECT * FROM tax_lots WHERE holding_id IN ({placeholders}) ORDER BY acquired_date", tuple(holdings_by_id),
+    ).fetchall()
+    lots_by_holding_id: Dict[int, List[Dict]] = {}
+    household_lots_for_wash_sale: List[Dict] = []
+    for row in rows:
+        lot = dict(row)
+        lots_by_holding_id.setdefault(lot["holding_id"], []).append(lot)
+        parent = holdings_by_id.get(lot["holding_id"], {})
+        household_lots_for_wash_sale.append({
+            "lot_id": lot["id"],
+            "ticker_or_name": parent.get("ticker") or parent.get("security_name"),
+            "acquired_date": lot["acquired_date"],
+            "account_id": parent.get("account_id"),
+            "account_name": None,  # filled in by the caller, which has account rows
+        })
+    return lots_by_holding_id, household_lots_for_wash_sale
+
+
 def _generate_candidate_cards(accounts, holdings, policy, pending_contribution: float = 0.0,
                               options_by_account: Optional[Dict[int, List[Dict]]] = None,
-                              goal_context: Optional[Dict] = None) -> List[Dict]:
+                              goal_context: Optional[Dict] = None,
+                              lots_by_holding_id: Optional[Dict[int, List[Dict]]] = None,
+                              household_lots_for_wash_sale: Optional[List[Dict]] = None,
+                              today: Optional[str] = None) -> List[Dict]:
     """Runs every coach_engine tier over already-loaded data and returns
     a single prioritized candidate list. Never re-derives a calculation
     holdings_engine.py already owns — this only classifies/compares/
@@ -1667,7 +1701,12 @@ def _generate_candidate_cards(accounts, holdings, policy, pending_contribution: 
     cards += ce.concentration_and_liquidity_recommendations(classified["household"], policy, household_cash)
     cards += ce.high_cost_or_redundant_recommendations(classified["household"])
     cards += ce.asset_location_recommendations(classified, options_by_account)
-    cards += ce.taxable_loss_review_recommendations(classified["household"])
+    lots_by_holding_id = lots_by_holding_id or {}
+    holding_ids_with_lots = {h.get("id") for h in classified["household"] if lots_by_holding_id.get(h.get("id"))}
+    cards += ce.tax_lot_loss_review_recommendations(
+        classified["household"], lots_by_holding_id, household_lots_for_wash_sale, today=today,
+    )
+    cards += ce.taxable_loss_review_recommendations(classified["household"], holding_ids_with_lots)
     cards += ce.minor_optimization_recommendations(classified["household"], goal_context or {})
 
     if not policy:
@@ -1810,9 +1849,16 @@ def get_recommendations(pending_contribution: float = 0.0):
     for row in conn.execute("SELECT * FROM account_investment_options").fetchall():
         options_by_account.setdefault(row["account_id"], []).append(_option_row_to_dict(row))
     goal_context = _portfolio_goal_context(conn, accounts, policy)
+    lots_by_holding_id, household_lots_for_wash_sale = _load_household_tax_lot_context(conn, holdings)
+    account_names_by_id = {a["id"]: a.get("name") for a in accounts}
+    for lot in household_lots_for_wash_sale:
+        lot["account_name"] = account_names_by_id.get(lot["account_id"])
     candidates = _generate_candidate_cards(accounts, holdings, policy, pending_contribution,
                                             options_by_account=options_by_account,
-                                            goal_context=goal_context)
+                                            goal_context=goal_context,
+                                            lots_by_holding_id=lots_by_holding_id,
+                                            household_lots_for_wash_sale=household_lots_for_wash_sale,
+                                            today=datetime.now().date().isoformat())
     _reconcile_and_persist_recommendations(conn, candidates)
     active_statuses = ("proposed", "reviewing", "accepted")
     placeholders = ",".join("?" * len(active_statuses))

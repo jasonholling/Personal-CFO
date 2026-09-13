@@ -83,7 +83,7 @@ function ActionCard({ card, onDecide, busy, onNavigate, accounts }) {
           {p.tax_impact && (
             <div style={{ fontSize: 12, marginTop: 6, color: 'var(--amber)' }}>
               ⚠ {p.tax_impact.has_cost_basis
-                ? `Estimated taxable gain: ${fmt(p.tax_impact.estimated_gain)}`
+                ? `Estimated taxable ${p.tax_impact.estimated_gain < 0 ? 'loss' : 'gain'}: ${fmt(p.tax_impact.estimated_gain)}`
                 : 'Tax impact could not be estimated — cost basis is missing (never invented).'}
             </div>
           )}
