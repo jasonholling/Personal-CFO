@@ -13,8 +13,9 @@ from unittest.mock import patch
 import pytest
 
 from security_provider import (
-    SecurityProvider, SecurityCandidate, SecurityQuote,
+    SecurityProvider, SecurityCandidate, SecurityQuote, QuoteResult,
     AlphaVantageSecurityProvider, MockSecurityProvider, get_active_provider, set_active_provider,
+    get_cached_or_fetch_quote, clear_quote_cache,
 )
 
 
@@ -137,6 +138,111 @@ class TestAlphaVantageSecurityProvider:
         with patch("security_provider.urlopen", return_value=self._Response({"Note": "rate limit"})):
             assert provider.search("SPAB") == []
             assert provider.get_quote("ALPHAVANTAGE:SPAB") is None
+
+    def test_get_quote_with_status_reports_ok(self):
+        provider = AlphaVantageSecurityProvider("test-key")
+        payload = {"Global Quote": {"05. price": "123.45", "07. latest trading day": "2026-09-11"}}
+        with patch("security_provider.urlopen", return_value=self._Response(payload)):
+            result = provider.get_quote_with_status("ALPHAVANTAGE:SPAB")
+        assert result.status == "ok"
+        assert result.quote.price == 123.45
+
+    def test_get_quote_with_status_distinguishes_rate_limit_from_provider_error(self):
+        provider = AlphaVantageSecurityProvider("test-key")
+        with patch("security_provider.urlopen", return_value=self._Response({"Note": "rate limit"})):
+            rate_limited = provider.get_quote_with_status("ALPHAVANTAGE:SPAB")
+        with patch("security_provider.urlopen", side_effect=OSError("boom")):
+            errored = provider.get_quote_with_status("ALPHAVANTAGE:SPAB")
+        assert rate_limited.status == "rate_limited"
+        assert errored.status == "provider_error"
+        assert rate_limited.quote is None and errored.quote is None
+        assert rate_limited.message != errored.message
+
+    def test_get_quote_with_status_reports_not_found_for_unknown_symbol(self):
+        provider = AlphaVantageSecurityProvider("test-key")
+        with patch("security_provider.urlopen", return_value=self._Response({"Global Quote": {}})):
+            result = provider.get_quote_with_status("ALPHAVANTAGE:NOTREAL")
+        assert result.status == "not_found"
+
+    def test_get_quote_with_status_rejects_a_foreign_identifier(self):
+        provider = AlphaVantageSecurityProvider("test-key")
+        result = provider.get_quote_with_status("MOCK:VTI")
+        assert result.status == "not_found"
+
+
+class TestQuoteResult:
+    def test_unknown_status_is_rejected(self):
+        with pytest.raises(ValueError):
+            QuoteResult(None, "made_up_status", "x")
+
+
+class TestDefaultGetQuoteWithStatus:
+    """The base class's default implementation, exercised via
+    MockSecurityProvider (which never overrides it) -- covers any
+    future provider that only implements get_quote()."""
+
+    def test_ok_when_a_quote_exists(self):
+        result = MockSecurityProvider().get_quote_with_status("MOCK:VTI")
+        assert result.status == "ok"
+        assert result.quote.price == 275.40
+
+    def test_not_found_when_no_quote_exists(self):
+        result = MockSecurityProvider().get_quote_with_status("MOCK:NOT_REAL")
+        assert result.status == "not_found"
+        assert result.quote is None
+
+
+class TestQuoteCache:
+    def setup_method(self):
+        clear_quote_cache()
+
+    def teardown_method(self):
+        clear_quote_cache()
+
+    def test_second_call_within_ttl_is_served_from_cache(self):
+        set_active_provider(MockSecurityProvider())
+        first = get_cached_or_fetch_quote("MOCK:VTI")
+        assert first.cached is False
+        second = get_cached_or_fetch_quote("MOCK:VTI")
+        assert second.cached is True
+        assert second.quote.price == first.quote.price
+        assert second.fetched_at == first.fetched_at
+
+    def test_expired_entry_is_refetched(self):
+        set_active_provider(MockSecurityProvider())
+        get_cached_or_fetch_quote("MOCK:VTI", ttl_seconds=1)
+        import time
+        time.sleep(1.05)
+        result = get_cached_or_fetch_quote("MOCK:VTI", ttl_seconds=1)
+        assert result.cached is False
+
+    def test_rate_limited_result_is_never_cached(self):
+        class FlakyProvider(SecurityProvider):
+            def __init__(self):
+                self.calls = 0
+
+            def search(self, query):
+                return []
+
+            def get_quote(self, provider_identifier):
+                return None
+
+            def get_quote_with_status(self, provider_identifier):
+                self.calls += 1
+                return QuoteResult(None, "rate_limited", "throttled")
+
+        flaky = FlakyProvider()
+        set_active_provider(flaky)
+        get_cached_or_fetch_quote("ANY:1")
+        get_cached_or_fetch_quote("ANY:1")
+        assert flaky.calls == 2  # never served from cache
+
+    def test_switching_provider_clears_the_cache(self):
+        set_active_provider(MockSecurityProvider())
+        get_cached_or_fetch_quote("MOCK:VTI")
+        set_active_provider(MockSecurityProvider())
+        result = get_cached_or_fetch_quote("MOCK:VTI")
+        assert result.cached is False
 
 
 # ── Optional live smoke test ────────────────────────────────────────────

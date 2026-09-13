@@ -58,6 +58,41 @@ class SecurityQuote:
     data_source: str = "unknown"
 
 
+# Item 2 (quote reliability): a quote fetch can fail in several
+# meaningfully different ways that the current app previously collapsed
+# into one generic "No quote is available" message. QUOTE_STATUSES is
+# the vocabulary every provider's get_quote_with_status() reports back
+# in, so the UI can show a specific, honest state instead of guessing:
+#   "ok"            -- a real quote was returned.
+#   "not_found"     -- the identifier isn't recognized by this provider
+#                      (delisted, mistyped, or never existed there).
+#   "rate_limited"  -- the provider throttled this request; retrying
+#                      immediately is expected to fail again.
+#   "provider_error" -- a network/parse/unexpected-response failure.
+#                      Distinct from rate_limited so the UI can suggest
+#                      "try again" rather than "wait."
+QUOTE_STATUSES = ("ok", "not_found", "rate_limited", "provider_error")
+
+
+@dataclass
+class QuoteResult:
+    """Richer quote outcome than a bare Optional[SecurityQuote] --
+    carries WHY a quote could not be produced, never invents a quote to
+    paper over a failure, and (via cached/fetched_at, set by the cache
+    layer below, not by a provider itself) lets the caller show whether
+    this result came from a fresh provider call or a reused one from
+    earlier in the same review session."""
+    quote: Optional[SecurityQuote]
+    status: str            # one of QUOTE_STATUSES
+    message: str
+    cached: bool = False
+    fetched_at: Optional[str] = None  # ISO timestamp of the underlying fetch (fresh or cached)
+
+    def __post_init__(self):
+        if self.status not in QUOTE_STATUSES:
+            raise ValueError(f"Unknown quote status '{self.status}' -- must be one of {QUOTE_STATUSES}")
+
+
 class SecurityProvider(ABC):
     """Interface every concrete provider must implement. main.py's
     endpoints resolve exactly ONE active provider via get_active_
@@ -75,6 +110,21 @@ class SecurityProvider(ABC):
         """A current/delayed quote for an already-resolved provider
         identifier. Returns None (not a fabricated price) if the
         identifier isn't recognized."""
+
+    def get_quote_with_status(self, provider_identifier: str) -> QuoteResult:
+        """Default implementation for any provider (including test
+        stubs) that only implements get_quote(): reports "ok" or
+        "not_found" but can never distinguish a rate limit from a
+        network error, since get_quote() itself throws that information
+        away. AlphaVantageSecurityProvider overrides this to report the
+        real reason. Never called by tests directly to bypass a
+        provider's own status logic -- callers should call THIS method,
+        not get_quote(), whenever they need to show the user why a
+        quote failed."""
+        quote = self.get_quote(provider_identifier)
+        if quote is not None:
+            return QuoteResult(quote, "ok", "Quote retrieved.")
+        return QuoteResult(None, "not_found", "No quote is available for this identifier.")
 
     @property
     def provider_name(self) -> str:
@@ -144,15 +194,33 @@ class AlphaVantageSecurityProvider(SecurityProvider):
         self.timeout_seconds = timeout_seconds
 
     def _request(self, **params) -> Dict:
+        """Kept for backward compatibility with any caller that only
+        wants the payload -- discards the failure reason. Prefer
+        _request_with_status below when the caller needs to tell a rate
+        limit apart from a network/parse error."""
+        payload, _status = self._request_with_status(**params)
+        return payload
+
+    def _request_with_status(self, **params) -> "tuple[Dict, str]":
+        """Returns (payload, status) where status is "ok",
+        "rate_limited", or "provider_error" -- never fabricates data for
+        any of them. Alpha Vantage signals a rate limit via a "Note" (or
+        sometimes "Information") field in an otherwise-200 response
+        rather than an HTTP error code, so that has to be detected in
+        the payload itself, not via an exception."""
         query = urlencode({**params, "apikey": self.api_key})
         try:
             with urlopen(f"{self._BASE_URL}?{query}", timeout=self.timeout_seconds) as response:
                 payload = json.loads(response.read().decode("utf-8"))
         except (URLError, OSError, ValueError, json.JSONDecodeError):
-            return {}
-        # API "Note", "Information", and "Error Message" responses do
-        # not contain usable data. Never turn one into a fabricated result.
-        return payload if isinstance(payload, dict) and not any(k in payload for k in ("Note", "Information", "Error Message")) else {}
+            return {}, "provider_error"
+        if not isinstance(payload, dict):
+            return {}, "provider_error"
+        if "Note" in payload or "Information" in payload:
+            return {}, "rate_limited"
+        if "Error Message" in payload:
+            return {}, "provider_error"
+        return payload, "ok"
 
     @staticmethod
     def _security_type(instrument_type: Optional[str]) -> str:
@@ -194,6 +262,23 @@ class AlphaVantageSecurityProvider(SecurityProvider):
             return None
         return SecurityQuote(provider_identifier, price, None, quote.get("07. latest trading day"), "alpha_vantage")
 
+    def get_quote_with_status(self, provider_identifier: str) -> QuoteResult:
+        prefix = "ALPHAVANTAGE:"
+        if not provider_identifier or not provider_identifier.startswith(prefix):
+            return QuoteResult(None, "not_found", "This holding has no Alpha Vantage identifier on file.")
+        payload, status = self._request_with_status(function="GLOBAL_QUOTE", symbol=provider_identifier[len(prefix):])
+        if status == "rate_limited":
+            return QuoteResult(None, "rate_limited", "Alpha Vantage rate-limited this request. Try again in a minute.")
+        if status == "provider_error":
+            return QuoteResult(None, "provider_error", "Could not reach Alpha Vantage right now. Try again shortly.")
+        quote_payload = payload.get("Global Quote", {})
+        try:
+            price = float(quote_payload["05. price"])
+        except (KeyError, TypeError, ValueError):
+            return QuoteResult(None, "not_found", "Alpha Vantage does not recognize this symbol (it may be delisted or mistyped).")
+        quote = SecurityQuote(provider_identifier, price, None, quote_payload.get("07. latest trading day"), "alpha_vantage")
+        return QuoteResult(quote, "ok", "Quote retrieved.")
+
     @property
     def provider_name(self) -> str:
         return "Alpha Vantage"
@@ -219,6 +304,49 @@ def get_active_provider() -> SecurityProvider:
 
 
 def set_active_provider(provider: SecurityProvider) -> None:
-    """Test hook / real-provider swap-in point."""
+    """Test hook / real-provider swap-in point. Also clears the quote
+    cache below -- a cached quote from the previous provider must never
+    be served as if it came from the new one."""
     global _ACTIVE_PROVIDER
     _ACTIVE_PROVIDER = provider
+    clear_quote_cache()
+
+
+# ── Session quote cache (item 2: avoid repeatedly calling the provider
+# during one review session) ─────────────────────────────────────────
+# Deliberately a plain in-process dict, not a DB table: this cache is a
+# same-review-session convenience only. It is never treated as a
+# recorded fact (a holding's own market_value/as_of_date are the
+# recorded facts; "Use quote value" is still a separate, explicit
+# confirmation step -- see main.py). Restarting the backend clears it,
+# which is fine since it exists only to avoid re-hitting a rate-limited
+# or slow provider for the same identifier within one sitting.
+DEFAULT_QUOTE_CACHE_TTL_SECONDS = 15 * 60  # 15 minutes
+
+_QUOTE_CACHE: Dict[str, "tuple[QuoteResult, datetime.datetime]"] = {}
+
+
+def clear_quote_cache() -> None:
+    _QUOTE_CACHE.clear()
+
+
+def get_cached_or_fetch_quote(provider_identifier: str, ttl_seconds: float = DEFAULT_QUOTE_CACHE_TTL_SECONDS) -> QuoteResult:
+    """The single choke point main.py should call for a quote --
+    reuses a still-fresh cached result instead of calling the provider
+    again, and marks the returned QuoteResult as `cached=True` with the
+    original `fetched_at` so the UI can show "from 3 minutes ago"
+    instead of implying every check is a brand-new live call. Only "ok"
+    and "not_found" results are cached -- a rate-limited or
+    provider_error result is deliberately NOT cached, so the very next
+    manual retry actually hits the provider again rather than replaying
+    the same failure for the full TTL."""
+    now = datetime.datetime.now()
+    cached = _QUOTE_CACHE.get(provider_identifier)
+    if cached is not None:
+        result, fetched_at = cached
+        if (now - fetched_at).total_seconds() <= ttl_seconds:
+            return QuoteResult(result.quote, result.status, result.message, cached=True, fetched_at=fetched_at.isoformat())
+    result = get_active_provider().get_quote_with_status(provider_identifier)
+    if result.status in ("ok", "not_found"):
+        _QUOTE_CACHE[provider_identifier] = (result, now)
+    return QuoteResult(result.quote, result.status, result.message, cached=False, fetched_at=now.isoformat())
