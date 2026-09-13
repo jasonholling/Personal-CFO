@@ -238,7 +238,7 @@ export default function PortfolioCoach({ onNavigate }) {
         </div>
         <button className="btn-secondary" onClick={() => onNavigate?.('portfoliosetup')}>Edit holdings & policy</button>
       </div>
-      {reviewSummary && <div className="card" style={{ marginBottom: 20 }}><div className="label">Decision review</div><div style={{ display: 'flex', gap: 18, flexWrap: 'wrap', marginTop: 8, fontSize: 13 }}><span><strong>{reviewSummary.counts?.proposed || 0}</strong> open</span><span><strong>{reviewSummary.counts?.accepted || 0}</strong> accepted</span><span><strong>{reviewSummary.counts?.deferred || 0}</strong> deferred</span><span style={{ color: reviewSummary.reviews_due ? 'var(--amber)' : 'var(--green)' }}><strong>{reviewSummary.reviews_due || 0}</strong> reviews due</span></div></div>}
+      {reviewSummary && <div className="card" style={{ marginBottom: 20 }}><div className="label">Decision review</div><div style={{ display: 'flex', gap: 18, flexWrap: 'wrap', marginTop: 8, fontSize: 13 }}><span><strong>{reviewSummary.counts?.proposed || 0}</strong> open</span><span><strong>{reviewSummary.counts?.accepted || 0}</strong> accepted</span><span><strong>{reviewSummary.counts?.deferred || 0}</strong> deferred</span><span style={{ color: reviewSummary.reviews_due ? 'var(--amber)' : 'var(--green)' }}><strong>{reviewSummary.reviews_due || 0}</strong> reviews due</span>{reviewSummary.next_review_date && <span>Next scheduled review: <strong>{reviewSummary.next_review_date}</strong></span>}</div></div>}
 
       {loadError && <div className="card" role="alert">Could not refresh your portfolio. <button className="btn-secondary" onClick={() => load()}>Try again</button></div>}
       {requestError && <p role="alert">{requestError}</p>}

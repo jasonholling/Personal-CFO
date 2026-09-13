@@ -1707,7 +1707,8 @@ def recommendation_review_summary():
     conn.close()
     counts = {status: sum(row["status"] == status for row in rows) for status in ("proposed", "reviewing", "accepted", "deferred", "completed", "rejected")}
     due = sum(row["status"] == "deferred" and row["review_date"] and row["review_date"] <= today for row in rows)
-    return {"counts": counts, "reviews_due": due, "today": today}
+    future_dates = sorted(row["review_date"] for row in rows if row["status"] == "deferred" and row["review_date"] and row["review_date"] > today)
+    return {"counts": counts, "reviews_due": due, "next_review_date": future_dates[0] if future_dates else None, "today": today}
 
 @app.get("/api/recommendations/{recommendation_id}")
 def get_recommendation_detail(recommendation_id: int):
