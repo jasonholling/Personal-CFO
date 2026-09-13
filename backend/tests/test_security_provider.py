@@ -15,7 +15,7 @@ import pytest
 from security_provider import (
     SecurityProvider, SecurityCandidate, SecurityQuote, QuoteResult,
     AlphaVantageSecurityProvider, MockSecurityProvider, get_active_provider, set_active_provider,
-    get_cached_or_fetch_quote, clear_quote_cache,
+    get_cached_or_fetch_quote, clear_quote_cache, peek_cached_quote,
 )
 
 
@@ -243,6 +243,48 @@ class TestQuoteCache:
         set_active_provider(MockSecurityProvider())
         result = get_cached_or_fetch_quote("MOCK:VTI")
         assert result.cached is False
+
+
+class TestPeekCachedQuote:
+    def setup_method(self):
+        clear_quote_cache()
+
+    def teardown_method(self):
+        clear_quote_cache()
+
+    def test_returns_none_when_nothing_cached(self):
+        set_active_provider(MockSecurityProvider())
+        assert peek_cached_quote("MOCK:VTI") is None
+
+    def test_never_calls_the_provider(self):
+        class ExplodingProvider(SecurityProvider):
+            def search(self, query):
+                return []
+
+            def get_quote(self, provider_identifier):
+                raise AssertionError("peek_cached_quote must never call the provider")
+
+        set_active_provider(ExplodingProvider())
+        assert peek_cached_quote("ANY:1") is None
+
+    def test_returns_a_freshly_cached_quote(self):
+        set_active_provider(MockSecurityProvider())
+        get_cached_or_fetch_quote("MOCK:VTI")
+        result = peek_cached_quote("MOCK:VTI")
+        assert result is not None
+        assert result.quote.price == 275.40
+
+    def test_expired_entry_returns_none(self):
+        set_active_provider(MockSecurityProvider())
+        get_cached_or_fetch_quote("MOCK:VTI", ttl_seconds=1)
+        import time
+        time.sleep(1.05)
+        assert peek_cached_quote("MOCK:VTI", ttl_seconds=1) is None
+
+    def test_a_cached_not_found_result_is_never_returned_as_a_quote(self):
+        set_active_provider(MockSecurityProvider())
+        get_cached_or_fetch_quote("MOCK:NOT_REAL")
+        assert peek_cached_quote("MOCK:NOT_REAL") is None
 
 
 # ── Optional live smoke test ────────────────────────────────────────────

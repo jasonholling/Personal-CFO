@@ -350,3 +350,22 @@ def get_cached_or_fetch_quote(provider_identifier: str, ttl_seconds: float = DEF
     if result.status in ("ok", "not_found"):
         _QUOTE_CACHE[provider_identifier] = (result, now)
     return QuoteResult(result.quote, result.status, result.message, cached=False, fetched_at=now.isoformat())
+
+
+def peek_cached_quote(provider_identifier: str, ttl_seconds: float = DEFAULT_QUOTE_CACHE_TTL_SECONDS) -> Optional[QuoteResult]:
+    """Reads a still-fresh cached quote WITHOUT ever calling the
+    provider -- used where a fresh fetch would be inappropriate (e.g.
+    CSV import preview, which must stay a pure "compare what's already
+    known" step, never an automatic quote check). Returns None if
+    nothing cached, the cached entry expired, or the cached result
+    wasn't a real quote (a not_found result never becomes a comparison
+    price)."""
+    cached = _QUOTE_CACHE.get(provider_identifier)
+    if cached is None:
+        return None
+    result, fetched_at = cached
+    if (datetime.datetime.now() - fetched_at).total_seconds() > ttl_seconds:
+        return None
+    if result.quote is None:
+        return None
+    return QuoteResult(result.quote, result.status, result.message, cached=True, fetched_at=fetched_at.isoformat())
