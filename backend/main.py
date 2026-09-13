@@ -411,6 +411,31 @@ class HoldingImportRow(BaseModel):
     notes: Optional[str] = None
     value_date: Optional[str] = None
 
+    @field_validator("market_value")
+    @classmethod
+    def _market_value_must_be_non_negative(cls, value):
+        if value < 0:
+            raise ValueError("market_value cannot be negative")
+        return value
+
+    @field_validator("shares", "expense_ratio", "cost_basis")
+    @classmethod
+    def _optional_amounts_must_be_non_negative(cls, value):
+        if value is not None and value < 0:
+            raise ValueError("shares, expense_ratio, and cost_basis cannot be negative")
+        return value
+
+    @field_validator("value_date")
+    @classmethod
+    def _value_date_must_be_iso_date(cls, value):
+        if value is None:
+            return value
+        try:
+            datetime.strptime(value, "%Y-%m-%d")
+        except (TypeError, ValueError):
+            raise ValueError("value_date must be YYYY-MM-DD")
+        return value
+
 class AccountInvestmentOption(BaseModel):
     """A general account-specific investment-option menu entry. NOT a
     401(k)-fund-menu-only model — this same table/model describes what
@@ -546,10 +571,24 @@ class InvestmentPolicy(BaseModel):
 class PortfolioContributionRequest(BaseModel):
     amount: float = 0
 
+    @field_validator("amount")
+    @classmethod
+    def _amount_must_be_non_negative(cls, value):
+        if value < 0:
+            raise ValueError("amount cannot be negative")
+        return value
+
 class ContributionPool(BaseModel):
     account_id: int
     amount: float = 0
     eligible_classes: Optional[List[str]] = None  # None = open universe, any underweight class
+
+    @field_validator("amount")
+    @classmethod
+    def _amount_must_be_non_negative(cls, value):
+        if value < 0:
+            raise ValueError("amount cannot be negative")
+        return value
 
 class MultiAccountContributionRequest(BaseModel):
     pools: List[ContributionPool]
@@ -1374,6 +1413,13 @@ def commit_holdings_import(rows: List[HoldingImportRow]):
         if row.account_id not in valid_account_ids:
             skipped.append({"security_name": row.security_name, "reason": f"account_id {row.account_id} does not exist"})
             continue
+        # Preview validates this for CSV uploads, but commit is also a
+        # public API boundary.  A matching existing holding must never
+        # become unclassified or invalid merely because a caller skipped
+        # the preview step.
+        if row.asset_class is not None and row.asset_class not in ASSET_CLASSES:
+            skipped.append({"security_name": row.security_name, "reason": f"asset_class '{row.asset_class}' is not one of {sorted(ASSET_CLASSES)}"})
+            continue
         existing = conn.execute(
             "SELECT * FROM holdings WHERE account_id=? AND ((? IS NOT NULL AND upper(ticker)=upper(?)) OR lower(security_name)=lower(?)) LIMIT 1",
             (row.account_id, row.ticker, row.ticker, row.security_name),
@@ -1676,10 +1722,17 @@ def portfolio_multi_account_contribution_destination(req: MultiAccountContributi
     comparison = compare_to_target(current, policy)
     excluded_accounts = set(policy.get("excluded_accounts") or [])
     constraints = {c.get("account_id"): c for c in (policy.get("account_constraints") or [])}
+    account_ids = {a["id"] for a in accounts}
     pools = []
     policy_blocked = []
     for submitted in req.pools:
         pool = submitted.dict()
+        if pool["account_id"] not in account_ids:
+            # A stale browser tab must not produce an action addressed to
+            # an account that was deleted after the page loaded.
+            policy_blocked.append({"account_id": pool["account_id"], "amount": round(pool["amount"], 2),
+                                   "reason": "Account no longer exists."})
+            continue
         if pool["account_id"] in excluded_accounts:
             policy_blocked.append({"account_id": pool["account_id"], "amount": round(pool["amount"], 2),
                                    "reason": "Account is excluded from the investment policy."})

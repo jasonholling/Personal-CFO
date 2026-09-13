@@ -320,6 +320,32 @@ class TestHoldingsCsvImport:
         assert r.json()["created"] == 0
         assert "asset_class" in r.json()["skipped"][0]["reason"]
 
+    def test_commit_cannot_corrupt_an_existing_holding_with_an_invalid_asset_class(self, client):
+        """Commit is an API boundary too; CSV preview may not be bypassed."""
+        acc = _create_account(client)
+        original = client.post("/api/holdings", json={
+            "account_id": acc["id"], "security_name": "Index Fund", "ticker": "IDX",
+            "market_value": 1000, "asset_class": "us_large_cap",
+        }).json()
+        r = client.post("/api/holdings/import/commit", json=[{
+            "account_id": acc["id"], "security_name": "Index Fund", "ticker": "IDX",
+            "market_value": 1200, "asset_class": "made_up_class",
+        }])
+        assert r.status_code == 200, r.text
+        assert r.json()["updated"] == 0
+        assert "not one of" in r.json()["skipped"][0]["reason"]
+        saved = next(h for h in client.get("/api/holdings").json() if h["id"] == original["id"])
+        assert saved["asset_class"] == "us_large_cap"
+        assert saved["market_value"] == 1000
+
+    def test_commit_rejects_negative_values_and_malformed_dates(self, client):
+        acc = _create_account(client)
+        base = {"account_id": acc["id"], "security_name": "Index Fund", "ticker": "IDX", "asset_class": "us_large_cap"}
+        negative = client.post("/api/holdings/import/commit", json=[{**base, "market_value": -1}])
+        assert negative.status_code == 422
+        malformed_date = client.post("/api/holdings/import/commit", json=[{**base, "market_value": 1000, "value_date": "not-a-date"}])
+        assert malformed_date.status_code == 422
+
     def test_preview_flags_a_material_difference_from_a_quote_checked_this_session(self, client):
         from security_provider import MockSecurityProvider, set_active_provider
         set_active_provider(MockSecurityProvider())

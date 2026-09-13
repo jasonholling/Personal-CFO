@@ -160,6 +160,21 @@ describe('PortfolioCoach', () => {
       status: 'deferred', review_date: '2030-01-15',
     }))
   })
+
+  it('shows an asset-location tax warning verbatim instead of claiming cost basis is missing', async () => {
+    const assetLocation = structuredClone(recommendationsResponse)
+    assetLocation.recommendations[0].payload.tax_impact = 'Selling in taxable may realize a gain or loss; Coach does not estimate it here without a complete replacement plan.'
+    axios.get.mockImplementation(url => {
+      if (url === '/api/recommendations') return Promise.resolve({ data: assetLocation })
+      if (url === '/api/portfolio/allocation') return Promise.resolve({ data: allocationResponse })
+      if (url === '/api/accounts') return Promise.resolve({ data: [{ id: 1, name: 'Retirement IRA' }] })
+      return Promise.resolve({ data: {} })
+    })
+    await act(async () => root.render(<PortfolioCoach />))
+    await flush()
+    expect(container.textContent).toContain('Selling in taxable may realize a gain or loss')
+    expect(container.textContent).not.toContain('cost basis is missing')
+  })
 })
 
 describe('PortfolioCoach value_unit rendering (external review finding #11)', () => {

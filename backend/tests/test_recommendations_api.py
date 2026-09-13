@@ -403,6 +403,28 @@ class TestMultiAccountContributionDestination:
             "reason": "Account is excluded from the investment policy.",
         }]
 
+    def test_deleted_account_pool_is_left_unallocated(self, client):
+        invested = _create_account(client, name="Brokerage")
+        client.post("/api/holdings", json={
+            "account_id": invested["id"], "security_name": "All Stock", "market_value": 100000,
+            "asset_class": "us_large_cap",
+        })
+        _save_policy(client)
+        body = client.post("/api/portfolio/contribution-destination/multi-account", json={
+            "pools": [{"account_id": 999999, "amount": 5000, "eligible_classes": None}],
+        }).json()
+        assert body["actions"] == []
+        assert body["unallocated"] == [{
+            "account_id": 999999, "amount": 5000.0,
+            "reason": "Account no longer exists.",
+        }]
+
+    def test_negative_contributions_are_rejected(self, client):
+        assert client.post("/api/portfolio/contribution-destination", json={"amount": -1}).status_code == 422
+        assert client.post("/api/portfolio/contribution-destination/multi-account", json={
+            "pools": [{"account_id": 1, "amount": -1}],
+        }).status_code == 422
+
 
 class TestRecommendationsPrivacy:
     def test_included_in_backup_export_and_restore(self, client):
