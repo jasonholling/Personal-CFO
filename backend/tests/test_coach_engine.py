@@ -13,7 +13,7 @@ from coach_engine import (
     stable_hash, recommendation_key, data_quality_recommendations,
     concentration_and_liquidity_recommendations, policy_violation_recommendations,
     high_cost_or_redundant_recommendations, new_money_recommendations,
-    rebalance_recommendations, minor_optimization_recommendations, asset_location_recommendations,
+    rebalance_recommendations, minor_optimization_recommendations, asset_location_recommendations, taxable_loss_review_recommendations,
     no_policy_recommendation, _card,
     prioritize, reconcile_recommendation_queue, CATEGORY_BASE_PRIORITY, CATEGORIES,
 )
@@ -126,6 +126,15 @@ class TestAssetLocationRecommendations:
             holding(2, 2, market_value=20000, asset_class="us_bonds"),
         ])
         assert asset_location_recommendations(classified) == []
+
+    def test_taxable_loss_is_a_review_not_a_sale_instruction(self):
+        classified = classify_holdings([account(1, "taxable")], [
+            holding(1, 1, market_value=8000, cost_basis=10000, asset_class="us_large_cap"),
+        ])
+        cards = taxable_loss_review_recommendations(classified["household"])
+        assert len(cards) == 1
+        assert cards[0]["current_value"] == 2000
+        assert cards[0]["proposed_change"] == "Review, do not automatically sell"
 
 
 class TestPolicyViolationRecommendations:

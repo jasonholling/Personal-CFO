@@ -1298,7 +1298,7 @@ def get_portfolio_allocation():
     from holdings_engine import (
         classify_holdings, compute_current_allocation, compare_to_target,
         concentration_flags, expense_ratio_flags, duplicate_exposure_flags, unclassified_flags,
-        policy_included_holdings,
+        policy_included_holdings, reconcile_account_holdings,
     )
     holdings = policy_included_holdings(holdings, policy)
     classified = classify_holdings(accounts, holdings)
