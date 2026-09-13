@@ -14,6 +14,7 @@ from coach_engine import (
     concentration_and_liquidity_recommendations, policy_violation_recommendations,
     high_cost_or_redundant_recommendations, new_money_recommendations,
     rebalance_recommendations, minor_optimization_recommendations, asset_location_recommendations, taxable_loss_review_recommendations,
+    tax_lot_loss_review_recommendations,
     no_policy_recommendation, _card,
     prioritize, reconcile_recommendation_queue, CATEGORY_BASE_PRIORITY, CATEGORIES,
 )
@@ -135,6 +136,99 @@ class TestAssetLocationRecommendations:
         assert len(cards) == 1
         assert cards[0]["current_value"] == 2000
         assert cards[0]["proposed_change"] == "Review, do not automatically sell"
+
+    def test_aggregate_loss_review_stays_the_fallback_for_holdings_without_lots(self):
+        """Item 1's aggregate fallback: a holding with no recorded lots
+        still gets the existing aggregate card exactly as before, and is
+        not excluded just because SOME OTHER holding has lots."""
+        classified = classify_holdings([account(1, "taxable")], [
+            holding(1, 1, market_value=8000, cost_basis=10000, asset_class="us_large_cap"),
+        ])
+        cards = taxable_loss_review_recommendations(classified["household"], holding_ids_with_lots=set())
+        assert len(cards) == 1
+
+    def test_aggregate_loss_review_skips_a_holding_already_covered_by_lot_level_cards(self):
+        classified = classify_holdings([account(1, "taxable")], [
+            holding(1, 1, market_value=8000, cost_basis=10000, asset_class="us_large_cap"),
+        ])
+        cards = taxable_loss_review_recommendations(classified["household"], holding_ids_with_lots={1})
+        assert cards == []
+
+    def test_aggregate_loss_review_never_flags_a_non_taxable_holding(self):
+        classified = classify_holdings([account(1, "taxable"), account(2, "401k")], [
+            holding(1, 1, market_value=8000, cost_basis=10000, asset_class="us_large_cap"),
+            holding(2, 2, market_value=8000, cost_basis=10000, asset_class="us_large_cap"),
+        ])
+        cards = taxable_loss_review_recommendations(classified["household"])
+        assert len(cards) == 1
+        assert cards[0]["affected_accounts"] == [1]
+
+
+class TestTaxLotLossReviewRecommendations:
+    def test_long_term_loss_lot_produces_a_review_card(self):
+        h = holding(1, 1, market_value=8000, asset_class="us_large_cap")
+        h["shares"] = 100
+        h["as_of_date"] = "2024-08-01"
+        h["ticker"] = "VTI"
+        classified = classify_holdings([account(1, "taxable")], [h])
+        lots_by_holding_id = {1: [{"id": 1, "holding_id": 1, "acquired_date": "2020-01-01", "shares": 100, "cost_basis": 10000}]}
+        cards = tax_lot_loss_review_recommendations(classified["household"], lots_by_holding_id, [], today="2024-08-01")
+        assert len(cards) == 1
+        assert cards[0]["current_value"] == 8000.0
+        assert cards[0]["target_value"] == 10000
+        assert "long-term" in cards[0]["action_text"]
+        assert cards[0]["proposed_change"] == "Review, do not automatically sell"
+        assert not any("wash-sale conflict" in a for a in cards[0]["assumptions"])
+
+    def test_short_term_loss_lot_is_labeled_short_term_in_the_card(self):
+        h = holding(1, 1, market_value=8000, asset_class="us_large_cap")
+        h["shares"] = 100
+        h["as_of_date"] = "2024-08-01"
+        h["ticker"] = "VTI"
+        classified = classify_holdings([account(1, "taxable")], [h])
+        lots_by_holding_id = {1: [{"id": 1, "holding_id": 1, "acquired_date": "2024-06-01", "shares": 100, "cost_basis": 10000}]}
+        cards = tax_lot_loss_review_recommendations(classified["household"], lots_by_holding_id, [], today="2024-08-01")
+        assert "short-term" in cards[0]["action_text"]
+
+    def test_profitable_lot_produces_no_card(self):
+        h = holding(1, 1, market_value=12000, asset_class="us_large_cap")
+        h["shares"] = 100
+        h["as_of_date"] = "2024-08-01"
+        classified = classify_holdings([account(1, "taxable")], [h])
+        lots_by_holding_id = {1: [{"id": 1, "holding_id": 1, "acquired_date": "2020-01-01", "shares": 100, "cost_basis": 10000}]}
+        cards = tax_lot_loss_review_recommendations(classified["household"], lots_by_holding_id, [], today="2024-08-01")
+        assert cards == []
+
+    def test_wash_sale_conflict_produces_a_possible_conflict_warning(self):
+        h = holding(1, 1, market_value=8000, asset_class="us_large_cap")
+        h["shares"] = 100
+        h["as_of_date"] = "2024-08-01"
+        h["ticker"] = "VTI"
+        classified = classify_holdings([account(1, "taxable")], [h])
+        lots_by_holding_id = {1: [{"id": 1, "holding_id": 1, "acquired_date": "2020-01-01", "shares": 100, "cost_basis": 10000}]}
+        household_lots = [{"lot_id": 2, "ticker_or_name": "VTI", "acquired_date": "2024-07-20", "account_id": 2, "account_name": "Other Brokerage"}]
+        cards = tax_lot_loss_review_recommendations(classified["household"], lots_by_holding_id, household_lots, today="2024-08-01")
+        assert len(cards) == 1
+        assert any("wash-sale conflict" in a for a in cards[0]["assumptions"])
+        assert "wash sale safe" not in cards[0]["assumptions"][-1].lower()
+        assert cards[0]["confidence"] == "low"
+
+    def test_loss_lot_in_retirement_account_is_not_a_taxable_loss_candidate(self):
+        h = holding(1, 1, market_value=8000, asset_class="us_large_cap")
+        h["shares"] = 100
+        h["as_of_date"] = "2024-08-01"
+        classified = classify_holdings([account(1, "ira")], [h])
+        lots_by_holding_id = {1: [{"id": 1, "holding_id": 1, "acquired_date": "2020-01-01", "shares": 100, "cost_basis": 10000}]}
+        cards = tax_lot_loss_review_recommendations(classified["household"], lots_by_holding_id, [], today="2024-08-01")
+        assert cards == []
+
+    def test_missing_share_count_produces_no_fabricated_card(self):
+        h = holding(1, 1, market_value=8000, asset_class="us_large_cap")
+        h["shares"] = None
+        classified = classify_holdings([account(1, "taxable")], [h])
+        lots_by_holding_id = {1: [{"id": 1, "holding_id": 1, "acquired_date": "2020-01-01", "shares": 100, "cost_basis": 10000}]}
+        cards = tax_lot_loss_review_recommendations(classified["household"], lots_by_holding_id, [], today="2024-08-01")
+        assert cards == []
 
 
 class TestPolicyViolationRecommendations:

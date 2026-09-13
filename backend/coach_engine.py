@@ -15,12 +15,14 @@ advice — see every card's own `assumptions`/`confidence`/
 import hashlib
 import json
 from datetime import date
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Set
 
 from holdings_engine import (
     TAXABLE_GAIN_TYPES, concentration_flags, expense_ratio_flags,
     duplicate_exposure_flags, ASSET_CLASSES,
     estimate_taxable_gain_warning,
+    evaluate_tax_lots, is_lot_loss_candidate, detect_wash_sale_conflicts,
+    DEFAULT_TAX_LOT_LOSS_REVIEW_THRESHOLD_PCT,
 )
 
 # ── Decision lifecycle ────────────────────────────────────────────────────
@@ -433,10 +435,18 @@ def asset_location_recommendations(classified: Dict, options_by_account: Optiona
     return cards
 
 
-def taxable_loss_review_recommendations(household_holdings: List[Dict]) -> List[Dict]:
+def taxable_loss_review_recommendations(household_holdings: List[Dict], holding_ids_with_lots: Optional[Set] = None) -> List[Dict]:
+    """Aggregate holding-level loss review -- the FALLBACK for a taxable
+    holding with no recorded tax lots. `holding_ids_with_lots` (when
+    supplied) excludes holdings already covered by the lot-aware
+    tax_lot_loss_review_recommendations above, so the same holding never
+    gets both an aggregate and a lot-level card for the same loss."""
+    holding_ids_with_lots = holding_ids_with_lots or set()
     cards = []
     for h in household_holdings:
         if h.get("_portfolio_account_type") not in TAXABLE_GAIN_TYPES:
+            continue
+        if h.get("id") in holding_ids_with_lots:
             continue
         value, basis = h.get("market_value") or 0, h.get("cost_basis")
         if basis is None or value >= basis:
@@ -447,6 +457,92 @@ def taxable_loss_review_recommendations(household_holdings: List[Dict]) -> List[
             f"Recorded value is ${loss:,.0f} below cost basis. Review tax-loss harvesting only after checking wash-sale rules and your replacement investment.",
             [h.get("account_id")], [h.get("id")], loss, None, "Review, do not automatically sell", "Potential tax-loss opportunity.", None,
             ["Uses aggregate cost basis, not tax lots."], "medium", assumptions_hash_input={"id":h.get("id"),"value":value,"basis":basis}))
+    return cards
+
+
+def tax_lot_loss_review_recommendations(
+    household_holdings: List[Dict],
+    lots_by_holding_id: Optional[Dict[int, List[Dict]]] = None,
+    household_lots_for_wash_sale: Optional[List[Dict]] = None,
+    today: Optional[str] = None,
+    threshold_pct: float = DEFAULT_TAX_LOT_LOSS_REVIEW_THRESHOLD_PCT,
+) -> List[Dict]:
+    """Lot-aware taxable-loss review -- a SEPARATE recommendation type
+    from taxable_loss_review_recommendations' aggregate-holding version
+    above (distinct recommendation_key prefix, one card per candidate
+    lot), for holdings that actually have recorded tax lots. Holdings
+    without lots are not touched here -- the caller keeps running the
+    aggregate version for those so no taxable holding silently loses its
+    loss review just because lots were never entered.
+
+    Never claims a loss "should" be harvested, never claims a sale is
+    "wash-sale safe", and never invents a wash-sale-free result: the
+    household's own recorded lots are the only purchases this function
+    can see, which is stated in every card's assumptions."""
+    lots_by_holding_id = lots_by_holding_id or {}
+    household_lots_for_wash_sale = household_lots_for_wash_sale or []
+    cards = []
+    for h in household_holdings:
+        if h.get("_portfolio_account_type") not in TAXABLE_GAIN_TYPES:
+            continue
+        lots = lots_by_holding_id.get(h.get("id"))
+        if not lots:
+            continue
+        evaluations = evaluate_tax_lots(h, lots)
+        name = h.get("security_name") or h.get("ticker") or "This holding"
+        ticker_or_name = h.get("ticker") or h.get("security_name")
+        for entry in evaluations:
+            if not is_lot_loss_candidate(entry, threshold_pct):
+                continue
+            conflicts = detect_wash_sale_conflicts(
+                ticker_or_name, entry["lot_id"], household_lots_for_wash_sale, potential_sale_date=today,
+            )
+            term_label = {"short_term": "short-term", "long_term": "long-term", "unknown": "unknown-term (needs review)"}[entry["term"]]
+            loss = abs(entry["gain_loss"])
+            pct_text = f" ({entry['gain_loss_pct']:+.1f}%)" if entry["gain_loss_pct"] is not None else ""
+            assumptions = [
+                "This is a review candidate, not an instruction to sell or harvest this lot.",
+                f"Priced using this holding's own recorded value as of {entry['current_price_date'] or 'an unknown date'} -- not a live quote.",
+                "This app cannot see purchases made in outside accounts or in retirement accounts unless those holdings/lots are recorded here.",
+            ]
+            action_text = (
+                f"Lot acquired {entry['acquired_date']} ({entry['shares']} shares, {term_label}) is worth an estimated "
+                f"${entry['current_value']:,.0f} against a cost basis of ${entry['cost_basis']:,.0f} -- an unrealized loss of "
+                f"${loss:,.0f}{pct_text} as of {entry['current_price_date'] or 'an unrecorded price date'}. "
+                "Review wash-sale exposure and your intended replacement investment before acting."
+            )
+            confidence = "medium"
+            if conflicts:
+                conflict_accounts = sorted({c.get("account_name") or f"account {c.get('account_id')}" for c in conflicts})
+                assumptions.append(
+                    "Possible wash-sale conflict -- review before acting: this app found a recorded purchase of "
+                    f"{ticker_or_name} within 30 days of the potential sale date in {', '.join(conflict_accounts)}."
+                )
+                confidence = "low"
+            else:
+                assumptions.append(
+                    "No matching same-ticker purchase was found in this app's own recorded accounts within the 30-day "
+                    "wash-sale window -- this is NOT a wash-sale-safe determination, only the absence of a conflict this app can see."
+                )
+            cards.append(_card(
+                "minor_optimization",
+                recommendation_key("tax_lot_loss_review", account_id=h.get("account_id"), holding_id=h.get("id"), extra=f"lot{entry['lot_id']}"),
+                7,
+                f"Review lot-level loss on {name} ({entry['acquired_date']})",
+                action_text,
+                [h.get("account_id")], [h.get("id")],
+                current_value=entry["current_value"], target_value=entry["cost_basis"],
+                proposed_change="Review, do not automatically sell",
+                expected_effect="Potential tax-loss review opportunity at the individual tax-lot level.",
+                tax_impact={"has_cost_basis": True, "estimated_gain": entry["gain_loss"]},
+                assumptions=assumptions,
+                confidence=confidence,
+                invalidates_on=["Holding value, this lot, or the household's recorded purchases change before this is acted on."],
+                assumptions_hash_input={
+                    "lot_id": entry["lot_id"], "holding_id": h.get("id"), "current_value": entry["current_value"],
+                    "cost_basis": entry["cost_basis"], "conflicts": [c.get("lot_id") for c in conflicts],
+                },
+            ))
     return cards
 
 
