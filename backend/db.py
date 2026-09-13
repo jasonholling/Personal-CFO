@@ -904,6 +904,10 @@ def init_portfolio_coach_tables():
         ("as_of_date",          "TEXT"),
         ("data_source",         "TEXT NOT NULL DEFAULT 'manual'"),
         ("confidence",          "TEXT NOT NULL DEFAULT 'low'"),
+        # A position handled by an outside manager remains visible in
+        # allocation and reconciliation, but Coach must never suggest a
+        # direct trade in that holding.
+        ("management_mode",     "TEXT NOT NULL DEFAULT 'self_directed'"),
     ]
     for col, typedef in holdings_migrations:
         if col not in holdings_cols:

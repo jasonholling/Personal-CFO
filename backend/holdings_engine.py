@@ -238,6 +238,8 @@ def holding_has_policy_exception(holding: Dict, policy: Optional[Dict]) -> bool:
     """Match employer-stock/legacy exceptions using explicit identifiers.
     Exceptions keep the position in allocation totals but prevent an
     automatic concentration or sell recommendation."""
+    if holding.get("management_mode") == "externally_managed":
+        return True
     for exception in ((policy or {}).get("employer_stock_exceptions") or []) + ((policy or {}).get("legacy_holding_exceptions") or []):
         if exception.get("holding_id") is not None and exception["holding_id"] == holding.get("id"):
             return True

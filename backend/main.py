@@ -273,7 +273,15 @@ class Holding(BaseModel):
     as_of_date: Optional[str] = None
     data_source: str = "manual"
     confidence: str = "low"
+    management_mode: str = "self_directed"
     notes: Optional[str] = None
+
+    @field_validator("management_mode")
+    @classmethod
+    def _management_mode_must_be_known(cls, v):
+        if v not in {"self_directed", "externally_managed"}:
+            raise ValueError("management_mode must be 'self_directed' or 'externally_managed'")
+        return v
 
     @field_validator("asset_class")
     @classmethod
@@ -288,6 +296,19 @@ class Holding(BaseModel):
     def _market_value_non_negative(cls, v):
         if v < 0:
             raise ValueError("market_value cannot be negative")
+        return v
+
+
+class HoldingManagementModeUpdate(BaseModel):
+    """A narrow update so a user can protect a managed position without
+    re-entering its market value, cost basis, or classification."""
+    management_mode: str
+
+    @field_validator("management_mode")
+    @classmethod
+    def _management_mode_must_be_known(cls, v):
+        if v not in {"self_directed", "externally_managed"}:
+            raise ValueError("management_mode must be 'self_directed' or 'externally_managed'")
         return v
 
 class HoldingImportRow(BaseModel):
@@ -828,10 +849,17 @@ def get_holdings_grouped():
     for acc in accounts:
         acc_holdings = by_account.get(acc["id"], [])
         ptype = resolve_portfolio_account_type(acc)
+        reported_dates = [
+            h.get("as_of_date") or h.get("updated_at") or h.get("created_at")
+            for h in acc_holdings
+            if h.get("as_of_date") or h.get("updated_at") or h.get("created_at")
+        ]
         groups.append({
             "account_id": acc["id"], "account_name": acc["name"], "account_type": acc["account_type"],
             "owner": acc["owner"], "portfolio_account_type": ptype, "allocation_blocked": is_allocation_blocked(ptype),
-            "holdings": acc_holdings, **reconcile_account_holdings(acc, acc_holdings),
+            "holdings": acc_holdings,
+            "holdings_as_of_date": max(reported_dates) if reported_dates else None,
+            **reconcile_account_holdings(acc, acc_holdings),
         })
     return {"groups": groups}
 
@@ -876,14 +904,31 @@ def update_holding(holding_id: int, holding: Holding):
     conn.execute(
         "UPDATE holdings SET account_id=?, ticker=?, security_name=?, provider_identifier=?, exchange=?, security_type=?, "
         "shares=?, market_value=?, asset_class=?, exposures_json=?, expense_ratio=?, cost_basis=?, as_of_date=?, "
-        "data_source=?, confidence=?, notes=?, updated_at=datetime('now') WHERE id=?",
+        "data_source=?, confidence=?, management_mode=?, notes=?, updated_at=datetime('now') WHERE id=?",
         (holding.account_id, holding.ticker, holding.security_name, holding.provider_identifier, holding.exchange,
          holding.security_type, holding.shares, holding.market_value, holding.asset_class, json.dumps(holding.exposures),
-         holding.expense_ratio, holding.cost_basis, holding.as_of_date, holding.data_source, holding.confidence, holding.notes, holding_id)
+         holding.expense_ratio, holding.cost_basis, holding.as_of_date, holding.data_source, holding.confidence,
+         holding.management_mode, holding.notes, holding_id)
     )
     conn.commit()
     conn.close()
     return {**holding.dict(), "id": holding_id}
+
+
+@app.patch("/api/holdings/{holding_id}/management-mode")
+def update_holding_management_mode(holding_id: int, update: HoldingManagementModeUpdate):
+    conn = get_db()
+    cur = conn.execute(
+        "UPDATE holdings SET management_mode=?, updated_at=datetime('now') WHERE id=?",
+        (update.management_mode, holding_id),
+    )
+    if cur.rowcount == 0:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Holding not found")
+    conn.commit()
+    row = conn.execute("SELECT * FROM holdings WHERE id=?", (holding_id,)).fetchone()
+    conn.close()
+    return _holding_row_to_dict(row)
 
 @app.delete("/api/holdings/{holding_id}")
 def delete_holding(holding_id: int):

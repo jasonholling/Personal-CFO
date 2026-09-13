@@ -132,6 +132,29 @@ describe('PortfolioSetup workflows', () => {
     expect(container.textContent).toContain('Lookup: Built-in offline catalog (offline)')
   })
 
+  it('shows reconciliation and protects externally managed holdings from direct Coach trades', async () => {
+    axios.get.mockImplementation(url => Promise.resolve({ data:
+      url === '/api/accounts' ? [{ id: 1, name: 'Managed HSA', account_type: 'hsa', balance: 1000 }] :
+      url === '/api/holdings/grouped' ? { groups: [{
+        account_id: 1, account_name: 'Managed HSA', account_type: 'hsa', holdings_total: 1200,
+        account_balance: 1000, unreconciled_remainder: -200, has_warning: true,
+        holdings_as_of_date: '2026-09-10', holdings: [{ id: 7, security_name: 'Managed Fund', market_value: 1200,
+          asset_class: 'us_large_cap', management_mode: 'externally_managed', exposures: [] },
+        ],
+      }] } :
+      url === '/api/account-investment-options' ? [] :
+      url === '/api/investment-policy' ? { has_policy: false } : []
+    }))
+    axios.patch.mockResolvedValue({ data: {} })
+    await act(async () => root.render(<PortfolioSetup />))
+    await flush()
+    expect(container.textContent).toContain('Holdings entered')
+    expect(container.textContent).toContain('Difference')
+    expect(container.textContent).toContain('Managed elsewhere — tracked, not traded')
+    await act(async () => [...container.querySelectorAll('button')].find(b => b.textContent === 'Manage yourself').click())
+    expect(axios.patch).toHaveBeenCalledWith('/api/holdings/7/management-mode', { management_mode: 'self_directed' })
+  })
+
   it('shows a save failure and keeps the entered holding available for correction', async () => {
     axios.post.mockRejectedValue({ response: { data: { detail: 'Account unavailable' } } })
     await act(async () => root.render(<PortfolioSetup />))

@@ -120,6 +120,16 @@ class TestReconcileAccountHoldings:
         assert result["has_warning"] is True
 
 
+class TestManagedHoldingProtection:
+    def test_managed_holding_remains_in_allocation_but_is_a_policy_exception(self):
+        from holdings_engine import holding_has_policy_exception
+        managed = holding(1, 1, market_value=100000, asset_class="us_large_cap")
+        managed["management_mode"] = "externally_managed"
+        allocation = compute_current_allocation([managed])
+        assert allocation["by_class"]["us_large_cap"] == 100000
+        assert holding_has_policy_exception(managed, {}) is True
+
+
 class TestClassifyHoldings:
     def _accounts(self):
         return [

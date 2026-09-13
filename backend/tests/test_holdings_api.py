@@ -107,6 +107,39 @@ class TestHoldingsCrud:
         })
         assert r.status_code == 422
 
+    def test_externally_managed_holding_round_trips_and_can_be_toggled(self, client):
+        acc = _create_account(client)
+        created = client.post("/api/holdings", json={
+            "account_id": acc["id"], "security_name": "Managed balanced fund",
+            "market_value": 10000, "asset_class": "us_large_cap",
+            "management_mode": "externally_managed",
+        })
+        assert created.status_code == 200, created.text
+        holding_id = created.json()["id"]
+        assert client.get("/api/holdings").json()[0]["management_mode"] == "externally_managed"
+
+        changed = client.patch(f"/api/holdings/{holding_id}/management-mode", json={
+            "management_mode": "self_directed",
+        })
+        assert changed.status_code == 200, changed.text
+        assert changed.json()["management_mode"] == "self_directed"
+        assert client.patch(f"/api/holdings/{holding_id}/management-mode", json={
+            "management_mode": "unknown",
+        }).status_code == 422
+
+    def test_grouped_holdings_exposes_reconciliation_and_latest_holding_date(self, client):
+        acc = _create_account(client)
+        created = client.post("/api/holdings", json={
+            "account_id": acc["id"], "security_name": "Fund", "market_value": 25000,
+            "asset_class": "us_large_cap", "as_of_date": "2026-09-10",
+        })
+        assert created.status_code == 200, created.text
+        group = client.get("/api/holdings/grouped").json()["groups"][0]
+        assert group["account_balance"] == 100000
+        assert group["holdings_total"] == 25000
+        assert group["unreconciled_remainder"] == 75000
+        assert group["holdings_as_of_date"] == "2026-09-10"
+
 
 class TestHoldingExposuresRoundTrip:
     """Reference tests #12/#16's holdings-side counterpart, now

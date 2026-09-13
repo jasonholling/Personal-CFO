@@ -33,7 +33,7 @@ const TABS = [
 
 const EMPTY_HOLDING_FORM = {
   account_id: '', security_name: '', ticker: '', market_value: '', asset_class: 'us_large_cap',
-  expense_ratio: '', cost_basis: '', multiAsset: false, exposures: [{ asset_class: 'us_large_cap', weight_pct: '' }],
+  expense_ratio: '', cost_basis: '', externallyManaged: false, multiAsset: false, exposures: [{ asset_class: 'us_large_cap', weight_pct: '' }],
 }
 
 const INVESTMENT_ACCOUNT_TYPES = new Set(['401k', '403b', 'ira', 'roth_ira', 'hsa', '529', 'custodial', 'taxable', 'brokerage'])
@@ -107,6 +107,7 @@ function HoldingsTab({ accounts, excludedAccounts, onEditPolicy }) {
         market_value: parseFloat(form.market_value), asset_class: form.asset_class, exposures,
         expense_ratio: form.expense_ratio ? parseFloat(form.expense_ratio) / 100 : null,
         cost_basis: form.cost_basis ? parseFloat(form.cost_basis) : null,
+        management_mode: form.externallyManaged ? 'externally_managed' : 'self_directed',
       })
       setForm(EMPTY_HOLDING_FORM)
       setSelectedOptionId('')
@@ -129,6 +130,15 @@ function HoldingsTab({ accounts, excludedAccounts, onEditPolicy }) {
   const exposureTotal = form.exposures.reduce((sum, x) => sum + (parseFloat(x.weight_pct) || 0), 0)
 
   const remove = async id => { await axios.delete(`/api/holdings/${id}`); await load() }
+  const setManagementMode = async (holding, management_mode) => {
+    setSaveError(null)
+    try {
+      await axios.patch(`/api/holdings/${holding.id}/management-mode`, { management_mode })
+      await load()
+    } catch (error) {
+      setSaveError(error.response?.data?.detail || 'Could not update how this holding is managed.')
+    }
+  }
 
   const searchTicker = async () => {
     if (!form.ticker.trim()) return
@@ -227,6 +237,10 @@ function HoldingsTab({ accounts, excludedAccounts, onEditPolicy }) {
           <input type="checkbox" checked={form.multiAsset} onChange={e => setForm(f => ({ ...f, multiAsset: e.target.checked }))} />
           Multi-asset (target-date / balanced fund)
         </label>
+        <label style={{ fontSize: 12, display: 'flex', gap: 4, alignItems: 'center' }}>
+          <input type="checkbox" checked={form.externallyManaged} onChange={e => setForm(f => ({ ...f, externallyManaged: e.target.checked }))} />
+          Managed elsewhere — track it, but do not suggest trades
+        </label>
         <button className="btn-primary" disabled={saving} type="submit">Add holding</button>
         {saveError && <div role="alert" style={{ width: '100%', color: 'var(--amber)' }}>{saveError}</div>}
         {saveNotice && <div role="status" style={{ width: '100%' }}>{saveNotice}</div>}
@@ -296,6 +310,11 @@ function HoldingsTab({ accounts, excludedAccounts, onEditPolicy }) {
               <span style={{ color: 'var(--amber)', fontSize: 12 }}>⚠ {g.warning}</span>
             )}
           </div>
+          <div className="setup-helper" style={{ marginBottom: 10 }}>
+            Account balance {fmt(g.account_balance)} · Holdings entered {fmt(g.holdings_total)} · Difference {fmt(g.unreconciled_remainder)}
+            {g.holdings_as_of_date && <> · latest holding date {g.holdings_as_of_date.slice(0, 10)}</>}
+            {g.has_warning && <>. A difference is left unresolved; Coach does not assume it is cash.</>}
+          </div>
           {g.holdings.length === 0 && <div style={{ color: 'var(--muted)', fontSize: 13 }}>No holdings entered for this account.</div>}
           {g.holdings.map(h => (
             <div key={h.id} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, padding: '5px 0', borderTop: '1px solid var(--border)' }}>
@@ -304,9 +323,13 @@ function HoldingsTab({ accounts, excludedAccounts, onEditPolicy }) {
                 {h.exposures?.length > 0
                   ? h.exposures.map(x => `${x.weight_pct}% ${x.asset_class.replace(/_/g, ' ')}`).join(' / ')
                   : h.asset_class.replace(/_/g, ' ')}
+                {h.management_mode === 'externally_managed' && <span style={{ color: 'var(--amber)' }}> · Managed elsewhere — tracked, not traded</span>}
               </span>
               <span>
                 {fmt(h.market_value)}
+                <button className="btn-secondary" style={{ marginLeft: 10, padding: '2px 8px', fontSize: 11 }} onClick={() => setManagementMode(h, h.management_mode === 'externally_managed' ? 'self_directed' : 'externally_managed')}>
+                  {h.management_mode === 'externally_managed' ? 'Manage yourself' : 'Mark externally managed'}
+                </button>
                 <button className="btn-secondary" style={{ marginLeft: 10, padding: '2px 8px', fontSize: 11 }} onClick={() => remove(h.id)}>Remove</button>
               </span>
             </div>
