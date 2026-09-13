@@ -1127,6 +1127,13 @@ async def preview_holdings_import(file: UploadFile = File(...)):
             row["previous_market_value"] = match["market_value"]
     preview["update_count"] = sum(row.get("import_action") == "update" for row in preview["rows"] if row.get("valid"))
     preview["create_count"] = sum(row.get("import_action") == "create" for row in preview["rows"] if row.get("valid"))
+    imported_account_ids = {row.get("account_id") for row in preview["rows"] if row.get("valid")}
+    matched_ids = {row.get("matching_holding_id") for row in preview["rows"] if row.get("matching_holding_id")}
+    preview["missing_existing_holdings"] = [
+        {"id": h["id"], "account_id": h["account_id"], "ticker": h.get("ticker"),
+         "security_name": h["security_name"], "market_value": h["market_value"]}
+        for h in existing if h["account_id"] in imported_account_ids and h["id"] not in matched_ids
+    ]
     return preview
 
 @app.post("/api/holdings/import/commit")
