@@ -33,12 +33,12 @@ app = FastAPI(title="Personal CFO API")
 # from the start; now backed by a real table (see its own schema
 # comment in db.py), same "predates this line -> rejected, not silently
 # incomplete" behavior as kids above applies to it too.
-# "holdings"/"investment_policies"/"securities"/"security_snapshots"/
+# "holdings"/"tax_lots"/"investment_policies"/"securities"/"security_snapshots"/
 # "recommendations"/"recommendation_events" added 2026-09-11 (Portfolio
 # Coach, codex/portfolio-coach-recommendations) -- same "predates this
 # line -> rejected, not silently incomplete" precedent as every earlier
 # table added to this list.
-_BACKUP_TABLES = ("accounts", "planning_inputs", "insurance_policies", "property_policies", "snapshots", "tasks", "cash_flow_items", "surplus_allocations", "saved_scenarios", "life_events", "estate_documents", "estate_beneficiaries", "assumption_reviews", "kids", "holdings", "account_investment_options", "investment_policies", "securities", "security_snapshots", "recommendations", "recommendation_events")
+_BACKUP_TABLES = ("accounts", "planning_inputs", "insurance_policies", "property_policies", "snapshots", "tasks", "cash_flow_items", "surplus_allocations", "saved_scenarios", "life_events", "estate_documents", "estate_beneficiaries", "assumption_reviews", "kids", "holdings", "tax_lots", "account_investment_options", "investment_policies", "securities", "security_snapshots", "recommendations", "recommendation_events")
 
 app.add_middleware(
     CORSMiddleware,
@@ -332,6 +332,30 @@ class HoldingValuationUpdate(BaseModel):
             datetime.strptime(v, "%Y-%m-%d")
         except (TypeError, ValueError):
             raise ValueError("as_of_date must be YYYY-MM-DD")
+        return v
+
+class TaxLot(BaseModel):
+    id: Optional[int] = None
+    holding_id: int
+    acquired_date: str
+    shares: float
+    cost_basis: float
+    notes: Optional[str] = None
+
+    @field_validator("acquired_date")
+    @classmethod
+    def _acquired_date_is_iso_date(cls, v):
+        try:
+            datetime.strptime(v, "%Y-%m-%d")
+        except (TypeError, ValueError):
+            raise ValueError("acquired_date must be YYYY-MM-DD")
+        return v
+
+    @field_validator("shares", "cost_basis")
+    @classmethod
+    def _amounts_are_non_negative(cls, v):
+        if v < 0:
+            raise ValueError("tax-lot shares and cost basis cannot be negative")
         return v
 
 class HoldingImportRow(BaseModel):
@@ -977,6 +1001,65 @@ def delete_holding(holding_id: int):
     conn.commit()
     conn.close()
     return {"deleted": holding_id}
+
+@app.get("/api/holdings/{holding_id}/tax-lots")
+def get_tax_lots(holding_id: int):
+    conn = get_db()
+    if not conn.execute("SELECT 1 FROM holdings WHERE id=?", (holding_id,)).fetchone():
+        conn.close()
+        raise HTTPException(status_code=404, detail="Holding not found")
+    rows = [dict(row) for row in conn.execute("SELECT * FROM tax_lots WHERE holding_id=? ORDER BY acquired_date", (holding_id,)).fetchall()]
+    conn.close()
+    return rows
+
+@app.post("/api/tax-lots")
+def create_tax_lot(lot: TaxLot):
+    conn = get_db()
+    if not conn.execute("SELECT 1 FROM holdings WHERE id=?", (lot.holding_id,)).fetchone():
+        conn.close(); raise HTTPException(status_code=400, detail="holding_id does not exist")
+    cur = conn.execute("INSERT INTO tax_lots (holding_id, acquired_date, shares, cost_basis, notes) VALUES (?,?,?,?,?)", (lot.holding_id, lot.acquired_date, lot.shares, lot.cost_basis, lot.notes))
+    conn.commit(); lot.id = cur.lastrowid; conn.close()
+    return lot
+
+@app.delete("/api/tax-lots/{lot_id}")
+def delete_tax_lot(lot_id: int):
+    conn = get_db()
+    deleted = conn.execute("DELETE FROM tax_lots WHERE id=?", (lot_id,)).rowcount
+    conn.commit()
+    conn.close()
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Tax lot not found")
+    return {"deleted": lot_id}
+
+@app.get("/api/holdings/{holding_id}/quote-preview")
+def preview_holding_quote(holding_id: int):
+    """Fetch a quote only when the user asks and never overwrite a holding.
+
+    The response contains the value implied by the entered share count; the
+    separate valuation endpoint is still an explicit user confirmation.
+    """
+    conn = get_db()
+    row = conn.execute("SELECT * FROM holdings WHERE id=?", (holding_id,)).fetchone()
+    conn.close()
+    if not row:
+        raise HTTPException(status_code=404, detail="Holding not found")
+    holding = _holding_row_to_dict(row)
+    if not holding.get("provider_identifier"):
+        raise HTTPException(status_code=400, detail="Confirm this holding through ticker lookup before checking a provider quote.")
+    from dataclasses import asdict
+    from security_provider import get_active_provider
+    quote = get_active_provider().get_quote(holding["provider_identifier"])
+    if quote is None:
+        return {"quote": None, "message": "No quote is available for this holding."}
+    quoted = asdict(quote)
+    implied_value = quote.price * holding["shares"] if holding.get("shares") is not None else None
+    return {
+        "quote": quoted,
+        "current_market_value": holding["market_value"],
+        "implied_market_value": implied_value,
+        "requires_confirmation": True,
+        "message": "Review this quote before replacing the recorded holding value.",
+    }
 
 def _option_row_to_dict(row) -> Dict:
     d = dict(row)

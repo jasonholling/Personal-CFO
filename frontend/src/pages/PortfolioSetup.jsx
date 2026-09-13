@@ -32,7 +32,7 @@ const TABS = [
 ]
 
 const EMPTY_HOLDING_FORM = {
-  account_id: '', security_name: '', ticker: '', market_value: '', asset_class: 'us_large_cap',
+  account_id: '', security_name: '', ticker: '', provider_identifier: '', shares: '', market_value: '', asset_class: 'us_large_cap',
   expense_ratio: '', cost_basis: '', as_of_date: new Date().toISOString().slice(0, 10), externallyManaged: false, multiAsset: false, exposures: [{ asset_class: 'us_large_cap', weight_pct: '' }],
 }
 
@@ -70,6 +70,11 @@ function HoldingsTab({ accounts, excludedAccounts, onEditPolicy }) {
   const [selectedOptionId, setSelectedOptionId] = useState('')
   const [providerStatus, setProviderStatus] = useState(null)
   const [refreshingHolding, setRefreshingHolding] = useState(null)
+  const [quotePreviews, setQuotePreviews] = useState({})
+  const [quoteError, setQuoteError] = useState(null)
+  const [taxLotEditor, setTaxLotEditor] = useState(null)
+  const [taxLots, setTaxLots] = useState([])
+  const [taxLotForm, setTaxLotForm] = useState({ acquired_date: new Date().toISOString().slice(0, 10), shares: '', cost_basis: '', notes: '' })
 
   const load = () => axios.get('/api/holdings/grouped').then(r => setGroups(r.data.groups)).finally(() => setLoading(false))
   const loadOptions = () => axios.get('/api/account-investment-options').then(r => {
@@ -105,6 +110,7 @@ function HoldingsTab({ accounts, excludedAccounts, onEditPolicy }) {
         : []
       await axios.post('/api/holdings', {
         account_id: parseInt(form.account_id, 10), security_name: form.security_name, ticker: form.ticker || null,
+        provider_identifier: form.provider_identifier || null, shares: form.shares === '' ? null : parseFloat(form.shares),
         market_value: parseFloat(form.market_value), asset_class: form.asset_class, exposures,
         expense_ratio: form.expense_ratio ? parseFloat(form.expense_ratio) / 100 : null,
         cost_basis: form.cost_basis ? parseFloat(form.cost_basis) : null,
@@ -152,6 +158,38 @@ function HoldingsTab({ accounts, excludedAccounts, onEditPolicy }) {
     }
   }
 
+  const checkQuote = async holding => {
+    setQuoteError(null)
+    try {
+      const response = await axios.get(`/api/holdings/${holding.id}/quote-preview`)
+      setQuotePreviews(current => ({ ...current, [holding.id]: response.data }))
+    } catch (error) {
+      setQuoteError(error.response?.data?.detail || 'Could not retrieve a quote right now.')
+    }
+  }
+  const useQuoteValue = (holding, preview) => {
+    if (preview?.implied_market_value == null || !preview.quote?.as_of) return
+    setRefreshingHolding({ holding, market_value: preview.implied_market_value, as_of_date: preview.quote.as_of.slice(0, 10) })
+  }
+  const openTaxLots = async holding => {
+    setTaxLotEditor(holding)
+    setTaxLotForm({ acquired_date: new Date().toISOString().slice(0, 10), shares: '', cost_basis: '', notes: '' })
+    const response = await axios.get(`/api/holdings/${holding.id}/tax-lots`)
+    setTaxLots(response.data)
+  }
+  const saveTaxLot = async event => {
+    event.preventDefault()
+    if (!taxLotEditor || taxLotForm.shares === '' || taxLotForm.cost_basis === '') return
+    await axios.post('/api/tax-lots', { holding_id: taxLotEditor.id, ...taxLotForm, shares: parseFloat(taxLotForm.shares), cost_basis: parseFloat(taxLotForm.cost_basis) })
+    const response = await axios.get(`/api/holdings/${taxLotEditor.id}/tax-lots`)
+    setTaxLots(response.data)
+    setTaxLotForm({ acquired_date: new Date().toISOString().slice(0, 10), shares: '', cost_basis: '', notes: '' })
+  }
+  const deleteTaxLot = async lotId => {
+    await axios.delete(`/api/tax-lots/${lotId}`)
+    setTaxLots(current => current.filter(lot => lot.id !== lotId))
+  }
+
   const searchTicker = async () => {
     if (!form.ticker.trim()) return
     const r = await axios.get('/api/securities/search', { params: { q: form.ticker.trim() } })
@@ -160,7 +198,7 @@ function HoldingsTab({ accounts, excludedAccounts, onEditPolicy }) {
   const chooseSecurity = async candidate => {
     await axios.post('/api/securities/confirm', candidate)
     setForm(f => ({ ...f, ticker: candidate.ticker || '', security_name: candidate.security_name,
-      asset_class: candidate.asset_class || 'unclassified' }))
+      provider_identifier: candidate.provider_identifier || '', asset_class: candidate.asset_class || 'unclassified' }))
     setSearchResults([])
   }
   const previewCsv = async file => {
@@ -238,6 +276,7 @@ function HoldingsTab({ accounts, excludedAccounts, onEditPolicy }) {
           {providerStatus.is_live ? `Lookup: ${providerStatus.provider}` : `Lookup: ${providerStatus.provider} (offline)`}
         </span>}
         <label>Current value ($)<input className="input" type="number" step="any" min="0" placeholder="Market value" value={form.market_value} onChange={e => setForm(f => ({ ...f, market_value: e.target.value }))} style={{ maxWidth: 140 }} /></label>
+        <label>Shares (optional)<input className="input" type="number" step="any" min="0" placeholder="Shares" value={form.shares} onChange={e => setForm(f => ({ ...f, shares: e.target.value }))} style={{ maxWidth: 120 }} /></label>
         <label>Value date<input className="input" type="date" value={form.as_of_date} onChange={e => setForm(f => ({ ...f, as_of_date: e.target.value }))} /></label>
         {!form.multiAsset && (
           <label>Asset class<select className="input" value={form.asset_class} onChange={e => setForm(f => ({ ...f, asset_class: e.target.value }))} style={{ minWidth: 160 }}>
@@ -330,8 +369,10 @@ function HoldingsTab({ accounts, excludedAccounts, onEditPolicy }) {
             {g.has_warning && <>. A difference is left unresolved; Coach does not assume it is cash.</>}
           </div>
           {g.holdings.length === 0 && <div style={{ color: 'var(--muted)', fontSize: 13 }}>No holdings entered for this account.</div>}
+          {quoteError && <div role="alert" style={{ color: 'var(--amber)', fontSize: 12 }}>{quoteError}</div>}
           {g.holdings.map(h => (
-            <div key={h.id} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, padding: '5px 0', borderTop: '1px solid var(--border)' }}>
+            <div key={h.id} style={{ fontSize: 13, padding: '5px 0', borderTop: '1px solid var(--border)' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between' }}>
               <span>
                 {h.security_name} {h.ticker ? `(${h.ticker})` : ''} —{' '}
                 {h.exposures?.length > 0
@@ -345,8 +386,18 @@ function HoldingsTab({ accounts, excludedAccounts, onEditPolicy }) {
                   {h.management_mode === 'externally_managed' ? 'Manage yourself' : 'Mark externally managed'}
                 </button>
                 <button className="btn-secondary" style={{ marginLeft: 10, padding: '2px 8px', fontSize: 11 }} onClick={() => setRefreshingHolding({ holding: h, market_value: h.market_value, as_of_date: (h.as_of_date || new Date().toISOString().slice(0, 10)).slice(0, 10) })}>Refresh value</button>
+                {h.provider_identifier && <button className="btn-secondary" style={{ marginLeft: 10, padding: '2px 8px', fontSize: 11 }} onClick={() => checkQuote(h)}>Check quote</button>}
+                {['taxable', 'brokerage'].includes(g.portfolio_account_type) && <button className="btn-secondary" style={{ marginLeft: 10, padding: '2px 8px', fontSize: 11 }} onClick={() => openTaxLots(h)}>Tax lots</button>}
                 <button className="btn-secondary" style={{ marginLeft: 10, padding: '2px 8px', fontSize: 11 }} onClick={() => remove(h.id)}>Remove</button>
               </span>
+            </div>
+            {quotePreviews[h.id] && <div className="setup-helper" style={{ marginTop: 5 }}>
+              {quotePreviews[h.id].quote ? <>
+                Quote {fmt(quotePreviews[h.id].quote.price)} on {quotePreviews[h.id].quote.as_of?.slice(0, 10)}
+                {quotePreviews[h.id].implied_market_value != null && <> · {h.shares} shares implies {fmt(quotePreviews[h.id].implied_market_value)} <button className="btn-secondary" style={{ marginLeft: 6, padding: '2px 8px', fontSize: 11 }} onClick={() => useQuoteValue(h, quotePreviews[h.id])}>Use quote value</button></>}
+                {quotePreviews[h.id].implied_market_value == null && <> · Add shares to use this price for a value update.</>}
+              </> : quotePreviews[h.id].message}
+            </div>}
             </div>
           ))}
           {refreshingHolding?.holding.account_id === g.account_id && (
@@ -356,6 +407,21 @@ function HoldingsTab({ accounts, excludedAccounts, onEditPolicy }) {
               <button className="btn-primary" type="submit">Save refreshed value</button>
               <button className="btn-secondary" type="button" onClick={() => setRefreshingHolding(null)}>Cancel</button>
             </form>
+          )}
+          {taxLotEditor?.account_id === g.account_id && (
+            <div className="card" style={{ marginTop: 10, padding: 12 }}>
+              <strong>Tax lots for {taxLotEditor.security_name}</strong>
+              <p className="setup-helper">Track purchase dates and basis for taxable-loss review. Lots do not create a sale recommendation by themselves.</p>
+              {taxLots.length > 0 && <div style={{ fontSize: 12, marginBottom: 8 }}>{taxLots.map(lot => <div key={lot.id}>{lot.acquired_date} · {lot.shares} shares · basis {fmt(lot.cost_basis)} {lot.notes ? `· ${lot.notes}` : ''} <button className="btn-secondary" onClick={() => deleteTaxLot(lot.id)}>Remove</button></div>)}</div>}
+              <form onSubmit={saveTaxLot} className="setup-form">
+                <label>Purchase date<input className="input" type="date" value={taxLotForm.acquired_date} onChange={e => setTaxLotForm(f => ({ ...f, acquired_date: e.target.value }))} /></label>
+                <label>Shares<input className="input" type="number" min="0" step="any" value={taxLotForm.shares} onChange={e => setTaxLotForm(f => ({ ...f, shares: e.target.value }))} /></label>
+                <label>Cost basis ($)<input className="input" type="number" min="0" step="any" value={taxLotForm.cost_basis} onChange={e => setTaxLotForm(f => ({ ...f, cost_basis: e.target.value }))} /></label>
+                <label>Note<input className="input" value={taxLotForm.notes} onChange={e => setTaxLotForm(f => ({ ...f, notes: e.target.value }))} /></label>
+                <button className="btn-primary" type="submit">Add tax lot</button>
+                <button className="btn-secondary" type="button" onClick={() => setTaxLotEditor(null)}>Close</button>
+              </form>
+            </div>
           )}
         </details>
       ))}

@@ -178,6 +178,41 @@ describe('PortfolioSetup workflows', () => {
     expect(axios.patch).toHaveBeenCalledWith('/api/holdings/7/valuation', { market_value: 1250, as_of_date: '2026-09-13' })
   })
 
+  it('shows a fetched quote for a confirmed holding and requires an explicit value update', async () => {
+    axios.get.mockImplementation(url => Promise.resolve({ data:
+      url === '/api/accounts' ? [{ id: 1, name: 'Brokerage', account_type: 'taxable', balance: 1000 }] :
+      url === '/api/holdings/grouped' ? { groups: [{ account_id: 1, account_name: 'Brokerage', portfolio_account_type: 'taxable', holdings_total: 500,
+        account_balance: 1000, unreconciled_remainder: 500, has_warning: true, holdings: [{ id: 7, account_id: 1, security_name: 'VTI', ticker: 'VTI', provider_identifier: 'MOCK:VTI', shares: 2, market_value: 500, asset_class: 'us_large_cap', exposures: [] }] }] } :
+      url === '/api/holdings/7/quote-preview' ? { quote: { price: 275.4, as_of: '2026-09-13' }, implied_market_value: 550.8, requires_confirmation: true } :
+      url === '/api/account-investment-options' ? [] : url === '/api/investment-policy' ? { has_policy: false } : []
+    }))
+    await act(async () => root.render(<PortfolioSetup />))
+    await flush()
+    await act(async () => [...container.querySelectorAll('button')].find(b => b.textContent === 'Check quote').click())
+    await flush()
+    expect(container.textContent).toContain('2 shares implies $551')
+    expect(axios.patch).not.toHaveBeenCalled()
+    await act(async () => [...container.querySelectorAll('button')].find(b => b.textContent === 'Use quote value').click())
+    await flush()
+    expect(container.textContent).toContain('Save refreshed value')
+  })
+
+  it('opens taxable tax-lot entry from the holding it belongs to', async () => {
+    axios.get.mockImplementation(url => Promise.resolve({ data:
+      url === '/api/accounts' ? [{ id: 1, name: 'Brokerage', account_type: 'taxable', balance: 1000 }] :
+      url === '/api/holdings/grouped' ? { groups: [{ account_id: 1, account_name: 'Brokerage', portfolio_account_type: 'taxable', holdings_total: 500,
+        account_balance: 1000, unreconciled_remainder: 500, has_warning: false, holdings: [{ id: 7, account_id: 1, security_name: 'VTI', market_value: 500, asset_class: 'us_large_cap', exposures: [] }] }] } :
+      url === '/api/holdings/7/tax-lots' ? [{ id: 3, acquired_date: '2025-01-01', shares: 1, cost_basis: 200, notes: 'Lot one' }] :
+      url === '/api/account-investment-options' ? [] : url === '/api/investment-policy' ? { has_policy: false } : []
+    }))
+    await act(async () => root.render(<PortfolioSetup />))
+    await flush()
+    await act(async () => [...container.querySelectorAll('button')].find(b => b.textContent === 'Tax lots').click())
+    await flush()
+    expect(container.textContent).toContain('Tax lots for VTI')
+    expect(container.textContent).toContain('Lot one')
+  })
+
   it('shows a save failure and keeps the entered holding available for correction', async () => {
     axios.post.mockRejectedValue({ response: { data: { detail: 'Account unavailable' } } })
     await act(async () => root.render(<PortfolioSetup />))

@@ -214,3 +214,55 @@ class TestHoldingExposuresRoundTrip:
                          files={"file": ("b.json", __import__("json").dumps(payload), "application/json")})
         assert r.status_code == 200, r.text
         assert client.get("/api/holdings").json()[0]["exposures"] == exposures
+
+
+class TestTaxLotsAndQuotePreview:
+    def test_tax_lots_are_scoped_to_a_holding_and_can_be_removed(self, client):
+        account = _create_account(client)
+        holding = client.post("/api/holdings", json={
+            "account_id": account["id"], "security_name": "Index fund",
+            "market_value": 1000, "asset_class": "us_large_cap",
+        }).json()
+        created = client.post("/api/tax-lots", json={
+            "holding_id": holding["id"], "acquired_date": "2024-01-15",
+            "shares": 5, "cost_basis": 900, "notes": "Initial purchase",
+        })
+        assert created.status_code == 200, created.text
+        lot = created.json()
+        stored = client.get(f"/api/holdings/{holding['id']}/tax-lots").json()
+        assert len(stored) == 1
+        assert {key: stored[0][key] for key in lot} == lot
+        assert client.delete(f"/api/tax-lots/{lot['id']}").json() == {"deleted": lot["id"]}
+        assert client.get(f"/api/holdings/{holding['id']}/tax-lots").json() == []
+
+    def test_tax_lots_are_preserved_by_backup_restore(self, client):
+        account = _create_account(client)
+        holding = client.post("/api/holdings", json={
+            "account_id": account["id"], "security_name": "Index fund",
+            "market_value": 1000, "asset_class": "us_large_cap",
+        }).json()
+        client.post("/api/tax-lots", json={
+            "holding_id": holding["id"], "acquired_date": "2024-01-15", "shares": 5, "cost_basis": 900,
+        })
+        payload = client.get("/api/backup/export").json()
+        assert len(payload["tables"]["tax_lots"]) == 1
+        restored = client.post("/api/backup/restore", params={"confirm": "true"},
+                               files={"file": ("backup.json", __import__("json").dumps(payload), "application/json")})
+        assert restored.status_code == 200, restored.text
+        assert client.get(f"/api/holdings/{holding['id']}/tax-lots").json()[0]["cost_basis"] == 900
+
+    def test_quote_preview_never_changes_a_holding_without_confirmation(self, client):
+        from security_provider import MockSecurityProvider, set_active_provider
+        set_active_provider(MockSecurityProvider())
+        account = _create_account(client)
+        holding = client.post("/api/holdings", json={
+            "account_id": account["id"], "security_name": "Vanguard Total Stock Market ETF",
+            "ticker": "VTI", "provider_identifier": "MOCK:VTI", "shares": 2,
+            "market_value": 500, "asset_class": "us_large_cap",
+        }).json()
+        preview = client.get(f"/api/holdings/{holding['id']}/quote-preview")
+        assert preview.status_code == 200, preview.text
+        assert preview.json()["quote"]["price"] == 275.40
+        assert preview.json()["implied_market_value"] == 550.80
+        assert preview.json()["requires_confirmation"] is True
+        assert client.get("/api/holdings").json()[0]["market_value"] == 500

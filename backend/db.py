@@ -761,6 +761,17 @@ def init_portfolio_coach_tables():
             updated_at TEXT DEFAULT (datetime('now'))
         );
         CREATE INDEX IF NOT EXISTS idx_holdings_account_id ON holdings(account_id);
+        CREATE TABLE IF NOT EXISTS tax_lots (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            holding_id INTEGER NOT NULL REFERENCES holdings(id) ON DELETE CASCADE,
+            acquired_date TEXT NOT NULL,
+            shares REAL NOT NULL CHECK (shares >= 0),
+            cost_basis REAL NOT NULL CHECK (cost_basis >= 0),
+            notes TEXT,
+            created_at TEXT DEFAULT (datetime('now')),
+            updated_at TEXT DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_tax_lots_holding_id ON tax_lots(holding_id);
 
         CREATE TABLE IF NOT EXISTS account_investment_options (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
