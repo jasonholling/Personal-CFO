@@ -58,6 +58,29 @@ class TestAccountsCrud:
         remaining = client.get("/api/accounts").json()
         assert not any(a["id"] == created["id"] for a in remaining)
 
+    def test_investment_menu_mode_is_account_specific_and_preserves_financial_facts(self, client):
+        created = client.post("/api/accounts", json={
+            "name": "Open Brokerage", "account_type": "taxable", "owner": "jason",
+            "institution": "Test", "balance": 12345,
+        }).json()
+        response = client.patch(f"/api/accounts/{created['id']}/investment-menu-mode", json={
+            "investment_menu_mode": "open",
+        })
+        assert response.status_code == 200, response.text
+        listed = client.get("/api/accounts").json()
+        assert listed[0]["investment_menu_mode"] == "open"
+        assert listed[0]["balance"] == 12345
+
+    def test_investment_menu_mode_rejects_unknown_value(self, client):
+        created = client.post("/api/accounts", json={
+            "name": "Account", "account_type": "taxable", "owner": "jason",
+            "institution": "Test", "balance": 1,
+        }).json()
+        response = client.patch(f"/api/accounts/{created['id']}/investment-menu-mode", json={
+            "investment_menu_mode": "anything-goes",
+        })
+        assert response.status_code == 422
+
     def test_create_rejects_unrecognized_account_type(self, client):
         """Regression: account_type used to be an unchecked str — a value
         outside VALID_ACCOUNT_TYPES (e.g. "pretax_401k" instead of the real

@@ -443,12 +443,32 @@ function OptionsTab({ accounts, excludedAccounts, onEditPolicy }) {
   const [form, setForm] = useState(emptyOption)
   const [mixResult, setMixResult] = useState(null)
   const [mixError, setMixError] = useState(null)
+  const [menuMode, setMenuMode] = useState('auto')
+  const [menuModeSaving, setMenuModeSaving] = useState(false)
+  const [menuModeNotice, setMenuModeNotice] = useState('')
 
   const load = id => {
     if (!id) { setOptions([]); return }
     axios.get('/api/account-investment-options', { params: { account_id: id } }).then(r => setOptions(r.data))
   }
-  useEffect(() => { load(accountId); setMixResult(null); setMixError(null) }, [accountId])
+  useEffect(() => {
+    load(accountId); setMixResult(null); setMixError(null); setMenuModeNotice('')
+    setMenuMode(accounts.find(account => account.id === Number(accountId))?.investment_menu_mode || 'auto')
+  }, [accountId, accounts])
+
+  const saveMenuMode = async value => {
+    setMenuMode(value)
+    if (!accountId) return
+    setMenuModeSaving(true)
+    setMenuModeNotice('')
+    try {
+      await axios.patch(`/api/accounts/${accountId}/investment-menu-mode`, { investment_menu_mode: value })
+      setMenuModeNotice('Investment access saved for Coach.')
+      setMixResult(null)
+    } catch (error) {
+      setMenuModeNotice(error.response?.data?.detail || 'Could not save investment access.')
+    } finally { setMenuModeSaving(false) }
+  }
 
   const runCompare = () => {
     setMixError(null)
@@ -485,6 +505,26 @@ function OptionsTab({ accounts, excludedAccounts, onEditPolicy }) {
       {accountId && (
         <>
           {excludedAccounts.includes(Number(accountId)) && <div className="card setup-excluded" style={{ marginBottom: 16 }}><strong>Excluded from Coach</strong><p className="setup-helper">These options are kept for reference and are not used for recommendations.</p><button className="btn-secondary" onClick={onEditPolicy}>Manage inclusion in policy</button></div>}
+          <div className="card" style={{ marginBottom: 16 }}>
+            <strong>How investments work in this account</strong>
+            <p className="setup-helper">This controls whether Coach must stay inside the menu you record here. It does not change the account's tax type or your plan calculations.</p>
+            <label style={{ display: 'block', maxWidth: 420 }}>
+              <span className="label">Investment access</span>
+              <select aria-label="Investment access" className="input" value={menuMode} disabled={menuModeSaving}
+                      onChange={e => saveMenuMode(e.target.value)}>
+                <option value="auto">Use the usual rule for this account type</option>
+                <option value="restricted">Restricted fund menu — record eligible funds below</option>
+                <option value="open">Open brokerage — research can suggest an asset class; record approved choices before acting</option>
+              </select>
+            </label>
+            <div role="status" className="setup-helper" style={{ marginTop: 6 }}>
+              {menuModeNotice || (menuMode === 'restricted'
+                ? 'Coach will only make actionable suggestions from the options recorded for this account.'
+                : menuMode === 'open'
+                  ? 'Coach can identify a needed asset class, but it will not assume any security is available until you record it here.'
+                  : 'Coach will use the account type’s usual investment-access rule.')}
+            </div>
+          </div>
           <form onSubmit={submit} className="card setup-form" style={{ marginBottom: 16, display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
             <label>Fund or option name<input className="input" placeholder="Option name" value={form.option_name} onChange={e => setForm(f => ({ ...f, option_name: e.target.value }))} style={{ minWidth: 200 }} /></label>
             <label>Ticker (optional)<input className="input" placeholder="Ticker (optional)" value={form.ticker} onChange={e => setForm(f => ({ ...f, ticker: e.target.value }))} style={{ maxWidth: 100 }} /></label>
@@ -515,7 +555,9 @@ function OptionsTab({ accounts, excludedAccounts, onEditPolicy }) {
           </form>
 
           <div className="card" style={{ marginBottom: 16 }}>
-            {options.length === 0 && <div style={{ color: 'var(--muted)', fontSize: 13 }}>No investment options recorded for this account yet — a closed-menu account (401(k), Roth 401(k), HSA, 529, trust) can only be recommended options recorded here.</div>}
+            {options.length === 0 && <div style={{ color: 'var(--muted)', fontSize: 13 }}>{menuMode === 'open'
+              ? 'No approved choices recorded yet. Coach can identify the asset class to add, but record a fund or security here before treating a suggestion as actionable.'
+              : 'No investment options recorded for this account yet — Coach will only recommend options you record here.'}</div>}
             {options.map(o => (
               <div key={o.id} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, padding: '6px 0', borderTop: '1px solid var(--border)' }}>
                 <span>

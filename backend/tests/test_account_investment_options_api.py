@@ -214,6 +214,28 @@ class TestAccountInvestmentOptionsCompare:
         assert body["unavailable_classes"] == ["us_large_cap"]
         assert body["is_closed_menu_account"] is True
 
+    def test_account_specific_menu_mode_overrides_the_type_default(self, client):
+        """A brokerage can be deliberately restricted, and a plan account
+        can be explicitly open, without changing either account's tax type."""
+        restricted = client.post("/api/accounts", json={
+            "name": "Restricted Brokerage", "account_type": "taxable", "owner": "jason",
+            "institution": "Test", "balance": 100, "investment_menu_mode": "restricted",
+        }).json()
+        opened = client.post("/api/accounts", json={
+            "name": "Open HSA", "account_type": "hsa", "owner": "jason",
+            "institution": "Test", "balance": 100, "investment_menu_mode": "open",
+        }).json()
+        restricted_result = client.post("/api/account-investment-options/compare", json={
+            "account_id": restricted["id"], "target_weights": {"us_large_cap": 100},
+        }).json()
+        open_result = client.post("/api/account-investment-options/compare", json={
+            "account_id": opened["id"], "target_weights": {"us_large_cap": 100},
+        }).json()
+        assert restricted_result["is_closed_menu_account"] is True
+        assert restricted_result["investment_menu_mode"] == "restricted"
+        assert open_result["is_closed_menu_account"] is False
+        assert open_result["investment_menu_mode"] == "open"
+
     def test_unknown_account_404s(self, client):
         r = client.post("/api/account-investment-options/compare", json={
             "account_id": 999999, "target_weights": {"us_large_cap": 100},

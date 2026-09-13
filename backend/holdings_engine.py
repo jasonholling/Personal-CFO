@@ -104,7 +104,7 @@ CLOSED_MENU_TYPES   = {"traditional_401k", "roth_401k", "hsa", "529", "trust"}
 OPEN_UNIVERSE_TYPES  = {"traditional_ira", "roth_ira", "brokerage", "custodial"}
 
 
-def is_closed_menu_account(portfolio_type: str) -> bool:
+def is_closed_menu_account(portfolio_type: str, investment_menu_mode: str = "auto") -> bool:
     """True for account types whose investable universe is limited to
     what the plan itself offers (see CLOSED_MENU_TYPES docstring above).
     An HSA/529/trust not otherwise flagged closed is treated as
@@ -112,6 +112,10 @@ def is_closed_menu_account(portfolio_type: str) -> bool:
     account via account.account_constraints if a specific plan is
     actually closed-menu, but no such override exists in this schema
     yet, so the type-level default is what's used."""
+    if investment_menu_mode == "restricted":
+        return True
+    if investment_menu_mode == "open":
+        return False
     return portfolio_type in CLOSED_MENU_TYPES
 
 

@@ -4,7 +4,7 @@ import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest'
 import axios from 'axios'
 import PortfolioSetup from './PortfolioSetup'
 
-vi.mock('axios', () => ({ default: { get: vi.fn(), post: vi.fn(), delete: vi.fn() } }))
+vi.mock('axios', () => ({ default: { get: vi.fn(), post: vi.fn(), patch: vi.fn(), delete: vi.fn() } }))
 globalThis.IS_REACT_ACT_ENVIRONMENT = true
 
 let container, root
@@ -177,6 +177,32 @@ describe('PortfolioSetup workflows', () => {
     await act(async () => toggle.click())
     expect(container.textContent).not.toContain('Reserve fund')
     expect(axios.delete).not.toHaveBeenCalled()
+  })
+
+  it('lets a brokerage account explicitly use an open investment universe', async () => {
+    axios.get.mockImplementation(url => Promise.resolve({ data:
+      url === '/api/accounts' ? [{ id: 1, name: 'Brokerage', account_type: 'taxable', investment_menu_mode: 'auto' }] :
+      url === '/api/investment-policy' ? { has_policy: false } :
+      url === '/api/holdings/grouped' ? { groups: [] } : []
+    }))
+    axios.patch.mockResolvedValue({ data: { id: 1, investment_menu_mode: 'open' } })
+    await act(async () => root.render(<PortfolioSetup />))
+    await flush()
+    await act(async () => [...container.querySelectorAll('button')].find(button => button.textContent === 'Account Investment Options').click())
+    await flush()
+    await act(async () => {
+      const account = container.querySelector('#options-account')
+      account.value = '1'
+      account.dispatchEvent(new Event('change', { bubbles: true }))
+    })
+    await flush()
+    const access = container.querySelector('select[aria-label="Investment access"]')
+    await act(async () => {
+      access.value = 'open'
+      access.dispatchEvent(new Event('change', { bubbles: true }))
+    })
+    expect(axios.patch).toHaveBeenCalledWith('/api/accounts/1/investment-menu-mode', { investment_menu_mode: 'open' })
+    expect(container.textContent).toContain('record approved choices before acting')
   })
 
   it('saves and reloads holding protections and account constraints with allocation intact', async () => {

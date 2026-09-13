@@ -192,6 +192,17 @@ class Account(BaseModel):
     # legacy-account_type mapping. None (every existing account) means
     # "derive it from account_type."
     portfolio_account_type: Optional[str] = None
+    # Portfolio Coach only.  This does not affect net-worth or retirement
+    # calculations; it tells Coach whether recommendations are limited to
+    # the recorded fund menu for this particular account.
+    investment_menu_mode: str = "auto"
+
+    @field_validator("investment_menu_mode")
+    @classmethod
+    def _investment_menu_mode_must_be_known(cls, v):
+        if v not in {"auto", "restricted", "open"}:
+            raise ValueError("investment_menu_mode must be 'auto', 'restricted', or 'open'")
+        return v
 
     @field_validator("portfolio_account_type")
     @classmethod
@@ -323,6 +334,7 @@ class AccountInvestmentOption(BaseModel):
     redemption_restriction: Optional[str] = None
     settlement_restriction: Optional[str] = None
     data_source: str = "manual"
+
     as_of_date: Optional[str] = None
     confidence: str = "low"
     notes: Optional[str] = None
@@ -349,6 +361,16 @@ class AccountInvestmentOption(BaseModel):
                 and self.minimum_allocation_pct > self.maximum_allocation_pct):
             raise ValueError("minimum_allocation_pct cannot exceed maximum_allocation_pct")
         return self
+
+class InvestmentMenuModeUpdate(BaseModel):
+    investment_menu_mode: str
+
+    @field_validator("investment_menu_mode")
+    @classmethod
+    def _mode_must_be_known(cls, v):
+        if v not in {"auto", "restricted", "open"}:
+            raise ValueError("investment_menu_mode must be 'auto', 'restricted', or 'open'")
+        return v
 
 class InvestmentPolicy(BaseModel):
     id: Optional[int] = None
@@ -726,10 +748,10 @@ def get_account_freshness():
 def create_account(account: Account):
     conn = get_db()
     cur = conn.execute(
-        "INSERT INTO accounts (name, account_type, owner, institution, balance, notes, interest_rate, minimum_payment, term_months, stock_allocation_pct, expense_ratio, monthly_rental_income, monthly_rental_expenses, portfolio_account_type) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO accounts (name, account_type, owner, institution, balance, notes, interest_rate, minimum_payment, term_months, stock_allocation_pct, expense_ratio, monthly_rental_income, monthly_rental_expenses, portfolio_account_type, investment_menu_mode) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (account.name, account.account_type, account.owner, account.institution, account.balance, account.notes,
          account.interest_rate, account.minimum_payment, account.term_months, account.stock_allocation_pct, account.expense_ratio,
-         account.monthly_rental_income, account.monthly_rental_expenses, account.portfolio_account_type)
+         account.monthly_rental_income, account.monthly_rental_expenses, account.portfolio_account_type, account.investment_menu_mode)
     )
     conn.commit()
     account.id = cur.lastrowid
@@ -740,14 +762,29 @@ def create_account(account: Account):
 def update_account(account_id: int, account: Account):
     conn = get_db()
     conn.execute(
-        "UPDATE accounts SET name=?, account_type=?, owner=?, institution=?, balance=?, notes=?, interest_rate=?, minimum_payment=?, term_months=?, stock_allocation_pct=?, expense_ratio=?, monthly_rental_income=?, monthly_rental_expenses=?, portfolio_account_type=? WHERE id=?",
+        "UPDATE accounts SET name=?, account_type=?, owner=?, institution=?, balance=?, notes=?, interest_rate=?, minimum_payment=?, term_months=?, stock_allocation_pct=?, expense_ratio=?, monthly_rental_income=?, monthly_rental_expenses=?, portfolio_account_type=?, investment_menu_mode=? WHERE id=?",
         (account.name, account.account_type, account.owner, account.institution, account.balance, account.notes,
          account.interest_rate, account.minimum_payment, account.term_months, account.stock_allocation_pct, account.expense_ratio,
-         account.monthly_rental_income, account.monthly_rental_expenses, account.portfolio_account_type, account_id)
+         account.monthly_rental_income, account.monthly_rental_expenses, account.portfolio_account_type, account.investment_menu_mode, account_id)
     )
     conn.commit()
     conn.close()
     return {**account.dict(), "id": account_id}
+
+@app.patch("/api/accounts/{account_id}/investment-menu-mode")
+def update_account_investment_menu_mode(account_id: int, body: InvestmentMenuModeUpdate):
+    """Set Coach's account-specific investable-universe rule without
+    overwriting any of the account's financial facts."""
+    conn = get_db()
+    updated = conn.execute(
+        "UPDATE accounts SET investment_menu_mode=? WHERE id=?",
+        (body.investment_menu_mode, account_id),
+    ).rowcount
+    conn.commit()
+    conn.close()
+    if not updated:
+        raise HTTPException(status_code=404, detail="Account not found")
+    return {"id": account_id, "investment_menu_mode": body.investment_menu_mode}
 
 @app.delete("/api/accounts/{account_id}")
 def delete_account(account_id: int):
@@ -977,7 +1014,9 @@ def compare_account_investment_options(req: OptionMixRequest):
     result = propose_account_option_mix(eligible, target_weights)
     portfolio_type = resolve_portfolio_account_type(acc)
     result["account_id"] = req.account_id
-    result["is_closed_menu_account"] = is_closed_menu_account(portfolio_type)
+    menu_mode = acc.get("investment_menu_mode") or "auto"
+    result["is_closed_menu_account"] = is_closed_menu_account(portfolio_type, menu_mode)
+    result["investment_menu_mode"] = menu_mode
     result["eligible_option_count"] = len(eligible)
     result["recorded_option_count"] = len(options)
     return result

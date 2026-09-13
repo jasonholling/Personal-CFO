@@ -33,6 +33,7 @@ def init_db():
             term_months INTEGER DEFAULT 0,
             stock_allocation_pct REAL,
             expense_ratio REAL DEFAULT 0,
+            investment_menu_mode TEXT DEFAULT 'auto',
             updated_at TEXT DEFAULT (datetime('now'))
         );
 
@@ -165,6 +166,11 @@ def init_db():
         # init_portfolio_coach_tables(), which runs unconditionally at
         # db.py's own import time, possibly before accounts exists yet.
         ("portfolio_account_type", "TEXT"),
+        # Portfolio Coach account-specific override. "auto" retains the
+        # conservative account-type default; a household can explicitly
+        # say a particular HSA, 529, or trust is open-universe, or that a
+        # brokerage is restricted to a recorded menu.
+        ("investment_menu_mode", "TEXT DEFAULT 'auto'"),
     ]
     for col, typedef in accounts_migrations:
         if col not in accounts_cols:
