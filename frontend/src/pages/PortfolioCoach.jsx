@@ -128,6 +128,8 @@ export default function PortfolioCoach({ onNavigate }) {
   const [contribAmount, setContribAmount] = useState('')
   const [contribResult, setContribResult] = useState(null)
   const [rebalanceResult, setRebalanceResult] = useState(null)
+  const [multiAmounts, setMultiAmounts] = useState({})
+  const [multiResult, setMultiResult] = useState(null)
   const [filterCategory, setFilterCategory] = useState('all')
   const [showAllActions, setShowAllActions] = useState(false)
   const requestVersion = useRef(0)
@@ -186,6 +188,12 @@ export default function PortfolioCoach({ onNavigate }) {
       .then(r => { if (version === requestVersion.current) setRebalanceResult(r.data) })
       .catch(() => { if (version === requestVersion.current) setRequestError('Could not generate the rebalance checklist. Please try again.') })
       .finally(() => { if (version === requestVersion.current) setBusy(false) })
+  }
+  const runMultiContribution = () => {
+    const pools = Object.entries(multiAmounts).filter(([, amount]) => Number(amount) > 0).map(([account_id, amount]) => ({ account_id: Number(account_id), amount: Number(amount) }))
+    if (!pools.length) return
+    setBusy(true); setMultiResult(null)
+    axios.post('/api/portfolio/contribution-destination/multi-account', { pools }).then(r => setMultiResult(r.data)).catch(() => setRequestError('Could not allocate the account-specific contributions.')).finally(() => setBusy(false))
   }
 
   const [planningResult, setPlanningResult] = useState(null)
@@ -403,6 +411,7 @@ export default function PortfolioCoach({ onNavigate }) {
           </div>
         )}
       </div>
+      <details className="card" style={{ marginBottom: 24 }}><summary>Allocate contributions across specific accounts</summary><p style={{ fontSize: 12, color: 'var(--muted)' }}>Enter amounts that are actually available in each account. Coach respects account policy restrictions; confirm contribution eligibility yourself.</p>{accounts.map(account => <label key={account.id} style={{ display: 'inline-flex', flexDirection: 'column', marginRight: 10, fontSize: 12 }}>{account.name}<input className="input" type="number" min="0" placeholder="$0" value={multiAmounts[account.id] || ''} onChange={e => setMultiAmounts(values => ({ ...values, [account.id]: e.target.value }))} /></label>)}<button className="btn-primary" onClick={runMultiContribution} disabled={busy}>Allocate account contributions</button>{multiResult && <div style={{ marginTop: 10, fontSize: 13 }}>{(multiResult.actions || []).map((action, i) => <div key={i}>{fmt(action.amount)} → {action.asset_class?.replace(/_/g, ' ')} in account {action.account_id}</div>)}{(multiResult.unallocated || []).map((item, i) => <div key={`u${i}`} style={{ color: 'var(--amber)' }}>{fmt(item.amount)} remains unallocated: {item.reason}</div>)}</div>}</details>
 
       <div className="card" style={{ marginBottom: 24 }}>
         <div className="label" style={{ marginBottom: 10 }}>Build a rebalance checklist</div>
