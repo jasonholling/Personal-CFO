@@ -921,6 +921,7 @@ def init_portfolio_coach_tables():
 
     policy_cols = [r[1] for r in conn.execute("PRAGMA table_info(investment_policies)").fetchall()]
     policy_migrations = [
+        ("glide_path_json",                    "TEXT"),
         ("target_us_large_cap_pct",           "REAL NOT NULL DEFAULT 0"),
         ("target_us_mid_cap_pct",              "REAL NOT NULL DEFAULT 0"),
         ("target_us_small_cap_pct",            "REAL NOT NULL DEFAULT 0"),

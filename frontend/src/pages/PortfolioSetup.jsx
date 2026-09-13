@@ -368,6 +368,7 @@ function PolicyTab({ accounts }) {
   const [saving, setSaving] = useState(false)
   const [saveError, setSaveError] = useState(null)
   const [saved, setSaved] = useState(false)
+  const [showGlidePath, setShowGlidePath] = useState(false)
 
   const load = () => axios.get('/api/investment-policy').then(r => {
     setPolicy(r.data.has_policy ? r.data.policy : {
@@ -404,6 +405,11 @@ function PolicyTab({ accounts }) {
       setSaving(false)
     }
   }
+
+  const glide = policy.glide_path || { enabled: false, start_age: 55, end_age: 65, end_targets: {} }
+  const setGlide = change => setPolicy(p => ({ ...p, glide_path: { ...glide, ...change } }))
+  const glideEndTotal = POLICY_TARGET_FIELDS.reduce((sum, [field]) => sum + (Number(glide.end_targets?.[field] ?? policy[field]) || 0), 0)
+  const glideValid = glide.end_age > glide.start_age && Math.abs(glideEndTotal - 100) <= 0.5
 
   return (
     <div className="card" onChange={() => setSaved(false)}>
@@ -477,6 +483,18 @@ function PolicyTab({ accounts }) {
         </div>
       </details>
       <PolicyRestrictions accounts={accounts} policy={policy} onChange={setPolicy} />
+      <details style={{ marginTop: 20, paddingTop: 16, borderTop: '1px solid var(--border)' }} open={showGlidePath} onToggle={e => setShowGlidePath(e.currentTarget.open)}>
+        <summary>Glide path <span className="setup-badge">{glide.enabled ? 'Enabled' : 'Preview only'}</span></summary>
+        <p className="setup-helper">Set a future target mix. It is saved for review and does not change Coach recommendations until its activation step is added.</p>
+        <label className="setup-toggle"><input type="checkbox" checked={!!glide.enabled} onChange={e => setGlide({ enabled: e.target.checked })} />Enable this saved glide-path plan</label>
+        <div className="setup-form" style={{ marginTop: 12 }}>
+          <label>Start age<input className="input" type="number" value={glide.start_age} onChange={e => setGlide({ start_age: Number(e.target.value) })} /></label>
+          <label>End age<input className="input" type="number" value={glide.end_age} onChange={e => setGlide({ end_age: Number(e.target.value) })} /></label>
+          {POLICY_TARGET_FIELDS.map(([field, label]) => <label key={field}>End: {label} (%)<input className="input" type="number" value={glide.end_targets?.[field] ?? policy[field] ?? 0} onChange={e => setGlide({ end_targets: { ...(glide.end_targets || {}), [field]: Number(e.target.value) || 0 } })} /></label>)}
+        </div>
+        <div style={{ marginTop: 10, fontSize: 13, color: glideValid ? 'var(--green)' : 'var(--red)' }}>Future mix total: {glideEndTotal.toFixed(1)}% {!glideValid && '— end age must be after start age and targets must total 100%.'}</div>
+        {glideValid && <div className="setup-helper">Preview: allocation shifts evenly each year from age {glide.start_age} to {glide.end_age}. At the midpoint, each target is halfway between today’s mix and the future mix.</div>}
+      </details>
       <div className="setup-save">
         <div role="status" style={{ fontSize: 13, color: saveError ? 'var(--red)' : 'var(--muted)' }}>{saveError || (saving ? 'Saving…' : saved ? 'Policy saved. Coach will use these settings.' : canSave ? 'Save to apply your allocation and account rules.' : 'Targets must total 100% before saving.')}</div>
         <button className="btn-primary" disabled={saving || !canSave} onClick={save}>Save policy</button>

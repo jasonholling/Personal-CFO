@@ -444,6 +444,7 @@ class InvestmentPolicy(BaseModel):
     effective_date: Optional[str] = None
     review_date: Optional[str] = None
     notes: Optional[str] = None
+    glide_path: Optional[Dict] = None
 
     @model_validator(mode="after")
     def _targets_must_be_valid_percentages(self):
@@ -1227,6 +1228,7 @@ def _policy_row_to_dict(row) -> Dict:
     for field in _POLICY_JSON_LIST_FIELDS:
         d[field] = json.loads(d.pop(f"{field}_json") or "[]")
     d["use_contributions_before_sales"] = bool(d["use_contributions_before_sales"])
+    d["glide_path"] = json.loads(d.pop("glide_path_json") or "null")
     return d
 
 @app.get("/api/investment-policy")
@@ -1249,7 +1251,7 @@ def save_investment_policy(policy: InvestmentPolicy):
         "rebalance_cadence, use_contributions_before_sales, taxable_sale_preference, "
         "excluded_accounts_json, excluded_holdings_json, employer_stock_exceptions_json, "
         "legacy_holding_exceptions_json, risk_profile, account_constraints_json, effective_date, "
-        "review_date, notes) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "review_date, notes, glide_path_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (policy.name, policy.target_us_large_cap_pct, policy.target_us_mid_cap_pct,
          policy.target_us_small_cap_pct, policy.target_international_developed_pct,
          policy.target_emerging_markets_pct, policy.target_us_bonds_pct,
@@ -1260,7 +1262,7 @@ def save_investment_policy(policy: InvestmentPolicy):
          json.dumps(policy.excluded_accounts), json.dumps(policy.excluded_holdings),
          json.dumps(policy.employer_stock_exceptions), json.dumps(policy.legacy_holding_exceptions),
          policy.risk_profile, json.dumps(policy.account_constraints), policy.effective_date,
-         policy.review_date, policy.notes)
+         policy.review_date, policy.notes, json.dumps(policy.glide_path) if policy.glide_path else None)
     )
     conn.commit()
     policy.id = cur.lastrowid
