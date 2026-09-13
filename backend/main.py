@@ -1702,6 +1702,19 @@ def get_recommendations(pending_contribution: float = 0.0):
     the "What should I do next?" list — sorted by priority."""
     conn = get_db()
     accounts, holdings, policy = _load_portfolio_context(conn)
+    if policy and (policy.get("glide_path") or {}).get("enabled"):
+        glide = policy["glide_path"]
+        inputs = conn.execute("SELECT jason_age FROM planning_inputs WHERE id=1").fetchone()
+        try:
+            from glide_path_engine import interpolate_targets
+            from holdings_engine import POLICY_TARGET_FIELD_TO_ASSET_CLASS
+            active_policy = dict(policy)
+            start = {field: policy.get(field, 0) for field in POLICY_TARGET_FIELD_TO_ASSET_CLASS}
+            end = {field: (glide.get("end_targets") or {}).get(field, start[field]) for field in start}
+            active_policy.update(interpolate_targets(start, end, int(glide["start_age"]), int(glide["end_age"]), int(inputs["jason_age"] if inputs else glide["start_age"])))
+            policy = active_policy
+        except (KeyError, TypeError, ValueError):
+            pass
     options_by_account: Dict[int, List[Dict]] = {}
     for row in conn.execute("SELECT * FROM account_investment_options").fetchall():
         options_by_account.setdefault(row["account_id"], []).append(_option_row_to_dict(row))
