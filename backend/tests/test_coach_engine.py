@@ -92,6 +92,13 @@ class TestDataQualityRecommendations:
         cards = data_quality_recommendations(classified, [])
         assert not any("Missing cost basis" in c["title"] for c in cards)
 
+    def test_cash_in_taxable_account_is_not_flagged_for_cost_basis(self):
+        accs = [account(1, "taxable")]
+        hs = [holding(1, 1, security_name="Cash & Money Market", market_value=1821.87,
+                      asset_class="cash", security_type="cash", data_source="statement")]
+        cards = data_quality_recommendations(classify_holdings(accs, hs), [])
+        assert not any("Missing cost basis" in c["title"] for c in cards)
+
     def test_managed_target_date_fund_is_not_a_missing_data_issue(self):
         """A target-date fund has a deliberately changing internal mix.
         Coach must not demand a fabricated static classification or fee."""

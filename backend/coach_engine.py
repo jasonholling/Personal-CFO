@@ -214,7 +214,11 @@ def data_quality_recommendations(classified: Dict, reconciliations: List[Dict]) 
                 assumptions_hash_input={"holding_id": h.get("id"), "asset_class": h.get("asset_class")},
                 value_unit="text",
             ))
-        if h.get("_portfolio_account_type") in TAXABLE_GAIN_TYPES and h.get("cost_basis") is None and (h.get("market_value", 0) or 0) > 0:
+        # Cash has no unrealized capital gain to track; its tax basis is its
+        # dollar value.  Do not ask for a tax lot or cost basis on it.
+        is_cash_position = h.get("security_type") == "cash" or h.get("asset_class") == "cash"
+        if (h.get("_portfolio_account_type") in TAXABLE_GAIN_TYPES and not is_cash_position
+                and h.get("cost_basis") is None and (h.get("market_value", 0) or 0) > 0):
             cards.append(_card(
                 "missing_data", recommendation_key("missing_cost_basis", account_id=h.get("account_id"), holding_id=h.get("id")),
                 3, f"Missing cost basis on {h.get('security_name') or 'a taxable holding'}",
