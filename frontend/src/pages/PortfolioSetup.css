@@ -49,3 +49,47 @@
   .portfolio-setup .setup-tabs > button { flex: 1 1 140px; }
   .portfolio-coach .allocation-donuts { gap: 0; }
 }
+
+/* The app shell is a fixed-height scrolling pane on screen. Without these
+   overrides, a browser print captures only that pane's first viewport.
+   The annual review intentionally prints the analysis and decision record,
+   not live contribution/rebalance controls. */
+@media print {
+  @page { margin: 12mm; }
+
+  html, body, #root, .app-shell, .main-content {
+    height: auto !important;
+    min-height: 0 !important;
+    overflow: visible !important;
+    background: #fff !important;
+    color: #111 !important;
+  }
+
+  .sidebar,
+  .coach-header button,
+  .portfolio-coach .coach-workflow-controls,
+  .portfolio-coach [role="alert"] button,
+  .portfolio-coach .annual-review-actions button,
+  .portfolio-coach .btn-primary,
+  .portfolio-coach .btn-secondary,
+  .portfolio-coach input,
+  .portfolio-coach select {
+    display: none !important;
+  }
+
+  .main-content { padding: 0 !important; }
+  .portfolio-coach { max-width: none !important; }
+  .portfolio-coach .card {
+    background: #fff !important;
+    border-color: #bbb !important;
+    box-shadow: none !important;
+    break-inside: avoid;
+  }
+  .portfolio-coach, .portfolio-coach * { color: #111 !important; }
+  .portfolio-coach .section-sub, .portfolio-coach .label,
+  .portfolio-coach .allocation-target-value { color: #444 !important; }
+  .portfolio-coach .allocation-swatch { print-color-adjust: exact; -webkit-print-color-adjust: exact; }
+  .portfolio-coach details:not([open]) > :not(summary) { display: block !important; }
+  .portfolio-coach details > summary { display: none !important; }
+  .portfolio-coach .allocation-donut { break-inside: avoid; }
+}

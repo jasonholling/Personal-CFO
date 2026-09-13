@@ -314,9 +314,30 @@ class HoldingManagementModeUpdate(BaseModel):
 
 class HoldingValuationUpdate(BaseModel):
     """Refresh only the facts that change with a statement or quote.
-    Classification, cost basis, and the management decision stay intact."""
+    Classification, cost basis, and the management decision stay intact.
+
+    `source` is an honest label for WHERE this refreshed value came
+    from, not a trigger for any different behavior beyond the
+    data_source/confidence recorded alongside it:
+    - "manual" (default): a person typed a new number. data_source/
+      confidence are left exactly as they were -- this endpoint has
+      never claimed manual entry is either higher or lower confidence
+      than whatever was already on file, and changing that here would
+      be an unannounced behavior change.
+    - "quote": this value came from an explicitly-confirmed provider
+      quote (the "Use quote value" button, never automatic). Recorded
+      as data_source="provider_quote", confidence="high" so Coach's own
+      low-confidence-entry check reflects that a real quote, not a
+      guess, backs this number.
+    - "statement": reserved for a future explicit "confirm from
+      statement" action; behaves like "quote" (data_source="statement",
+      confidence="high") since a statement is also an authoritative
+      source, not a guess. Not yet exposed by an endpoint on this
+      branch — CSV import (a different endpoint) uses "statement" for
+      HoldingImportRow's own reasoning, not this model."""
     market_value: float
     as_of_date: str
+    source: str = "manual"
 
     @field_validator("market_value")
     @classmethod
@@ -332,6 +353,13 @@ class HoldingValuationUpdate(BaseModel):
             datetime.strptime(v, "%Y-%m-%d")
         except (TypeError, ValueError):
             raise ValueError("as_of_date must be YYYY-MM-DD")
+        return v
+
+    @field_validator("source")
+    @classmethod
+    def _source_must_be_known(cls, v):
+        if v not in {"manual", "quote", "statement"}:
+            raise ValueError("source must be 'manual', 'quote', or 'statement'")
         return v
 
 class TaxLot(BaseModel):
@@ -362,16 +390,26 @@ class HoldingImportRow(BaseModel):
     """Deliberately NOT the Holding model — asset_class isn't validated
     here so an invalid preview row can round-trip through preview ->
     edit -> commit without a 422 before the user gets a chance to fix
-    it (commit re-validates server-side before writing)."""
+    it (commit re-validates server-side before writing).
+
+    asset_class/expense_ratio/cost_basis/notes/value_date are all
+    Optional — a statement export that only carries account/ticker/
+    shares/value columns is a legitimate "just refresh the numbers"
+    import (item 2), not an invalid one. commit_holdings_import fills
+    in each omitted field from the MATCHED existing holding rather than
+    overwriting it with a blank; asset_class is the one exception that
+    is still required when the row creates a brand-new holding (there
+    is no existing classification to fall back to)."""
     account_id: int
     ticker: Optional[str] = None
     security_name: str
     shares: Optional[float] = None
     market_value: float
-    asset_class: str
+    asset_class: Optional[str] = None
     expense_ratio: Optional[float] = None
     cost_basis: Optional[float] = None
     notes: Optional[str] = None
+    value_date: Optional[str] = None
 
 class AccountInvestmentOption(BaseModel):
     """A general account-specific investment-option menu entry. NOT a
@@ -984,10 +1022,20 @@ def update_holding_management_mode(holding_id: int, update: HoldingManagementMod
 @app.patch("/api/holdings/{holding_id}/valuation")
 def update_holding_valuation(holding_id: int, update: HoldingValuationUpdate):
     conn = get_db()
-    cur = conn.execute(
-        "UPDATE holdings SET market_value=?, as_of_date=?, updated_at=datetime('now') WHERE id=?",
-        (update.market_value, update.as_of_date, holding_id),
-    )
+    if update.source in ("quote", "statement"):
+        data_source = "provider_quote" if update.source == "quote" else "statement"
+        cur = conn.execute(
+            "UPDATE holdings SET market_value=?, as_of_date=?, data_source=?, confidence='high', updated_at=datetime('now') WHERE id=?",
+            (update.market_value, update.as_of_date, data_source, holding_id),
+        )
+    else:
+        # "manual": never touches data_source/confidence -- this
+        # endpoint has always preserved whatever those already were for
+        # a plain manual value refresh, and that behavior is unchanged.
+        cur = conn.execute(
+            "UPDATE holdings SET market_value=?, as_of_date=?, updated_at=datetime('now') WHERE id=?",
+            (update.market_value, update.as_of_date, holding_id),
+        )
     if cur.rowcount == 0:
         conn.close()
         raise HTTPException(status_code=404, detail="Holding not found")
@@ -1033,12 +1081,45 @@ def delete_tax_lot(lot_id: int):
         raise HTTPException(status_code=404, detail="Tax lot not found")
     return {"deleted": lot_id}
 
+def _quote_freshness(is_live: bool, as_of: Optional[str]) -> "tuple[Optional[int], str]":
+    """Classifies a quote's price age into a plain freshness label the
+    UI can show without the caller having to reason about dates itself.
+    An offline/mock provider is always labeled "offline" regardless of
+    its own dated timestamp, since it was never a real market price to
+    begin with -- never implied as live just because it carries a date.
+    Thresholds (documented, not hidden): same/previous day is "live",
+    up to 5 calendar days is "delayed" (covers a provider's own
+    end-of-day/previous-close convention over a weekend), anything
+    older is "stale". An unparseable/missing date is "unknown" rather
+    than assumed fresh."""
+    if not is_live:
+        return None, "offline"
+    try:
+        price_date = datetime.strptime(str(as_of)[:10], "%Y-%m-%d").date()
+    except (TypeError, ValueError):
+        return None, "unknown"
+    age_days = (datetime.now().date() - price_date).days
+    if age_days < 0:
+        return age_days, "unknown"
+    if age_days <= 1:
+        return age_days, "live"
+    if age_days <= 5:
+        return age_days, "delayed"
+    return age_days, "stale"
+
+
 @app.get("/api/holdings/{holding_id}/quote-preview")
 def preview_holding_quote(holding_id: int):
     """Fetch a quote only when the user asks and never overwrite a holding.
 
     The response contains the value implied by the entered share count; the
     separate valuation endpoint is still an explicit user confirmation.
+
+    Reuses a still-fresh quote from earlier in this review session
+    (see security_provider.get_cached_or_fetch_quote) instead of always
+    hitting the provider again, and reports exactly why a quote could
+    not be produced (rate limit / provider error / symbol not found)
+    instead of one generic "no quote" message.
     """
     conn = get_db()
     row = conn.execute("SELECT * FROM holdings WHERE id=?", (holding_id,)).fetchone()
@@ -1049,17 +1130,27 @@ def preview_holding_quote(holding_id: int):
     if not holding.get("provider_identifier"):
         raise HTTPException(status_code=400, detail="Confirm this holding through ticker lookup before checking a provider quote.")
     from dataclasses import asdict
-    from security_provider import get_active_provider
-    quote = get_active_provider().get_quote(holding["provider_identifier"])
-    if quote is None:
-        return {"quote": None, "message": "No quote is available for this holding."}
+    from security_provider import get_active_provider, get_cached_or_fetch_quote
+    provider = get_active_provider()
+    result = get_cached_or_fetch_quote(holding["provider_identifier"])
+    base = {
+        "status": result.status, "source": provider.provider_name, "is_live": provider.is_live,
+        "cached": result.cached, "fetched_at": result.fetched_at,
+    }
+    if result.quote is None:
+        return {**base, "quote": None, "message": result.message}
+    quote = result.quote
     quoted = asdict(quote)
     implied_value = quote.price * holding["shares"] if holding.get("shares") is not None else None
+    price_age_days, freshness = _quote_freshness(provider.is_live, quote.as_of)
     return {
+        **base,
         "quote": quoted,
         "current_market_value": holding["market_value"],
         "implied_market_value": implied_value,
         "requires_confirmation": True,
+        "price_age_days": price_age_days,
+        "freshness": freshness,
         "message": "Review this quote before replacing the recorded holding value.",
     }
 
@@ -1191,8 +1282,19 @@ def compare_account_investment_options(req: OptionMixRequest):
     result["recorded_option_count"] = len(options)
     return result
 
+MATERIAL_QUOTE_DEVIATION_PCT = 5.0  # documented review threshold, item 2
+
+
 @app.post("/api/holdings/import/preview")
 async def preview_holdings_import(file: UploadFile = File(...)):
+    """Item 2: a row that MATCHES an existing holding is a value/date
+    refresh -- it never requires asset_class (missing/blank means "keep
+    the existing classification"). A row that would CREATE a brand-new
+    holding still needs one; there's nothing to fall back to. Also
+    flags, without deciding which number is right, when a matched
+    holding's imported value differs materially from a quote already
+    checked earlier in this session (never fetches a fresh quote here
+    -- see security_provider.peek_cached_quote)."""
     content = await file.read()
     try:
         text = content.decode("utf-8-sig")
@@ -1200,9 +1302,12 @@ async def preview_holdings_import(file: UploadFile = File(...)):
         text = content.decode("latin-1")
     conn = get_db()
     valid_account_ids = {r[0] for r in conn.execute("SELECT id FROM accounts").fetchall()}
-    existing = [dict(r) for r in conn.execute("SELECT id, account_id, ticker, security_name, market_value FROM holdings").fetchall()]
+    existing = [dict(r) for r in conn.execute(
+        "SELECT id, account_id, ticker, security_name, market_value, shares, provider_identifier FROM holdings"
+    ).fetchall()]
     conn.close()
     from holdings_engine import parse_holdings_csv
+    from security_provider import peek_cached_quote
     preview = parse_holdings_csv(text, valid_account_ids)
     for row in preview["rows"]:
         match = next((h for h in existing if h["account_id"] == row.get("account_id") and ((row.get("ticker") and h.get("ticker") and row["ticker"].upper() == h["ticker"].upper()) or row.get("security_name", "").lower() == h.get("security_name", "").lower())), None)
@@ -1210,6 +1315,30 @@ async def preview_holdings_import(file: UploadFile = File(...)):
         if match:
             row["matching_holding_id"] = match["id"]
             row["previous_market_value"] = match["market_value"]
+            if not row.get("valid"):
+                continue
+            if match.get("provider_identifier"):
+                cached = peek_cached_quote(match["provider_identifier"])
+                if cached is not None and cached.quote is not None:
+                    shares = row.get("shares") if row.get("shares") is not None else match.get("shares")
+                    if shares:
+                        quote_implied_value = round(cached.quote.price * shares, 2)
+                        if quote_implied_value > 0:
+                            deviation_pct = round(abs(row["market_value"] - quote_implied_value) / quote_implied_value * 100, 1)
+                            if deviation_pct >= MATERIAL_QUOTE_DEVIATION_PCT:
+                                row["quote_comparison"] = {
+                                    "quote_price": cached.quote.price, "quote_as_of": cached.quote.as_of,
+                                    "quote_implied_value": quote_implied_value, "imported_value": row["market_value"],
+                                    "deviation_pct": deviation_pct,
+                                    "message": "This imported value differs from a quote checked earlier this session by "
+                                               f"{deviation_pct}%. Review both before importing -- this does not decide which is correct.",
+                                }
+        elif not row.get("asset_class"):
+            row["valid"] = False
+            row["errors"] = row.get("errors", []) + ["asset_class is required for a new holding (no existing holding to keep it from)"]
+            preview["errors"].append({"row": row["row"], "message": row["errors"][-1]})
+    preview["valid_count"] = sum(1 for r in preview["rows"] if r["valid"])
+    preview["invalid_count"] = sum(1 for r in preview["rows"] if not r["valid"])
     preview["update_count"] = sum(row.get("import_action") == "update" for row in preview["rows"] if row.get("valid"))
     preview["create_count"] = sum(row.get("import_action") == "create" for row in preview["rows"] if row.get("valid"))
     imported_account_ids = {row.get("account_id") for row in preview["rows"] if row.get("valid")}
@@ -1223,29 +1352,66 @@ async def preview_holdings_import(file: UploadFile = File(...)):
 
 @app.post("/api/holdings/import/commit")
 def commit_holdings_import(rows: List[HoldingImportRow]):
+    """Item 2: refreshes shares/market_value/value_date on a matched
+    holding while PRESERVING classification (asset_class/exposures),
+    cost_basis, expense_ratio, and notes unless the import row
+    EXPLICITLY supplies a replacement (a non-blank value) -- a CSV that
+    only carries shares/value/value_date can never silently blank out
+    an existing classification or cost basis. management_mode and tax
+    lots are untouched by construction (this UPDATE never mentions
+    either column/table). Recorded as data_source='statement',
+    confidence='high' (both create and update) -- a statement import is
+    an authoritative source, not a guess, and should not trip Coach's
+    low-confidence-manual-entry review the way a typed number does."""
     from holdings_engine import ASSET_CLASSES
     conn = get_db()
     valid_account_ids = {r[0] for r in conn.execute("SELECT id FROM accounts").fetchall()}
     created = 0
     updated = 0
     skipped = []
+    today = datetime.now().date().isoformat()
     for row in rows:
         if row.account_id not in valid_account_ids:
             skipped.append({"security_name": row.security_name, "reason": f"account_id {row.account_id} does not exist"})
             continue
-        if row.asset_class not in ASSET_CLASSES:
-            skipped.append({"security_name": row.security_name, "reason": f"asset_class '{row.asset_class}' is not one of {sorted(ASSET_CLASSES)}"})
-            continue
         existing = conn.execute(
-            "SELECT id FROM holdings WHERE account_id=? AND ((? IS NOT NULL AND upper(ticker)=upper(?)) OR lower(security_name)=lower(?)) LIMIT 1",
+            "SELECT * FROM holdings WHERE account_id=? AND ((? IS NOT NULL AND upper(ticker)=upper(?)) OR lower(security_name)=lower(?)) LIMIT 1",
             (row.account_id, row.ticker, row.ticker, row.security_name),
         ).fetchone()
         if existing:
-            conn.execute("UPDATE holdings SET ticker=?, security_name=?, shares=?, market_value=?, asset_class=?, expense_ratio=?, cost_basis=?, notes=?, data_source='manual', confidence='low', updated_at=datetime('now') WHERE id=?",
-                         (row.ticker, row.security_name, row.shares, row.market_value, row.asset_class, row.expense_ratio, row.cost_basis, row.notes, existing["id"]))
+            existing = dict(existing)
+            asset_class = row.asset_class or existing["asset_class"]
+            expense_ratio = row.expense_ratio if row.expense_ratio is not None else existing["expense_ratio"]
+            cost_basis = row.cost_basis if row.cost_basis is not None else existing["cost_basis"]
+            notes = row.notes if row.notes is not None else existing["notes"]
+            shares = row.shares if row.shares is not None else existing["shares"]
+            as_of_date = row.value_date or today
+            # A confirmed provider_identifier (from ticker lookup) is
+            # tied to a SPECIFIC ticker -- if the import explicitly
+            # supplies a different, non-blank ticker, the old
+            # provider_identifier no longer describes the same
+            # security and must not be silently kept pointing at it.
+            # Omitting the ticker column (None) never touches either.
+            ticker = row.ticker if row.ticker is not None else existing["ticker"]
+            provider_identifier = existing["provider_identifier"]
+            if row.ticker is not None and existing["ticker"] and row.ticker.strip().upper() != existing["ticker"].strip().upper():
+                provider_identifier = None
+            conn.execute(
+                "UPDATE holdings SET ticker=?, provider_identifier=?, security_name=?, shares=?, market_value=?, asset_class=?, expense_ratio=?, "
+                "cost_basis=?, notes=?, as_of_date=?, data_source='statement', confidence='high', updated_at=datetime('now') WHERE id=?",
+                (ticker, provider_identifier, row.security_name, shares, row.market_value, asset_class, expense_ratio, cost_basis, notes, as_of_date, existing["id"]),
+            )
             updated += 1
         else:
-            _insert_holding(conn, {**row.model_dump(), "data_source": "manual", "confidence": "low"})
+            if not row.asset_class:
+                skipped.append({"security_name": row.security_name, "reason": "asset_class is required for a new holding"})
+                continue
+            if row.asset_class not in ASSET_CLASSES:
+                skipped.append({"security_name": row.security_name, "reason": f"asset_class '{row.asset_class}' is not one of {sorted(ASSET_CLASSES)}"})
+                continue
+            values = row.model_dump(exclude={"value_date"})
+            values["as_of_date"] = row.value_date or today
+            _insert_holding(conn, {**values, "data_source": "statement", "confidence": "high"})
             created += 1
     conn.commit()
     conn.close()
@@ -1667,9 +1833,43 @@ def portfolio_planning_comparison(req: PlanningComparisonRequest):
 
 # ── Recommendation engine: generate/list/decide (decision lifecycle) ────
 
+def _load_household_tax_lot_context(conn, holdings: List[Dict]):
+    """Loads every recorded tax lot for the given holdings, plus a
+    flattened household-wide list (ticker/name + account identity) used
+    only for the wash-sale same-ticker-purchase check -- that check
+    deliberately looks across ALL accounts (including retirement
+    accounts), since a wash sale can be triggered by a purchase in any
+    account the household actually recorded, not just the one being
+    reviewed for a loss."""
+    holdings_by_id = {h["id"]: h for h in holdings}
+    if not holdings_by_id:
+        return {}, []
+    placeholders = ",".join("?" * len(holdings_by_id))
+    rows = conn.execute(
+        f"SELECT * FROM tax_lots WHERE holding_id IN ({placeholders}) ORDER BY acquired_date", tuple(holdings_by_id),
+    ).fetchall()
+    lots_by_holding_id: Dict[int, List[Dict]] = {}
+    household_lots_for_wash_sale: List[Dict] = []
+    for row in rows:
+        lot = dict(row)
+        lots_by_holding_id.setdefault(lot["holding_id"], []).append(lot)
+        parent = holdings_by_id.get(lot["holding_id"], {})
+        household_lots_for_wash_sale.append({
+            "lot_id": lot["id"],
+            "ticker_or_name": parent.get("ticker") or parent.get("security_name"),
+            "acquired_date": lot["acquired_date"],
+            "account_id": parent.get("account_id"),
+            "account_name": None,  # filled in by the caller, which has account rows
+        })
+    return lots_by_holding_id, household_lots_for_wash_sale
+
+
 def _generate_candidate_cards(accounts, holdings, policy, pending_contribution: float = 0.0,
                               options_by_account: Optional[Dict[int, List[Dict]]] = None,
-                              goal_context: Optional[Dict] = None) -> List[Dict]:
+                              goal_context: Optional[Dict] = None,
+                              lots_by_holding_id: Optional[Dict[int, List[Dict]]] = None,
+                              household_lots_for_wash_sale: Optional[List[Dict]] = None,
+                              today: Optional[str] = None) -> List[Dict]:
     """Runs every coach_engine tier over already-loaded data and returns
     a single prioritized candidate list. Never re-derives a calculation
     holdings_engine.py already owns — this only classifies/compares/
@@ -1695,7 +1895,12 @@ def _generate_candidate_cards(accounts, holdings, policy, pending_contribution: 
     cards += ce.concentration_and_liquidity_recommendations(classified["household"], policy, household_cash)
     cards += ce.high_cost_or_redundant_recommendations(classified["household"])
     cards += ce.asset_location_recommendations(classified, options_by_account)
-    cards += ce.taxable_loss_review_recommendations(classified["household"])
+    lots_by_holding_id = lots_by_holding_id or {}
+    holding_ids_with_lots = {h.get("id") for h in classified["household"] if lots_by_holding_id.get(h.get("id"))}
+    cards += ce.tax_lot_loss_review_recommendations(
+        classified["household"], lots_by_holding_id, household_lots_for_wash_sale, today=today,
+    )
+    cards += ce.taxable_loss_review_recommendations(classified["household"], holding_ids_with_lots)
     cards += ce.minor_optimization_recommendations(classified["household"], goal_context or {})
 
     if not policy:
@@ -1838,9 +2043,16 @@ def get_recommendations(pending_contribution: float = 0.0):
     for row in conn.execute("SELECT * FROM account_investment_options").fetchall():
         options_by_account.setdefault(row["account_id"], []).append(_option_row_to_dict(row))
     goal_context = _portfolio_goal_context(conn, accounts, policy)
+    lots_by_holding_id, household_lots_for_wash_sale = _load_household_tax_lot_context(conn, holdings)
+    account_names_by_id = {a["id"]: a.get("name") for a in accounts}
+    for lot in household_lots_for_wash_sale:
+        lot["account_name"] = account_names_by_id.get(lot["account_id"])
     candidates = _generate_candidate_cards(accounts, holdings, policy, pending_contribution,
                                             options_by_account=options_by_account,
-                                            goal_context=goal_context)
+                                            goal_context=goal_context,
+                                            lots_by_holding_id=lots_by_holding_id,
+                                            household_lots_for_wash_sale=household_lots_for_wash_sale,
+                                            today=datetime.now().date().isoformat())
     _reconcile_and_persist_recommendations(conn, candidates)
     active_statuses = ("proposed", "reviewing", "accepted")
     placeholders = ",".join("?" * len(active_statuses))

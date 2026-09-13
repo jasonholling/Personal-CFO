@@ -200,3 +200,68 @@ describe('PortfolioCoach value_unit rendering (external review finding #11)', ()
     expect(container.textContent).not.toContain('50%')
   })
 })
+
+describe('PortfolioCoach lot-aware tax-loss review card (item 1)', () => {
+  const lotReviewResponse = {
+    has_policy: true,
+    recommendations: [{
+      id: 3, category: 'minor_optimization', status: 'proposed',
+      payload: {
+        title: 'Review lot-level loss on VTI (2020-01-01)',
+        action_text: 'Lot acquired 2020-01-01 (100 shares, long-term) is worth an estimated $8,000 against a cost basis of $10,000 -- an unrealized loss of $2,000 (-20.0%) as of 2024-08-01. Review wash-sale exposure and your intended replacement investment before acting.',
+        current_value: 8000, target_value: 10000, value_unit: 'currency',
+        proposed_change: 'Review, do not automatically sell',
+        expected_effect: 'Potential tax-loss review opportunity at the individual tax-lot level.',
+        tax_impact: { has_cost_basis: true, estimated_gain: -2000 },
+        assumptions: [
+          'This is a review candidate, not an instruction to sell or harvest this lot.',
+          'Possible wash-sale conflict -- review before acting: this app found a recorded purchase of VTI within 30 days of the potential sale date in Other Brokerage.',
+        ],
+        confidence: 'low', recommendation_key: 'tax_lot_loss_review:1:1:None:lot1',
+        affected_accounts: [1],
+      },
+    }],
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    setPrivacyMode(false)
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    root = createRoot(container)
+    axios.get.mockImplementation(url => {
+      if (url === '/api/recommendations') return Promise.resolve({ data: lotReviewResponse })
+      if (url === '/api/portfolio/allocation') return Promise.resolve({ data: { has_holdings: false } })
+      if (url === '/api/accounts') return Promise.resolve({ data: [{ id: 1, name: 'Brokerage' }] })
+      return Promise.resolve({ data: {} })
+    })
+  })
+  afterEach(async () => {
+    await act(async () => root.unmount())
+    container.remove()
+  })
+
+  it('shows the specific lot, its loss, and never claims a gain', async () => {
+    await act(async () => root.render(<PortfolioCoach />))
+    await flush()
+    expect(container.textContent).toContain('2020-01-01')
+    expect(container.textContent).toContain('long-term')
+    expect(container.textContent).toContain('$8,000')
+    expect(container.textContent).toContain('$10,000')
+    expect(container.textContent).toContain('Estimated taxable loss')
+    expect(container.textContent).not.toContain('Estimated taxable gain')
+  })
+
+  it('surfaces the wash-sale caution and never claims a sale is wash-sale-safe', async () => {
+    await act(async () => root.render(<PortfolioCoach />))
+    await flush()
+    expect(container.textContent).toContain('Possible wash-sale conflict')
+    expect(container.textContent.toLowerCase()).not.toContain('wash-sale safe')
+  })
+
+  it('never shows a sell instruction for a loss-review card', async () => {
+    await act(async () => root.render(<PortfolioCoach />))
+    await flush()
+    expect(container.textContent).toContain('Review, do not automatically sell')
+  })
+})

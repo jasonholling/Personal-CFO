@@ -175,7 +175,7 @@ describe('PortfolioSetup workflows', () => {
     const date = refreshForm.querySelector('input[type="date"]')
     await setInput(date, '2026-09-13')
     await act(async () => [...container.querySelectorAll('button')].find(b => b.textContent === 'Save refreshed value').click())
-    expect(axios.patch).toHaveBeenCalledWith('/api/holdings/7/valuation', { market_value: 1250, as_of_date: '2026-09-13' })
+    expect(axios.patch).toHaveBeenCalledWith('/api/holdings/7/valuation', { market_value: 1250, as_of_date: '2026-09-13', source: 'manual' })
   })
 
   it('shows a fetched quote for a confirmed holding and requires an explicit value update', async () => {
@@ -183,18 +183,40 @@ describe('PortfolioSetup workflows', () => {
       url === '/api/accounts' ? [{ id: 1, name: 'Brokerage', account_type: 'taxable', balance: 1000 }] :
       url === '/api/holdings/grouped' ? { groups: [{ account_id: 1, account_name: 'Brokerage', portfolio_account_type: 'taxable', holdings_total: 500,
         account_balance: 1000, unreconciled_remainder: 500, has_warning: true, holdings: [{ id: 7, account_id: 1, security_name: 'VTI', ticker: 'VTI', provider_identifier: 'MOCK:VTI', shares: 2, market_value: 500, asset_class: 'us_large_cap', exposures: [] }] }] } :
-      url === '/api/holdings/7/quote-preview' ? { quote: { price: 275.4, as_of: '2026-09-13' }, implied_market_value: 550.8, requires_confirmation: true } :
+      url === '/api/holdings/7/quote-preview' ? { quote: { price: 275.4, as_of: '2026-09-13' }, implied_market_value: 550.8, requires_confirmation: true,
+        status: 'ok', source: 'Built-in offline catalog', is_live: false, freshness: 'offline', cached: false } :
+      url === '/api/account-investment-options' ? [] : url === '/api/investment-policy' ? { has_policy: false } : []
+    }))
+    axios.patch.mockResolvedValue({ data: {} })
+    await act(async () => root.render(<PortfolioSetup />))
+    await flush()
+    await act(async () => [...container.querySelectorAll('button')].find(b => b.textContent === 'Check quote').click())
+    await flush()
+    expect(container.textContent).toContain('2 shares implies $551')
+    expect(container.textContent).toContain('Built-in offline catalog')
+    expect(container.textContent).toContain('Offline catalog price')
+    expect(axios.patch).not.toHaveBeenCalled()
+    await act(async () => [...container.querySelectorAll('button')].find(b => b.textContent === 'Use quote value').click())
+    await flush()
+    expect(container.textContent).toContain('Save refreshed value')
+    expect(container.textContent).toContain('This value comes from a provider quote')
+    await act(async () => [...container.querySelectorAll('button')].find(b => b.textContent === 'Save refreshed value').click())
+    expect(axios.patch).toHaveBeenCalledWith('/api/holdings/7/valuation', { market_value: 550.8, as_of_date: '2026-09-13', source: 'quote' })
+  })
+
+  it('shows a clear message when the provider rate-limits a quote check', async () => {
+    axios.get.mockImplementation(url => Promise.resolve({ data:
+      url === '/api/accounts' ? [{ id: 1, name: 'Brokerage', account_type: 'taxable', balance: 1000 }] :
+      url === '/api/holdings/grouped' ? { groups: [{ account_id: 1, account_name: 'Brokerage', portfolio_account_type: 'taxable', holdings_total: 500,
+        account_balance: 1000, unreconciled_remainder: 500, has_warning: true, holdings: [{ id: 7, account_id: 1, security_name: 'VTI', ticker: 'VTI', provider_identifier: 'MOCK:VTI', shares: 2, market_value: 500, asset_class: 'us_large_cap', exposures: [] }] }] } :
+      url === '/api/holdings/7/quote-preview' ? { quote: null, status: 'rate_limited', message: 'Alpha Vantage rate-limited this request. Try again in a minute.' } :
       url === '/api/account-investment-options' ? [] : url === '/api/investment-policy' ? { has_policy: false } : []
     }))
     await act(async () => root.render(<PortfolioSetup />))
     await flush()
     await act(async () => [...container.querySelectorAll('button')].find(b => b.textContent === 'Check quote').click())
     await flush()
-    expect(container.textContent).toContain('2 shares implies $551')
-    expect(axios.patch).not.toHaveBeenCalled()
-    await act(async () => [...container.querySelectorAll('button')].find(b => b.textContent === 'Use quote value').click())
-    await flush()
-    expect(container.textContent).toContain('Save refreshed value')
+    expect(container.textContent).toContain('rate-limited')
   })
 
   it('opens taxable tax-lot entry from the holding it belongs to', async () => {
@@ -372,6 +394,25 @@ describe('PortfolioSetup workflows', () => {
     const commit = [...container.querySelectorAll('button')].find(b => b.textContent.includes('Import 1 valid row'))
     await act(async () => { commit.click(); await Promise.resolve() })
     expect(axios.post).toHaveBeenCalledWith('/api/holdings/import/commit', [expect.objectContaining({ security_name: 'Fund' })])
+  })
+
+  it('shows a review message when an imported value differs from a quote checked this session, without deciding which is right', async () => {
+    axios.post.mockImplementation(url => {
+      if (url === '/api/holdings/import/preview') return Promise.resolve({ data: {
+        rows: [{ row: 2, account_id: 1, security_name: 'VTI', market_value: 1000, asset_class: null, valid: true, import_action: 'update',
+          quote_comparison: { quote_price: 275.4, quote_implied_value: 2754, imported_value: 1000, deviation_pct: 63.7,
+            message: 'This imported value differs from a quote checked earlier this session by 63.7%. Review both before importing -- this does not decide which is correct.' } }],
+        errors: [], valid_count: 1, invalid_count: 0,
+      } })
+      return Promise.resolve({ data: {} })
+    })
+    await act(async () => root.render(<PortfolioSetup />))
+    await flush()
+    const input = container.querySelector('input[aria-label="Holdings CSV"]')
+    const file = new File(['account_id,ticker,security_name,shares,market_value\n1,VTI,VTI,10,1000'], 'holdings.csv', { type: 'text/csv' })
+    await act(async () => { Object.defineProperty(input, 'files', { value: [file] }); input.dispatchEvent(new Event('change', { bubbles: true })); await Promise.resolve() })
+    expect(container.textContent).toContain('differs from a quote checked earlier this session')
+    expect(container.textContent).toContain('does not decide which is correct')
   })
 
   it('shows the account-option limits and restrictions controls', async () => {

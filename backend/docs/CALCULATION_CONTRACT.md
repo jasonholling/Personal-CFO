@@ -7200,3 +7200,469 @@ basis. Those remain user-confirmed facts.
 Employer/legacy exception editing and holding-level exclusion are
 supported by the API policy model but this pass only adds the requested
 account-exclusion UI.
+
+## 79. Portfolio Coach next backlog — lot-aware tax review (item 1), and planning-model design proposals (item 6) (2026-09-13, `codex/portfolio-coach-next-backlog`)
+
+Branch: `codex/portfolio-coach-next-backlog`, from `origin/main` at
+`4ad529b`. This section documents item 1 (implemented, tested) and item
+6 (design-only, no calculation changes) of a six-item follow-on brief.
+Items 2-5 of that brief (quote reliability/statement refresh, household
+review-workflow integration, per-account investment constraints, and a
+reviewable tax-location comparison) are **not implemented on this
+branch** — see the branch's own final status note at the end of this
+section for exactly what was and wasn't reached.
+
+### Item 1: lot-aware taxable-loss review (implemented)
+
+Builds on the existing `tax_lots` table (added in the prior "Add tax
+lots and holding quote previews" commit, itself undocumented in this
+contract until now) and the existing aggregate
+`coach_engine.taxable_loss_review_recommendations()` (which used only a
+holding's own aggregate `cost_basis`, explicitly flagged in its own
+card as "Uses aggregate cost basis, not tax lots").
+
+**New pure functions in `holdings_engine.py`:**
+
+- `classify_lot_term(acquired_date, as_of_date=None)` — `"short_term"` /
+  `"long_term"` / `"unknown"`. Long-term boundary is `> 365` days
+  (`LONG_TERM_HOLDING_PERIOD_DAYS`), a deliberate simplification of the
+  IRC "more than one year" rule that does not account for leap years —
+  documented, not silently assumed exact. Returns `"unknown"` when the
+  acquisition date is missing, unparseable, or after the reference date
+  — never a guessed term.
+- `evaluate_tax_lots(holding, lots)` — per-lot current value and
+  gain/loss, priced ONLY from the parent holding's own recorded
+  `market_value / shares` (never a live quote, never invented). A lot
+  missing shares or cost basis, or a holding missing shares or market
+  value, gets `limitation` set and `current_value`/`gain_loss`/
+  `gain_loss_pct` left `None` — never a false zero or a best-guess
+  number. Every entry carries `current_price_date` (the holding's own
+  `as_of_date`) so the UI can show exactly which price the figure came
+  from.
+- `is_lot_loss_candidate(evaluation, threshold_pct=DEFAULT_TAX_LOT_LOSS_REVIEW_THRESHOLD_PCT)`
+  — `DEFAULT_TAX_LOT_LOSS_REVIEW_THRESHOLD_PCT = 1.0`: a documented,
+  overridable review threshold (loss must be at least 1% of the lot's
+  own cost basis), not a hidden magic number. A lot with a limitation,
+  or a flat/profitable lot, is never a candidate.
+- `detect_wash_sale_conflicts(ticker_or_name, exclude_lot_id, household_lots, potential_sale_date=None)`
+  — flags other RECORDED lots (any holding, any account, including
+  retirement accounts) sharing the same ticker/security name acquired
+  within the IRC Sec. 1091 61-day window (`WASH_SALE_WINDOW_DAYS = 30`
+  each side) of a potential sale date (defaults to today, since the
+  loss has not actually been realized yet). This can only see purchases
+  actually entered in this app — it cannot see outside brokerage
+  accounts or a spouse's separate, unrecorded accounts, and every card
+  built from it says so explicitly. It never returns or implies
+  "wash-sale safe" — absence of a detected conflict is stated as "no
+  conflict this app can see," never as clearance.
+
+**New card generator in `coach_engine.py`:**
+`tax_lot_loss_review_recommendations(household_holdings, lots_by_holding_id, household_lots_for_wash_sale, today=None, threshold_pct=...)`
+— a SEPARATE recommendation type from the aggregate review (distinct
+`tax_lot_loss_review` key prefix, one card per candidate lot, still
+tier 8/`minor_optimization` — the existing 8-tier priority order from
+section 77 is unchanged; this is a new card type within the existing
+tier, not a 9th tier). Every card names the specific lot (acquisition
+date, shares, term), the estimated loss, the current-price date used,
+and — when a same-ticker purchase was found within the window — an
+explicit "possible wash-sale conflict — review before acting" warning
+that also lowers the card's `confidence` to `"low"`. `proposed_change`
+is always `"Review, do not automatically sell"`, matching the aggregate
+card's own wording; nothing here is ever an instruction to harvest.
+
+Retirement-account exclusion is structural, not a special case: both
+the lot-aware and aggregate functions only run for holdings whose
+`_portfolio_account_type` is in `TAXABLE_GAIN_TYPES` (`{"brokerage"}`),
+so a loss lot recorded against a 401(k)/IRA/HSA/Roth holding is never
+presented as a taxable-loss-harvesting candidate, regardless of lot
+data quality.
+
+**Fallback preserved:** `taxable_loss_review_recommendations()` now
+takes an optional `holding_ids_with_lots` set (built by `main.py` from
+whichever household holdings actually have `tax_lots` rows) and skips
+those holdings — so a taxable holding keeps getting exactly one loss
+card, from whichever mechanism actually has the data, never both and
+never neither.
+
+**`main.py` wiring:** `_load_household_tax_lot_context()` loads every
+tax lot for the currently-loaded holdings plus a flattened,
+ticker/name-indexed household-wide list (used only for the wash-sale
+cross-account check) and threads both into `_generate_candidate_cards()`
+via `GET /api/recommendations`. No new table, no new lifecycle: these
+cards flow through the exact same `reconcile_recommendation_queue()`
+proposed → reviewing → accepted/deferred/rejected → completed/
+invalidated machinery every other recommendation category already uses
+(their `recommendation_key` includes the specific lot id, so accepting/
+deferring one lot's card is independent of any other lot on the same
+holding).
+
+**Tests:** `tests/test_holdings_engine.py` (`TestClassifyLotTerm`,
+`TestEvaluateTaxLots`, `TestDetectWashSaleConflicts`) and
+`tests/test_coach_engine.py` (`TestTaxLotLossReviewRecommendations`,
+plus two new cases on the existing aggregate-review test class)
+directly cover every case item 1 required: a long-term loss lot becomes
+a candidate; a short-term loss lot is labeled short-term; a profitable
+lot is never a candidate; missing shares/value/cost-basis produce a
+`limitation`, never a fabricated number; a same-ticker purchase inside
+the 30-day window produces the possible-conflict warning; a loss lot in
+a retirement (`ira`) account produces no card; the aggregate fallback
+still runs, unchanged, for a holding with no recorded lots, and is
+skipped for one that has lots.
+
+**Known limitation, stated rather than silently assumed handled:** lot
+disposal method (FIFO/specific-lot/average-cost) is not modeled — this
+is a REVIEW tool that surfaces which lots are currently at a loss, not
+a lot-selection or trade-execution engine, and it never claims to know
+which lot a broker would actually sell.
+
+### Item 6: planning-model backlog — design proposals only (no calculation changes)
+
+Per the controlling brief, these five items are documentation only on
+this branch. Nothing in `projection_engine.py`/`simulation_engine.py`
+was changed to support them.
+
+**6.1 — Real payroll-tax modeling for a working spouse during
+phased/two-age retirement.**
+*Current state:* `projection_engine.py`'s two-age bridge-income path
+(`two_age_still_working_income_inputs`, consumed by both
+`run_two_dimensional_retirement_projection` and
+`simulation_engine.py`'s two-age Monte Carlo/Stress Tests) already
+models a working spouse's gross salary during phase 1, but applies the
+household's single flat effective tax rate to it — the code's own
+comment at the second-earner gap-income fix (2026-09-08) states this
+explicitly: "NOT a real payroll/capital-gains-bracket model."
+*Dependencies:* needs a real federal/FICA/state bracket table (does not
+exist anywhere in this codebase today — no `tax_engine.py`), and a
+decision on state (this household's state, configurable, not
+hardcoded per CLAUDE.md's "no hardcoded personal data" rule).
+*Design:* a new pure `payroll_tax_engine.py` taking
+`(gross_wages, filing_status, state)` and returning
+`{federal_income_tax, oasdi, medicare, additional_medicare, state_income_tax, net}`,
+using bracket tables as versioned constants (mirroring
+`RMD_TABLE`'s own versioning pattern) so a future tax-year update is a
+data change, not a logic change. `two_age_still_working_income_inputs`
+would call it instead of applying the flat blended rate to salary
+income specifically, while investment-withdrawal income keeps using
+the existing effective-rate approximation (full marginal-bracket
+modeling of combined wage + withdrawal income is a larger, separate
+project, out of scope for this item).
+*Example:* Justin works through age 62 earning $85,000/year while Jason
+is already retired at 60; today the projection taxes that $85,000 at
+the same ~18% blended rate as pension/withdrawal income. The real
+model would apply 2026 married-filing-jointly brackets + 6.2%/1.45%
+FICA to that wage income specifically, producing a materially lower net
+bridge-income figure in high-earner scenarios.
+*Acceptance criteria:* (a) a wage-income tax calculation with a
+documented bracket-table source/year and unit tests spanning every
+bracket boundary; (b) the two-age bridge-income path uses it for wage
+income only, with the existing withdrawal-income tax path completely
+unchanged (regression tests proving byte-identical output for every
+retiree-only scenario, i.e. zero wage income); (c) the state selection
+is a `planning_inputs` field, never a hardcoded value.
+
+**6.2 — Per-spouse RMDs while both spouses are alive.**
+*Current state:* explicitly out of scope today —
+`owner_split_retirement_projection`'s own docstring states "RMD stays
+aggregate, Jason-anchored, matching every other two-age consumer;
+per-spouse RMDs during normal both-alive operation are explicitly out
+of scope per section 37.4." The only per-spouse RMD logic that exists
+at all is the Survivor Scenario's one-time death-year event
+(`death_jason_age`/`deceased` params on the same function), not a
+recurring per-spouse calculation.
+*Dependencies:* item 6.2 needs each spouse's own pretax balance tracked
+separately (the owner-split buckets already exist for Survivor
+Scenario, so the balance-tracking infrastructure is close, but the RMD
+computation itself is still a single aggregate call keyed to Jason's
+age via `rmd_start_age`/`RMD_TABLE`).
+*Design:* extend the owner-split walk to compute RMD_TABLE lookups
+twice per year (once per spouse's own age and own pretax bucket) once
+both spouses have independently reached their own RMD start age, sum
+the two mandatory amounts into that year's total required withdrawal,
+and continue funding spending from the existing draw order. The pooled
+`run_two_dimensional_retirement_projection` (used by SWR/Monte
+Carlo/Roth Conversion/Tax Efficiency per the section 37.4 note) would
+need its own equivalent change or an explicit, documented decision to
+leave it aggregate-only and route every RMD-sensitive planning page
+through the owner-split path instead — a real architectural choice, not
+a detail to discover mid-implementation.
+*Example:* Jason turns 73 in year 5, Justin turns 73 in year 8 (three
+years younger) — today's aggregate model starts RMDs on the household's
+whole pretax balance at Jason's age-73 year; the per-spouse model would
+require only Jason's own pretax-bucket RMD in years 5-7, and both
+spouses' RMDs summed from year 8 onward.
+*Acceptance criteria:* (a) a household with a 3+ year spouse age gap
+produces a different, smaller total year-5 RMD than today's aggregate
+model, matched by hand-calculation; (b) a household with both spouses
+the same age (edge case) produces the same total RMD as today's
+aggregate model (regression-safe); (c) an explicit, documented decision
+on whether the pooled projection path adopts this or stays aggregate.
+
+**6.3 — Inherited IRA and survivor tax/RMD transitions.**
+*Current state:* Survivor Scenario (section referenced in
+`owner_split_retirement_projection`'s docstring) models a spouse's
+death and incorporates the deceased's own final-year RMD, but nothing
+in this codebase models what happens to the SURVIVING spouse's inherited
+share afterward — a surviving spouse's 10-year inherited-IRA
+distribution rule (for a non-spousal beneficiary) or spousal rollover
+treatment (for the surviving spouse, who typically rolls the deceased's
+IRA into their own) is not modeled at all.
+*Dependencies:* item 6.2 (per-spouse RMD tracking) should land first,
+since inherited-RMD rules are computed per-owner, not aggregate; also
+needs a decision on scope — a full non-spousal 10-year inherited-IRA
+depletion schedule is materially different work from a spousal-rollover
+"treat it as the survivor's own IRA" simplification.
+*Design:* for the common case in this app (surviving spouse, spousal
+rollover), the simplest correct model is: on the death-year event
+already in Survivor Scenario, merge the deceased's pretax balance into
+the survivor's own pretax bucket (spousal rollover treatment — no
+change to RMD start age, since the survivor uses their own age going
+forward) rather than tracking a separate "inherited" bucket. A
+non-spousal inherited IRA (e.g., an adult child inheriting) is a
+different, larger feature (10-year full-depletion rule, no RMD-based
+stretch) and should be scoped as a distinct, later item if this
+household's estate plan ever needs it — flagged here as a real gap,
+not silently assumed unnecessary.
+*Example:* Jason dies in year 10; today's Survivor Scenario handles
+that year's RMD correctly but has no explicit statement of what
+happens to Jason's pretax balance in year 11 onward. The spousal-
+rollover design merges it into Justin's own pretax bucket, using
+Justin's own age for all future RMD calculations.
+*Acceptance criteria:* (a) after the death year, the survivor's pretax
+balance equals pre-death survivor pretax + deceased's pretax (minus
+that year's withdrawals/RMDs), explicit in a test; (b) all future RMDs
+use the survivor's own age/RMD_TABLE lookup, not the deceased's; (c)
+the non-spousal inherited-IRA case is explicitly out of scope and
+stated as such in both code comments and this contract, not silently
+unhandled.
+
+**6.4 — Two-age retirement heatmap/matrix UI.**
+*Current state:* the calculation engines already support arbitrary
+(jason_retirement_age, justin_retirement_age) pairs via the two-age
+dispatch path (`_run_single_two_age` and siblings in
+`simulation_engine.py`), but no page runs a GRID of combinations and
+visualizes the result — `RetirementSensitivity.jsx` (existing page)
+sensitizes one axis at a time, not a two-age matrix.
+*Dependencies:* none new on the calculation side — this is a frontend
++ orchestration item once 6.1/6.2 don't need to land first (it can
+target today's existing two-age engine as-is).
+*Design:* a new backend endpoint,
+`POST /api/retirement/two-age-heatmap`, taking `jason_age_range` and
+`justin_age_range` (each a list of candidate ages, capped at a
+reasonable grid size — e.g. 5x5 — to bound compute), running the
+existing `run_two_dimensional_retirement_projection`/`run_monte_carlo`
+once per cell, and returning a matrix of
+`{jason_age, justin_age, percent_funded, monte_carlo_success_rate}`.
+Frontend: a new page or a `RetirementSensitivity.jsx` tab rendering the
+matrix as a color-scaled grid (reusing the app's existing Recharts
+patterns/CSS variables, not a new charting library). Compute cost is
+the main design risk — a naive 5x5 grid is 25 full projection runs;
+the endpoint should support a smaller default grid with an explicit
+"compute more" action rather than a large grid on every page load.
+*Example:* a 5x5 grid spanning Jason 58-66 and Justin 58-66 in 2-year
+steps, each cell colored green ("fully funded, high Monte Carlo success)
+through red (early depletion risk), so a household can see at a glance
+which combinations of retirement ages are safe.
+*Acceptance criteria:* (a) endpoint returns byte-identical per-cell
+figures to calling the existing single-pair endpoints directly for the
+same age pair (no re-derived math); (b) a documented, enforced grid-size
+cap with a clear error message beyond it; (c) frontend renders without
+blocking the main thread (loading state while the grid computes).
+
+**6.5 — Filing-status modeling beyond the current household
+assumptions.**
+*Current state:* this app assumes one household, married, with no
+filing-status field anywhere in `planning_inputs` or the tax-rate
+approximations used across `projection_engine.py`/`simulation_engine.py`
+(`grep` for `filing_status` across the backend returns nothing). Every
+effective-tax-rate figure is a single household-level approximation,
+not a bracket calculation keyed to a filing status.
+*Dependencies:* real bracket-table infrastructure from 6.1's
+`payroll_tax_engine.py` (or an equivalent), since filing status only
+matters once real brackets exist to select between.
+*Design:* add a `filing_status` field to `planning_inputs`
+(`"married_filing_jointly"` default, `"married_filing_separately"`,
+`"single"`, `"head_of_household"` — relevant post-widowhood, connecting
+to item 6.3) and thread it through every bracket lookup the new
+`payroll_tax_engine.py` performs. The existing single flat
+effective-rate approximation for withdrawal income would remain the
+default for households that don't need bracket precision, with
+filing-status-aware brackets as an opt-in "more precise" mode — a
+smaller, incremental change rather than replacing the existing
+approximation outright, since a wholesale replacement risks silently
+changing every existing projection's numbers.
+*Example:* a widowed survivor filing as `"single"` the year after a
+spouse's death faces materially higher marginal rates on the same
+withdrawal income than the same household filing jointly — today's
+model cannot show that transition at all.
+*Acceptance criteria:* (a) `filing_status` is a stored, versioned
+`planning_inputs` field (participates in `assumption_reviews` per the
+existing pattern); (b) changing it changes computed tax only when the
+new bracket-aware mode is active — the existing flat-rate default is
+completely unaffected (regression tests); (c) item 6.3's post-death
+year transition can set `filing_status` to `"single"`/
+`"head_of_household"` automatically as a documented, overridable
+default, not a silent assumption baked into the death-year math.
+
+### Branch status note (superseded by section 80 below for item 2)
+
+Item 1 is fully implemented and tested on this branch. Item 2 (quote
+reliability and statement refresh) was completed in a follow-up pass —
+see section 80. Items 3-5 were not reached — see the branch's own
+commit history and the final status reported alongside this contract
+update for exactly what remains, so this section is not read as
+claiming more than what the code actually does.
+
+## 80. Quote reliability and statement refresh (item 2) (2026-09-13, `codex/portfolio-coach-next-backlog`)
+
+Builds on what already existed on `main` before this branch: a manual,
+explicit `GET /api/holdings/{id}/quote-preview` (a quote is only ever
+fetched when the user clicks "Check quote," never automatically) and a
+CSV statement-import preview/commit flow (`POST /api/holdings/import/
+preview` and `/commit`) that already matched a CSV row against an
+existing holding by account + ticker/name. This pass makes both more
+reliable and fixes several real overwrite bugs found in the existing
+CSV commit path, without making anything automatic.
+
+### Quote status, source, and freshness (`security_provider.py`)
+
+`QuoteResult` (new) reports WHY a quote could or could not be produced
+— `status` is one of `"ok"`, `"not_found"`, `"rate_limited"`,
+`"provider_error"` — instead of the previous bare `Optional[
+SecurityQuote]`, which collapsed every failure into the same `None`.
+`SecurityProvider.get_quote_with_status()` has a default implementation
+(for any provider, including test stubs, that only implements
+`get_quote()`); `AlphaVantageSecurityProvider` overrides it with the
+real reason, splitting `_request` into `_request_with_status` so a
+"Note"/"Information" rate-limit response is distinguishable from a
+network/parse error (previously both collapsed to the same empty
+dict). `MockSecurityProvider` never needed an override — the default
+`ok`/`not_found` split is exactly right for a deterministic offline
+catalog.
+
+`GET /api/holdings/{id}/quote-preview` returns, in addition to the
+existing `quote`/`implied_market_value`/`requires_confirmation`:
+`status`, `source` (provider display name), `is_live`, `cached`,
+`fetched_at`, and — only when a quote exists — `price_age_days` and a
+documented `freshness` classification (`_quote_freshness()` in
+`main.py`): `"live"` (same/previous day), `"delayed"` (up to 5 calendar
+days, covering an end-of-day/previous-close convention over a
+weekend), `"stale"` (older), `"offline"` (a non-live provider,
+regardless of its own dated timestamp — never implied live just
+because it carries a date), or `"unknown"` (unparseable/missing date,
+never assumed fresh). `PortfolioSetup.jsx` renders all of these as
+plain-language labels, never inferring freshness from a number's
+magnitude in the UI.
+
+### Session quote cache
+
+`get_cached_or_fetch_quote()` (a small in-process, TTL-based cache —
+15 minutes by default, `DEFAULT_QUOTE_CACHE_TTL_SECONDS`) avoids
+repeatedly calling the provider for the same identifier within one
+review session; the quote-preview endpoint now calls this instead of
+the provider directly. Only `"ok"`/`"not_found"` results are cached —
+a `rate_limited`/`provider_error` result is deliberately never cached,
+so the very next manual retry actually reaches the provider instead of
+replaying the same failure for the rest of the TTL. `set_active_
+provider()` clears the cache, so a stale quote from a previous provider
+can never be served as if it came from the new one (this matters for
+tests as much as a real provider swap). `peek_cached_quote()` is a
+read-only variant that NEVER calls the provider — used by CSV import
+preview (below), which must stay a pure "compare what's already known"
+step, never an automatic quote check.
+
+### "Use quote value" records an honest source (`HoldingValuationUpdate.source`)
+
+`PATCH /api/holdings/{id}/valuation` gained an optional `source` field
+(`"manual"` default, `"quote"`, or `"statement"` — the last reserved
+for a future explicit "confirm from statement" action, not yet exposed
+by an endpoint). `"manual"` preserves the exact previous behavior —
+`data_source`/`confidence` are left untouched, so no existing caller's
+assumptions change. `"quote"` (used by "Use quote value") records
+`data_source="provider_quote"`, `confidence="high"`, so a holding
+backed by an actual confirmed quote no longer trips Coach's
+low-confidence-manual-entry card (`coach_engine.py`'s `data_source ==
+"manual" or confidence == "low"` check) the same way a guessed manual
+number does. Still a single explicit PATCH call per confirmation —
+nothing here makes a value change automatic, and market_value/
+as_of_date are the only facts this endpoint ever touches (cost basis
+and classification are untouched, exactly as before).
+
+### CSV import: preserve facts, add value_date, flag quote drift
+
+**Before this pass** (undocumented in this contract until now, from
+the prior "Add tax lots and holding quote previews" branch):
+`commit_holdings_import` REQUIRED `asset_class` on every row (even a
+pure value refresh) and, on a matched row, unconditionally overwrote
+`ticker`/`shares`/`asset_class`/`expense_ratio`/`cost_basis`/`notes`
+from the CSV row — a CSV that only carried shares/value would silently
+blank out an existing cost basis, notes, or classification, and always
+stamped `data_source='manual', confidence='low'` even though a
+statement is an authoritative source, not a guess. `as_of_date` was
+never touched at all by an update, so a freshly-imported value could
+still trip Coach's 35-day stale-value card on data that was current
+that same day.
+
+**Now:**
+- `asset_class` is required only for a row that would CREATE a
+  brand-new holding (there is no existing classification to fall back
+  to) — enforced in `preview_holdings_import` (marks the row invalid
+  with a clear message) and re-checked defensively in
+  `commit_holdings_import`. `holdings_engine.parse_holdings_csv` no
+  longer requires an `asset_class` column at all.
+- A new optional `value_date` CSV column (validated as YYYY-MM-DD) sets
+  the holding's `as_of_date` on both create and update; when omitted,
+  `as_of_date` defaults to today rather than staying stale.
+- On a matched (update) row, `asset_class`, `expense_ratio`,
+  `cost_basis`, `notes`, and `shares` are each preserved from the
+  existing holding unless the row supplies a non-blank replacement —
+  never blanked out just because a column was absent or empty.
+  `management_mode` and tax lots are untouched by construction (the
+  UPDATE statement never mentions either column/table).
+- A confirmed `provider_identifier` (from ticker lookup) is preserved
+  when the row's ticker is unchanged or omitted, and cleared ONLY when
+  the row explicitly supplies a different, non-blank ticker — a stale
+  identifier left pointing at a ticker that no longer matches would
+  misattribute quotes to the wrong security. This is the concrete fix
+  for "ticker lookup, confirmed provider identifier, quote preview, and
+  imported statement values do not overwrite each other unexpectedly."
+- Both created and updated rows are recorded as `data_source=
+  'statement', confidence='high'` — a statement import is an
+  authoritative source and should not trip the low-confidence-manual-
+  entry card the way a typed guess does.
+- `preview_holdings_import` flags, without deciding which number is
+  right, when a matched holding's imported value differs from a quote
+  already checked earlier in this session by at least
+  `MATERIAL_QUOTE_DEVIATION_PCT` (5%, documented) — via `peek_cached_
+  quote`, so preview itself never triggers a fresh provider call. The
+  UI shows this as a neutral review message, never a correction.
+
+### Known limitations / deferred work
+
+- `"statement"` as a `HoldingValuationUpdate.source` value is modeled
+  (same `data_source`/`confidence` treatment as `"quote"`) but no
+  endpoint sets it yet — there is no dedicated "confirm from statement"
+  single-holding action distinct from the CSV import flow.
+- The quote-drift comparison in CSV preview only fires when a quote was
+  ALREADY checked this session (via the cache) — it never fetches one
+  itself, and does not persist across a backend restart or a long gap
+  between checking a quote and importing a statement.
+- `_quote_freshness`'s 1-day/5-day thresholds are a deliberate,
+  documented simplification (not a market-calendar-aware "is today a
+  trading day" check) — stated here rather than silently assumed
+  precise.
+
+### Verification
+
+Backend: `tests/test_security_provider.py` (`QuoteResult`, `get_quote_
+with_status` default + Alpha Vantage override, `get_cached_or_fetch_
+quote`, `peek_cached_quote`), `tests/test_holdings_api.py` (quote-
+preview status/freshness/cache fields, rate-limited state,
+`HoldingValuationUpdate.source` behavior, and a new `TestHoldingsCsvImport`
+class covering every case above), `tests/test_holdings_engine.py`
+(`parse_holdings_csv`'s optional `asset_class`/`value_date` handling).
+Frontend: `PortfolioSetup.test.jsx` covers the quote source/freshness/
+cache/rate-limit rendering, the "Use quote value" source-tagged PATCH
+call, and the CSV quote-drift review message. Exact pass counts and
+coverage are reported in this branch's final status report rather than
+restated here, since a contract section should not go stale the moment
+a later commit changes a number.

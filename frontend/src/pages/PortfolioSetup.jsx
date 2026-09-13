@@ -15,6 +15,14 @@ const ASSET_CLASSES = [
   'us_large_cap', 'us_mid_cap', 'us_small_cap', 'international_developed', 'emerging_markets',
   'us_bonds', 'international_bonds', 'cash', 'real_estate', 'alternatives', 'unclassified',
 ]
+
+// Item 2 (quote reliability): plain-language labels for
+// main.py's _quote_freshness() classification -- never guessed from a
+// number's magnitude in the UI, always the backend's own label.
+const QUOTE_FRESHNESS_LABELS = {
+  live: 'Live price', delayed: 'Delayed price', stale: 'Stale price (check before relying on it)',
+  offline: 'Offline catalog price, not a live market price', unknown: 'Price date unknown',
+}
 const POLICY_TARGET_FIELDS = [
   ['target_us_large_cap_pct', 'US large-cap'], ['target_us_mid_cap_pct', 'US mid-cap'],
   ['target_us_small_cap_pct', 'US small-cap'], ['target_international_developed_pct', 'Int\'l developed'],
@@ -147,10 +155,10 @@ function HoldingsTab({ accounts, excludedAccounts, onEditPolicy }) {
       setSaveError(error.response?.data?.detail || 'Could not update how this holding is managed.')
     }
   }
-  const refreshValuation = async (holding, market_value, as_of_date) => {
+  const refreshValuation = async (holding, market_value, as_of_date, source = 'manual') => {
     setSaveError(null)
     try {
-      await axios.patch(`/api/holdings/${holding.id}/valuation`, { market_value: parseFloat(market_value), as_of_date })
+      await axios.patch(`/api/holdings/${holding.id}/valuation`, { market_value: parseFloat(market_value), as_of_date, source })
       setRefreshingHolding(null)
       await load()
     } catch (error) {
@@ -169,7 +177,7 @@ function HoldingsTab({ accounts, excludedAccounts, onEditPolicy }) {
   }
   const useQuoteValue = (holding, preview) => {
     if (preview?.implied_market_value == null || !preview.quote?.as_of) return
-    setRefreshingHolding({ holding, market_value: preview.implied_market_value, as_of_date: preview.quote.as_of.slice(0, 10) })
+    setRefreshingHolding({ holding, market_value: preview.implied_market_value, as_of_date: preview.quote.as_of.slice(0, 10), source: 'quote' })
   }
   const openTaxLots = async holding => {
     setTaxLotEditor(holding)
@@ -333,13 +341,18 @@ function HoldingsTab({ accounts, excludedAccounts, onEditPolicy }) {
 
       <details className="card" style={{ marginBottom: 20 }}>
         <summary>Import holdings from CSV</summary>
-        <p style={{ fontSize: 12, color: 'var(--muted)' }}>Preview and validate every row before anything is saved.</p>
+        <p style={{ fontSize: 12, color: 'var(--muted)' }}>Preview and validate every row before anything is saved. A row that matches an existing holding (by account + ticker or name) updates shares, value, and value date only -- classification, cost basis, notes, management mode, and tax lots stay as recorded unless the row explicitly supplies a replacement. A row with no match needs an asset class to create a new holding.</p>
         <input aria-label="Holdings CSV" type="file" accept=".csv,text/csv" onChange={e => previewCsv(e.target.files?.[0])} />
         {importError && <div style={{ color: 'var(--red)', fontSize: 12 }}>{importError}</div>}
         {importPreview && (
           <div style={{ marginTop: 10, fontSize: 12 }}>
             <div>{importPreview.valid_count} valid · {importPreview.invalid_count} need attention · {importPreview.update_count || 0} will update · {importPreview.create_count || 0} new</div>
             {(importPreview.missing_existing_holdings || []).length > 0 && <div style={{ color: 'var(--amber)', marginTop: 6 }}>Not present in this statement: {(importPreview.missing_existing_holdings || []).map(h => h.ticker || h.security_name).join(', ')}. They will remain unchanged until you review them.</div>}
+            {(importPreview.rows || []).filter(r => r.quote_comparison).map((r, i) => (
+              <div key={i} style={{ color: 'var(--amber)', marginTop: 6 }}>
+                Row {r.row} ({r.security_name}): {r.quote_comparison.message}
+              </div>
+            ))}
             {(importPreview.errors || []).map((e, i) => <div key={i} style={{ color: 'var(--red)' }}>Row {e.row}: {e.message}</div>)}
             <button className="btn-primary" disabled={!importPreview.valid_count} onClick={commitCsv} style={{ marginTop: 8 }}>
               Import {importPreview.valid_count} valid row{importPreview.valid_count === 1 ? '' : 's'}
@@ -385,7 +398,7 @@ function HoldingsTab({ accounts, excludedAccounts, onEditPolicy }) {
                 <button className="btn-secondary" style={{ marginLeft: 10, padding: '2px 8px', fontSize: 11 }} onClick={() => setManagementMode(h, h.management_mode === 'externally_managed' ? 'self_directed' : 'externally_managed')}>
                   {h.management_mode === 'externally_managed' ? 'Manage yourself' : 'Mark externally managed'}
                 </button>
-                <button className="btn-secondary" style={{ marginLeft: 10, padding: '2px 8px', fontSize: 11 }} onClick={() => setRefreshingHolding({ holding: h, market_value: h.market_value, as_of_date: (h.as_of_date || new Date().toISOString().slice(0, 10)).slice(0, 10) })}>Refresh value</button>
+                <button className="btn-secondary" style={{ marginLeft: 10, padding: '2px 8px', fontSize: 11 }} onClick={() => setRefreshingHolding({ holding: h, market_value: h.market_value, as_of_date: (h.as_of_date || new Date().toISOString().slice(0, 10)).slice(0, 10), source: 'manual' })}>Refresh value</button>
                 {h.provider_identifier && <button className="btn-secondary" style={{ marginLeft: 10, padding: '2px 8px', fontSize: 11 }} onClick={() => checkQuote(h)}>Check quote</button>}
                 {['taxable', 'brokerage'].includes(g.portfolio_account_type) && <button className="btn-secondary" style={{ marginLeft: 10, padding: '2px 8px', fontSize: 11 }} onClick={() => openTaxLots(h)}>Tax lots</button>}
                 <button className="btn-secondary" style={{ marginLeft: 10, padding: '2px 8px', fontSize: 11 }} onClick={() => remove(h.id)}>Remove</button>
@@ -394,14 +407,18 @@ function HoldingsTab({ accounts, excludedAccounts, onEditPolicy }) {
             {quotePreviews[h.id] && <div className="setup-helper" style={{ marginTop: 5 }}>
               {quotePreviews[h.id].quote ? <>
                 Quote {fmt(quotePreviews[h.id].quote.price)} on {quotePreviews[h.id].quote.as_of?.slice(0, 10)}
+                {' '}· Source: {quotePreviews[h.id].source}{quotePreviews[h.id].is_live ? '' : ' (offline catalog, not a live price)'}
+                {' '}· {QUOTE_FRESHNESS_LABELS[quotePreviews[h.id].freshness] || quotePreviews[h.id].freshness}
+                {quotePreviews[h.id].cached && ' · from earlier this session'}
                 {quotePreviews[h.id].implied_market_value != null && <> · {h.shares} shares implies {fmt(quotePreviews[h.id].implied_market_value)} <button className="btn-secondary" style={{ marginLeft: 6, padding: '2px 8px', fontSize: 11 }} onClick={() => useQuoteValue(h, quotePreviews[h.id])}>Use quote value</button></>}
                 {quotePreviews[h.id].implied_market_value == null && <> · Add shares to use this price for a value update.</>}
-              </> : quotePreviews[h.id].message}
+              </> : <span style={{ color: ['rate_limited', 'provider_error'].includes(quotePreviews[h.id].status) ? 'var(--amber)' : 'inherit' }}>{quotePreviews[h.id].message}</span>}
             </div>}
             </div>
           ))}
           {refreshingHolding?.holding.account_id === g.account_id && (
-            <form onSubmit={e => { e.preventDefault(); refreshValuation(refreshingHolding.holding, refreshingHolding.market_value, refreshingHolding.as_of_date) }} className="setup-form" style={{ marginTop: 10 }}>
+            <form onSubmit={e => { e.preventDefault(); refreshValuation(refreshingHolding.holding, refreshingHolding.market_value, refreshingHolding.as_of_date, refreshingHolding.source) }} className="setup-form" style={{ marginTop: 10 }}>
+              {refreshingHolding.source === 'quote' && <div className="setup-helper" style={{ width: '100%' }}>This value comes from a provider quote you just reviewed -- confirm to record it.</div>}
               <label>Updated value ($)<input className="input" type="number" step="any" min="0" value={refreshingHolding.market_value} onChange={e => setRefreshingHolding(s => ({ ...s, market_value: e.target.value }))} /></label>
               <label>Statement / quote date<input className="input" type="date" value={refreshingHolding.as_of_date} onChange={e => setRefreshingHolding(s => ({ ...s, as_of_date: e.target.value }))} /></label>
               <button className="btn-primary" type="submit">Save refreshed value</button>

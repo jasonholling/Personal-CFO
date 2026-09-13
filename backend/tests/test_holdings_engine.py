@@ -24,7 +24,13 @@ from holdings_engine import (
     is_closed_menu_account, eligible_options_for_account, is_option_actionable,
     CLOSED_MENU_TYPES, OPEN_UNIVERSE_TYPES, propose_account_option_mix,
     policy_included_holdings, blended_portfolio_volatility,
+    classify_lot_term, evaluate_tax_lots, is_lot_loss_candidate, detect_wash_sale_conflicts,
 )
+
+
+def lot(id, holding_id, acquired_date, shares, cost_basis, notes=None):
+    return {"id": id, "holding_id": holding_id, "acquired_date": acquired_date, "shares": shares,
+            "cost_basis": cost_basis, "notes": notes}
 
 
 def option(id, account_id, option_name="Fund", ticker=None, asset_class="us_large_cap",
@@ -730,10 +736,32 @@ class TestParseHoldingsCsv:
         assert result["rows"][0]["asset_class"] == "crypto"
 
     def test_missing_required_column_rejects_whole_file(self):
-        csv_text = "account_id,security_name,market_value\n1,VTI,50000\n"
+        csv_text = "account_id,market_value\n1,50000\n"
         result = parse_holdings_csv(csv_text, {1})
         assert result["rows"] == []
-        assert "asset_class" in result["errors"][0]["message"]
+        assert "security_name" in result["errors"][0]["message"]
+
+    def test_asset_class_column_is_optional_for_a_value_only_refresh_csv(self):
+        """Item 2: a statement export with no asset_class column at all
+        (just refreshing shares/value) is a legitimate import -- whether
+        a MISSING asset_class blocks a particular row depends on
+        whether that row would create a brand-new holding, which only
+        main.py's preview endpoint (aware of existing holdings) can
+        decide. The parser itself never rejects the row or the file."""
+        csv_text = "account_id,ticker,security_name,shares,market_value\n1,VTI,Vanguard Total Market,100,50000\n"
+        result = parse_holdings_csv(csv_text, {1})
+        assert result["valid_count"] == 1
+        assert result["rows"][0]["asset_class"] is None
+
+    def test_value_date_column_is_optional_and_validated_when_present(self):
+        csv_text = self.HEADER + ",value_date\n1,VTI,Vanguard,100,50000,us_large_cap,,,,2026-09-01\n"
+        result = parse_holdings_csv(csv_text, {1})
+        assert result["rows"][0]["value_date"] == "2026-09-01"
+
+    def test_malformed_value_date_is_flagged(self):
+        csv_text = self.HEADER + ",value_date\n1,VTI,Vanguard,100,50000,us_large_cap,,,,not-a-date\n"
+        result = parse_holdings_csv(csv_text, {1})
+        assert not result["rows"][0]["valid"]
 
 
 def mix_option(id, option_name="Fund", ticker=None, asset_class="us_large_cap", expense_ratio=None, exposures=None,
@@ -1006,3 +1034,131 @@ class TestAccountInvestmentOptionEligibility:
         assert eligible_options_for_account(opts, for_new_contribution=False) == opts
         assert not is_option_actionable(opts[0], for_new_contribution=True)
         assert is_option_actionable(opts[0], for_new_contribution=False)
+
+
+class TestClassifyLotTerm:
+    def test_long_term_lot_beyond_one_year(self):
+        assert classify_lot_term("2020-01-01", as_of_date="2024-01-15") == "long_term"
+
+    def test_short_term_lot_within_one_year(self):
+        assert classify_lot_term("2024-06-01", as_of_date="2024-08-01") == "short_term"
+
+    def test_missing_acquired_date_is_unknown(self):
+        assert classify_lot_term(None, as_of_date="2024-08-01") == "unknown"
+
+    def test_unparseable_acquired_date_is_unknown(self):
+        assert classify_lot_term("not-a-date", as_of_date="2024-08-01") == "unknown"
+
+    def test_acquired_after_reference_date_is_unknown(self):
+        assert classify_lot_term("2024-09-01", as_of_date="2024-08-01") == "unknown"
+
+
+class TestEvaluateTaxLots:
+    def test_long_term_loss_lot_is_a_review_candidate(self):
+        h = holding(1, 1, market_value=8000, shares=100)
+        h["as_of_date"] = "2024-08-01"
+        lots = [lot(1, 1, "2020-01-01", shares=100, cost_basis=10000)]
+        evaluations = evaluate_tax_lots(h, lots)
+        assert len(evaluations) == 1
+        e = evaluations[0]
+        assert e["term"] == "long_term"
+        assert e["current_value"] == 8000.0
+        assert e["gain_loss"] == -2000.0
+        assert is_lot_loss_candidate(e) is True
+
+    def test_short_term_loss_lot_is_labeled_short_term(self):
+        h = holding(1, 1, market_value=8000, shares=100)
+        h["as_of_date"] = "2024-08-01"
+        lots = [lot(1, 1, "2024-06-01", shares=100, cost_basis=10000)]
+        e = evaluate_tax_lots(h, lots)[0]
+        assert e["term"] == "short_term"
+        assert is_lot_loss_candidate(e) is True
+
+    def test_profitable_lot_is_not_a_loss_candidate(self):
+        h = holding(1, 1, market_value=12000, shares=100)
+        h["as_of_date"] = "2024-08-01"
+        lots = [lot(1, 1, "2020-01-01", shares=100, cost_basis=10000)]
+        e = evaluate_tax_lots(h, lots)[0]
+        assert e["gain_loss"] == 2000.0
+        assert is_lot_loss_candidate(e) is False
+
+    def test_missing_holding_shares_produces_a_limitation_not_a_fake_number(self):
+        h = holding(1, 1, market_value=8000, shares=None)
+        h["as_of_date"] = "2024-08-01"
+        lots = [lot(1, 1, "2020-01-01", shares=100, cost_basis=10000)]
+        e = evaluate_tax_lots(h, lots)[0]
+        assert e["limitation"] is not None
+        assert e["current_value"] is None
+        assert e["gain_loss"] is None
+        assert is_lot_loss_candidate(e) is False
+
+    def test_missing_holding_market_value_produces_a_limitation(self):
+        h = holding(1, 1, market_value=None, shares=100)
+        h["market_value"] = None
+        lots = [lot(1, 1, "2020-01-01", shares=100, cost_basis=10000)]
+        e = evaluate_tax_lots(h, lots)[0]
+        assert e["limitation"] is not None
+        assert e["current_value"] is None
+
+    def test_missing_lot_shares_or_cost_basis_produces_a_limitation(self):
+        h = holding(1, 1, market_value=8000, shares=100)
+        lots = [lot(1, 1, "2020-01-01", shares=None, cost_basis=10000),
+                lot(2, 1, "2020-01-01", shares=100, cost_basis=None)]
+        evaluations = evaluate_tax_lots(h, lots)
+        assert all(e["limitation"] is not None and e["current_value"] is None for e in evaluations)
+
+    def test_below_threshold_loss_is_not_a_candidate(self):
+        h = holding(1, 1, market_value=9990, shares=100)
+        h["as_of_date"] = "2024-08-01"
+        lots = [lot(1, 1, "2020-01-01", shares=100, cost_basis=10000)]
+        e = evaluate_tax_lots(h, lots)[0]
+        # A $10 loss on $10,000 (0.1%) is below the default 1% threshold.
+        assert is_lot_loss_candidate(e) is False
+
+    def test_a_loss_with_no_percent_available_is_still_a_candidate(self):
+        # gain_loss_pct is None whenever cost_basis is falsy (0) --
+        # is_lot_loss_candidate must still flag a real dollar loss rather
+        # than requiring a percentage it cannot compute.
+        e = {"limitation": None, "gain_loss": -5.0, "gain_loss_pct": None}
+        assert is_lot_loss_candidate(e) is True
+
+
+class TestDetectWashSaleConflicts:
+    def test_matching_recent_purchase_is_flagged(self):
+        household_lots = [
+            {"lot_id": 1, "ticker_or_name": "VTI", "acquired_date": "2024-08-05", "account_id": 2, "account_name": "Brokerage 2"},
+        ]
+        conflicts = detect_wash_sale_conflicts("VTI", exclude_lot_id=99, household_lots=household_lots, potential_sale_date="2024-08-15")
+        assert len(conflicts) == 1
+
+    def test_purchase_outside_window_is_not_flagged(self):
+        household_lots = [
+            {"lot_id": 1, "ticker_or_name": "VTI", "acquired_date": "2024-01-01", "account_id": 2, "account_name": "Brokerage 2"},
+        ]
+        conflicts = detect_wash_sale_conflicts("VTI", exclude_lot_id=99, household_lots=household_lots, potential_sale_date="2024-08-15")
+        assert conflicts == []
+
+    def test_different_ticker_is_not_flagged(self):
+        household_lots = [
+            {"lot_id": 1, "ticker_or_name": "VOO", "acquired_date": "2024-08-05", "account_id": 2, "account_name": "Brokerage 2"},
+        ]
+        conflicts = detect_wash_sale_conflicts("VTI", exclude_lot_id=99, household_lots=household_lots, potential_sale_date="2024-08-15")
+        assert conflicts == []
+
+    def test_the_lot_being_reviewed_never_flags_itself(self):
+        household_lots = [
+            {"lot_id": 1, "ticker_or_name": "VTI", "acquired_date": "2024-08-05", "account_id": 2, "account_name": "Brokerage 2"},
+        ]
+        conflicts = detect_wash_sale_conflicts("VTI", exclude_lot_id=1, household_lots=household_lots, potential_sale_date="2024-08-15")
+        assert conflicts == []
+
+    def test_no_ticker_or_name_returns_no_conflicts(self):
+        assert detect_wash_sale_conflicts(None, exclude_lot_id=1, household_lots=[{"lot_id": 2, "ticker_or_name": "VTI", "acquired_date": "2024-08-05"}], potential_sale_date="2024-08-15") == []
+        assert detect_wash_sale_conflicts("", exclude_lot_id=1, household_lots=[{"lot_id": 2, "ticker_or_name": "VTI", "acquired_date": "2024-08-05"}], potential_sale_date="2024-08-15") == []
+
+    def test_a_household_lot_with_an_unparseable_acquired_date_is_skipped(self):
+        household_lots = [
+            {"lot_id": 2, "ticker_or_name": "VTI", "acquired_date": "not-a-date", "account_id": 2, "account_name": "Other"},
+        ]
+        conflicts = detect_wash_sale_conflicts("VTI", exclude_lot_id=1, household_lots=household_lots, potential_sale_date="2024-08-15")
+        assert conflicts == []

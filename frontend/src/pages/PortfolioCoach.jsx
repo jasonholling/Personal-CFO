@@ -45,6 +45,7 @@ const CATEGORY_COLORS = {
 
 const assetClassLabel = assetClass => assetClass.replace(/_/g, ' ')
 const ALLOCATION_COLORS = ['#6ea8fe', '#56c7b5', '#f4b860', '#b894ee', '#f08080', '#79b8ff', '#c5d86d', '#f4a261', '#9aa7bd', '#d986ba']
+const CONTRIBUTION_ACCOUNT_TYPES = new Set(['401k', 'roth_401k', 'ira', 'roth_ira', 'hsa', 'taxable', 'brokerage', '529', 'custodial', 'trust'])
 
 function AllocationComparisonChart({ comparison }) {
   const rows = Object.entries(comparison?.by_class || {})
@@ -129,7 +130,7 @@ function ActionCard({ card, onDecide, busy, onNavigate, accounts }) {
           {p.tax_impact && (
             <div style={{ fontSize: 12, marginTop: 6, color: 'var(--amber)' }}>
               ⚠ {p.tax_impact.has_cost_basis
-                ? `Estimated taxable gain: ${fmt(p.tax_impact.estimated_gain)}`
+                ? `Estimated taxable ${p.tax_impact.estimated_gain < 0 ? 'loss' : 'gain'}: ${fmt(p.tax_impact.estimated_gain)}`
                 : 'Tax impact could not be estimated — cost basis is missing (never invented).'}
             </div>
           )}
@@ -176,6 +177,8 @@ export default function PortfolioCoach({ onNavigate }) {
   const [rebalanceResult, setRebalanceResult] = useState(null)
   const [multiAmounts, setMultiAmounts] = useState({})
   const [multiResult, setMultiResult] = useState(null)
+  const [multiAccountIds, setMultiAccountIds] = useState([])
+  const [accountToAdd, setAccountToAdd] = useState('')
   const [filterCategory, setFilterCategory] = useState('all')
   const [showAllActions, setShowAllActions] = useState(false)
   const requestVersion = useRef(0)
@@ -242,28 +245,34 @@ export default function PortfolioCoach({ onNavigate }) {
     axios.post('/api/portfolio/contribution-destination/multi-account', { pools }).then(r => setMultiResult(r.data)).catch(() => setRequestError('Could not allocate the account-specific contributions.')).finally(() => setBusy(false))
   }
 
-  const [planningResult, setPlanningResult] = useState(null)
-  const runPlanningComparison = () => {
-    if (!allocation?.comparison?.by_class) return
-    const proposed_allocation = Object.fromEntries(
-      Object.entries(allocation.comparison.by_class).map(([c, d]) => [c, d.target_pct]),
-    )
-    setBusy(true)
-    setPlanningResult(null)
-    setRequestError('')
-    axios.post('/api/portfolio/planning-comparison', { proposed_allocation })
-      .then(r => setPlanningResult(r.data))
-      .catch(() => setRequestError('Could not compare planning outcomes. Please try again.'))
-      .finally(() => setBusy(false))
-  }
-
   const cards = data?.recommendations || []
+  const contributionAccounts = useMemo(
+    () => accounts.filter(account => CONTRIBUTION_ACCOUNT_TYPES.has(account.account_type)),
+    [accounts],
+  )
+  const accountsStillAvailable = contributionAccounts.filter(account => !multiAccountIds.includes(account.id))
+  const addContributionAccount = () => {
+    const accountId = Number(accountToAdd)
+    if (!accountId || multiAccountIds.includes(accountId)) return
+    setMultiAccountIds(ids => [...ids, accountId])
+    setAccountToAdd('')
+    setMultiResult(null)
+  }
+  const removeContributionAccount = accountId => {
+    setMultiAccountIds(ids => ids.filter(id => id !== accountId))
+    setMultiAmounts(amounts => {
+      const next = { ...amounts }
+      delete next[accountId]
+      return next
+    })
+    setMultiResult(null)
+  }
   const visible = useMemo(
     () => filterCategory === 'all' ? cards : cards.filter(c => c.category === filterCategory),
     [cards, filterCategory],
   )
   const categoriesPresent = useMemo(() => [...new Set(cards.map(c => c.category))], [cards])
-  const nextActions = <section aria-label="Recommended next actions" style={{ marginBottom: 28 }}>
+  const nextActions = <section className="annual-review-actions" aria-label="Recommended next actions" style={{ marginBottom: 28 }}>
     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12, flexWrap: 'wrap', gap: 8 }}>
       <h2 style={{ fontSize: 18, fontWeight: 600 }}>What should I do next?</h2>
       <select className="input" aria-label="Filter recommendations" value={filterCategory} onChange={e => { setFilterCategory(e.target.value); setShowAllActions(false) }} style={{ maxWidth: 260 }}>
@@ -383,68 +392,16 @@ export default function PortfolioCoach({ onNavigate }) {
               </table>
             </div>
           </details>
+          <details style={{ marginTop: 12, fontSize: 12, color: 'var(--muted)' }}>
+            <summary>How allocation connects to your retirement plan</summary>
+            <p>Your policy target drives Coach’s drift, new-money, and rebalance recommendations. Your retirement projections keep their own saved return assumptions; a change in allocation is not presented as a promise of a particular future dollar outcome.</p>
+          </details>
         </section>
       )}
 
       {nextActions}
 
-      {allocation?.has_policy && allocation?.comparison && (
-        <details className="card" style={{ marginBottom: 24 }}>
-          <summary>Explore current mix versus target mix</summary>
-          <p style={{ fontSize: 12, color: 'var(--muted)', marginTop: -4, marginBottom: 10 }}>
-            Uses the same retirement, Monte Carlo, and SWR engines to compare the blended return and volatility of
-            your policy-included holdings today with your policy target. It is a static-mix sensitivity check, not a forecast or glide path.
-          </p>
-          <button className="btn-primary" disabled={busy} onClick={runPlanningComparison}>Compare planning outcomes</button>
-          {planningResult && (
-            <div style={{ overflowX: 'auto', marginTop: 14 }}>
-              <div style={{ fontSize: 12, color: 'var(--muted)', marginBottom: 8 }}>
-                Scenario: {planningResult.scenario?.saved_scenario_name ? `saved scenario “${planningResult.scenario.saved_scenario_name}”` : 'default plan'}
-                {' '}· retire at {planningResult.scenario?.retirement_age} · Social Security: {planningResult.scenario?.ss_timing}
-              </div>
-              <table style={{ width: '100%', fontSize: 13, borderCollapse: 'collapse' }}>
-                <thead>
-                  <tr style={{ textAlign: 'left', color: 'var(--muted)' }}>
-                    <th style={{ padding: '4px 8px' }}></th>
-                    <th style={{ padding: '4px 8px' }}>{planningResult.baseline_source === 'current_portfolio_mix' ? 'Current portfolio mix' : 'Saved assumptions'}</th>
-                    <th style={{ padding: '4px 8px' }}>Policy target mix</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <tr style={{ borderTop: '1px solid var(--border)' }}>
-                    <td style={{ padding: '4px 8px' }}>Monte Carlo success rate</td>
-                    <td style={{ padding: '4px 8px' }}>{pct(planningResult.baseline.monte_carlo_success_rate)}</td>
-                    <td style={{ padding: '4px 8px' }}>{pct(planningResult.proposed.monte_carlo_success_rate)}</td>
-                  </tr>
-                  <tr style={{ borderTop: '1px solid var(--border)' }}>
-                    <td style={{ padding: '4px 8px' }}>Safe withdrawal (annual)</td>
-                    <td style={{ padding: '4px 8px' }}>{fmt(planningResult.baseline.safe_withdrawal_annual)}</td>
-                    <td style={{ padding: '4px 8px' }}>{fmt(planningResult.proposed.safe_withdrawal_annual)}</td>
-                  </tr>
-                  <tr style={{ borderTop: '1px solid var(--border)' }}>
-                    <td style={{ padding: '4px 8px' }}>SWR cushion</td>
-                    <td style={{ padding: '4px 8px' }}>{pct(planningResult.baseline.swr_cushion_pct)}</td>
-                    <td style={{ padding: '4px 8px' }}>{pct(planningResult.proposed.swr_cushion_pct)}</td>
-                  </tr>
-                  <tr style={{ borderTop: '1px solid var(--border)' }}>
-                    <td style={{ padding: '4px 8px' }}>Monte Carlo median ending balance</td>
-                    <td style={{ padding: '4px 8px' }}>{fmt(planningResult.baseline.monte_carlo_median_final_balance)}</td>
-                    <td style={{ padding: '4px 8px' }}>{fmt(planningResult.proposed.monte_carlo_median_final_balance)}</td>
-                  </tr>
-                </tbody>
-              </table>
-              <div style={{ fontSize: 11, color: 'var(--muted)', marginTop: 8 }}>
-                {planningResult.baseline_source === 'current_portfolio_mix'
-                  ? <>Current mix: {(planningResult.baseline_expected_return_pre_retirement * 100).toFixed(2)}% expected return / {planningResult.baseline_portfolio_volatility == null ? 'unavailable' : `${(planningResult.baseline_portfolio_volatility * 100).toFixed(2)}%`} volatility; target mix: {(planningResult.proposed_blended_expected_return * 100).toFixed(2)}% / {planningResult.proposed_portfolio_volatility == null ? 'unavailable' : `${(planningResult.proposed_portfolio_volatility * 100).toFixed(2)}%`}. {planningResult.baseline_classified_pct != null && `${planningResult.baseline_classified_pct}% of the current portfolio is classified.`}</>
-                  : <>No classified, policy-included holdings were available, so the left column uses your saved return assumptions.</>}
-                {' '}Both mixes are held statically before and after retirement; this does not model a glide path.
-              </div>
-            </div>
-          )}
-        </details>
-      )}
-
-      <div className="card" style={{ marginBottom: 24 }}>
+      <div className="card coach-workflow-controls" style={{ marginBottom: 24 }}>
         <div className="label" style={{ marginBottom: 10 }}>Where should new money go?</div>
         <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
           <label style={{ fontSize: 12, color: 'var(--muted)' }}>New money available ($)<input className="input" type="number" min="0" placeholder="Amount to invest" value={contribAmount}
@@ -468,9 +425,33 @@ export default function PortfolioCoach({ onNavigate }) {
           </div>
         )}
       </div>
-      <details className="card" style={{ marginBottom: 24 }}><summary>Allocate contributions across specific accounts</summary><p style={{ fontSize: 12, color: 'var(--muted)' }}>Enter amounts that are actually available in each account. Coach respects account policy restrictions; confirm contribution eligibility yourself.</p>{accounts.map(account => <label key={account.id} style={{ display: 'inline-flex', flexDirection: 'column', marginRight: 10, fontSize: 12 }}>{account.name}<input className="input" type="number" min="0" placeholder="$0" value={multiAmounts[account.id] || ''} onChange={e => setMultiAmounts(values => ({ ...values, [account.id]: e.target.value }))} /></label>)}<button className="btn-primary" onClick={runMultiContribution} disabled={busy}>Allocate account contributions</button>{multiResult && <div style={{ marginTop: 10, fontSize: 13 }}>{(multiResult.actions || []).map((action, i) => <div key={i}>{fmt(action.amount)} → {action.asset_class?.replace(/_/g, ' ')} in account {action.account_id}</div>)}{(multiResult.unallocated || []).map((item, i) => <div key={`u${i}`} style={{ color: 'var(--amber)' }}>{fmt(item.amount)} remains unallocated: {item.reason}</div>)}</div>}</details>
+      <details className="card coach-workflow-controls" style={{ marginBottom: 24 }}>
+        <summary>Contributions in specific accounts</summary>
+        <p style={{ fontSize: 12, color: 'var(--muted)' }}>Use this only when money is already earmarked for more than one account. Add the accounts receiving money, then Coach will respect each account’s available options and policy restrictions.</p>
+        {accountsStillAvailable.length > 0 && <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'end', marginBottom: 12 }}>
+          <label style={{ fontSize: 12, color: 'var(--muted)', minWidth: 240 }}>Account receiving money
+            <select className="input" aria-label="Account receiving money" value={accountToAdd} onChange={e => setAccountToAdd(e.target.value)}>
+              <option value="">Choose an account</option>
+              {accountsStillAvailable.map(account => <option key={account.id} value={account.id}>{account.name}</option>)}
+            </select>
+          </label>
+          <button className="btn-secondary" disabled={!accountToAdd} onClick={addContributionAccount}>Add account</button>
+        </div>}
+        {multiAccountIds.length === 0 ? <div style={{ fontSize: 13, color: 'var(--muted)' }}>No account-specific contributions added.</div> : <div style={{ display: 'grid', gap: 8 }}>
+          {multiAccountIds.map(accountId => {
+            const account = contributionAccounts.find(item => item.id === accountId)
+            if (!account) return null
+            return <div key={accountId} style={{ display: 'flex', gap: 8, alignItems: 'end', flexWrap: 'wrap', padding: '8px 0', borderTop: '1px solid var(--border)' }}>
+              <label style={{ flex: '1 1 220px', fontSize: 13 }}><strong>{account.name}</strong><input className="input" aria-label={`${account.name} contribution amount`} type="number" min="0" placeholder="Amount available" value={multiAmounts[accountId] || ''} onChange={e => { setMultiAmounts(values => ({ ...values, [accountId]: e.target.value })); setMultiResult(null) }} /></label>
+              <button className="btn-secondary" aria-label={`Remove ${account.name}`} onClick={() => removeContributionAccount(accountId)}>Remove</button>
+            </div>
+          })}
+          <button className="btn-primary" onClick={runMultiContribution} disabled={busy || !Object.values(multiAmounts).some(amount => Number(amount) > 0)}>Get account-specific recommendation</button>
+        </div>}
+        {multiResult && <div style={{ marginTop: 12, fontSize: 13 }}>{(multiResult.actions || []).map((action, i) => <div key={i}><strong>{fmt(action.amount)}</strong> → {action.asset_class?.replace(/_/g, ' ')} in {accounts.find(account => account.id === action.account_id)?.name || `account ${action.account_id}`}</div>)}{(multiResult.unallocated || []).map((item, i) => <div key={`u${i}`} style={{ color: 'var(--amber)' }}>{fmt(item.amount)} remains unallocated: {item.reason}</div>)}</div>}
+      </details>
 
-      <div className="card" style={{ marginBottom: 24 }}>
+      <div className="card coach-workflow-controls" style={{ marginBottom: 24 }}>
         <div className="label" style={{ marginBottom: 10 }}>Build a rebalance checklist</div>
         <p style={{ fontSize: 12, color: 'var(--muted)' }}>Uses new money first when your policy requests it, keeps exchanges inside the funding account, and flags taxable sales.</p>
         <button className="btn-primary" disabled={busy || !allocation?.has_policy} onClick={runRebalance}>Generate rebalance checklist</button>
