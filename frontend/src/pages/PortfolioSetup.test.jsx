@@ -119,6 +119,19 @@ describe('PortfolioSetup workflows', () => {
     expect(checklist.textContent).not.toContain('cash')
   })
 
+  it('labels whether ticker lookup uses a live provider or the offline catalog', async () => {
+    axios.get.mockImplementation(url => Promise.resolve({ data:
+      url === '/api/accounts' ? [{ id: 1, name: 'Brokerage', account_type: 'taxable' }] :
+      url === '/api/holdings/grouped' ? { groups: [] } :
+      url === '/api/account-investment-options' ? [] :
+      url === '/api/investment-policy' ? { has_policy: false } :
+      url === '/api/securities/provider-status' ? { provider: 'Built-in offline catalog', is_live: false } : []
+    }))
+    await act(async () => root.render(<PortfolioSetup />))
+    await flush()
+    expect(container.textContent).toContain('Lookup: Built-in offline catalog (offline)')
+  })
+
   it('shows a save failure and keeps the entered holding available for correction', async () => {
     axios.post.mockRejectedValue({ response: { data: { detail: 'Account unavailable' } } })
     await act(async () => root.render(<PortfolioSetup />))

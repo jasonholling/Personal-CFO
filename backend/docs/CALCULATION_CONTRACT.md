@@ -7190,8 +7190,13 @@ stores a review date.
 ### Retained boundaries
 
 The feature proposes and records decisions; it does not place trades.
-Ticker search still uses the configured security provider, which is the
-mock provider until a live data source is deliberately configured.
+Ticker lookup is provider-backed. The default is the built-in offline
+catalog, visibly labeled as such in Portfolio Setup. Setting the local,
+untracked `ALPHAVANTAGE_API_KEY` environment variable enables the Alpha
+Vantage adapter for symbol search and quotes. The adapter supplies only
+provider identity, name, type, and dated quote; it never invents an
+asset class, expense ratio, account availability, tax treatment, or cost
+basis. Those remain user-confirmed facts.
 Employer/legacy exception editing and holding-level exclusion are
 supported by the API policy model but this pass only adds the requested
 account-exclusion UI.
