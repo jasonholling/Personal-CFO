@@ -1125,6 +1125,7 @@ def commit_holdings_import(rows: List[HoldingImportRow]):
     conn = get_db()
     valid_account_ids = {r[0] for r in conn.execute("SELECT id FROM accounts").fetchall()}
     created = 0
+    updated = 0
     skipped = []
     for row in rows:
         if row.account_id not in valid_account_ids:
@@ -1133,11 +1134,20 @@ def commit_holdings_import(rows: List[HoldingImportRow]):
         if row.asset_class not in ASSET_CLASSES:
             skipped.append({"security_name": row.security_name, "reason": f"asset_class '{row.asset_class}' is not one of {sorted(ASSET_CLASSES)}"})
             continue
-        _insert_holding(conn, {**row.model_dump(), "data_source": "manual", "confidence": "low"})
-        created += 1
+        existing = conn.execute(
+            "SELECT id FROM holdings WHERE account_id=? AND ((? IS NOT NULL AND upper(ticker)=upper(?)) OR lower(security_name)=lower(?)) LIMIT 1",
+            (row.account_id, row.ticker, row.ticker, row.security_name),
+        ).fetchone()
+        if existing:
+            conn.execute("UPDATE holdings SET ticker=?, security_name=?, shares=?, market_value=?, asset_class=?, expense_ratio=?, cost_basis=?, notes=?, data_source='manual', confidence='low', updated_at=datetime('now') WHERE id=?",
+                         (row.ticker, row.security_name, row.shares, row.market_value, row.asset_class, row.expense_ratio, row.cost_basis, row.notes, existing["id"]))
+            updated += 1
+        else:
+            _insert_holding(conn, {**row.model_dump(), "data_source": "manual", "confidence": "low"})
+            created += 1
     conn.commit()
     conn.close()
-    return {"created": created, "skipped": skipped}
+    return {"created": created, "updated": updated, "skipped": skipped}
 
 # ── Security lookup (Milestone 2) ────────────────────────────────────────
 # Never called directly from the browser for the actual provider request

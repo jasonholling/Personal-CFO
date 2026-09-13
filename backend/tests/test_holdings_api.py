@@ -60,14 +60,13 @@ class TestHoldingsCrud:
         assert response.status_code == 200, response.text
         response = client.post('/api/holdings/import/commit', json=[{**row, 'security_name': 'Imported fund'}])
         assert response.status_code == 200, response.text
-        assert response.json() == {'created': 1, 'skipped': []}
+        assert response.json() == {'created': 0, 'updated': 1, 'skipped': []}
         db.init_portfolio_coach_tables()
         conn = db.get_db()
         saved = [tuple(r) for r in conn.execute('SELECT name, security_name, market_value FROM holdings ORDER BY id')]
         conn.close()
         assert saved == [('Existing fund', 'Existing fund', 75),
-                         ('Manual fund', 'Manual fund', 123.45),
-                         ('Imported fund', 'Imported fund', 123.45)]
+                         ('Manual fund', 'Imported fund', 123.45)]
 
     def test_fresh_install_has_zero_holdings(self, client):
         assert client.get("/api/holdings").json() == []
