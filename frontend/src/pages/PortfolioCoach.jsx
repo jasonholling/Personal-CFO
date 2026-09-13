@@ -1,6 +1,7 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import axios from 'axios'
 import { isPrivacyMode, MASK_CURRENCY, MASK_PERCENT, MASK_NUMBER, maskDigitsInText } from '../utils/privacy'
+import './PortfolioSetup.css'
 
 // Portfolio Coach (codex/portfolio-coach-recommendations). Decision
 // support only -- nothing here places a trade, connects to a
@@ -41,7 +42,7 @@ const CATEGORY_COLORS = {
   taxable_rebalance: 'var(--amber)', minor_optimization: 'var(--muted)',
 }
 
-function ActionCard({ card, onDecide, busy, onNavigate }) {
+function ActionCard({ card, onDecide, busy, onNavigate, accounts }) {
   const p = card.payload
   const [notes, setNotes] = useState('')
   const [showDecide, setShowDecide] = useState(false)
@@ -58,6 +59,7 @@ function ActionCard({ card, onDecide, busy, onNavigate }) {
             {CATEGORY_LABELS[card.category] || card.category}
           </div>
           <div style={{ fontWeight: 600, fontSize: 15, marginTop: 4 }}>{p.title}</div>
+          {p.affected_accounts?.length > 0 && <div style={{ fontSize: 13, color: 'var(--accent)', marginTop: 4 }}>{p.affected_accounts.map(id => accounts.find(a => a.id === id)?.name || `Account ${id}`).join(' · ')}</div>}
           <div style={{ color: 'var(--muted)', fontSize: 13, marginTop: 6 }}>{p.action_text}</div>
           {(p.current_value != null || p.target_value != null) && (
             <div style={{ fontSize: 12, marginTop: 8, color: 'var(--muted)' }}>
@@ -66,6 +68,7 @@ function ActionCard({ card, onDecide, busy, onNavigate }) {
               {p.target_value != null && <>Target: <strong>{formatByUnit(p.target_value, p.value_unit)}</strong></>}
             </div>
           )}
+          <details style={{ marginTop: 10 }}><summary>Why this matters and assumptions</summary>
           {p.proposed_change && (
             <div style={{ fontSize: 12, marginTop: 6 }}><strong>Proposed:</strong> {p.proposed_change}</div>
           )}
@@ -75,16 +78,13 @@ function ActionCard({ card, onDecide, busy, onNavigate }) {
           <div style={{ fontSize: 12, marginTop: 4, color: 'var(--muted)' }}>
             <strong>If you do nothing:</strong> This condition stays as-is until holdings, the policy, or a related planning input changes.
           </div>
+          {p.assumptions?.length > 0 && <div style={{ fontSize: 11, marginTop: 8, color: 'var(--muted)' }}>Assumptions: {p.assumptions.join(' ')}</div>}
+          </details>
           {p.tax_impact && (
             <div style={{ fontSize: 12, marginTop: 6, color: 'var(--amber)' }}>
               ⚠ {p.tax_impact.has_cost_basis
                 ? `Estimated taxable gain: ${fmt(p.tax_impact.estimated_gain)}`
                 : 'Tax impact could not be estimated — cost basis is missing (never invented).'}
-            </div>
-          )}
-          {p.assumptions?.length > 0 && (
-            <div style={{ fontSize: 11, marginTop: 8, color: 'var(--muted)' }}>
-              Assumptions: {p.assumptions.join(' ')}
             </div>
           )}
           <div style={{ fontSize: 11, marginTop: 4, color: 'var(--muted)' }}>
@@ -97,13 +97,15 @@ function ActionCard({ card, onDecide, busy, onNavigate }) {
           {isAccountTypeIssue && (
             <button className="btn-primary" onClick={() => onNavigate?.('accounts')}>Review account type →</button>
           )}
+          {card.category === 'missing_data' && !isAccountTypeIssue && <button className="btn-primary" onClick={() => onNavigate?.('portfoliosetup')}>Review portfolio setup</button>}
           {card.status !== 'accepted' && (
             <button className="btn-secondary" disabled={busy} onClick={() => onDecide(card.id, 'accepted', notes)}>Accept</button>
           )}
           {card.status === 'accepted' && (
             <button className="btn-primary" disabled={busy} onClick={() => onDecide(card.id, 'completed', notes)}>Mark complete</button>
           )}
-          <input aria-label="Review date" className="input" type="date" value={reviewDate} onChange={e => setReviewDate(e.target.value)} />
+          <label style={{ fontSize: 12, color: 'var(--muted)', marginTop: 8 }}>Review later on
+          <input aria-label="Review date" className="input" type="date" value={reviewDate} onChange={e => setReviewDate(e.target.value)} /></label>
           <button className="btn-secondary" disabled={busy || !reviewDate} onClick={() => onDecide(card.id, 'deferred', notes, reviewDate)}>Defer until date</button>
           <button className="btn-secondary" disabled={busy} onClick={() => setShowDecide(v => !v)}>Reject…</button>
         </div>
@@ -127,16 +129,24 @@ export default function PortfolioCoach({ onNavigate }) {
   const [contribResult, setContribResult] = useState(null)
   const [rebalanceResult, setRebalanceResult] = useState(null)
   const [filterCategory, setFilterCategory] = useState('all')
+  const [showAllActions, setShowAllActions] = useState(false)
+  const requestVersion = useRef(0)
+  const [requestError, setRequestError] = useState('')
+  const [loadError, setLoadError] = useState(false)
+  const [accounts, setAccounts] = useState([])
 
   const load = (pending = 0) => {
     setLoading(true)
+    setLoadError(false)
     Promise.all([
       axios.get('/api/recommendations', { params: { pending_contribution: pending || 0 } }),
       axios.get('/api/portfolio/allocation').catch(() => ({ data: { has_holdings: false } })),
-    ]).then(([rec, alloc]) => {
+      axios.get('/api/accounts').catch(() => ({ data: [] })),
+    ]).then(([rec, alloc, accountResponse]) => {
       setData(rec.data)
       setAllocation(alloc.data)
-    }).finally(() => setLoading(false))
+      setAccounts(Array.isArray(accountResponse.data) ? accountResponse.data : [])
+    }).catch(() => setLoadError(true)).finally(() => setLoading(false))
   }
 
   useEffect(() => { load() }, [])
@@ -154,18 +164,25 @@ export default function PortfolioCoach({ onNavigate }) {
   const runContribution = () => {
     const amount = parseFloat(contribAmount)
     if (!amount || amount <= 0) return
+    const version = ++requestVersion.current
+    setRequestError('')
+    setContribResult(null)
     setBusy(true)
     axios.post('/api/portfolio/contribution-destination', { amount })
-      .then(r => setContribResult(r.data))
-      .finally(() => setBusy(false))
+      .then(r => { if (version === requestVersion.current) setContribResult(r.data) })
+      .catch(() => { if (version === requestVersion.current) setRequestError('Could not generate contribution advice. Please try again.') })
+      .finally(() => { if (version === requestVersion.current) setBusy(false) })
   }
 
   const runRebalance = () => {
+    const version = ++requestVersion.current
+    setRequestError('')
     setBusy(true)
     setRebalanceResult(null)
     axios.post('/api/portfolio/rebalance', { amount: parseFloat(contribAmount) || 0 })
-      .then(r => setRebalanceResult(r.data))
-      .finally(() => setBusy(false))
+      .then(r => { if (version === requestVersion.current) setRebalanceResult(r.data) })
+      .catch(() => { if (version === requestVersion.current) setRequestError('Could not generate the rebalance checklist. Please try again.') })
+      .finally(() => { if (version === requestVersion.current) setBusy(false) })
   }
 
   const [planningResult, setPlanningResult] = useState(null)
@@ -175,8 +192,11 @@ export default function PortfolioCoach({ onNavigate }) {
       Object.entries(allocation.comparison.by_class).map(([c, d]) => [c, d.target_pct]),
     )
     setBusy(true)
+    setPlanningResult(null)
+    setRequestError('')
     axios.post('/api/portfolio/planning-comparison', { proposed_allocation })
       .then(r => setPlanningResult(r.data))
+      .catch(() => setRequestError('Could not compare planning outcomes. Please try again.'))
       .finally(() => setBusy(false))
   }
 
@@ -186,19 +206,38 @@ export default function PortfolioCoach({ onNavigate }) {
     [cards, filterCategory],
   )
   const categoriesPresent = useMemo(() => [...new Set(cards.map(c => c.category))], [cards])
+  const nextActions = <section aria-label="Recommended next actions" style={{ marginBottom: 28 }}>
+    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12, flexWrap: 'wrap', gap: 8 }}>
+      <h2 style={{ fontSize: 18, fontWeight: 600 }}>What should I do next?</h2>
+      <select className="input" aria-label="Filter recommendations" value={filterCategory} onChange={e => { setFilterCategory(e.target.value); setShowAllActions(false) }} style={{ maxWidth: 260 }}>
+        <option value="all">All categories ({cards.length})</option>
+        {categoriesPresent.map(c => <option key={c} value={c}>{CATEGORY_LABELS[c] || c} ({cards.filter(x => x.category === c).length})</option>)}
+      </select>
+    </div>
+    {visible.length === 0 && <div className="card" style={{ color: 'var(--muted)' }}>
+      {loadError ? 'Recommendations are unavailable until the refresh succeeds.' : filterCategory !== 'all' ? 'No open recommendations in this category.' : 'No open recommendations. Review the setup and data-quality indicators above before treating this as an all-clear.'}
+    </div>}
+    {(showAllActions ? visible : visible.slice(0, 5)).map(card => <ActionCard key={card.id} card={card} onDecide={decide} busy={busy} onNavigate={onNavigate} accounts={accounts} />)}
+    {visible.length > 5 && <button className="btn-secondary" onClick={() => setShowAllActions(v => !v)}>{showAllActions ? 'Show top 5 actions' : `Show all ${visible.length} actions`}</button>}
+  </section>
 
   if (loading && !data) return <div className="loading">Analyzing your portfolio...</div>
 
   return (
-    <div>
-      <div style={{ marginBottom: 24 }}>
+    <div className="portfolio-coach">
+      <div className="coach-header">
+        <div>
         <h1 className="section-title">Portfolio Coach</h1>
         <p className="section-sub">
-          Explainable, decision-support-only recommendations from your holdings, investment policy, and account
-          investment options. Nothing here places a trade or connects to a brokerage — every action is yours to take.
+          Review what needs attention, decide where new money goes, and build a rebalance checklist.
+          Recommendations use your included accounts and saved policy. You review and execute any trades yourself.
         </p>
+        </div>
+        <button className="btn-secondary" onClick={() => onNavigate?.('portfoliosetup')}>Edit holdings & policy</button>
       </div>
 
+      {loadError && <div className="card" role="alert">Could not refresh your portfolio. <button className="btn-secondary" onClick={() => load()}>Try again</button></div>}
+      {requestError && <p role="alert">{requestError}</p>}
       {!data?.has_policy && (
         <div className="card" style={{ marginBottom: 20, borderLeft: '3px solid var(--red)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 12 }}>
           <div>
@@ -242,9 +281,10 @@ export default function PortfolioCoach({ onNavigate }) {
         </div>
       )}
 
+      {nextActions}
       {allocation?.has_policy && allocation?.comparison && (
-        <div className="card" style={{ marginBottom: 24 }}>
-          <div className="label" style={{ marginBottom: 10 }}>Current vs. target allocation</div>
+        <details className="card" style={{ marginBottom: 24 }}>
+          <summary>Current vs. target allocation</summary>
           <div style={{ overflowX: 'auto' }}>
             <table style={{ width: '100%', fontSize: 13, borderCollapse: 'collapse' }}>
               <thead>
@@ -263,7 +303,7 @@ export default function PortfolioCoach({ onNavigate }) {
                     <td style={{ padding: '4px 8px' }}>{pct(d.current_pct)}</td>
                     <td style={{ padding: '4px 8px' }}>{pct(d.target_pct)}</td>
                     <td style={{ padding: '4px 8px', color: d.within_drift_band ? 'var(--muted)' : 'var(--amber)' }}>
-                      {d.deviation_pct > 0 ? '+' : ''}{isPrivacyMode() ? MASK_PERCENT : d.deviation_pct}%
+                      {isPrivacyMode() ? MASK_PERCENT : `${d.deviation_pct > 0 ? '+' : ''}${d.deviation_pct}%`}
                     </td>
                     <td style={{ padding: '4px 8px' }}>{d.within_drift_band ? '✓' : '—'}</td>
                   </tr>
@@ -271,12 +311,12 @@ export default function PortfolioCoach({ onNavigate }) {
               </tbody>
             </table>
           </div>
-        </div>
+        </details>
       )}
 
       {allocation?.has_policy && allocation?.comparison && (
-        <div className="card" style={{ marginBottom: 24 }}>
-          <div className="label" style={{ marginBottom: 10 }}>What would this policy's target mix do to my retirement plan?</div>
+        <details className="card" style={{ marginBottom: 24 }}>
+          <summary>Explore how your target mix affects retirement</summary>
           <p style={{ fontSize: 12, color: 'var(--muted)', marginTop: -4, marginBottom: 10 }}>
             Compares your saved retirement assumptions against the blended expected return and volatility of your
             policy's target mix, using the same retirement/Monte Carlo/SWR engines the rest of the app uses.
@@ -295,8 +335,8 @@ export default function PortfolioCoach({ onNavigate }) {
                 <tbody>
                   <tr style={{ borderTop: '1px solid var(--border)' }}>
                     <td style={{ padding: '4px 8px' }}>Monte Carlo success rate</td>
-                    <td style={{ padding: '4px 8px' }}>{planningResult.baseline.monte_carlo_success_rate}%</td>
-                    <td style={{ padding: '4px 8px' }}>{planningResult.proposed.monte_carlo_success_rate}%</td>
+                    <td style={{ padding: '4px 8px' }}>{pct(planningResult.baseline.monte_carlo_success_rate)}</td>
+                    <td style={{ padding: '4px 8px' }}>{pct(planningResult.proposed.monte_carlo_success_rate)}</td>
                   </tr>
                   <tr style={{ borderTop: '1px solid var(--border)' }}>
                     <td style={{ padding: '4px 8px' }}>Safe withdrawal (annual)</td>
@@ -322,19 +362,19 @@ export default function PortfolioCoach({ onNavigate }) {
               </div>
             </div>
           )}
-        </div>
+        </details>
       )}
 
       <div className="card" style={{ marginBottom: 24 }}>
         <div className="label" style={{ marginBottom: 10 }}>Where should new money go?</div>
         <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-          <input className="input" type="number" placeholder="Amount to invest" value={contribAmount}
-                 onChange={e => { setContribAmount(e.target.value); setContribResult(null); setRebalanceResult(null) }} style={{ maxWidth: 200 }} />
-          <button className="btn-primary" disabled={busy} onClick={runContribution}>Get contribution recommendation</button>
+          <label style={{ fontSize: 12, color: 'var(--muted)' }}>New money available ($)<input className="input" type="number" min="0" placeholder="Amount to invest" value={contribAmount}
+                 onChange={e => { requestVersion.current += 1; setBusy(false); setRequestError(''); setContribAmount(e.target.value); setContribResult(null); setRebalanceResult(null) }} style={{ maxWidth: 200 }} />
+          </label><button className="btn-primary" disabled={busy || !allocation?.has_policy || !(Number(contribAmount) > 0)} onClick={runContribution}>Get contribution recommendation</button>
         </div>
         {contribResult && (
           <div style={{ marginTop: 14 }}>
-            {(contribResult.actions || []).length === 0 && <div style={{ color: 'var(--muted)', fontSize: 13 }}>No underweight asset classes to fund — allocation is already at or above target everywhere.</div>}
+            {(contribResult.actions || []).length === 0 && <div style={{ color: 'var(--muted)', fontSize: 13 }}>No eligible contribution recommendation was returned. Review your allocation, account exclusions, and available funds.</div>}
             {(contribResult.actions || []).map((a, i) => (
               <div key={i} style={{ fontSize: 13, padding: '6px 0', borderTop: i ? '1px solid var(--border)' : 'none' }}>
                 <strong>{fmt(a.amount)}</strong> → {a.asset_class?.replace(/_/g, ' ')}
@@ -370,25 +410,6 @@ export default function PortfolioCoach({ onNavigate }) {
         )}
       </div>
 
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12, flexWrap: 'wrap', gap: 8 }}>
-        <h2 style={{ fontSize: 16, fontWeight: 600 }}>What should I do next?</h2>
-        <select className="input" value={filterCategory} onChange={e => setFilterCategory(e.target.value)} style={{ maxWidth: 260 }}>
-          <option value="all">All categories ({cards.length})</option>
-          {categoriesPresent.map(c => (
-            <option key={c} value={c}>{CATEGORY_LABELS[c] || c} ({cards.filter(x => x.category === c).length})</option>
-          ))}
-        </select>
-      </div>
-
-      {visible.length === 0 && (
-        <div className="card" style={{ color: 'var(--muted)' }}>
-          No open recommendations right now — your portfolio matches your policy within its drift band, or there's
-          nothing new to review.
-        </div>
-      )}
-      {visible.map(card => (
-        <ActionCard key={card.id} card={card} onDecide={decide} busy={busy} onNavigate={onNavigate} />
-      ))}
     </div>
   )
 }

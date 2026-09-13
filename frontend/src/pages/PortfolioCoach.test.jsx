@@ -30,6 +30,7 @@ const recommendationsResponse = {
         expected_effect: 'Reduces drift.', confidence: 'medium',
         tax_impact: { has_cost_basis: true, estimated_gain: 9876 },
         assumptions: [], recommendation_key: 'k1',
+        affected_accounts: [1],
       },
     },
   ],
@@ -55,6 +56,7 @@ beforeEach(() => {
   axios.get.mockImplementation(url => {
     if (url === '/api/recommendations') return Promise.resolve({ data: recommendationsResponse })
     if (url === '/api/portfolio/allocation') return Promise.resolve({ data: allocationResponse })
+    if (url === '/api/accounts') return Promise.resolve({ data: [{ id: 1, name: 'Retirement IRA' }] })
     return Promise.resolve({ data: {} })
   })
 })
@@ -69,6 +71,7 @@ describe('PortfolioCoach', () => {
     await flush()
     expect(container.textContent).toContain('$543,210')
     expect(container.textContent).toContain('$9,876')
+    expect(container.textContent).toContain('Retirement IRA')
   })
 
   it('masks household total, tax-impact gain, and card figures in privacy mode', async () => {
@@ -115,6 +118,20 @@ describe('PortfolioCoach', () => {
     await act(async () => { button.click(); await Promise.resolve(); await Promise.resolve() })
     expect(container.textContent).toContain('$1,000')
     await setInput(amount, '2000')
+    expect(container.textContent).not.toContain('$1,000')
+  })
+
+  it('ignores an in-flight contribution response after the amount changes', async () => {
+    let finish
+    axios.post.mockImplementationOnce(() => new Promise(resolve => { finish = resolve }))
+    await act(async () => root.render(<PortfolioCoach />))
+    await flush()
+    const amount = container.querySelector('input[placeholder="Amount to invest"]')
+    await setInput(amount, '1000')
+    await act(async () => [...container.querySelectorAll('button')].find(b => b.textContent === 'Get contribution recommendation').click())
+    await setInput(amount, '2000')
+    await act(async () => finish({ data: { actions: [{ amount: 1000, asset_class: 'us_bonds', reason: 'Outdated advice' }] } }))
+    expect(container.textContent).not.toContain('Outdated advice')
     expect(container.textContent).not.toContain('$1,000')
   })
 

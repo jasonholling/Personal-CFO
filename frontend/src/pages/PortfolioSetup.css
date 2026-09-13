@@ -1,0 +1,35 @@
+.portfolio-setup, .portfolio-coach { --muted: var(--text2); }
+.portfolio-setup { max-width: 1240px; margin: 0 auto; }
+.portfolio-setup input[type="checkbox"], .portfolio-coach input[type="checkbox"] { width: 16px; height: 16px; flex: 0 0 16px; padding: 0; accent-color: var(--accent); }
+.portfolio-setup label { min-width: 0; }
+.portfolio-setup .setup-tabs { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 24px; }
+.portfolio-setup .setup-helper { color: var(--muted); font-size: 13px; line-height: 1.6; margin: 6px 0 18px; }
+.portfolio-setup .setup-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; margin-bottom: 18px; }
+.portfolio-setup .setup-toggle { display: flex; align-items: center; gap: 9px; font-size: 13px; }
+.portfolio-setup .setup-excluded { border-style: dashed; }
+.portfolio-setup .setup-excluded > summary { color: var(--muted); }
+.portfolio-setup .setup-badge { display: inline-block; font-size: 11px; color: var(--muted); border: 1px solid var(--border); border-radius: 20px; padding: 3px 9px; margin-left: 10px; white-space: nowrap; }
+.portfolio-setup summary { cursor: pointer; font-size: 14px; font-weight: 600; line-height: 1.6; }
+.portfolio-setup details > summary { padding: 2px 0; }
+.portfolio-setup details[open] > summary { margin-bottom: 16px; }
+.portfolio-setup .setup-account-row { display: flex; align-items: center; gap: 12px; padding: 12px; border-radius: 8px; background: var(--bg3); }
+.portfolio-setup .setup-account-row span { display: block; }
+.portfolio-setup .setup-account-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 300px), 1fr)); gap: 8px; }
+.portfolio-setup .setup-save { position: sticky; bottom: 12px; display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-top: 20px; padding: 14px 18px; border: 1px solid var(--border); border-radius: 10px; background: var(--bg2); box-shadow: 0 5px 24px #0004; z-index: 2; }
+.portfolio-setup .setup-form { display: grid !important; grid-template-columns: repeat(auto-fit, minmax(min(100%, 190px), 1fr)); align-items: start !important; gap: 16px !important; }
+.portfolio-setup .setup-form > input, .portfolio-setup .setup-form > select { min-width: 0 !important; max-width: none !important; }
+.portfolio-setup .setup-form > label { display: flex; flex-direction: column; gap: 6px; font-size: 12px; color: var(--muted); }
+.portfolio-setup .setup-form > label > input, .portfolio-setup .setup-form > label > select { min-width: 0 !important; max-width: none !important; }
+.portfolio-setup .setup-form > div { grid-column: 1 / -1; }
+.portfolio-setup .setup-form > details { grid-column: 1 / -1; border-top: 1px solid var(--border); padding-top: 14px; }
+.portfolio-setup .setup-form > button { align-self: end; }
+.portfolio-setup .setup-form > label:has(input[type="checkbox"]) { flex-direction: row; align-items: center; }
+.portfolio-coach .coach-header { display: flex; justify-content: space-between; gap: 20px; flex-wrap: wrap; margin-bottom: 24px; }
+.portfolio-coach .coach-header p { max-width: 720px; }
+.portfolio-coach .coach-header > button { align-self: start; }
+.portfolio-coach details summary { cursor: pointer; color: var(--muted); font-size: 12px; }
+@media (max-width: 640px) {
+  .portfolio-setup .card { padding: 16px; }
+  .portfolio-setup .setup-save { bottom: 0; flex-wrap: wrap; }
+  .portfolio-setup .setup-tabs > button { flex: 1 1 140px; }
+}

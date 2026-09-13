@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import axios from 'axios'
 import { isPrivacyMode, MASK_CURRENCY } from '../utils/privacy'
 import PolicyRestrictions from '../components/PolicyRestrictions'
+import './PortfolioSetup.css'
 
 // Portfolio Setup (codex/portfolio-coach-recommendations) — the data
 // entry surface Portfolio Coach reads from: holdings, the household
@@ -35,7 +36,8 @@ const EMPTY_HOLDING_FORM = {
   expense_ratio: '', cost_basis: '', multiAsset: false, exposures: [{ asset_class: 'us_large_cap', weight_pct: '' }],
 }
 
-function HoldingsTab({ accounts }) {
+function HoldingsTab({ accounts, excludedAccounts, onEditPolicy }) {
+  const [showExcluded, setShowExcluded] = useState(false)
   const [groups, setGroups] = useState([])
   const [loading, setLoading] = useState(true)
   const [form, setForm] = useState(EMPTY_HOLDING_FORM)
@@ -107,22 +109,28 @@ function HoldingsTab({ accounts }) {
 
   return (
     <div>
-      <form onSubmit={submit} className="card" style={{ marginBottom: 20, display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
-        <select className="input" value={form.account_id} onChange={e => setForm(f => ({ ...f, account_id: e.target.value }))} style={{ minWidth: 160 }}>
+      <div className="setup-toolbar">
+        <div><strong>What you own</strong><p className="setup-helper">Enter holdings to give the Coach an accurate picture of your investments.</p></div>
+        <label className="setup-toggle"><input type="checkbox" checked={showExcluded} onChange={e => { setShowExcluded(e.target.checked); if (!e.target.checked && excludedAccounts.includes(Number(form.account_id))) setForm(EMPTY_HOLDING_FORM) }} />Show excluded accounts ({excludedAccounts.length})</label>
+      </div>
+      <details className="card" open style={{ marginBottom: 16 }}>
+      <summary>Add a holding</summary>
+      <form onSubmit={submit} className="setup-form">
+        <label>Account<select className="input" value={form.account_id} onChange={e => setForm(f => ({ ...f, account_id: e.target.value }))} style={{ minWidth: 160 }}>
           <option value="">Account…</option>
-          {accounts.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
-        </select>
-        <input className="input" placeholder="Security name" value={form.security_name} onChange={e => setForm(f => ({ ...f, security_name: e.target.value }))} style={{ minWidth: 160 }} />
-        <input className="input" placeholder="Ticker (optional)" value={form.ticker} onChange={e => { setForm(f => ({ ...f, ticker: e.target.value })); setSearchResults([]) }} style={{ maxWidth: 100 }} />
+          {accounts.filter(a => showExcluded || !excludedAccounts.includes(a.id)).map(a => <option key={a.id} value={a.id}>{a.name}{excludedAccounts.includes(a.id) ? ' — Excluded from Coach' : ''}</option>)}
+        </select></label>
+        <label>Fund or security name<input className="input" placeholder="Security name" value={form.security_name} onChange={e => setForm(f => ({ ...f, security_name: e.target.value }))} style={{ minWidth: 160 }} /></label>
+        <label>Ticker (optional)<input className="input" placeholder="Ticker (optional)" value={form.ticker} onChange={e => { setForm(f => ({ ...f, ticker: e.target.value })); setSearchResults([]) }} style={{ maxWidth: 100 }} /></label>
         <button type="button" className="btn-secondary" onClick={searchTicker}>Look up ticker</button>
-        <input className="input" type="number" placeholder="Market value" value={form.market_value} onChange={e => setForm(f => ({ ...f, market_value: e.target.value }))} style={{ maxWidth: 140 }} />
+        <label>Current value ($)<input className="input" type="number" placeholder="Market value" value={form.market_value} onChange={e => setForm(f => ({ ...f, market_value: e.target.value }))} style={{ maxWidth: 140 }} /></label>
         {!form.multiAsset && (
-          <select className="input" value={form.asset_class} onChange={e => setForm(f => ({ ...f, asset_class: e.target.value }))} style={{ minWidth: 160 }}>
+          <label>Asset class<select className="input" value={form.asset_class} onChange={e => setForm(f => ({ ...f, asset_class: e.target.value }))} style={{ minWidth: 160 }}>
             {ASSET_CLASSES.map(c => <option key={c} value={c}>{c.replace(/_/g, ' ')}</option>)}
-          </select>
+          </select></label>
         )}
-        <input className="input" type="number" placeholder="Expense ratio %" value={form.expense_ratio} onChange={e => setForm(f => ({ ...f, expense_ratio: e.target.value }))} style={{ maxWidth: 130 }} />
-        <input className="input" type="number" placeholder="Cost basis" value={form.cost_basis} onChange={e => setForm(f => ({ ...f, cost_basis: e.target.value }))} style={{ maxWidth: 130 }} />
+        <label>Annual expense ratio (%)<input className="input" type="number" placeholder="Expense ratio %" value={form.expense_ratio} onChange={e => setForm(f => ({ ...f, expense_ratio: e.target.value }))} style={{ maxWidth: 130 }} /></label>
+        <label>Cost basis ($, optional)<input className="input" type="number" placeholder="Cost basis" value={form.cost_basis} onChange={e => setForm(f => ({ ...f, cost_basis: e.target.value }))} style={{ maxWidth: 130 }} /></label>
         <label style={{ fontSize: 12, display: 'flex', gap: 4, alignItems: 'center' }}>
           <input type="checkbox" checked={form.multiAsset} onChange={e => setForm(f => ({ ...f, multiAsset: e.target.checked }))} />
           Multi-asset (target-date / balanced fund)
@@ -161,9 +169,10 @@ function HoldingsTab({ accounts }) {
           </div>
         )}
       </form>
+      </details>
 
-      <div className="card" style={{ marginBottom: 20 }}>
-        <div className="label">Import holdings from CSV</div>
+      <details className="card" style={{ marginBottom: 20 }}>
+        <summary>Import holdings from CSV</summary>
         <p style={{ fontSize: 12, color: 'var(--muted)' }}>Preview and validate every row before anything is saved.</p>
         <input aria-label="Holdings CSV" type="file" accept=".csv,text/csv" onChange={e => previewCsv(e.target.files?.[0])} />
         {importError && <div style={{ color: 'var(--red)', fontSize: 12 }}>{importError}</div>}
@@ -176,10 +185,13 @@ function HoldingsTab({ accounts }) {
             </button>
           </div>
         )}
-      </div>
+      </details>
 
-      {groups.map(g => (
-        <div key={g.account_id} className="card" style={{ marginBottom: 14 }}>
+      {!showExcluded && excludedAccounts.length > 0 && <p className="setup-helper">Excluded accounts are hidden here. Their balances and holdings remain in your financial plan.</p>}
+      {groups.filter(g => showExcluded || !excludedAccounts.includes(g.account_id)).map(g => (
+        <details key={`${g.account_id}-${showExcluded}`} open={!excludedAccounts.includes(g.account_id) && g.holdings.length > 0} className={`card ${excludedAccounts.includes(g.account_id) ? 'setup-excluded' : ''}`} style={{ marginBottom: 14 }}>
+          <summary>{g.account_name}<span className="setup-badge">{excludedAccounts.includes(g.account_id) ? 'Excluded from Coach' : `${g.holdings.length} holdings`}</span></summary>
+          {excludedAccounts.includes(g.account_id) && <p className="setup-helper">Kept for your records; not used in Coach allocation or recommendations. <button className="btn-secondary" onClick={onEditPolicy}>Manage inclusion in policy</button></p>}
           <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8 }}>
             <div>
               <strong>{g.account_name}</strong>
@@ -205,7 +217,7 @@ function HoldingsTab({ accounts }) {
               </span>
             </div>
           ))}
-        </div>
+        </details>
       ))}
     </div>
   )
@@ -216,6 +228,7 @@ function PolicyTab({ accounts }) {
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [saveError, setSaveError] = useState(null)
+  const [saved, setSaved] = useState(false)
 
   const load = () => axios.get('/api/investment-policy').then(r => {
     setPolicy(r.data.has_policy ? r.data.policy : {
@@ -241,9 +254,11 @@ function PolicyTab({ accounts }) {
     if (!canSave) return
     setSaving(true)
     setSaveError(null)
+    setSaved(false)
     try {
       await axios.post('/api/investment-policy', policy)
       await load()
+      setSaved(true)
     } catch (e) {
       setSaveError(e.response?.data?.detail ? JSON.stringify(e.response.data.detail) : 'Could not save policy.')
     } finally {
@@ -252,13 +267,14 @@ function PolicyTab({ accounts }) {
   }
 
   return (
-    <div className="card">
-      <div className="label" style={{ marginBottom: 12 }}>Target allocation by asset class</div>
+    <div className="card" onChange={() => setSaved(false)}>
+      <h2 style={{ fontSize: 18, margin: '0 0 6px' }}>Your target investment mix</h2>
+      <p className="setup-helper">Set percentages for the accounts included in Coach. Use the sections below for exclusions and account-specific rules.</p>
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 1fr))', gap: 10 }}>
         {POLICY_TARGET_FIELDS.map(([field, label]) => (
           <div key={field}>
-            <label style={{ fontSize: 12, color: 'var(--muted)' }}>{label}</label>
-            <input className="input" type="number" value={policy[field] ?? 0}
+            <label htmlFor={field} style={{ fontSize: 12, color: 'var(--muted)' }}>{label} (%)</label>
+            <input id={field} className="input" type="number" min="0" max="100" step="any" value={policy[field] ?? 0}
                    onChange={e => setPolicy(p => ({ ...p, [field]: parseFloat(e.target.value) || 0 }))} />
           </div>
         ))}
@@ -271,23 +287,23 @@ function PolicyTab({ accounts }) {
       )}
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 1fr))', gap: 10, marginTop: 16 }}>
         <div>
-          <label style={{ fontSize: 12, color: 'var(--muted)' }}>Drift band (±%)</label>
-          <input className="input" type="number" value={policy.drift_band_pct ?? 5}
+          <label htmlFor="policy-drift" style={{ fontSize: 12, color: 'var(--muted)' }}>Drift band (±%)</label>
+          <input id="policy-drift" className="input" type="number" value={policy.drift_band_pct ?? 5}
                  onChange={e => setPolicy(p => ({ ...p, drift_band_pct: parseFloat(e.target.value) || 0 }))} />
         </div>
         <div>
-          <label style={{ fontSize: 12, color: 'var(--muted)' }}>Minimum cash reserve ($)</label>
-          <input className="input" type="number" value={policy.minimum_cash_reserve ?? 0}
+          <label htmlFor="policy-cash" style={{ fontSize: 12, color: 'var(--muted)' }}>Minimum cash reserve ($)</label>
+          <input id="policy-cash" className="input" type="number" value={policy.minimum_cash_reserve ?? 0}
                  onChange={e => setPolicy(p => ({ ...p, minimum_cash_reserve: parseFloat(e.target.value) || 0 }))} />
         </div>
         <div>
-          <label style={{ fontSize: 12, color: 'var(--muted)' }}>Maximum single security (%)</label>
-          <input className="input" type="number" min="0" max="100" value={policy.max_single_security_pct ?? ''}
+          <label htmlFor="policy-security" style={{ fontSize: 12, color: 'var(--muted)' }}>Maximum single security (%)</label>
+          <input id="policy-security" className="input" type="number" min="0" max="100" value={policy.max_single_security_pct ?? ''}
                  onChange={e => setPolicy(p => ({ ...p, max_single_security_pct: e.target.value === '' ? null : parseFloat(e.target.value) }))} />
         </div>
         <div>
-          <label style={{ fontSize: 12, color: 'var(--muted)' }}>Rebalance cadence</label>
-          <select className="input" value={policy.rebalance_cadence || 'annual'}
+          <label htmlFor="policy-cadence" style={{ fontSize: 12, color: 'var(--muted)' }}>Rebalance cadence</label>
+          <select id="policy-cadence" className="input" value={policy.rebalance_cadence || 'annual'}
                   onChange={e => setPolicy(p => ({ ...p, rebalance_cadence: e.target.value }))}>
             <option value="annual">Annual</option>
             <option value="semiannual">Semiannual</option>
@@ -295,40 +311,43 @@ function PolicyTab({ accounts }) {
           </select>
         </div>
         <div style={{ display: 'flex', alignItems: 'flex-end', gap: 6 }}>
-          <input type="checkbox" checked={!!policy.use_contributions_before_sales}
+          <input id="policy-contributions" type="checkbox" checked={!!policy.use_contributions_before_sales}
                  onChange={e => setPolicy(p => ({ ...p, use_contributions_before_sales: e.target.checked }))} />
-          <label style={{ fontSize: 12 }}>Prefer contributions/exchanges before any taxable sale</label>
+          <label htmlFor="policy-contributions" style={{ fontSize: 12 }}>Prefer contributions/exchanges before any taxable sale</label>
         </div>
       </div>
-      <div style={{ marginTop: 20, paddingTop: 16, borderTop: '1px solid var(--border)' }}>
-        <div className="label" style={{ marginBottom: 4 }}>Accounts excluded from investing advice</div>
+      <details style={{ marginTop: 20, paddingTop: 16, borderTop: '1px solid var(--border)' }}>
+        <summary>Accounts excluded from investing advice <span className="setup-badge">{policy.excluded_accounts?.length || 0} excluded</span></summary>
         <div style={{ fontSize: 12, color: 'var(--muted)', marginBottom: 10 }}>
           Use this for checking, bill-pay cash, or any account the Coach should leave alone. The account still counts in net worth and cash planning.
         </div>
-        <div style={{ display: 'grid', gap: 7 }}>
+        <div className="setup-account-grid">
           {accounts.map(account => {
             const excluded = (policy.excluded_accounts || []).includes(account.id)
             return (
-              <label key={account.id} style={{ display: 'flex', alignItems: 'center', gap: 7, fontSize: 13 }}>
+              <label key={account.id} className="setup-account-row" style={{ fontSize: 13 }}>
                 <input aria-label={`Exclude ${account.name} from investing advice`} type="checkbox" checked={excluded}
                        onChange={e => setPolicy(p => ({ ...p, excluded_accounts: e.target.checked
                          ? [...new Set([...(p.excluded_accounts || []), account.id])]
                          : (p.excluded_accounts || []).filter(id => id !== account.id) }))} />
-                {account.name} <span style={{ color: 'var(--muted)' }}>({account.account_type || 'account'}{account.balance != null ? ` · ${fmt(account.balance)}` : ''})</span>
+                <div>{account.name} <span style={{ color: 'var(--muted)', fontSize: 12 }}>{account.account_type || 'account'}{account.balance != null ? ` · ${fmt(account.balance)}` : ''}</span></div>
               </label>
             )
           })}
           {!accounts.length && <div style={{ fontSize: 12, color: 'var(--muted)' }}>No accounts entered yet.</div>}
         </div>
-      </div>
+      </details>
       <PolicyRestrictions accounts={accounts} policy={policy} onChange={setPolicy} />
-      {saveError && <div style={{ fontSize: 13, color: 'var(--red)', marginTop: 8 }}>{saveError}</div>}
-      <button className="btn-primary" style={{ marginTop: 16 }} disabled={saving || !canSave} onClick={save}>Save policy</button>
+      <div className="setup-save">
+        <div role="status" style={{ fontSize: 13, color: saveError ? 'var(--red)' : 'var(--muted)' }}>{saveError || (saving ? 'Saving…' : saved ? 'Policy saved. Coach will use these settings.' : canSave ? 'Save to apply your allocation and account rules.' : 'Targets must total 100% before saving.')}</div>
+        <button className="btn-primary" disabled={saving || !canSave} onClick={save}>Save policy</button>
+      </div>
     </div>
   )
 }
 
-function OptionsTab({ accounts }) {
+function OptionsTab({ accounts, excludedAccounts, onEditPolicy }) {
+  const [showExcluded, setShowExcluded] = useState(false)
   const [accountId, setAccountId] = useState('')
   const [options, setOptions] = useState([])
   const emptyOption = { option_name: '', ticker: '', asset_class: 'us_large_cap', expense_ratio: '', minimum_investment: '',
@@ -367,29 +386,36 @@ function OptionsTab({ accounts }) {
 
   return (
     <div>
-      <select className="input" value={accountId} onChange={e => setAccountId(e.target.value)} style={{ marginBottom: 16, maxWidth: 260 }}>
+      <div className="setup-toolbar"><div><strong>What you can buy</strong><p className="setup-helper">Record the funds available in each account, then compare a mix against your household policy.</p></div>
+        <label className="setup-toggle"><input type="checkbox" checked={showExcluded} onChange={e => { setShowExcluded(e.target.checked); if (!e.target.checked && excludedAccounts.includes(Number(accountId))) setAccountId('') }} />Show excluded accounts ({excludedAccounts.length})</label>
+      </div>
+      <label htmlFor="options-account" style={{ display: 'block', fontSize: 12, color: 'var(--muted)' }}>Account to review</label>
+      <select id="options-account" className="input" value={accountId} onChange={e => setAccountId(e.target.value)} style={{ marginBottom: 16, maxWidth: 320 }}>
         <option value="">Select an account…</option>
-        {accounts.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
+        {accounts.filter(a => showExcluded || !excludedAccounts.includes(a.id)).map(a => <option key={a.id} value={a.id}>{a.name}{excludedAccounts.includes(a.id) ? ' — Excluded from Coach' : ''}</option>)}
       </select>
 
       {accountId && (
         <>
-          <form onSubmit={submit} className="card" style={{ marginBottom: 16, display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
-            <input className="input" placeholder="Option name" value={form.option_name} onChange={e => setForm(f => ({ ...f, option_name: e.target.value }))} style={{ minWidth: 200 }} />
-            <input className="input" placeholder="Ticker (optional)" value={form.ticker} onChange={e => setForm(f => ({ ...f, ticker: e.target.value }))} style={{ maxWidth: 100 }} />
-            <select className="input" value={form.asset_class} onChange={e => setForm(f => ({ ...f, asset_class: e.target.value }))} style={{ minWidth: 160 }}>
+          {excludedAccounts.includes(Number(accountId)) && <div className="card setup-excluded" style={{ marginBottom: 16 }}><strong>Excluded from Coach</strong><p className="setup-helper">These options are kept for reference and are not used for recommendations.</p><button className="btn-secondary" onClick={onEditPolicy}>Manage inclusion in policy</button></div>}
+          <form onSubmit={submit} className="card setup-form" style={{ marginBottom: 16, display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+            <label>Fund or option name<input className="input" placeholder="Option name" value={form.option_name} onChange={e => setForm(f => ({ ...f, option_name: e.target.value }))} style={{ minWidth: 200 }} /></label>
+            <label>Ticker (optional)<input className="input" placeholder="Ticker (optional)" value={form.ticker} onChange={e => setForm(f => ({ ...f, ticker: e.target.value }))} style={{ maxWidth: 100 }} /></label>
+            <label>Asset class<select className="input" value={form.asset_class} onChange={e => setForm(f => ({ ...f, asset_class: e.target.value }))} style={{ minWidth: 160 }}>
               {ASSET_CLASSES.map(c => <option key={c} value={c}>{c.replace(/_/g, ' ')}</option>)}
-            </select>
-            <input className="input" type="number" placeholder="Expense ratio %" value={form.expense_ratio} onChange={e => setForm(f => ({ ...f, expense_ratio: e.target.value }))} style={{ maxWidth: 130 }} />
-            <input className="input" type="number" placeholder="Minimum $" value={form.minimum_investment} onChange={e => setForm(f => ({ ...f, minimum_investment: e.target.value }))} style={{ maxWidth: 120 }} />
-            <input className="input" type="number" placeholder="Min allocation %" value={form.minimum_allocation_pct} onChange={e => setForm(f => ({ ...f, minimum_allocation_pct: e.target.value }))} style={{ maxWidth: 140 }} />
-            <input className="input" type="number" placeholder="Max allocation %" value={form.maximum_allocation_pct} onChange={e => setForm(f => ({ ...f, maximum_allocation_pct: e.target.value }))} style={{ maxWidth: 140 }} />
-            <input className="input" type="number" placeholder="Trading fee $" value={form.trading_fee} onChange={e => setForm(f => ({ ...f, trading_fee: e.target.value }))} style={{ maxWidth: 120 }} />
+            </select></label>
+            <label>Annual expense ratio (%)<input className="input" type="number" step="any" placeholder="Expense ratio %" value={form.expense_ratio} onChange={e => setForm(f => ({ ...f, expense_ratio: e.target.value }))} style={{ maxWidth: 130 }} /></label>
+            <details><summary>Minimums, trading fees & restrictions (optional)</summary><div className="setup-form">
+            <label>Minimum investment ($)<input className="input" type="number" placeholder="Minimum $" value={form.minimum_investment} onChange={e => setForm(f => ({ ...f, minimum_investment: e.target.value }))} style={{ maxWidth: 120 }} /></label>
+            <label>Minimum allocation (%)<input className="input" type="number" step="any" placeholder="Min allocation %" value={form.minimum_allocation_pct} onChange={e => setForm(f => ({ ...f, minimum_allocation_pct: e.target.value }))} style={{ maxWidth: 140 }} /></label>
+            <label>Maximum allocation (%)<input className="input" type="number" step="any" placeholder="Max allocation %" value={form.maximum_allocation_pct} onChange={e => setForm(f => ({ ...f, maximum_allocation_pct: e.target.value }))} style={{ maxWidth: 140 }} /></label>
+            <label>Trading fee ($)<input className="input" type="number" step="any" placeholder="Trading fee $" value={form.trading_fee} onChange={e => setForm(f => ({ ...f, trading_fee: e.target.value }))} style={{ maxWidth: 120 }} /></label>
             <select className="input" aria-label="Employer match eligibility" value={form.employer_match_eligible} onChange={e => setForm(f => ({ ...f, employer_match_eligible: e.target.value }))}>
               <option value="">Match eligibility unknown</option><option value="yes">Match eligible</option><option value="no">Not match eligible</option>
             </select>
-            <input className="input" placeholder="Redemption restriction" value={form.redemption_restriction} onChange={e => setForm(f => ({ ...f, redemption_restriction: e.target.value }))} />
-            <input className="input" placeholder="Settlement restriction" value={form.settlement_restriction} onChange={e => setForm(f => ({ ...f, settlement_restriction: e.target.value }))} />
+            <label>Redemption restriction<input className="input" placeholder="Redemption restriction" value={form.redemption_restriction} onChange={e => setForm(f => ({ ...f, redemption_restriction: e.target.value }))} /></label>
+            <label>Settlement restriction<input className="input" placeholder="Settlement restriction" value={form.settlement_restriction} onChange={e => setForm(f => ({ ...f, settlement_restriction: e.target.value }))} /></label>
+            </div></details>
             <label style={{ fontSize: 12, display: 'flex', gap: 4, alignItems: 'center' }}>
               <input type="checkbox" checked={form.available_for_new_contributions} onChange={e => setForm(f => ({ ...f, available_for_new_contributions: e.target.checked }))} />
               New contributions
@@ -423,7 +449,7 @@ function OptionsTab({ accounts }) {
 
           <div className="card">
             <div className="label" style={{ marginBottom: 10 }}>Which mix best implements my household policy?</div>
-            <button className="btn-primary" onClick={runCompare} disabled={options.length === 0}>Compare eligible options</button>
+            <button className="btn-primary" onClick={runCompare} disabled={options.length === 0 || excludedAccounts.includes(Number(accountId))}>Compare eligible options</button>
             {mixError && <div style={{ color: 'var(--amber)', fontSize: 13, marginTop: 10 }}>{mixError}</div>}
             {mixResult && (
               <div style={{ marginTop: 14 }}>
@@ -457,23 +483,37 @@ function OptionsTab({ accounts }) {
 export default function PortfolioSetup() {
   const [tab, setTab] = useState('holdings')
   const [accounts, setAccounts] = useState([])
+  const [excludedAccounts, setExcludedAccounts] = useState([])
+  const [policyReady, setPolicyReady] = useState(false)
+  const [policyError, setPolicyError] = useState(false)
 
   useEffect(() => { axios.get('/api/accounts').then(r => setAccounts(r.data)) }, [])
+  useEffect(() => {
+    let active = true
+    setPolicyReady(false)
+    setPolicyError(false)
+    axios.get('/api/investment-policy').then(r => {
+      if (active) { setExcludedAccounts(r.data.policy?.excluded_accounts || []); setPolicyReady(true) }
+    }).catch(() => { if (active) setPolicyError(true) })
+    return () => { active = false }
+  }, [tab])
 
   return (
-    <div>
+    <div className="portfolio-setup">
       <div style={{ marginBottom: 20 }}>
         <h1 className="section-title">Portfolio Setup</h1>
-        <p className="section-sub">Holdings, investment policy, and account investment options — the facts Portfolio Coach reads from.</p>
+        <p className="section-sub">Set your target mix, record what you own, and choose from the funds available to you.</p>
       </div>
-      <div style={{ display: 'flex', gap: 8, marginBottom: 20 }}>
+      <div className="setup-tabs">
         {TABS.map(t => (
-          <button key={t.id} className={tab === t.id ? 'btn-primary' : 'btn-secondary'} onClick={() => setTab(t.id)}>{t.label}</button>
+          <button key={t.id} aria-pressed={tab === t.id} className={tab === t.id ? 'btn-primary' : 'btn-secondary'} onClick={() => setTab(t.id)}>{t.label}</button>
         ))}
       </div>
-      {tab === 'holdings' && <HoldingsTab accounts={accounts} />}
+      {policyError && <p role="alert">Could not load account exclusions. Reload this page to retry.</p>}
+      {!policyReady && !policyError && tab !== 'policy' && <p>Loading investment policy…</p>}
+      {tab === 'holdings' && policyReady && <HoldingsTab accounts={accounts} excludedAccounts={excludedAccounts} onEditPolicy={() => setTab('policy')} />}
       {tab === 'policy' && <PolicyTab accounts={accounts} />}
-      {tab === 'options' && <OptionsTab accounts={accounts} />}
+      {tab === 'options' && policyReady && <OptionsTab accounts={accounts} excludedAccounts={excludedAccounts} onEditPolicy={() => setTab('policy')} />}
     </div>
   )
 }

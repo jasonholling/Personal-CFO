@@ -40,6 +40,50 @@ afterEach(async () => {
 })
 
 describe('PortfolioSetup workflows', () => {
+  it('hides excluded accounts by default and reveals their preserved holdings without deleting them', async () => {
+    axios.get.mockImplementation(url => Promise.resolve({ data:
+      url === '/api/accounts' ? [{ id: 1, name: 'IRA' }, { id: 2, name: 'Reserve' }] :
+      url === '/api/investment-policy' ? { has_policy: true, policy: { excluded_accounts: [2] } } :
+      url === '/api/holdings/grouped' ? { groups: [{ account_id: 2, account_name: 'Reserve', holdings: [{ id: 7, security_name: 'Reserve fund', asset_class: 'cash', market_value: 1000 }] }] } : []
+    }))
+    await act(async () => root.render(<PortfolioSetup />))
+    await flush()
+    expect(container.textContent).not.toContain('Reserve fund')
+    const toggle = [...container.querySelectorAll('label')].find(l => l.textContent.includes('Show excluded accounts')).querySelector('input')
+    await act(async () => toggle.click())
+    expect(container.textContent).toContain('Reserve fund')
+    const excluded = container.querySelector('details.setup-excluded')
+    expect(excluded.open).toBe(false)
+    expect(excluded.textContent).toContain('Excluded from Coach')
+    expect(axios.delete).not.toHaveBeenCalled()
+    await act(async () => [...excluded.querySelectorAll('button')].find(b => b.textContent === 'Manage inclusion in policy').click())
+    await flush()
+    expect(container.querySelector('input[aria-label="Exclude Reserve from investing advice"]').checked).toBe(true)
+  })
+
+  it('reveals excluded fund menus for reference but disables comparison and clears them when hidden', async () => {
+    axios.get.mockImplementation(url => Promise.resolve({ data:
+      url === '/api/accounts' ? [{ id: 2, name: 'Reserve' }] :
+      url === '/api/investment-policy' ? { has_policy: true, policy: { excluded_accounts: [2] } } :
+      url === '/api/holdings/grouped' ? { groups: [] } :
+      url === '/api/account-investment-options' ? [{ id: 1, option_name: 'Reserve fund', asset_class: 'cash' }] : []
+    }))
+    await act(async () => root.render(<PortfolioSetup />))
+    await flush()
+    await act(async () => [...container.querySelectorAll('button')].find(b => b.textContent === 'Account Investment Options').click())
+    await flush()
+    expect(container.querySelector('option[value="2"]')).toBeNull()
+    const toggle = [...container.querySelectorAll('label')].find(l => l.textContent.includes('Show excluded accounts')).querySelector('input')
+    await act(async () => toggle.click())
+    await act(async () => { const select = container.querySelector('select'); select.value = '2'; select.dispatchEvent(new Event('change', { bubbles: true })) })
+    await flush()
+    expect(container.textContent).toContain('not used for recommendations')
+    expect([...container.querySelectorAll('button')].find(b => b.textContent === 'Compare eligible options').disabled).toBe(true)
+    await act(async () => toggle.click())
+    expect(container.textContent).not.toContain('Reserve fund')
+    expect(axios.delete).not.toHaveBeenCalled()
+  })
+
   it('saves and reloads holding protections and account constraints with allocation intact', async () => {
     let saved = { target_us_large_cap_pct: 98, target_cash_pct: 2,
       employer_stock_exceptions: [{ ticker: 'TEST', reason: 'Keep existing exception' }] }

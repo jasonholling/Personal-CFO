@@ -36,13 +36,14 @@ export default function PolicyRestrictions({ accounts, policy, onChange }) {
       : rows.filter(c => c.account_id !== id) }
   })
   return <>
-    <section style={sectionStyle} aria-label="Holding exclusions">
-      <h3 style={{ fontSize: 14 }}>Individual holding exclusions</h3>
+    <details style={sectionStyle}>
+      <summary>Individual holding exclusions <span className="setup-badge">{policy.excluded_holdings?.length || 0} excluded</span></summary>
+      <section aria-label="Holding exclusions">
       <p style={{ fontSize: 12, color: 'var(--muted)' }}>Excluded positions leave investment allocation and Coach advice. They remain stored and count in the rest of your financial plan. Save policy below to apply changes.</p>
       {loading && <p>Loading holdings…</p>}
       {error && <p role="alert">{error}</p>}
       {!loading && !error && !holdings.length && <p>No holdings entered yet.</p>}
-      {holdings.map(h => <label key={h.id} style={{ display: 'block', marginBottom: 8 }}>
+      {holdings.map(h => <label className="setup-toggle" key={h.id} style={{ marginBottom: 8 }}>
         <input type="checkbox" checked={(policy.excluded_holdings || []).includes(h.id)}
           onChange={e => { const checked = e.target.checked; onChange(p => ({ ...p, excluded_holdings: checked
             ? [...new Set([...(p.excluded_holdings || []), h.id])]
@@ -51,10 +52,12 @@ export default function PolicyRestrictions({ accounts, policy, onChange }) {
         {(policy.excluded_accounts || []).includes(h.account_id) && <small> — entire account already excluded</small>}
       </label>)}
     </section>
-    <section style={sectionStyle} aria-label="Protected holdings">
-      <h3 style={{ fontSize: 14 }}>Employer stock and legacy exceptions</h3>
+    </details>
+    <details style={sectionStyle}>
+      <summary>Employer stock and legacy exceptions <span className="setup-badge">{EXCEPTIONS.reduce((n, [key]) => n + (policy[key]?.length || 0), 0)} protected</span></summary>
+      <section aria-label="Protected holdings">
       <p style={{ fontSize: 12, color: 'var(--muted)' }}>Protected positions stay in allocation totals, but do not generate concentration or rebalance-sale recommendations. Exclusion takes precedence if both are selected.</p>
-      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+      <div className="setup-form">
         <select className="input" aria-label="Holding to protect" value={selectedHolding} onChange={e => setSelectedHolding(e.target.value)}>
           <option value="">Choose a holding…</option>
           {holdings.map(h => <option key={h.id} value={h.id}>{holdingName(h)}</option>)}
@@ -76,16 +79,18 @@ export default function PolicyRestrictions({ accounts, policy, onChange }) {
           onClick={() => onChange(p => ({ ...p, [key]: (p[key] || []).filter((_, i) => i !== index) }))}>Remove protection</button>
       </div>))}
     </section>
-    <section style={sectionStyle} aria-label="Account constraints">
-      <h3 style={{ fontSize: 14 }}>Account asset-class constraints</h3>
+    </details>
+    <details style={sectionStyle}>
+      <summary>Account asset-class constraints <span className="setup-badge">Optional</span></summary>
+      <section aria-label="Account constraints">
       <p style={{ fontSize: 12, color: 'var(--muted)' }}>These rules limit Coach destinations and fund comparisons. They do not remove existing holdings from allocation or establish which funds your provider offers.</p>
       {accounts.map(a => {
         const c = (policy.account_constraints || []).find(row => row.account_id === a.id) || {}
         const mode = draftModes[a.id] || (c.allowed_asset_classes != null ? 'allow' : c.excluded_asset_classes?.length ? 'deny' : 'any')
         const field = mode === 'allow' ? 'allowed_asset_classes' : 'excluded_asset_classes'
         const selected = c[field] || []
-        return <fieldset key={a.id} style={{ marginBottom: 12, border: '1px solid var(--border)', padding: 12 }}>
-          <legend>{a.name}</legend>
+        return <details key={a.id} style={{ marginBottom: 8, border: '1px solid var(--border)', borderRadius: 8, padding: 12 }}>
+          <summary>{a.name}<span className="setup-badge">{mode === 'any' ? 'Unrestricted' : `${mode === 'allow' ? 'Allow' : 'Block'} ${selected.length} classes`}</span></summary>
           {(policy.excluded_accounts || []).includes(a.id) && <p>Account excluded: these rules apply only if you include it again.</p>}
           <select className="input" aria-label={`Constraint mode for ${a.name}`} value={mode} onChange={e => {
             const nextMode = e.target.value
@@ -98,7 +103,7 @@ export default function PolicyRestrictions({ accounts, policy, onChange }) {
           </select>
           {mode !== 'any' && <>
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 8, marginTop: 10 }}>
-              {CLASSES.map(assetClass => <label key={assetClass}>
+              {CLASSES.map(assetClass => <label className="setup-toggle" key={assetClass}>
                 <input type="checkbox" aria-label={`${mode === 'allow' ? 'Allow' : 'Block'} ${assetClass.replace(/_/g, ' ')} in ${a.name}`}
                   checked={selected.includes(assetClass)} onChange={e => {
                     const checked = e.target.checked
@@ -111,8 +116,9 @@ export default function PolicyRestrictions({ accounts, policy, onChange }) {
             </div>
             {mode === 'allow' && !selected.length && <p role="status">No classes allowed: Coach will not recommend purchases in this account.</p>}
           </>}
-        </fieldset>
+        </details>
       })}
     </section>
+    </details>
   </>
 }
