@@ -98,9 +98,12 @@ describe('PortfolioCoach', () => {
     await act(async () => root.render(<PortfolioCoach />))
     await flush()
     expect(container.querySelector('[aria-label="Current versus target allocation chart"]')).not.toBeNull()
-    expect(container.textContent).toContain('65% current · 50% target · +15% (over target)')
-    expect(container.querySelector('.allocation-current-bar').style.width).toBe('65%')
-    expect(container.querySelector('.allocation-target-bar').style.width).toBe('50%')
+    expect(container.textContent).toContain('Current')
+    expect(container.textContent).toContain('Target')
+    expect(container.textContent).toContain('65%')
+    expect(container.textContent).toContain('→ 50%')
+    expect(container.textContent).toContain('+15%')
+    expect(container.querySelectorAll('.allocation-donut svg').length).toBe(2)
   })
 
   it('renders an account-and-fund rebalance checklist with its tax warning', async () => {

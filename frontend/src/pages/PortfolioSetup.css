@@ -29,22 +29,23 @@
 .portfolio-coach .coach-header > button { align-self: start; }
 .portfolio-coach details summary { cursor: pointer; color: var(--muted); font-size: 12px; }
 .portfolio-coach .allocation-visual { margin-top: 16px; }
-.portfolio-coach .allocation-legend { display: flex; align-items: center; gap: 7px; color: var(--muted); font-size: 12px; margin-bottom: 12px; }
-.portfolio-coach .allocation-legend-current, .portfolio-coach .allocation-legend-target { width: 12px; height: 8px; display: inline-block; border-radius: 2px; }
-.portfolio-coach .allocation-legend-current { background: var(--accent); }
-.portfolio-coach .allocation-legend-target { border: 1px solid var(--text2); margin-left: 8px; }
-.portfolio-coach .allocation-row { padding: 9px 0; border-top: 1px solid var(--border); }
-.portfolio-coach .allocation-row-head { display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; font-size: 13px; text-transform: capitalize; }
-.portfolio-coach .allocation-row-head > span:first-child { font-weight: 600; }
+.portfolio-coach .allocation-donuts { display: flex; justify-content: center; align-items: center; gap: 28px; flex-wrap: wrap; margin: 4px 0 12px; }
+.portfolio-coach .allocation-donut { width: 190px; height: 190px; }
+.portfolio-coach .allocation-donut-label { fill: var(--text); font-size: 14px; font-weight: 650; }
+.portfolio-coach .allocation-donut-subtitle { fill: var(--text2); font-size: 11px; }
+.portfolio-coach .allocation-legend { display: grid; grid-template-columns: 22px minmax(110px, 1fr) auto auto auto; gap: 0; border-top: 1px solid var(--border); color: var(--muted); font-size: 12px; }
+.portfolio-coach .allocation-legend-row { display: contents; }
+.portfolio-coach .allocation-legend-row > span { padding: 7px 6px; border-bottom: 1px solid var(--border); }
+.portfolio-coach .allocation-name { color: var(--text); text-transform: capitalize; }
+.portfolio-coach .allocation-swatch { width: 10px; height: 10px; display: inline-block; border-radius: 50%; align-self: center; margin-left: 6px; }
+.portfolio-coach .allocation-target-value { color: var(--text2); }
 .portfolio-coach .allocation-ok { color: var(--muted); }
 .portfolio-coach .allocation-drift { color: var(--amber); }
-.portfolio-coach .allocation-bars { position: relative; height: 12px; margin-top: 7px; border-radius: 4px; background: var(--bg3); overflow: hidden; }
-.portfolio-coach .allocation-target-bar { position: absolute; inset: 1px auto 1px 1px; background: transparent; border: 1px dashed var(--text2); border-radius: 3px; min-width: 0; }
-.portfolio-coach .allocation-current-bar { position: absolute; inset: 3px auto 3px 3px; background: var(--accent); border-radius: 2px; min-width: 0; opacity: .9; }
 .portfolio-coach .allocation-table-details { margin-top: 14px; }
 .portfolio-coach .allocation-privacy-note { margin-top: 14px; color: var(--muted); font-size: 13px; }
 @media (max-width: 640px) {
   .portfolio-setup .card { padding: 16px; }
   .portfolio-setup .setup-save { bottom: 0; flex-wrap: wrap; }
   .portfolio-setup .setup-tabs > button { flex: 1 1 140px; }
+  .portfolio-coach .allocation-donuts { gap: 0; }
 }

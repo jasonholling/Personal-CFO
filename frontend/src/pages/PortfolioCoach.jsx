@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import axios from 'axios'
+import { Cell, Pie, PieChart } from 'recharts'
 import { isPrivacyMode, MASK_CURRENCY, MASK_PERCENT, MASK_NUMBER, maskDigitsInText } from '../utils/privacy'
 import './PortfolioSetup.css'
 
@@ -43,13 +44,15 @@ const CATEGORY_COLORS = {
 }
 
 const assetClassLabel = assetClass => assetClass.replace(/_/g, ' ')
+const ALLOCATION_COLORS = ['#6ea8fe', '#56c7b5', '#f4b860', '#b894ee', '#f08080', '#79b8ff', '#c5d86d', '#f4a261', '#9aa7bd', '#d986ba']
 
-// This deliberately uses simple bars instead of a pie chart: a reader can
-// compare each current value directly against its policy target, including
-// small allocations and zero targets, without trying to estimate angles.
 function AllocationComparisonChart({ comparison }) {
   const rows = Object.entries(comparison?.by_class || {})
     .filter(([, d]) => Number(d.current_pct) || Number(d.target_pct))
+    .map(([assetClass, d], index) => ({
+      assetClass, ...d, color: ALLOCATION_COLORS[index % ALLOCATION_COLORS.length],
+      current: Math.max(0, Number(d.current_pct) || 0), target: Math.max(0, Number(d.target_pct) || 0),
+    }))
 
   if (!rows.length) return null
   if (isPrivacyMode()) {
@@ -57,27 +60,30 @@ function AllocationComparisonChart({ comparison }) {
   }
   return (
     <section className="allocation-visual" aria-label="Current versus target allocation chart">
-      <div className="allocation-legend" aria-hidden="true"><span className="allocation-legend-current" /> Current <span className="allocation-legend-target" /> Target</div>
-      {rows.map(([assetClass, d]) => {
-        const current = Math.max(0, Math.min(100, Number(d.current_pct) || 0))
-        const target = Math.max(0, Math.min(100, Number(d.target_pct) || 0))
-        const drift = Number(d.deviation_pct) || 0
-        const status = d.within_drift_band ? 'within band' : `${drift > 0 ? 'over' : 'under'} target`
-        return (
-          <div className="allocation-row" key={assetClass}>
-            <div className="allocation-row-head">
-              <span>{assetClassLabel(assetClass)}</span>
-              <span className={d.within_drift_band ? 'allocation-ok' : 'allocation-drift'}>
-                {pct(d.current_pct)} current · {pct(d.target_pct)} target · {drift > 0 ? '+' : ''}{drift}% ({status})
-              </span>
-            </div>
-            <div className="allocation-bars" aria-label={`${assetClassLabel(assetClass)}: ${d.current_pct}% current, ${d.target_pct}% target`}>
-              <div className="allocation-target-bar" style={{ width: `${target}%` }} />
-              <div className="allocation-current-bar" style={{ width: `${current}%` }} />
-            </div>
+      <div className="allocation-donuts" aria-hidden="true">
+        {[['Current', 'current'], ['Target', 'target']].map(([label, key]) => (
+          <div className="allocation-donut" key={key}>
+            <PieChart width={190} height={190}>
+              <Pie data={rows} dataKey={key} nameKey="assetClass" cx="50%" cy="50%" innerRadius={53} outerRadius={81} paddingAngle={1} stroke="none">
+                {rows.map(row => <Cell key={row.assetClass} fill={row.color} />)}
+              </Pie>
+              <text x="95" y="91" textAnchor="middle" className="allocation-donut-label">{label}</text>
+              <text x="95" y="111" textAnchor="middle" className="allocation-donut-subtitle">allocation</text>
+            </PieChart>
           </div>
-        )
-      })}
+        ))}
+      </div>
+      <div className="allocation-legend" aria-label="Allocation values and drift">
+        {rows.map(row => {
+          const drift = Number(row.deviation_pct) || 0
+          return <div className="allocation-legend-row" key={row.assetClass}>
+            <span className="allocation-swatch" style={{ background: row.color }} aria-hidden="true" />
+            <span className="allocation-name">{assetClassLabel(row.assetClass)}</span>
+            <span>{pct(row.current_pct)}</span><span className="allocation-target-value">→ {pct(row.target_pct)}</span>
+            <span className={row.within_drift_band ? 'allocation-ok' : 'allocation-drift'}>{drift > 0 ? '+' : ''}{drift}%</span>
+          </div>
+        })}
+      </div>
     </section>
   )
 }
