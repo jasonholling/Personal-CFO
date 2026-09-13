@@ -343,7 +343,9 @@ def compare_to_target(current_allocation: Dict, policy: Dict) -> Dict:
         current_pct = current_allocation["pct_by_class"].get(asset_class, 0.0)
         target_pct = targets.get(asset_class, 0.0)
         deviation_pct = round(current_pct - target_pct, 2)
-        deviation_dollars = round(deviation_pct / 100 * total, 2)
+        # Display percentages are rounded; never use them to size trades.
+        deviation_dollars = round(current_allocation['by_class'].get(asset_class, 0.0)
+                                  - target_pct / 100 * total, 2)
         deviations[asset_class] = {
             "current_pct": current_pct, "target_pct": round(target_pct, 2),
             "deviation_pct": deviation_pct, "deviation_dollars": deviation_dollars,
@@ -421,11 +423,16 @@ def option_allowed_by_policy(option: Dict, account_id: int, asset_class: str,
 def choose_account_option(options: List[Dict], asset_class: str, *, for_new_contribution: bool,
                           account_id: int, policy: Optional[Dict] = None,
                           amount: Optional[float] = None) -> Optional[Dict]:
-    """Return the best recorded, eligible option for one account/class."""
+    """Return a recorded option that implements a single-class dollar action.
+
+    A balanced fund cannot implement "$1,000 of bonds" with a $1,000 buy.
+    Multi-class funds remain supported by propose_account_option_mix, which
+    solves against their complete exposure vectors instead.
+    """
     candidates = []
     for opt in eligible_options_for_account(options, for_new_contribution=for_new_contribution):
         weights = holding_exposure_weights(opt)
-        if asset_class not in weights or not option_allowed_by_policy(opt, account_id, asset_class, policy, amount):
+        if len(weights) != 1 or asset_class not in weights or not option_allowed_by_policy(opt, account_id, asset_class, policy, amount):
             continue
         er = opt.get("expense_ratio")
         candidates.append((0 if len(weights) == 1 else 1,
@@ -446,10 +453,10 @@ def resolve_new_money_destinations(contribution_actions: List[Dict], options_by_
     (never a candidate merely found via ticker search -- see
     is_option_actionable's own docstring for why).
 
-    Selection mirrors propose_account_option_mix's own order: a
-    single-asset-class option is preferred over a multi-exposure one,
-    then the lowest expense_ratio (unknown fee sorts last), then
-    option_name for determinism.
+    Only single-asset-class options can implement these per-class dollar
+    actions. Among those, use the lowest expense_ratio (unknown fee sorts
+    last), then option_name for determinism. Multi-exposure funds require
+    the separate account mix solver.
 
     `options_by_account`: {account_id: [account_investment_options
     rows]} for every household account -- not just one.
@@ -824,6 +831,9 @@ def recommend_rebalance_actions(
     underweight = sorted(
         [(c, -v) for c, v in remaining_deviation.items() if v < -0.01 and c != "unclassified"], key=lambda p: -p[1])
 
+    # None preserves the formula-only internal interface; an explicit empty
+    # menu (as supplied by the API) means no recorded destination exists.
+    require_destination = options_by_account is not None
     options_by_account = options_by_account or {}
     account_names = account_names or {}
     rebalance_actions = []
@@ -870,7 +880,7 @@ def recommend_rebalance_actions(
             destination = choose_account_option(options_by_account.get(h.get("account_id"), []), asset_class,
                                                 for_new_contribution=False, account_id=h.get("account_id"),
                                                 policy=policy, amount=amount) if options_by_account else None
-            if options_by_account and destination is None:
+            if require_destination and destination is None:
                 continue
             if amount <= 0:
                 continue
@@ -898,6 +908,10 @@ def recommend_rebalance_actions(
     overweight = sorted(
         [(c, v) for c, v in remaining_deviation.items() if v > 0.01 and c not in ("unclassified", "cash")], key=lambda p: -p[1])
 
+    # Reserve each buy as its sale is planned. Otherwise multiple holdings
+    # can each sell against the same gap, leaving unmatched proceeds.
+    gaps = {asset_class: gap for asset_class, gap in underweight}
+    planned_buys = []
     for asset_class, excess_dollars in overweight:
         if remaining_underweight_need <= 0.01:
             break
@@ -912,19 +926,25 @@ def recommend_rebalance_actions(
                 break
             is_taxable = h.get("_portfolio_account_type") in TAXABLE_GAIN_TYPES
             amount = min(to_sell, h.get("market_value", 0) or 0)
-            if options_by_account:
-                eligible_capacity = sum(
-                    target_gap for target_class, target_gap in underweight
-                    if target_gap > 0.01 and choose_account_option(
-                        options_by_account.get(h.get("account_id"), []), target_class,
-                        for_new_contribution=False, account_id=h.get("account_id"),
-                        policy=policy, amount=min(amount, target_gap))
-                )
-                if eligible_capacity <= 0.01:
+            budget = round(amount, 2)
+            buys = []
+            for target_class in sorted(gaps, key=lambda c: -gaps[c]):
+                buy_amount = round(min(budget, gaps[target_class]), 2)
+                if buy_amount <= 0.01:
                     continue
-                amount = min(amount, eligible_capacity)
+                destination = choose_account_option(
+                    options_by_account.get(h.get("account_id"), []), target_class,
+                    for_new_contribution=False, account_id=h.get("account_id"),
+                    policy=policy, amount=buy_amount) if require_destination else None
+                if require_destination and destination is None:
+                    continue
+                buys.append((h.get("account_id"), target_class, buy_amount, destination))
+                budget = round(budget - buy_amount, 2)
+                gaps[target_class] = round(gaps[target_class] - buy_amount, 2)
+            amount = sum(buy[2] for buy in buys)
             if amount <= 0:
                 continue
+            planned_buys.extend(buys)
             rebalance_actions.append({
                 "account_id": h.get("account_id"), "holding_id": h.get("id"), "holding_name": h.get("security_name"),
                 "action": "sell", "asset_class": asset_class, "amount": round(amount, 2),
@@ -943,33 +963,18 @@ def recommend_rebalance_actions(
             to_sell -= amount
             remaining_underweight_need -= amount
 
-    gaps = {asset_class: gap for asset_class, gap in underweight}
-    sell_actions = [a for a in rebalance_actions if a["action"] == "sell"]
-    for sale in sell_actions:
-        proceeds = sale["amount"]
-        account_id = sale["account_id"]
-        for asset_class in sorted(gaps, key=lambda c: -gaps[c]):
-            if proceeds <= 0.01:
-                break
-            amount = min(proceeds, gaps[asset_class])
-            destination = choose_account_option(options_by_account.get(account_id, []), asset_class,
-                                                for_new_contribution=False, account_id=account_id,
-                                                policy=policy, amount=amount) if options_by_account else None
-            if options_by_account and destination is None:
-                continue
-            rebalance_actions.append({
-                "account_id": account_id, "holding_id": None,
-                "holding_name": destination.get("option_name") if destination else None,
-                "action": "buy", "asset_class": asset_class, "amount": round(amount, 2), "pct_of_holding": None,
-                "reason": f"Underweight by ${gaps[asset_class]:,.0f} against target -- funded by the sale in this same account.",
-                "is_taxable_sale": False, "tax_warning": None,
-                "confidence_note": "Buy remains in the same account as its funding sale.",
-                "destination": ({"account_id": account_id, "account_name": account_names.get(account_id),
-                                 "option_id": destination.get("id"), "option_name": destination.get("option_name"),
-                                 "ticker": destination.get("ticker")} if destination else None),
-            })
-            proceeds -= amount
-            gaps[asset_class] -= amount
+    for account_id, asset_class, amount, destination in planned_buys:
+        rebalance_actions.append({
+            "account_id": account_id, "holding_id": None,
+            "holding_name": destination.get("option_name") if destination else None,
+            "action": "buy", "asset_class": asset_class, "amount": round(amount, 2), "pct_of_holding": None,
+            "reason": f"${amount:,.0f} toward this underweight class -- funded by the sale in this same account.",
+            "is_taxable_sale": False, "tax_warning": None,
+            "confidence_note": "Buy remains in the same account as its funding sale.",
+            "destination": ({"account_id": account_id, "account_name": account_names.get(account_id),
+                             "option_id": destination.get("id"), "option_name": destination.get("option_name"),
+                             "ticker": destination.get("ticker")} if destination else None),
+        })
 
     projected_by_class = dict(current_allocation["by_class"])
     for a in contribution_actions:
