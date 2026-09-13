@@ -396,6 +396,25 @@ describe('PortfolioSetup workflows', () => {
     expect(axios.post).toHaveBeenCalledWith('/api/holdings/import/commit', [expect.objectContaining({ security_name: 'Fund' })])
   })
 
+  it('shows a review message when an imported value differs from a quote checked this session, without deciding which is right', async () => {
+    axios.post.mockImplementation(url => {
+      if (url === '/api/holdings/import/preview') return Promise.resolve({ data: {
+        rows: [{ row: 2, account_id: 1, security_name: 'VTI', market_value: 1000, asset_class: null, valid: true, import_action: 'update',
+          quote_comparison: { quote_price: 275.4, quote_implied_value: 2754, imported_value: 1000, deviation_pct: 63.7,
+            message: 'This imported value differs from a quote checked earlier this session by 63.7%. Review both before importing -- this does not decide which is correct.' } }],
+        errors: [], valid_count: 1, invalid_count: 0,
+      } })
+      return Promise.resolve({ data: {} })
+    })
+    await act(async () => root.render(<PortfolioSetup />))
+    await flush()
+    const input = container.querySelector('input[aria-label="Holdings CSV"]')
+    const file = new File(['account_id,ticker,security_name,shares,market_value\n1,VTI,VTI,10,1000'], 'holdings.csv', { type: 'text/csv' })
+    await act(async () => { Object.defineProperty(input, 'files', { value: [file] }); input.dispatchEvent(new Event('change', { bubbles: true })); await Promise.resolve() })
+    expect(container.textContent).toContain('differs from a quote checked earlier this session')
+    expect(container.textContent).toContain('does not decide which is correct')
+  })
+
   it('shows the account-option limits and restrictions controls', async () => {
     await act(async () => root.render(<PortfolioSetup />))
     await flush()

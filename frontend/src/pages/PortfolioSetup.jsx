@@ -341,13 +341,18 @@ function HoldingsTab({ accounts, excludedAccounts, onEditPolicy }) {
 
       <details className="card" style={{ marginBottom: 20 }}>
         <summary>Import holdings from CSV</summary>
-        <p style={{ fontSize: 12, color: 'var(--muted)' }}>Preview and validate every row before anything is saved.</p>
+        <p style={{ fontSize: 12, color: 'var(--muted)' }}>Preview and validate every row before anything is saved. A row that matches an existing holding (by account + ticker or name) updates shares, value, and value date only -- classification, cost basis, notes, management mode, and tax lots stay as recorded unless the row explicitly supplies a replacement. A row with no match needs an asset class to create a new holding.</p>
         <input aria-label="Holdings CSV" type="file" accept=".csv,text/csv" onChange={e => previewCsv(e.target.files?.[0])} />
         {importError && <div style={{ color: 'var(--red)', fontSize: 12 }}>{importError}</div>}
         {importPreview && (
           <div style={{ marginTop: 10, fontSize: 12 }}>
             <div>{importPreview.valid_count} valid · {importPreview.invalid_count} need attention · {importPreview.update_count || 0} will update · {importPreview.create_count || 0} new</div>
             {(importPreview.missing_existing_holdings || []).length > 0 && <div style={{ color: 'var(--amber)', marginTop: 6 }}>Not present in this statement: {(importPreview.missing_existing_holdings || []).map(h => h.ticker || h.security_name).join(', ')}. They will remain unchanged until you review them.</div>}
+            {(importPreview.rows || []).filter(r => r.quote_comparison).map((r, i) => (
+              <div key={i} style={{ color: 'var(--amber)', marginTop: 6 }}>
+                Row {r.row} ({r.security_name}): {r.quote_comparison.message}
+              </div>
+            ))}
             {(importPreview.errors || []).map((e, i) => <div key={i} style={{ color: 'var(--red)' }}>Row {e.row}: {e.message}</div>)}
             <button className="btn-primary" disabled={!importPreview.valid_count} onClick={commitCsv} style={{ marginTop: 8 }}>
               Import {importPreview.valid_count} valid row{importPreview.valid_count === 1 ? '' : 's'}
