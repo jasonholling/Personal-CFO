@@ -40,10 +40,12 @@ def account(id, account_type=None, portfolio_account_type=None, balance=0, owner
 
 
 def holding(id, account_id, security_name="Fund", market_value=0, asset_class="us_large_cap",
-            cost_basis=None, expense_ratio=None, shares=None, ticker=None, exposures=None):
+            cost_basis=None, expense_ratio=None, shares=None, ticker=None, exposures=None,
+            management_mode="self_directed", security_type=None):
     return {"id": id, "account_id": account_id, "security_name": security_name, "ticker": ticker,
             "market_value": market_value, "asset_class": asset_class, "cost_basis": cost_basis,
-            "expense_ratio": expense_ratio, "shares": shares, "exposures": exposures}
+            "expense_ratio": expense_ratio, "shares": shares, "exposures": exposures,
+            "management_mode": management_mode, "security_type": security_type}
 
 
 def policy(**overrides):
@@ -686,6 +688,15 @@ class TestFundQualityFlags:
 
     def test_same_account_duplicate_name_not_flagged(self):
         household = [holding(1, 1, security_name="VTI", market_value=10000), holding(2, 1, security_name="VTI", market_value=5000)]
+        assert duplicate_exposure_flags(household) == []
+
+    def test_managed_target_date_funds_across_accounts_are_not_duplicate_exposure(self):
+        household = [
+            holding(1, 1, security_name="Target 2055", market_value=400, asset_class="unclassified",
+                    management_mode="externally_managed", security_type="target_date_fund"),
+            holding(2, 2, security_name="Target 2055", market_value=350, asset_class="unclassified",
+                    management_mode="externally_managed", security_type="target_date_fund"),
+        ]
         assert duplicate_exposure_flags(household) == []
 
     def test_unclassified_flagged(self):

@@ -1054,6 +1054,14 @@ def expense_ratio_flags(household_holdings: List[Dict], threshold: float = HIGH_
 def duplicate_exposure_flags(household_holdings: List[Dict]) -> List[Dict]:
     by_name: Dict[str, List[Dict]] = {}
     for h in household_holdings:
+        # Two separately owned target-date portfolios are not redundant
+        # exposure to consolidate: each is an independently managed glide
+        # path.  Excluding this exact case avoids a false trade/review card
+        # while retaining duplicate detection for ordinary self-managed
+        # securities.
+        if (h.get("management_mode") == "externally_managed"
+                and h.get("security_type") == "target_date_fund"):
+            continue
         name = (h.get("security_name") or h.get("ticker") or "").strip().lower()
         if not name:
             continue
