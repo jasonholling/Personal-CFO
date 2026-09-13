@@ -91,6 +91,16 @@ describe('PortfolioCoach', () => {
     expect(container.textContent).not.toContain('65%')
     expect(container.textContent).not.toContain('50%')
     expect(container.textContent).toContain('••%')
+    expect(container.textContent).toContain('Allocation chart is hidden while privacy mode is on.')
+  })
+
+  it('renders a visual current-versus-target allocation comparison', async () => {
+    await act(async () => root.render(<PortfolioCoach />))
+    await flush()
+    expect(container.querySelector('[aria-label="Current versus target allocation chart"]')).not.toBeNull()
+    expect(container.textContent).toContain('65% current · 50% target · +15% (over target)')
+    expect(container.querySelector('.allocation-current-bar').style.width).toBe('65%')
+    expect(container.querySelector('.allocation-target-bar').style.width).toBe('50%')
   })
 
   it('renders an account-and-fund rebalance checklist with its tax warning', async () => {

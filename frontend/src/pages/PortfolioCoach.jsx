@@ -42,6 +42,46 @@ const CATEGORY_COLORS = {
   taxable_rebalance: 'var(--amber)', minor_optimization: 'var(--muted)',
 }
 
+const assetClassLabel = assetClass => assetClass.replace(/_/g, ' ')
+
+// This deliberately uses simple bars instead of a pie chart: a reader can
+// compare each current value directly against its policy target, including
+// small allocations and zero targets, without trying to estimate angles.
+function AllocationComparisonChart({ comparison }) {
+  const rows = Object.entries(comparison?.by_class || {})
+    .filter(([, d]) => Number(d.current_pct) || Number(d.target_pct))
+
+  if (!rows.length) return null
+  if (isPrivacyMode()) {
+    return <div className="allocation-privacy-note">Allocation chart is hidden while privacy mode is on.</div>
+  }
+  return (
+    <section className="allocation-visual" aria-label="Current versus target allocation chart">
+      <div className="allocation-legend" aria-hidden="true"><span className="allocation-legend-current" /> Current <span className="allocation-legend-target" /> Target</div>
+      {rows.map(([assetClass, d]) => {
+        const current = Math.max(0, Math.min(100, Number(d.current_pct) || 0))
+        const target = Math.max(0, Math.min(100, Number(d.target_pct) || 0))
+        const drift = Number(d.deviation_pct) || 0
+        const status = d.within_drift_band ? 'within band' : `${drift > 0 ? 'over' : 'under'} target`
+        return (
+          <div className="allocation-row" key={assetClass}>
+            <div className="allocation-row-head">
+              <span>{assetClassLabel(assetClass)}</span>
+              <span className={d.within_drift_band ? 'allocation-ok' : 'allocation-drift'}>
+                {pct(d.current_pct)} current · {pct(d.target_pct)} target · {drift > 0 ? '+' : ''}{drift}% ({status})
+              </span>
+            </div>
+            <div className="allocation-bars" aria-label={`${assetClassLabel(assetClass)}: ${d.current_pct}% current, ${d.target_pct}% target`}>
+              <div className="allocation-target-bar" style={{ width: `${target}%` }} />
+              <div className="allocation-current-bar" style={{ width: `${current}%` }} />
+            </div>
+          </div>
+        )
+      })}
+    </section>
+  )
+}
+
 function ActionCard({ card, onDecide, busy, onNavigate, accounts }) {
   const p = card.payload
   const [notes, setNotes] = useState('')
@@ -303,38 +343,44 @@ export default function PortfolioCoach({ onNavigate }) {
       )}
       {allocation?.glide_path?.active && <details className="card" style={{ marginBottom: 24 }}><summary>Active glide path — age {allocation.glide_path.current_age}</summary><p style={{ fontSize: 12, color: 'var(--muted)' }}>Coach is using the age-specific targets below.</p>{(allocation.glide_path.preview || []).map(row => <div key={row.age} style={{ fontSize: 12, padding: '4px 0', borderTop: '1px solid var(--border)' }}><strong>Age {row.age}</strong> · {Object.entries(row.targets).filter(([, value]) => value).map(([key, value]) => `${key.replace('target_', '').replace('_pct', '').replace(/_/g, ' ')} ${value}%`).join(' · ')}</div>)}</details>}
 
-      {nextActions}
       {allocation?.has_policy && allocation?.comparison && (
-        <details className="card" style={{ marginBottom: 24 }}>
-          <summary>Current vs. target allocation</summary>
-          <div style={{ overflowX: 'auto' }}>
-            <table style={{ width: '100%', fontSize: 13, borderCollapse: 'collapse' }}>
-              <thead>
-                <tr style={{ textAlign: 'left', color: 'var(--muted)' }}>
-                  <th style={{ padding: '4px 8px' }}>Asset class</th>
-                  <th style={{ padding: '4px 8px' }}>Current</th>
-                  <th style={{ padding: '4px 8px' }}>Target</th>
-                  <th style={{ padding: '4px 8px' }}>Drift</th>
-                  <th style={{ padding: '4px 8px' }}>Within band</th>
-                </tr>
-              </thead>
-              <tbody>
-                {Object.entries(allocation.comparison.by_class || {}).map(([assetClass, d]) => (
-                  <tr key={assetClass} style={{ borderTop: '1px solid var(--border)' }}>
-                    <td style={{ padding: '4px 8px' }}>{assetClass.replace(/_/g, ' ')}</td>
-                    <td style={{ padding: '4px 8px' }}>{pct(d.current_pct)}</td>
-                    <td style={{ padding: '4px 8px' }}>{pct(d.target_pct)}</td>
-                    <td style={{ padding: '4px 8px', color: d.within_drift_band ? 'var(--muted)' : 'var(--amber)' }}>
-                      {isPrivacyMode() ? MASK_PERCENT : `${d.deviation_pct > 0 ? '+' : ''}${d.deviation_pct}%`}
-                    </td>
-                    <td style={{ padding: '4px 8px' }}>{d.within_drift_band ? '✓' : '—'}</td>
+        <section className="card" style={{ marginBottom: 24 }}>
+          <div className="label">Allocation alignment</div>
+          <h2 style={{ fontSize: 18, margin: '5px 0 4px' }}>Current vs. target allocation</h2>
+          <p style={{ fontSize: 13, color: 'var(--muted)', margin: 0 }}>Each row compares what you hold now with the target in your saved policy. Amber rows are outside your drift band.</p>
+          <AllocationComparisonChart comparison={allocation.comparison} />
+          <details className="allocation-table-details"><summary>Show allocation table</summary>
+            <div style={{ overflowX: 'auto' }}>
+              <table style={{ width: '100%', fontSize: 13, borderCollapse: 'collapse' }}>
+                <thead>
+                  <tr style={{ textAlign: 'left', color: 'var(--muted)' }}>
+                    <th style={{ padding: '4px 8px' }}>Asset class</th>
+                    <th style={{ padding: '4px 8px' }}>Current</th>
+                    <th style={{ padding: '4px 8px' }}>Target</th>
+                    <th style={{ padding: '4px 8px' }}>Drift</th>
+                    <th style={{ padding: '4px 8px' }}>Within band</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </details>
+                </thead>
+                <tbody>
+                  {Object.entries(allocation.comparison.by_class || {}).map(([assetClass, d]) => (
+                    <tr key={assetClass} style={{ borderTop: '1px solid var(--border)' }}>
+                      <td style={{ padding: '4px 8px' }}>{assetClassLabel(assetClass)}</td>
+                      <td style={{ padding: '4px 8px' }}>{pct(d.current_pct)}</td>
+                      <td style={{ padding: '4px 8px' }}>{pct(d.target_pct)}</td>
+                      <td style={{ padding: '4px 8px', color: d.within_drift_band ? 'var(--muted)' : 'var(--amber)' }}>
+                        {isPrivacyMode() ? MASK_PERCENT : `${d.deviation_pct > 0 ? '+' : ''}${d.deviation_pct}%`}
+                      </td>
+                      <td style={{ padding: '4px 8px' }}>{d.within_drift_band ? '✓' : '—'}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </details>
+        </section>
       )}
+
+      {nextActions}
 
       {allocation?.has_policy && allocation?.comparison && (
         <details className="card" style={{ marginBottom: 24 }}>
