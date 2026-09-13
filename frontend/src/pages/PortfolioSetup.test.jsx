@@ -155,6 +155,29 @@ describe('PortfolioSetup workflows', () => {
     expect(axios.patch).toHaveBeenCalledWith('/api/holdings/7/management-mode', { management_mode: 'self_directed' })
   })
 
+  it('refreshes a holding value without requiring its classification to be entered again', async () => {
+    axios.get.mockImplementation(url => Promise.resolve({ data:
+      url === '/api/accounts' ? [{ id: 1, name: 'IRA', account_type: 'ira', balance: 1000 }] :
+      url === '/api/holdings/grouped' ? { groups: [{ account_id: 1, account_name: 'IRA', holdings_total: 1000,
+        account_balance: 1000, unreconciled_remainder: 0, has_warning: false, holdings: [{ id: 7, account_id: 1, security_name: 'Index',
+          market_value: 1000, asset_class: 'us_large_cap', as_of_date: '2026-09-01', exposures: [] }],
+      }] } : url === '/api/account-investment-options' ? [] :
+      url === '/api/investment-policy' ? { has_policy: false } : []
+    }))
+    axios.patch.mockResolvedValue({ data: {} })
+    await act(async () => root.render(<PortfolioSetup />))
+    await flush()
+    await act(async () => [...container.querySelectorAll('button')].find(b => b.textContent === 'Refresh value').click())
+    await flush()
+    const refreshForm = [...container.querySelectorAll('form')].find(form => form.textContent.includes('Save refreshed value'))
+    const update = refreshForm.querySelector('input[type="number"]')
+    await setInput(update, '1250')
+    const date = refreshForm.querySelector('input[type="date"]')
+    await setInput(date, '2026-09-13')
+    await act(async () => [...container.querySelectorAll('button')].find(b => b.textContent === 'Save refreshed value').click())
+    expect(axios.patch).toHaveBeenCalledWith('/api/holdings/7/valuation', { market_value: 1250, as_of_date: '2026-09-13' })
+  })
+
   it('shows a save failure and keeps the entered holding available for correction', async () => {
     axios.post.mockRejectedValue({ response: { data: { detail: 'Account unavailable' } } })
     await act(async () => root.render(<PortfolioSetup />))

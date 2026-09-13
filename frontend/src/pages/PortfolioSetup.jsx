@@ -33,7 +33,7 @@ const TABS = [
 
 const EMPTY_HOLDING_FORM = {
   account_id: '', security_name: '', ticker: '', market_value: '', asset_class: 'us_large_cap',
-  expense_ratio: '', cost_basis: '', externallyManaged: false, multiAsset: false, exposures: [{ asset_class: 'us_large_cap', weight_pct: '' }],
+  expense_ratio: '', cost_basis: '', as_of_date: new Date().toISOString().slice(0, 10), externallyManaged: false, multiAsset: false, exposures: [{ asset_class: 'us_large_cap', weight_pct: '' }],
 }
 
 const INVESTMENT_ACCOUNT_TYPES = new Set(['401k', '403b', 'ira', 'roth_ira', 'hsa', '529', 'custodial', 'taxable', 'brokerage'])
@@ -69,6 +69,7 @@ function HoldingsTab({ accounts, excludedAccounts, onEditPolicy }) {
   const [optionsByAccount, setOptionsByAccount] = useState({})
   const [selectedOptionId, setSelectedOptionId] = useState('')
   const [providerStatus, setProviderStatus] = useState(null)
+  const [refreshingHolding, setRefreshingHolding] = useState(null)
 
   const load = () => axios.get('/api/holdings/grouped').then(r => setGroups(r.data.groups)).finally(() => setLoading(false))
   const loadOptions = () => axios.get('/api/account-investment-options').then(r => {
@@ -108,6 +109,7 @@ function HoldingsTab({ accounts, excludedAccounts, onEditPolicy }) {
         expense_ratio: form.expense_ratio ? parseFloat(form.expense_ratio) / 100 : null,
         cost_basis: form.cost_basis ? parseFloat(form.cost_basis) : null,
         management_mode: form.externallyManaged ? 'externally_managed' : 'self_directed',
+        as_of_date: form.as_of_date || null,
       })
       setForm(EMPTY_HOLDING_FORM)
       setSelectedOptionId('')
@@ -137,6 +139,16 @@ function HoldingsTab({ accounts, excludedAccounts, onEditPolicy }) {
       await load()
     } catch (error) {
       setSaveError(error.response?.data?.detail || 'Could not update how this holding is managed.')
+    }
+  }
+  const refreshValuation = async (holding, market_value, as_of_date) => {
+    setSaveError(null)
+    try {
+      await axios.patch(`/api/holdings/${holding.id}/valuation`, { market_value: parseFloat(market_value), as_of_date })
+      setRefreshingHolding(null)
+      await load()
+    } catch (error) {
+      setSaveError(error.response?.data?.detail || 'Could not refresh this holding value.')
     }
   }
 
@@ -226,6 +238,7 @@ function HoldingsTab({ accounts, excludedAccounts, onEditPolicy }) {
           {providerStatus.is_live ? `Lookup: ${providerStatus.provider}` : `Lookup: ${providerStatus.provider} (offline)`}
         </span>}
         <label>Current value ($)<input className="input" type="number" step="any" min="0" placeholder="Market value" value={form.market_value} onChange={e => setForm(f => ({ ...f, market_value: e.target.value }))} style={{ maxWidth: 140 }} /></label>
+        <label>Value date<input className="input" type="date" value={form.as_of_date} onChange={e => setForm(f => ({ ...f, as_of_date: e.target.value }))} /></label>
         {!form.multiAsset && (
           <label>Asset class<select className="input" value={form.asset_class} onChange={e => setForm(f => ({ ...f, asset_class: e.target.value }))} style={{ minWidth: 160 }}>
             {ASSET_CLASSES.map(c => <option key={c} value={c}>{c.replace(/_/g, ' ')}</option>)}
@@ -330,10 +343,19 @@ function HoldingsTab({ accounts, excludedAccounts, onEditPolicy }) {
                 <button className="btn-secondary" style={{ marginLeft: 10, padding: '2px 8px', fontSize: 11 }} onClick={() => setManagementMode(h, h.management_mode === 'externally_managed' ? 'self_directed' : 'externally_managed')}>
                   {h.management_mode === 'externally_managed' ? 'Manage yourself' : 'Mark externally managed'}
                 </button>
+                <button className="btn-secondary" style={{ marginLeft: 10, padding: '2px 8px', fontSize: 11 }} onClick={() => setRefreshingHolding({ holding: h, market_value: h.market_value, as_of_date: (h.as_of_date || new Date().toISOString().slice(0, 10)).slice(0, 10) })}>Refresh value</button>
                 <button className="btn-secondary" style={{ marginLeft: 10, padding: '2px 8px', fontSize: 11 }} onClick={() => remove(h.id)}>Remove</button>
               </span>
             </div>
           ))}
+          {refreshingHolding?.holding.account_id === g.account_id && (
+            <form onSubmit={e => { e.preventDefault(); refreshValuation(refreshingHolding.holding, refreshingHolding.market_value, refreshingHolding.as_of_date) }} className="setup-form" style={{ marginTop: 10 }}>
+              <label>Updated value ($)<input className="input" type="number" step="any" min="0" value={refreshingHolding.market_value} onChange={e => setRefreshingHolding(s => ({ ...s, market_value: e.target.value }))} /></label>
+              <label>Statement / quote date<input className="input" type="date" value={refreshingHolding.as_of_date} onChange={e => setRefreshingHolding(s => ({ ...s, as_of_date: e.target.value }))} /></label>
+              <button className="btn-primary" type="submit">Save refreshed value</button>
+              <button className="btn-secondary" type="button" onClick={() => setRefreshingHolding(null)}>Cancel</button>
+            </form>
+          )}
         </details>
       ))}
     </div>

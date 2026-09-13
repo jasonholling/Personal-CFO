@@ -14,6 +14,7 @@ advice — see every card's own `assumptions`/`confidence`/
 """
 import hashlib
 import json
+from datetime import date
 from typing import Dict, List, Optional
 
 from holdings_engine import (
@@ -175,6 +176,23 @@ def data_quality_recommendations(classified: Dict, reconciliations: List[Dict]) 
                 value_unit="currency",
             ))
     for h in classified["household"] + classified["hsa"] + classified["child_specific"]:
+        reported_date = h.get("as_of_date") or h.get("updated_at") or h.get("created_at")
+        try:
+            reported_day = date.fromisoformat(str(reported_date)[:10]) if reported_date else None
+        except ValueError:
+            reported_day = None
+        days_old = (date.today() - reported_day).days if reported_day else None
+        if days_old is not None and days_old > 35:
+            cards.append(_card(
+                "missing_data", recommendation_key("stale_holding_value", account_id=h.get("account_id"), holding_id=h.get("id")),
+                1, f"Refresh the value of {h.get('security_name') or h.get('ticker') or 'this holding'}",
+                f"Its latest recorded value is {days_old} days old. Refresh the market value from a statement or quote before relying on allocation and trade guidance.",
+                [h.get("account_id")], [h.get("id")], current_value=days_old, target_value=35,
+                proposed_change="Refresh the holding value and statement date", expected_effect="Keeps allocation and Coach actions based on current values.",
+                tax_impact=None, assumptions=[f"Latest holding date: {reported_day.isoformat()}"], confidence="medium",
+                assumptions_hash_input={"holding_id": h.get("id"), "reported_date": reported_day.isoformat()},
+                value_unit="count",
+            ))
         if (h.get("asset_class") or "unclassified") == "unclassified" or h.get("asset_class") not in ASSET_CLASSES:
             cards.append(_card(
                 "missing_data", recommendation_key("unclassified_security", account_id=h.get("account_id"), holding_id=h.get("id")),

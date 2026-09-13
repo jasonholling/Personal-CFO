@@ -97,6 +97,17 @@ class TestDataQualityRecommendations:
         cards = data_quality_recommendations(classified, [])
         assert any("entered manually" in c["title"] for c in cards)
 
+    def test_stale_holding_value_is_flagged_from_its_statement_date(self):
+        accs = [account(1, "taxable")]
+        stale = holding(1, 1, market_value=50000, data_source="statement", confidence="high")
+        stale["as_of_date"] = "2000-01-01"
+        classified = classify_holdings(accs, [stale])
+        cards = data_quality_recommendations(classified, [])
+        card = next(c for c in cards if c["recommendation_key"].startswith("stale_holding_value:1:1"))
+        assert card["title"] == "Refresh the value of Fund"
+        assert card["target_value"] == 35
+        assert card["value_unit"] == "count"
+
 
 class TestPolicyViolationRecommendations:
     """Tier 3: material investment-policy violation."""

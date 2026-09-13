@@ -140,6 +140,21 @@ class TestHoldingsCrud:
         assert group["unreconciled_remainder"] == 75000
         assert group["holdings_as_of_date"] == "2026-09-10"
 
+    def test_refreshing_a_valuation_preserves_the_holding_identity(self, client):
+        acc = _create_account(client)
+        created = client.post("/api/holdings", json={
+            "account_id": acc["id"], "security_name": "Index fund", "ticker": "IDX",
+            "market_value": 1000, "asset_class": "us_large_cap", "management_mode": "externally_managed",
+        }).json()
+        refreshed = client.patch(f"/api/holdings/{created['id']}/valuation", json={
+            "market_value": 1234.56, "as_of_date": "2026-09-13",
+        })
+        assert refreshed.status_code == 200, refreshed.text
+        assert refreshed.json()["market_value"] == 1234.56
+        assert refreshed.json()["as_of_date"] == "2026-09-13"
+        assert refreshed.json()["ticker"] == "IDX"
+        assert refreshed.json()["management_mode"] == "externally_managed"
+
 
 class TestHoldingExposuresRoundTrip:
     """Reference tests #12/#16's holdings-side counterpart, now

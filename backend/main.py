@@ -311,6 +311,29 @@ class HoldingManagementModeUpdate(BaseModel):
             raise ValueError("management_mode must be 'self_directed' or 'externally_managed'")
         return v
 
+
+class HoldingValuationUpdate(BaseModel):
+    """Refresh only the facts that change with a statement or quote.
+    Classification, cost basis, and the management decision stay intact."""
+    market_value: float
+    as_of_date: str
+
+    @field_validator("market_value")
+    @classmethod
+    def _market_value_non_negative(cls, v):
+        if v < 0:
+            raise ValueError("market_value cannot be negative")
+        return v
+
+    @field_validator("as_of_date")
+    @classmethod
+    def _as_of_date_is_iso_date(cls, v):
+        try:
+            datetime.strptime(v, "%Y-%m-%d")
+        except (TypeError, ValueError):
+            raise ValueError("as_of_date must be YYYY-MM-DD")
+        return v
+
 class HoldingImportRow(BaseModel):
     """Deliberately NOT the Holding model — asset_class isn't validated
     here so an invalid preview row can round-trip through preview ->
@@ -921,6 +944,22 @@ def update_holding_management_mode(holding_id: int, update: HoldingManagementMod
     cur = conn.execute(
         "UPDATE holdings SET management_mode=?, updated_at=datetime('now') WHERE id=?",
         (update.management_mode, holding_id),
+    )
+    if cur.rowcount == 0:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Holding not found")
+    conn.commit()
+    row = conn.execute("SELECT * FROM holdings WHERE id=?", (holding_id,)).fetchone()
+    conn.close()
+    return _holding_row_to_dict(row)
+
+
+@app.patch("/api/holdings/{holding_id}/valuation")
+def update_holding_valuation(holding_id: int, update: HoldingValuationUpdate):
+    conn = get_db()
+    cur = conn.execute(
+        "UPDATE holdings SET market_value=?, as_of_date=?, updated_at=datetime('now') WHERE id=?",
+        (update.market_value, update.as_of_date, holding_id),
     )
     if cur.rowcount == 0:
         conn.close()
