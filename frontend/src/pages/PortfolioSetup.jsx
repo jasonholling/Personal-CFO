@@ -299,7 +299,7 @@ function HoldingsTab({ accounts, excludedAccounts, onEditPolicy }) {
         {importError && <div style={{ color: 'var(--red)', fontSize: 12 }}>{importError}</div>}
         {importPreview && (
           <div style={{ marginTop: 10, fontSize: 12 }}>
-            <div>{importPreview.valid_count} valid · {importPreview.invalid_count} need attention</div>
+            <div>{importPreview.valid_count} valid · {importPreview.invalid_count} need attention · {importPreview.update_count || 0} will update · {importPreview.create_count || 0} new</div>
             {(importPreview.errors || []).map((e, i) => <div key={i} style={{ color: 'var(--red)' }}>Row {e.row}: {e.message}</div>)}
             <button className="btn-primary" disabled={!importPreview.valid_count} onClick={commitCsv} style={{ marginTop: 8 }}>
               Import {importPreview.valid_count} valid row{importPreview.valid_count === 1 ? '' : 's'}

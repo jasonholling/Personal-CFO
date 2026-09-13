@@ -1115,9 +1115,19 @@ async def preview_holdings_import(file: UploadFile = File(...)):
         text = content.decode("latin-1")
     conn = get_db()
     valid_account_ids = {r[0] for r in conn.execute("SELECT id FROM accounts").fetchall()}
+    existing = [dict(r) for r in conn.execute("SELECT id, account_id, ticker, security_name, market_value FROM holdings").fetchall()]
     conn.close()
     from holdings_engine import parse_holdings_csv
-    return parse_holdings_csv(text, valid_account_ids)
+    preview = parse_holdings_csv(text, valid_account_ids)
+    for row in preview["rows"]:
+        match = next((h for h in existing if h["account_id"] == row.get("account_id") and ((row.get("ticker") and h.get("ticker") and row["ticker"].upper() == h["ticker"].upper()) or row.get("security_name", "").lower() == h.get("security_name", "").lower())), None)
+        row["import_action"] = "update" if match else "create"
+        if match:
+            row["matching_holding_id"] = match["id"]
+            row["previous_market_value"] = match["market_value"]
+    preview["update_count"] = sum(row.get("import_action") == "update" for row in preview["rows"] if row.get("valid"))
+    preview["create_count"] = sum(row.get("import_action") == "create" for row in preview["rows"] if row.get("valid"))
+    return preview
 
 @app.post("/api/holdings/import/commit")
 def commit_holdings_import(rows: List[HoldingImportRow]):
