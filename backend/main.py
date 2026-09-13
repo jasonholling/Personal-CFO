@@ -1320,6 +1320,12 @@ def get_portfolio_allocation():
         "duplicate_exposure_flags": duplicate_exposure_flags(classified["household"] + classified["hsa"] + classified["child_specific"]),
         "unclassified_flags": unclassified_flags(classified["household"]),
     }
+    result["health"] = {
+        "reconciled": not any(reconcile_account_holdings(a, [h for h in holdings if h.get("account_id") == a["id"]])["has_warning"] for a in accounts),
+        "unclassified_count": len(result["unclassified_flags"]),
+        "concentration_count": len(result["concentration_flags"]),
+        "high_fee_count": len(result["expense_ratio_flags"]),
+    }
     if not policy:
         result["has_policy"] = False
         return result

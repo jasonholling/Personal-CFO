@@ -261,7 +261,8 @@ export default function PortfolioCoach({ onNavigate }) {
       )}
 
       {allocation?.has_holdings && (
-        <div className="grid-4" style={{ marginBottom: 24 }}>
+        <>
+        <div className="grid-4" style={{ marginBottom: 12 }}>
           <div className="card">
             <div className="label">Household investable assets</div>
             <div className="number-lg" style={{ marginTop: 8 }}>{fmt(allocation.current_allocation?.total)}</div>
@@ -283,6 +284,14 @@ export default function PortfolioCoach({ onNavigate }) {
             <div className="number-lg" style={{ marginTop: 8, color: cards.length ? 'var(--amber)' : 'var(--green)' }}>{cards.length}</div>
           </div>
         </div>
+        <div className="card" style={{ marginBottom: 24, fontSize: 13 }}>
+          <div className="label">Portfolio health</div>
+          <div style={{ marginTop: 8, color: allocation.health?.reconciled ? 'var(--green)' : 'var(--amber)' }}>
+            {allocation.health?.reconciled ? '✓ Account balances reconcile with entered holdings.' : '⚠ At least one account balance does not reconcile with its entered holdings.'}
+          </div>
+          <div style={{ color: 'var(--muted)', marginTop: 5 }}>{allocation.health?.high_fee_count || 0} fee review{allocation.health?.high_fee_count === 1 ? '' : 's'} · {allocation.health?.concentration_count || 0} concentration flag{allocation.health?.concentration_count === 1 ? '' : 's'} · {allocation.health?.unclassified_count || 0} unclassified holding{allocation.health?.unclassified_count === 1 ? '' : 's'}</div>
+        </div>
+        </>
       )}
 
       {nextActions}
