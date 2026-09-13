@@ -22,6 +22,7 @@ beforeEach(() => {
   axios.get.mockImplementation((url) => {
     if (url === '/api/accounts') return Promise.resolve({ data: [{ id: 1, name: '401k' }] })
     if (url === '/api/holdings/grouped') return Promise.resolve({ data: { groups: [] } })
+    if (url === '/api/holdings') return Promise.resolve({ data: [] })
     if (url === '/api/account-investment-options') return Promise.resolve({ data: [] })
     if (url === '/api/investment-policy') return Promise.resolve({ data: { has_policy: false } })
     if (url === '/api/securities/search') return Promise.resolve({ data: { candidates: [{
@@ -39,6 +40,48 @@ afterEach(async () => {
 })
 
 describe('PortfolioSetup workflows', () => {
+  it('saves and reloads holding protections and account constraints with allocation intact', async () => {
+    let saved = { target_us_large_cap_pct: 98, target_cash_pct: 2,
+      employer_stock_exceptions: [{ ticker: 'TEST', reason: 'Keep existing exception' }] }
+    axios.get.mockImplementation(url => Promise.resolve({ data:
+      url === '/api/accounts' ? [{ id: 1, name: 'IRA' }] :
+      url === '/api/holdings/grouped' ? { groups: [] } :
+      url === '/api/holdings' ? [{ id: 7, account_id: 1, security_name: 'Index', ticker: 'TEST' }] :
+      url === '/api/investment-policy' ? { has_policy: true, policy: saved } : []
+    }))
+    axios.post.mockImplementation((url, body) => { saved = structuredClone(body); return Promise.resolve({ data: {} }) })
+    const button = text => [...container.querySelectorAll('button')].find(b => b.textContent === text)
+    const select = async (label, value) => act(async () => {
+      const el = container.querySelector(`select[aria-label="${label}"]`)
+      el.value = value
+      el.dispatchEvent(new Event('change', { bubbles: true }))
+    })
+    await act(async () => root.render(<PortfolioSetup />))
+    await act(async () => button('Investment Policy').click())
+    await flush()
+    await act(async () => container.querySelector('section[aria-label="Holding exclusions"] input').click())
+    await select('Holding to protect', '7')
+    await select('Exception type', 'legacy_holding_exceptions')
+    await act(async () => button('Protect holding').click())
+    await select('Constraint mode for IRA', 'deny')
+    await act(async () => container.querySelector('input[aria-label="Block us bonds in IRA"]').click())
+    await act(async () => button('Save policy').click())
+    await flush()
+    expect(saved).toMatchObject({ target_us_large_cap_pct: 98, target_cash_pct: 2,
+      excluded_holdings: [7], legacy_holding_exceptions: [{ holding_id: 7 }],
+      employer_stock_exceptions: [{ ticker: 'TEST', reason: 'Keep existing exception' }],
+      account_constraints: [{ account_id: 1, excluded_asset_classes: ['us_bonds'] }] })
+    await act(async () => root.unmount())
+    root = createRoot(container)
+    await act(async () => root.render(<PortfolioSetup />))
+    await act(async () => button('Investment Policy').click())
+    await flush()
+    expect(container.querySelector('section[aria-label="Holding exclusions"] input').checked).toBe(true)
+    expect(container.querySelector('input[aria-label="Block us bonds in IRA"]').checked).toBe(true)
+    expect(container.textContent).toContain('Legacy holding: Index')
+    expect(container.textContent).toContain('Keep existing exception')
+  })
+
   it('searches for a ticker and confirms the selected candidate', async () => {
     axios.post.mockResolvedValue({ data: { security_id: 1 } })
     await act(async () => root.render(<PortfolioSetup />))

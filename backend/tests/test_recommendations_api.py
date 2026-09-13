@@ -348,6 +348,22 @@ class TestMultiAccountContributionDestination:
         })
         assert r.status_code == 400
 
+    def test_open_pool_honors_blocked_asset_classes(self, client):
+        account = _create_account(client, balance=10000)
+        client.post("/api/holdings", json={
+            "account_id": account["id"], "security_name": "Stock Fund",
+            "market_value": 10000, "asset_class": "us_large_cap",
+        })
+        _save_policy(client, target_us_large_cap_pct=40, target_us_bonds_pct=40,
+                     target_cash_pct=20, account_constraints=[{
+                         "account_id": account["id"], "excluded_asset_classes": ["us_bonds"],
+                     }])
+        response = client.post("/api/portfolio/contribution-destination/multi-account", json={
+            "pools": [{"account_id": account["id"], "amount": 1000, "eligible_classes": None}],
+        })
+        assert response.status_code == 200, response.text
+        assert [(a["asset_class"], a["amount"]) for a in response.json()["actions"]] == [("cash", 1000)]
+
     def test_bonds_only_pool_gets_bonds_open_pool_gets_next_largest_gap(self, client):
         acc1 = _create_account(client, name="401k")
         acc2 = _create_account(client, name="Brokerage")

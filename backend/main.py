@@ -1251,6 +1251,9 @@ def portfolio_multi_account_contribution_destination(req: MultiAccountContributi
         denied = set(constraint.get("excluded_asset_classes") or [])
         if pool["eligible_classes"] is None:
             pool["eligible_classes"] = allowed
+            if allowed is None and denied:
+                from holdings_engine import ASSET_CLASSES
+                pool["eligible_classes"] = list(ASSET_CLASSES)
         elif allowed is not None:
             pool["eligible_classes"] = [c for c in pool["eligible_classes"] if c in allowed]
         if pool["eligible_classes"] is not None:

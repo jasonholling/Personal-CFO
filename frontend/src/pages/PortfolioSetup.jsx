@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import axios from 'axios'
 import { isPrivacyMode, MASK_CURRENCY } from '../utils/privacy'
+import PolicyRestrictions from '../components/PolicyRestrictions'
 
 // Portfolio Setup (codex/portfolio-coach-recommendations) — the data
 // entry surface Portfolio Coach reads from: holdings, the household
@@ -320,6 +321,7 @@ function PolicyTab({ accounts }) {
           {!accounts.length && <div style={{ fontSize: 12, color: 'var(--muted)' }}>No accounts entered yet.</div>}
         </div>
       </div>
+      <PolicyRestrictions accounts={accounts} policy={policy} onChange={setPolicy} />
       {saveError && <div style={{ fontSize: 13, color: 'var(--red)', marginTop: 8 }}>{saveError}</div>}
       <button className="btn-primary" style={{ marginTop: 16 }} disabled={saving || !canSave} onClick={save}>Save policy</button>
     </div>
