@@ -25,10 +25,12 @@ def account(id, account_type=None, portfolio_account_type=None, balance=0, owner
 
 
 def holding(id, account_id, security_name="Fund", market_value=0, asset_class="us_large_cap",
-            cost_basis=None, expense_ratio=None, data_source="manual", confidence="high"):
+            cost_basis=None, expense_ratio=None, data_source="manual", confidence="high",
+            management_mode="self_directed", security_type=None):
     return {"id": id, "account_id": account_id, "security_name": security_name, "market_value": market_value,
             "asset_class": asset_class, "cost_basis": cost_basis, "expense_ratio": expense_ratio,
-            "data_source": data_source, "confidence": confidence}
+            "data_source": data_source, "confidence": confidence, "management_mode": management_mode,
+            "security_type": security_type}
 
 
 def policy(**overrides):
@@ -89,6 +91,16 @@ class TestDataQualityRecommendations:
         classified = classify_holdings(accs, hs)
         cards = data_quality_recommendations(classified, [])
         assert not any("Missing cost basis" in c["title"] for c in cards)
+
+    def test_managed_target_date_fund_is_not_a_missing_data_issue(self):
+        """A target-date fund has a deliberately changing internal mix.
+        Coach must not demand a fabricated static classification or fee."""
+        accs = [account(1, "roth_ira", owner="kid_1")]
+        target_date = holding(1, 1, security_name="Schwab Target 2055 Index", market_value=400,
+                              asset_class="unclassified", data_source="statement", confidence="high",
+                              management_mode="externally_managed", security_type="target_date_fund")
+        cards = data_quality_recommendations(classify_holdings(accs, [target_date]), [])
+        assert not any("Target 2055" in card["title"] for card in cards)
 
     def test_low_confidence_manual_entry_flagged(self):
         accs = [account(1, "taxable")]

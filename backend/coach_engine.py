@@ -176,6 +176,16 @@ def data_quality_recommendations(classified: Dict, reconciliations: List[Dict]) 
                 value_unit="currency",
             ))
     for h in classified["household"] + classified["hsa"] + classified["child_specific"]:
+        # A target-date portfolio is intentionally a managed multi-asset
+        # holding.  Its internal mix changes on the fund's own glide path,
+        # so treating its single `unclassified` placeholder as missing data
+        # would ask the household to invent a static allocation.  It remains
+        # tracked by value, but is not a direct Coach trade or fee-audit
+        # candidate until look-through data is deliberately supplied.
+        is_managed_target_date = (
+            h.get("management_mode") == "externally_managed"
+            and h.get("security_type") == "target_date_fund"
+        )
         reported_date = h.get("as_of_date") or h.get("updated_at") or h.get("created_at")
         try:
             reported_day = date.fromisoformat(str(reported_date)[:10]) if reported_date else None
@@ -193,7 +203,7 @@ def data_quality_recommendations(classified: Dict, reconciliations: List[Dict]) 
                 assumptions_hash_input={"holding_id": h.get("id"), "reported_date": reported_day.isoformat()},
                 value_unit="count",
             ))
-        if (h.get("asset_class") or "unclassified") == "unclassified" or h.get("asset_class") not in ASSET_CLASSES:
+        if not is_managed_target_date and ((h.get("asset_class") or "unclassified") == "unclassified" or h.get("asset_class") not in ASSET_CLASSES):
             cards.append(_card(
                 "missing_data", recommendation_key("unclassified_security", account_id=h.get("account_id"), holding_id=h.get("id")),
                 2, f"{h.get('security_name') or h.get('ticker') or 'This holding'} needs an asset class",
@@ -214,7 +224,7 @@ def data_quality_recommendations(classified: Dict, reconciliations: List[Dict]) 
                 tax_impact=None, assumptions=[], confidence="high",
                 assumptions_hash_input={"holding_id": h.get("id"), "has_cost_basis": False},
             ))
-        if h.get("expense_ratio") is None and (h.get("market_value", 0) or 0) > 0:
+        if not is_managed_target_date and h.get("expense_ratio") is None and (h.get("market_value", 0) or 0) > 0:
             cards.append(_card(
                 "missing_data", recommendation_key("missing_expense_ratio", account_id=h.get("account_id"), holding_id=h.get("id")),
                 4, f"Missing expense ratio on {h.get('security_name') or 'a holding'}",
