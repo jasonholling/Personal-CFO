@@ -1292,13 +1292,14 @@ def _load_portfolio_context(conn):
 def get_portfolio_allocation():
     conn = get_db()
     accounts, holdings, policy = _load_portfolio_context(conn)
+    inputs_row = conn.execute("SELECT * FROM planning_inputs WHERE id=1").fetchone()
     conn.close()
     if not holdings:
         return {"has_holdings": False}
     from holdings_engine import (
         classify_holdings, compute_current_allocation, compare_to_target,
         concentration_flags, expense_ratio_flags, duplicate_exposure_flags, unclassified_flags,
-        policy_included_holdings, reconcile_account_holdings,
+        policy_included_holdings, reconcile_account_holdings, POLICY_TARGET_FIELD_TO_ASSET_CLASS,
     )
     holdings = policy_included_holdings(holdings, policy)
     classified = classify_holdings(accounts, holdings)
@@ -1330,7 +1331,20 @@ def get_portfolio_allocation():
         result["has_policy"] = False
         return result
     result["has_policy"] = True
-    result["comparison"] = compare_to_target(current, policy)
+    active_policy = dict(policy)
+    glide = policy.get("glide_path") or {}
+    if glide.get("enabled"):
+        from glide_path_engine import interpolate_targets
+        current_age = int(dict(inputs_row).get("jason_age") or glide.get("start_age") or 0) if inputs_row else int(glide.get("start_age") or 0)
+        start = {field: policy.get(field, 0) for field in POLICY_TARGET_FIELD_TO_ASSET_CLASS}
+        end = {field: (glide.get("end_targets") or {}).get(field, start[field]) for field in start}
+        try:
+            targets = interpolate_targets(start, end, int(glide["start_age"]), int(glide["end_age"]), current_age)
+            active_policy.update(targets)
+            result["glide_path"] = {"active": True, "current_age": current_age, "targets": targets}
+        except (KeyError, TypeError, ValueError):
+            result["glide_path"] = {"active": False, "invalid": True}
+    result["comparison"] = compare_to_target(current, active_policy)
     return result
 
 @app.post("/api/portfolio/contribution-destination")
