@@ -155,6 +155,191 @@ class TestHoldingsCrud:
         assert refreshed.json()["management_mode"] == "externally_managed"
 
 
+class TestHoldingsCsvImport:
+    """Item 2: CSV import updates shares/value/value_date on a matched
+    holding while preserving classification, cost basis, notes,
+    management mode, and tax lots unless the row explicitly supplies a
+    replacement -- and shows (without deciding) when an imported value
+    differs materially from a quote already checked this session."""
+
+    def _preview(self, client, csv_text):
+        return client.post("/api/holdings/import/preview", files={"file": ("h.csv", csv_text.encode(), "text/csv")})
+
+    def test_a_refresh_only_csv_with_no_asset_class_column_matches_and_previews_as_an_update(self, client):
+        acc = _create_account(client)
+        holding = client.post("/api/holdings", json={
+            "account_id": acc["id"], "security_name": "Index Fund", "ticker": "IDX",
+            "market_value": 1000, "shares": 10, "asset_class": "us_large_cap", "cost_basis": 900, "notes": "core",
+        }).json()
+        csv_text = f"account_id,ticker,security_name,shares,market_value\n{acc['id']},IDX,Index Fund,11,1250\n"
+        r = self._preview(client, csv_text)
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["valid_count"] == 1
+        row = body["rows"][0]
+        assert row["import_action"] == "update"
+        assert row["matching_holding_id"] == holding["id"]
+        assert row["asset_class"] is None
+
+    def test_a_new_holding_row_without_asset_class_is_invalid(self, client):
+        acc = _create_account(client)
+        csv_text = f"account_id,ticker,security_name,shares,market_value\n{acc['id']},NEW,Brand New Fund,5,500\n"
+        r = self._preview(client, csv_text)
+        body = r.json()
+        assert body["valid_count"] == 0
+        assert body["invalid_count"] == 1
+        assert "asset_class is required" in body["errors"][0]["message"]
+
+    def test_commit_preserves_classification_cost_basis_and_notes_when_omitted(self, client):
+        acc = _create_account(client)
+        holding = client.post("/api/holdings", json={
+            "account_id": acc["id"], "security_name": "Index Fund", "ticker": "IDX",
+            "market_value": 1000, "shares": 10, "asset_class": "us_bonds", "cost_basis": 900, "notes": "core",
+        }).json()
+        r = client.post("/api/holdings/import/commit", json=[{
+            "account_id": acc["id"], "ticker": "IDX", "security_name": "Index Fund",
+            "shares": 11, "market_value": 1250,
+        }])
+        assert r.status_code == 200, r.text
+        assert r.json() == {"created": 0, "updated": 1, "skipped": []}
+        updated = client.get("/api/holdings").json()[0]
+        assert updated["market_value"] == 1250
+        assert updated["shares"] == 11
+        assert updated["asset_class"] == "us_bonds"
+        assert updated["cost_basis"] == 900
+        assert updated["notes"] == "core"
+
+    def test_commit_replaces_classification_and_notes_when_explicitly_supplied(self, client):
+        acc = _create_account(client)
+        client.post("/api/holdings", json={
+            "account_id": acc["id"], "security_name": "Index Fund", "ticker": "IDX",
+            "market_value": 1000, "shares": 10, "asset_class": "us_bonds", "cost_basis": 900, "notes": "core",
+        })
+        r = client.post("/api/holdings/import/commit", json=[{
+            "account_id": acc["id"], "ticker": "IDX", "security_name": "Index Fund",
+            "shares": 11, "market_value": 1250, "asset_class": "us_large_cap", "cost_basis": 1100, "notes": "reclassified",
+        }])
+        assert r.status_code == 200, r.text
+        updated = client.get("/api/holdings").json()[0]
+        assert updated["asset_class"] == "us_large_cap"
+        assert updated["cost_basis"] == 1100
+        assert updated["notes"] == "reclassified"
+
+    def test_commit_sets_value_date_from_the_row_or_defaults_to_today(self, client):
+        acc = _create_account(client)
+        client.post("/api/holdings", json={
+            "account_id": acc["id"], "security_name": "Index Fund", "ticker": "IDX",
+            "market_value": 1000, "asset_class": "us_large_cap",
+        })
+        r = client.post("/api/holdings/import/commit", json=[{
+            "account_id": acc["id"], "ticker": "IDX", "security_name": "Index Fund",
+            "market_value": 1250, "value_date": "2026-08-01",
+        }])
+        assert r.status_code == 200, r.text
+        assert client.get("/api/holdings").json()[0]["as_of_date"] == "2026-08-01"
+
+        r2 = client.post("/api/holdings/import/commit", json=[{
+            "account_id": acc["id"], "ticker": "IDX", "security_name": "Index Fund", "market_value": 1300,
+        }])
+        assert r2.status_code == 200, r2.text
+        from datetime import date
+        assert client.get("/api/holdings").json()[0]["as_of_date"] == date.today().isoformat()
+
+    def test_commit_records_a_statement_source_and_high_confidence(self, client):
+        acc = _create_account(client)
+        client.post("/api/holdings", json={
+            "account_id": acc["id"], "security_name": "Guessed Fund", "market_value": 1000,
+            "asset_class": "us_large_cap", "data_source": "manual", "confidence": "low",
+        })
+        client.post("/api/holdings/import/commit", json=[{
+            "account_id": acc["id"], "security_name": "Guessed Fund", "market_value": 1100,
+        }])
+        updated = client.get("/api/holdings").json()[0]
+        assert updated["data_source"] == "statement"
+        assert updated["confidence"] == "high"
+
+    def test_commit_preserves_management_mode_and_tax_lots(self, client):
+        acc = _create_account(client)
+        holding = client.post("/api/holdings", json={
+            "account_id": acc["id"], "security_name": "Managed Fund", "market_value": 1000,
+            "asset_class": "us_large_cap", "management_mode": "externally_managed",
+        }).json()
+        client.post("/api/tax-lots", json={
+            "holding_id": holding["id"], "acquired_date": "2024-01-15", "shares": 5, "cost_basis": 900,
+        })
+        client.post("/api/holdings/import/commit", json=[{
+            "account_id": acc["id"], "security_name": "Managed Fund", "market_value": 1250,
+        }])
+        updated = client.get("/api/holdings").json()[0]
+        assert updated["management_mode"] == "externally_managed"
+        assert client.get(f"/api/holdings/{holding['id']}/tax-lots").json()[0]["cost_basis"] == 900
+
+    def test_commit_still_requires_asset_class_for_a_brand_new_holding(self, client):
+        acc = _create_account(client)
+        r = client.post("/api/holdings/import/commit", json=[{
+            "account_id": acc["id"], "security_name": "New Fund", "market_value": 500,
+        }])
+        assert r.status_code == 200, r.text
+        assert r.json()["created"] == 0
+        assert "asset_class" in r.json()["skipped"][0]["reason"]
+
+    def test_preview_flags_a_material_difference_from_a_quote_checked_this_session(self, client):
+        from security_provider import MockSecurityProvider, set_active_provider
+        set_active_provider(MockSecurityProvider())
+        acc = _create_account(client)
+        holding = client.post("/api/holdings", json={
+            "account_id": acc["id"], "security_name": "Vanguard Total Stock Market ETF", "ticker": "VTI",
+            "provider_identifier": "MOCK:VTI", "shares": 10, "market_value": 2000, "asset_class": "us_large_cap",
+        }).json()
+        # Check a quote this session (mock price 275.40 * 10 shares = 2754.00) so it lands in the cache.
+        client.get(f"/api/holdings/{holding['id']}/quote-preview")
+        csv_text = f"account_id,ticker,security_name,shares,market_value\n{acc['id']},VTI,Vanguard Total Stock Market ETF,10,1000\n"
+        r = self._preview(client, csv_text)
+        row = r.json()["rows"][0]
+        assert "quote_comparison" in row
+        assert row["quote_comparison"]["quote_implied_value"] == 2754.0
+        assert row["quote_comparison"]["imported_value"] == 1000
+        assert row["quote_comparison"]["deviation_pct"] > 5
+
+    def test_preview_does_not_flag_a_small_difference_from_a_cached_quote(self, client):
+        from security_provider import MockSecurityProvider, set_active_provider
+        set_active_provider(MockSecurityProvider())
+        acc = _create_account(client)
+        holding = client.post("/api/holdings", json={
+            "account_id": acc["id"], "security_name": "Vanguard Total Stock Market ETF", "ticker": "VTI",
+            "provider_identifier": "MOCK:VTI", "shares": 10, "market_value": 2000, "asset_class": "us_large_cap",
+        }).json()
+        client.get(f"/api/holdings/{holding['id']}/quote-preview")  # 2754.00 implied
+        csv_text = f"account_id,ticker,security_name,shares,market_value\n{acc['id']},VTI,Vanguard Total Stock Market ETF,10,2760\n"
+        r = self._preview(client, csv_text)
+        assert "quote_comparison" not in r.json()["rows"][0]
+
+    def test_preview_never_fetches_a_fresh_quote_for_comparison(self, client):
+        """Comparing against a quote is only ever a review of what was
+        ALREADY checked this session -- CSV preview must never itself
+        trigger a provider call."""
+        from security_provider import SecurityProvider, set_active_provider
+
+        class ExplodingProvider(SecurityProvider):
+            def search(self, query):
+                return []
+
+            def get_quote(self, provider_identifier):
+                raise AssertionError("CSV preview must never call the provider")
+
+        set_active_provider(ExplodingProvider())
+        acc = _create_account(client)
+        client.post("/api/holdings", json={
+            "account_id": acc["id"], "security_name": "Some Fund", "ticker": "ABC",
+            "provider_identifier": "ANY:1", "shares": 10, "market_value": 2000, "asset_class": "us_large_cap",
+        })
+        csv_text = f"account_id,ticker,security_name,shares,market_value\n{acc['id']},ABC,Some Fund,10,1000\n"
+        r = self._preview(client, csv_text)
+        assert r.status_code == 200, r.text
+        from security_provider import MockSecurityProvider
+        set_active_provider(MockSecurityProvider())
+
+
 class TestHoldingExposuresRoundTrip:
     """Reference tests #12/#16's holdings-side counterpart, now
     reachable through the real API/DB, not just a synthetic dict."""

@@ -390,16 +390,26 @@ class HoldingImportRow(BaseModel):
     """Deliberately NOT the Holding model — asset_class isn't validated
     here so an invalid preview row can round-trip through preview ->
     edit -> commit without a 422 before the user gets a chance to fix
-    it (commit re-validates server-side before writing)."""
+    it (commit re-validates server-side before writing).
+
+    asset_class/expense_ratio/cost_basis/notes/value_date are all
+    Optional — a statement export that only carries account/ticker/
+    shares/value columns is a legitimate "just refresh the numbers"
+    import (item 2), not an invalid one. commit_holdings_import fills
+    in each omitted field from the MATCHED existing holding rather than
+    overwriting it with a blank; asset_class is the one exception that
+    is still required when the row creates a brand-new holding (there
+    is no existing classification to fall back to)."""
     account_id: int
     ticker: Optional[str] = None
     security_name: str
     shares: Optional[float] = None
     market_value: float
-    asset_class: str
+    asset_class: Optional[str] = None
     expense_ratio: Optional[float] = None
     cost_basis: Optional[float] = None
     notes: Optional[str] = None
+    value_date: Optional[str] = None
 
 class AccountInvestmentOption(BaseModel):
     """A general account-specific investment-option menu entry. NOT a
@@ -1270,8 +1280,19 @@ def compare_account_investment_options(req: OptionMixRequest):
     result["recorded_option_count"] = len(options)
     return result
 
+MATERIAL_QUOTE_DEVIATION_PCT = 5.0  # documented review threshold, item 2
+
+
 @app.post("/api/holdings/import/preview")
 async def preview_holdings_import(file: UploadFile = File(...)):
+    """Item 2: a row that MATCHES an existing holding is a value/date
+    refresh -- it never requires asset_class (missing/blank means "keep
+    the existing classification"). A row that would CREATE a brand-new
+    holding still needs one; there's nothing to fall back to. Also
+    flags, without deciding which number is right, when a matched
+    holding's imported value differs materially from a quote already
+    checked earlier in this session (never fetches a fresh quote here
+    -- see security_provider.peek_cached_quote)."""
     content = await file.read()
     try:
         text = content.decode("utf-8-sig")
@@ -1279,9 +1300,12 @@ async def preview_holdings_import(file: UploadFile = File(...)):
         text = content.decode("latin-1")
     conn = get_db()
     valid_account_ids = {r[0] for r in conn.execute("SELECT id FROM accounts").fetchall()}
-    existing = [dict(r) for r in conn.execute("SELECT id, account_id, ticker, security_name, market_value FROM holdings").fetchall()]
+    existing = [dict(r) for r in conn.execute(
+        "SELECT id, account_id, ticker, security_name, market_value, shares, provider_identifier FROM holdings"
+    ).fetchall()]
     conn.close()
     from holdings_engine import parse_holdings_csv
+    from security_provider import peek_cached_quote
     preview = parse_holdings_csv(text, valid_account_ids)
     for row in preview["rows"]:
         match = next((h for h in existing if h["account_id"] == row.get("account_id") and ((row.get("ticker") and h.get("ticker") and row["ticker"].upper() == h["ticker"].upper()) or row.get("security_name", "").lower() == h.get("security_name", "").lower())), None)
@@ -1289,6 +1313,30 @@ async def preview_holdings_import(file: UploadFile = File(...)):
         if match:
             row["matching_holding_id"] = match["id"]
             row["previous_market_value"] = match["market_value"]
+            if not row.get("valid"):
+                continue
+            if match.get("provider_identifier"):
+                cached = peek_cached_quote(match["provider_identifier"])
+                if cached is not None and cached.quote is not None:
+                    shares = row.get("shares") if row.get("shares") is not None else match.get("shares")
+                    if shares:
+                        quote_implied_value = round(cached.quote.price * shares, 2)
+                        if quote_implied_value > 0:
+                            deviation_pct = round(abs(row["market_value"] - quote_implied_value) / quote_implied_value * 100, 1)
+                            if deviation_pct >= MATERIAL_QUOTE_DEVIATION_PCT:
+                                row["quote_comparison"] = {
+                                    "quote_price": cached.quote.price, "quote_as_of": cached.quote.as_of,
+                                    "quote_implied_value": quote_implied_value, "imported_value": row["market_value"],
+                                    "deviation_pct": deviation_pct,
+                                    "message": "This imported value differs from a quote checked earlier this session by "
+                                               f"{deviation_pct}%. Review both before importing -- this does not decide which is correct.",
+                                }
+        elif not row.get("asset_class"):
+            row["valid"] = False
+            row["errors"] = row.get("errors", []) + ["asset_class is required for a new holding (no existing holding to keep it from)"]
+            preview["errors"].append({"row": row["row"], "message": row["errors"][-1]})
+    preview["valid_count"] = sum(1 for r in preview["rows"] if r["valid"])
+    preview["invalid_count"] = sum(1 for r in preview["rows"] if not r["valid"])
     preview["update_count"] = sum(row.get("import_action") == "update" for row in preview["rows"] if row.get("valid"))
     preview["create_count"] = sum(row.get("import_action") == "create" for row in preview["rows"] if row.get("valid"))
     imported_account_ids = {row.get("account_id") for row in preview["rows"] if row.get("valid")}
@@ -1302,29 +1350,55 @@ async def preview_holdings_import(file: UploadFile = File(...)):
 
 @app.post("/api/holdings/import/commit")
 def commit_holdings_import(rows: List[HoldingImportRow]):
+    """Item 2: refreshes shares/market_value/value_date on a matched
+    holding while PRESERVING classification (asset_class/exposures),
+    cost_basis, expense_ratio, and notes unless the import row
+    EXPLICITLY supplies a replacement (a non-blank value) -- a CSV that
+    only carries shares/value/value_date can never silently blank out
+    an existing classification or cost basis. management_mode and tax
+    lots are untouched by construction (this UPDATE never mentions
+    either column/table). Recorded as data_source='statement',
+    confidence='high' (both create and update) -- a statement import is
+    an authoritative source, not a guess, and should not trip Coach's
+    low-confidence-manual-entry review the way a typed number does."""
     from holdings_engine import ASSET_CLASSES
     conn = get_db()
     valid_account_ids = {r[0] for r in conn.execute("SELECT id FROM accounts").fetchall()}
     created = 0
     updated = 0
     skipped = []
+    today = datetime.now().date().isoformat()
     for row in rows:
         if row.account_id not in valid_account_ids:
             skipped.append({"security_name": row.security_name, "reason": f"account_id {row.account_id} does not exist"})
             continue
-        if row.asset_class not in ASSET_CLASSES:
-            skipped.append({"security_name": row.security_name, "reason": f"asset_class '{row.asset_class}' is not one of {sorted(ASSET_CLASSES)}"})
-            continue
         existing = conn.execute(
-            "SELECT id FROM holdings WHERE account_id=? AND ((? IS NOT NULL AND upper(ticker)=upper(?)) OR lower(security_name)=lower(?)) LIMIT 1",
+            "SELECT * FROM holdings WHERE account_id=? AND ((? IS NOT NULL AND upper(ticker)=upper(?)) OR lower(security_name)=lower(?)) LIMIT 1",
             (row.account_id, row.ticker, row.ticker, row.security_name),
         ).fetchone()
         if existing:
-            conn.execute("UPDATE holdings SET ticker=?, security_name=?, shares=?, market_value=?, asset_class=?, expense_ratio=?, cost_basis=?, notes=?, data_source='manual', confidence='low', updated_at=datetime('now') WHERE id=?",
-                         (row.ticker, row.security_name, row.shares, row.market_value, row.asset_class, row.expense_ratio, row.cost_basis, row.notes, existing["id"]))
+            existing = dict(existing)
+            asset_class = row.asset_class or existing["asset_class"]
+            expense_ratio = row.expense_ratio if row.expense_ratio is not None else existing["expense_ratio"]
+            cost_basis = row.cost_basis if row.cost_basis is not None else existing["cost_basis"]
+            notes = row.notes if row.notes is not None else existing["notes"]
+            as_of_date = row.value_date or today
+            conn.execute(
+                "UPDATE holdings SET ticker=?, security_name=?, shares=?, market_value=?, asset_class=?, expense_ratio=?, "
+                "cost_basis=?, notes=?, as_of_date=?, data_source='statement', confidence='high', updated_at=datetime('now') WHERE id=?",
+                (row.ticker, row.security_name, row.shares, row.market_value, asset_class, expense_ratio, cost_basis, notes, as_of_date, existing["id"]),
+            )
             updated += 1
         else:
-            _insert_holding(conn, {**row.model_dump(), "data_source": "manual", "confidence": "low"})
+            if not row.asset_class:
+                skipped.append({"security_name": row.security_name, "reason": "asset_class is required for a new holding"})
+                continue
+            if row.asset_class not in ASSET_CLASSES:
+                skipped.append({"security_name": row.security_name, "reason": f"asset_class '{row.asset_class}' is not one of {sorted(ASSET_CLASSES)}"})
+                continue
+            values = row.model_dump(exclude={"value_date"})
+            values["as_of_date"] = row.value_date or today
+            _insert_holding(conn, {**values, "data_source": "statement", "confidence": "high"})
             created += 1
     conn.commit()
     conn.close()

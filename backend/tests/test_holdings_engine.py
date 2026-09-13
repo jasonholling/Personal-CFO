@@ -725,10 +725,32 @@ class TestParseHoldingsCsv:
         assert result["rows"][0]["asset_class"] == "crypto"
 
     def test_missing_required_column_rejects_whole_file(self):
-        csv_text = "account_id,security_name,market_value\n1,VTI,50000\n"
+        csv_text = "account_id,market_value\n1,50000\n"
         result = parse_holdings_csv(csv_text, {1})
         assert result["rows"] == []
-        assert "asset_class" in result["errors"][0]["message"]
+        assert "security_name" in result["errors"][0]["message"]
+
+    def test_asset_class_column_is_optional_for_a_value_only_refresh_csv(self):
+        """Item 2: a statement export with no asset_class column at all
+        (just refreshing shares/value) is a legitimate import -- whether
+        a MISSING asset_class blocks a particular row depends on
+        whether that row would create a brand-new holding, which only
+        main.py's preview endpoint (aware of existing holdings) can
+        decide. The parser itself never rejects the row or the file."""
+        csv_text = "account_id,ticker,security_name,shares,market_value\n1,VTI,Vanguard Total Market,100,50000\n"
+        result = parse_holdings_csv(csv_text, {1})
+        assert result["valid_count"] == 1
+        assert result["rows"][0]["asset_class"] is None
+
+    def test_value_date_column_is_optional_and_validated_when_present(self):
+        csv_text = self.HEADER + ",value_date\n1,VTI,Vanguard,100,50000,us_large_cap,,,,2026-09-01\n"
+        result = parse_holdings_csv(csv_text, {1})
+        assert result["rows"][0]["value_date"] == "2026-09-01"
+
+    def test_malformed_value_date_is_flagged(self):
+        csv_text = self.HEADER + ",value_date\n1,VTI,Vanguard,100,50000,us_large_cap,,,,not-a-date\n"
+        result = parse_holdings_csv(csv_text, {1})
+        assert not result["rows"][0]["valid"]
 
 
 def mix_option(id, option_name="Fund", ticker=None, asset_class="us_large_cap", expense_ratio=None, exposures=None,

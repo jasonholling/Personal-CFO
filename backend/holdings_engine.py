@@ -1241,7 +1241,14 @@ def unclassified_flags(household_holdings: List[Dict]) -> List[Dict]:
 
 # ── CSV import (preview/validate, no writes) ──────────────────────────────
 
-REQUIRED_CSV_COLUMNS = {"account_id", "security_name", "market_value", "asset_class"}
+# Item 2: asset_class is deliberately NOT required at parse time anymore
+# -- a statement export that only refreshes shares/value/value_date for
+# holdings that already exist is a legitimate import, not an invalid
+# one. main.py's preview endpoint (which knows which rows MATCH an
+# existing holding and which would CREATE a new one) is what actually
+# enforces "a brand-new holding still needs a classification" -- this
+# parser only validates that a supplied asset_class, if any, is real.
+REQUIRED_CSV_COLUMNS = {"account_id", "security_name", "market_value"}
 
 
 def _parse_optional_float(raw_row: Dict, key: str, row_errors: List[str]) -> Optional[float]:
@@ -1255,11 +1262,26 @@ def _parse_optional_float(raw_row: Dict, key: str, row_errors: List[str]) -> Opt
         return None
 
 
+def _parse_optional_date(raw_row: Dict, key: str, row_errors: List[str]) -> Optional[str]:
+    value = (raw_row.get(key) or "").strip()
+    if not value:
+        return None
+    try:
+        datetime.strptime(value, "%Y-%m-%d")
+    except ValueError:
+        row_errors.append(f"{key} must be YYYY-MM-DD if provided")
+        return None
+    return value
+
+
 def parse_holdings_csv(csv_text: str, valid_account_ids: Set[int]) -> Dict:
     """Parses a holdings CSV into validated rows WITHOUT writing
-    anything. Required: account_id, security_name, market_value,
-    asset_class. Optional: ticker, description/notes, shares,
-    expense_ratio, cost_basis."""
+    anything. Required: account_id, security_name, market_value.
+    Optional: ticker, notes, shares, expense_ratio, cost_basis,
+    value_date, and asset_class (required only for a row that will
+    CREATE a new holding -- see preview_holdings_import in main.py,
+    which is the only place that knows whether a row matches an
+    existing holding)."""
     reader = csv.DictReader(io.StringIO(csv_text))
     if reader.fieldnames is None:
         return {"rows": [], "errors": [{"row": 0, "message": "Empty file or no header row."}], "valid_count": 0, "invalid_count": 0}
@@ -1294,18 +1316,19 @@ def parse_holdings_csv(csv_text: str, valid_account_ids: Set[int]) -> Dict:
             row_errors.append("market_value must be a number")
 
         asset_class = (raw.get("asset_class") or "").strip()
-        if asset_class not in ASSET_CLASSES:
+        if asset_class and asset_class not in ASSET_CLASSES:
             row_errors.append(f"asset_class must be one of: {', '.join(ASSET_CLASSES)}")
 
         shares = _parse_optional_float(raw, "shares", row_errors)
         expense_ratio = _parse_optional_float(raw, "expense_ratio", row_errors)
         cost_basis = _parse_optional_float(raw, "cost_basis", row_errors)
+        value_date = _parse_optional_date(raw, "value_date", row_errors)
 
         rows.append({
             "row": i, "account_id": account_id, "ticker": (raw.get("ticker") or "").strip() or None,
             "security_name": security_name or None, "shares": shares, "market_value": market_value,
             "asset_class": asset_class or None, "expense_ratio": expense_ratio, "cost_basis": cost_basis,
-            "notes": (raw.get("notes") or "").strip() or None,
+            "notes": (raw.get("notes") or "").strip() or None, "value_date": value_date,
             "valid": not row_errors, "errors": row_errors,
         })
         if row_errors:
