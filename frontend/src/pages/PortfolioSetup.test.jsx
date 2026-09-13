@@ -68,6 +68,57 @@ describe('PortfolioSetup workflows', () => {
     }))
   })
 
+  it('reuses the selected account menu entry when adding a holding', async () => {
+    axios.get.mockImplementation(url => Promise.resolve({ data:
+      url === '/api/accounts' ? [{ id: 1, name: 'HSA Invest', account_type: 'hsa' }] :
+      url === '/api/holdings/grouped' ? { groups: [] } :
+      url === '/api/account-investment-options' ? [{
+        id: 14, account_id: 1, ticker: 'SSSYX', option_name: 'State Street Equity 500 Index Fund',
+        asset_class: 'us_large_cap', expense_ratio: 0.0005, exposures: [],
+      }] :
+      url === '/api/investment-policy' ? { has_policy: false } : []
+    }))
+    axios.post.mockResolvedValue({ data: { id: 5 } })
+    await act(async () => root.render(<PortfolioSetup />))
+    await flush()
+    await act(async () => {
+      const account = container.querySelector('select')
+      account.value = '1'
+      account.dispatchEvent(new Event('change', { bubbles: true }))
+    })
+    await flush()
+    const option = container.querySelector('select[aria-label="Use recorded investment option"]')
+    await act(async () => {
+      option.value = '14'
+      option.dispatchEvent(new Event('change', { bubbles: true }))
+    })
+    expect(container.querySelector('[placeholder="Security name"]').value).toBe('State Street Equity 500 Index Fund')
+    expect(container.querySelector('[placeholder="Ticker (optional)"]').value).toBe('SSSYX')
+    expect(container.querySelector('[placeholder="Expense ratio %"]').value).toBe('0.05')
+    expect(container.querySelector('select[aria-label="Use recorded investment option"]').value).toBe('14')
+    await setInput(container.querySelector('[placeholder="Market value"]'), '1000')
+    await act(async () => [...container.querySelectorAll('button')].find(b => b.textContent === 'Add holding').click())
+    expect(axios.post).toHaveBeenCalledWith('/api/holdings', expect.objectContaining({
+      account_id: 1, security_name: 'State Street Equity 500 Index Fund', ticker: 'SSSYX',
+      asset_class: 'us_large_cap', expense_ratio: 0.0005,
+    }))
+  })
+
+  it('shows an investment-account setup checklist without treating an unreconciled balance as cash', async () => {
+    axios.get.mockImplementation(url => Promise.resolve({ data:
+      url === '/api/accounts' ? [{ id: 1, name: 'HSA Invest', account_type: 'hsa', balance: 19302 }] :
+      url === '/api/holdings/grouped' ? { groups: [{ account_id: 1, holdings: [{ id: 2, security_name: 'Fund', asset_class: 'us_large_cap', market_value: 1000 }] }] } :
+      url === '/api/account-investment-options' ? [] :
+      url === '/api/investment-policy' ? { has_policy: false } : []
+    }))
+    await act(async () => root.render(<PortfolioSetup />))
+    await flush()
+    expect(container.textContent).toContain('Portfolio setup checklist')
+    expect(container.textContent).toContain('Add its available investment options')
+    const checklist = [...container.querySelectorAll('.card')].find(card => card.textContent.includes('Portfolio setup checklist'))
+    expect(checklist.textContent).not.toContain('cash')
+  })
+
   it('shows a save failure and keeps the entered holding available for correction', async () => {
     axios.post.mockRejectedValue({ response: { data: { detail: 'Account unavailable' } } })
     await act(async () => root.render(<PortfolioSetup />))

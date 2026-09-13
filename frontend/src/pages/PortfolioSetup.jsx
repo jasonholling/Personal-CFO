@@ -36,6 +36,25 @@ const EMPTY_HOLDING_FORM = {
   expense_ratio: '', cost_basis: '', multiAsset: false, exposures: [{ asset_class: 'us_large_cap', weight_pct: '' }],
 }
 
+const INVESTMENT_ACCOUNT_TYPES = new Set(['401k', '403b', 'ira', 'roth_ira', 'hsa', '529', 'custodial', 'taxable', 'brokerage'])
+
+const optionLabel = option => `${option.ticker ? `${option.ticker} — ` : ''}${option.option_name}`
+
+function holdingFormFromOption(option) {
+  const exposures = option.exposures || []
+  return {
+    ...EMPTY_HOLDING_FORM,
+    ticker: option.ticker || '',
+    security_name: option.option_name || '',
+    asset_class: option.asset_class || 'unclassified',
+    expense_ratio: option.expense_ratio == null ? '' : String(option.expense_ratio * 100),
+    multiAsset: exposures.length > 0,
+    exposures: exposures.length > 0
+      ? exposures.map(exposure => ({ asset_class: exposure.asset_class, weight_pct: String(exposure.weight_pct) }))
+      : EMPTY_HOLDING_FORM.exposures,
+  }
+}
+
 function HoldingsTab({ accounts, excludedAccounts, onEditPolicy }) {
   const [showExcluded, setShowExcluded] = useState(false)
   const [groups, setGroups] = useState([])
@@ -47,9 +66,24 @@ function HoldingsTab({ accounts, excludedAccounts, onEditPolicy }) {
   const [importError, setImportError] = useState(null)
   const [saveError, setSaveError] = useState(null)
   const [saveNotice, setSaveNotice] = useState(null)
+  const [optionsByAccount, setOptionsByAccount] = useState({})
+  const [selectedOptionId, setSelectedOptionId] = useState('')
 
   const load = () => axios.get('/api/holdings/grouped').then(r => setGroups(r.data.groups)).finally(() => setLoading(false))
-  useEffect(() => { load() }, [])
+  const loadOptions = () => axios.get('/api/account-investment-options').then(r => {
+    setOptionsByAccount(r.data.reduce((byAccount, option) => {
+      ;(byAccount[option.account_id] ||= []).push(option)
+      return byAccount
+    }, {}))
+  })
+  useEffect(() => { load(); loadOptions() }, [])
+
+  const applyRecordedOption = option => {
+    if (!option) return
+    setSelectedOptionId(String(option.id))
+    setForm(current => ({ ...holdingFormFromOption(option), account_id: current.account_id }))
+    setSearchResults([])
+  }
 
   const submit = async e => {
     e.preventDefault()
@@ -71,6 +105,7 @@ function HoldingsTab({ accounts, excludedAccounts, onEditPolicy }) {
         cost_basis: form.cost_basis ? parseFloat(form.cost_basis) : null,
       })
       setForm(EMPTY_HOLDING_FORM)
+      setSelectedOptionId('')
       setSaveNotice('Holding saved.')
       try { await load() } catch {
         setSaveError('Holding saved, but the list could not refresh. Reload the page before adding it again.')
@@ -127,15 +162,51 @@ function HoldingsTab({ accounts, excludedAccounts, onEditPolicy }) {
         <div><strong>What you own</strong><p className="setup-helper">Enter holdings to give the Coach an accurate picture of your investments.</p></div>
         <label className="setup-toggle"><input type="checkbox" checked={showExcluded} onChange={e => { setShowExcluded(e.target.checked); if (!e.target.checked && excludedAccounts.includes(Number(form.account_id))) setForm(EMPTY_HOLDING_FORM) }} />Show excluded accounts ({excludedAccounts.length})</label>
       </div>
+      {accounts.some(account => INVESTMENT_ACCOUNT_TYPES.has(account.account_type)) && (
+        <div className="card" style={{ marginBottom: 16 }}>
+          <strong>Portfolio setup checklist</strong>
+          <p className="setup-helper">For each investment account, enter what you own and, if its investment menu is limited, record what you can buy.</p>
+          <div className="setup-account-grid" style={{ marginTop: 10 }}>
+            {accounts.filter(account => INVESTMENT_ACCOUNT_TYPES.has(account.account_type) && (showExcluded || !excludedAccounts.includes(account.id))).map(account => {
+              const group = groups.find(item => item.account_id === account.id)
+              const holdingsEntered = (group?.holdings || []).length > 0
+              const optionCount = (optionsByAccount[account.id] || []).length
+              const needsMenu = ['401k', '403b', 'hsa', '529'].includes(account.account_type)
+              const complete = holdingsEntered && (!needsMenu || optionCount > 0)
+              return <div key={account.id} className="setup-account-row" style={{ alignItems: 'flex-start' }}>
+                <div>
+                  <strong>{account.name}</strong>
+                  <div style={{ color: complete ? 'var(--green)' : 'var(--amber)', fontSize: 12, marginTop: 3 }}>
+                    {complete ? 'Ready for Coach' : !holdingsEntered ? 'Add your holdings' : 'Add its available investment options'}
+                  </div>
+                  <div className="setup-helper">{holdingsEntered ? `${group.holdings.length} holding${group.holdings.length === 1 ? '' : 's'} entered` : 'No holdings entered'}{needsMenu ? ` · ${optionCount} menu option${optionCount === 1 ? '' : 's'} recorded` : ''}</div>
+                </div>
+              </div>
+            })}
+          </div>
+        </div>
+      )}
       <details className="card" open style={{ marginBottom: 16 }}>
       <summary>Add a holding</summary>
       <form onSubmit={submit} className="setup-form">
-        <label>Account<select className="input" value={form.account_id} onChange={e => setForm(f => ({ ...f, account_id: e.target.value }))} style={{ minWidth: 160 }}>
+        <label>Account<select className="input" value={form.account_id} onChange={e => { setForm(f => ({ ...f, account_id: e.target.value })); setSelectedOptionId('') }} style={{ minWidth: 160 }}>
           <option value="">Account…</option>
           {accounts.filter(a => showExcluded || !excludedAccounts.includes(a.id)).map(a => <option key={a.id} value={a.id}>{a.name}{excludedAccounts.includes(a.id) ? ' — Excluded from Coach' : ''}</option>)}
         </select></label>
+        {form.account_id && (optionsByAccount[Number(form.account_id)] || []).length > 0 && (
+          <label>Use this account's recorded option<select aria-label="Use recorded investment option" className="input" value={selectedOptionId} onChange={e => {
+            if (!e.target.value) { setSelectedOptionId(''); return }
+            applyRecordedOption((optionsByAccount[Number(form.account_id)] || []).find(option => option.id === Number(e.target.value)))
+          }} style={{ minWidth: 220 }}>
+            <option value="">Enter manually…</option>
+            {(optionsByAccount[Number(form.account_id)] || []).map(option => <option key={option.id} value={option.id}>{optionLabel(option)}</option>)}
+          </select></label>
+        )}
         <label>Fund or security name<input className="input" placeholder="Security name" value={form.security_name} onChange={e => setForm(f => ({ ...f, security_name: e.target.value }))} style={{ minWidth: 160 }} /></label>
-        <label>Ticker (optional)<input className="input" placeholder="Ticker (optional)" value={form.ticker} onChange={e => { setForm(f => ({ ...f, ticker: e.target.value })); setSearchResults([]) }} style={{ maxWidth: 100 }} /></label>
+        <label>Ticker (optional)<input className="input" placeholder="Ticker (optional)" value={form.ticker} onChange={e => { setForm(f => ({ ...f, ticker: e.target.value })); setSearchResults([]) }} onBlur={() => {
+          const match = (optionsByAccount[Number(form.account_id)] || []).find(option => option.ticker?.toUpperCase() === form.ticker.trim().toUpperCase())
+          if (match) applyRecordedOption(match)
+        }} style={{ maxWidth: 100 }} /></label>
         <button type="button" className="btn-secondary" onClick={searchTicker}>Look up ticker</button>
         <label>Current value ($)<input className="input" type="number" step="any" min="0" placeholder="Market value" value={form.market_value} onChange={e => setForm(f => ({ ...f, market_value: e.target.value }))} style={{ maxWidth: 140 }} /></label>
         {!form.multiAsset && (
