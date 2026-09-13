@@ -423,6 +423,23 @@ def asset_location_recommendations(classified: Dict) -> List[Dict]:
     return cards
 
 
+def taxable_loss_review_recommendations(household_holdings: List[Dict]) -> List[Dict]:
+    cards = []
+    for h in household_holdings:
+        if h.get("_portfolio_account_type") not in TAXABLE_GAIN_TYPES:
+            continue
+        value, basis = h.get("market_value") or 0, h.get("cost_basis")
+        if basis is None or value >= basis:
+            continue
+        loss = round(basis - value, 2)
+        cards.append(_card("minor_optimization", recommendation_key("tax_loss_review", account_id=h.get("account_id"), holding_id=h.get("id")), 6,
+            f"Review unrealized loss on {h.get('security_name') or h.get('ticker')}",
+            f"Recorded value is ${loss:,.0f} below cost basis. Review tax-loss harvesting only after checking wash-sale rules and your replacement investment.",
+            [h.get("account_id")], [h.get("id")], loss, None, "Review, do not automatically sell", "Potential tax-loss opportunity.", None,
+            ["Uses aggregate cost basis, not tax lots."], "medium", assumptions_hash_input={"id":h.get("id"),"value":value,"basis":basis}))
+    return cards
+
+
 # ── Tiers 6/7: account-aware rebalancing (tax-advantaged vs. taxable) ────
 
 def rebalance_recommendations(rebalance_result: Dict) -> List[Dict]:
