@@ -293,6 +293,7 @@ export default function PortfolioCoach({ onNavigate }) {
         </div>
         </>
       )}
+      {allocation?.glide_path?.active && <details className="card" style={{ marginBottom: 24 }}><summary>Active glide path — age {allocation.glide_path.current_age}</summary><p style={{ fontSize: 12, color: 'var(--muted)' }}>Coach is using the age-specific targets below.</p>{(allocation.glide_path.preview || []).map(row => <div key={row.age} style={{ fontSize: 12, padding: '4px 0', borderTop: '1px solid var(--border)' }}><strong>Age {row.age}</strong> · {Object.entries(row.targets).filter(([, value]) => value).map(([key, value]) => `${key.replace('target_', '').replace('_pct', '').replace(/_/g, ' ')} ${value}%`).join(' · ')}</div>)}</details>}
 
       {nextActions}
       {allocation?.has_policy && allocation?.comparison && (

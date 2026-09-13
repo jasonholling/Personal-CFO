@@ -1344,14 +1344,15 @@ def get_portfolio_allocation():
     active_policy = dict(policy)
     glide = policy.get("glide_path") or {}
     if glide.get("enabled"):
-        from glide_path_engine import interpolate_targets
+        from glide_path_engine import interpolate_targets, glide_path_preview
         current_age = int(dict(inputs_row).get("jason_age") or glide.get("start_age") or 0) if inputs_row else int(glide.get("start_age") or 0)
         start = {field: policy.get(field, 0) for field in POLICY_TARGET_FIELD_TO_ASSET_CLASS}
         end = {field: (glide.get("end_targets") or {}).get(field, start[field]) for field in start}
         try:
             targets = interpolate_targets(start, end, int(glide["start_age"]), int(glide["end_age"]), current_age)
             active_policy.update(targets)
-            result["glide_path"] = {"active": True, "current_age": current_age, "targets": targets}
+            result["glide_path"] = {"active": True, "current_age": current_age, "targets": targets,
+                                    "preview": glide_path_preview(start, end, int(glide["start_age"]), int(glide["end_age"]))}
         except (KeyError, TypeError, ValueError):
             result["glide_path"] = {"active": False, "invalid": True}
     result["comparison"] = compare_to_target(current, active_policy)
