@@ -1677,6 +1677,21 @@ def get_recommendations(pending_contribution: float = 0.0):
     conn.close()
     return {"recommendations": [_recommendation_row_to_dict(r) for r in rows], "has_policy": policy is not None}
 
+
+@app.get("/api/recommendations/review-summary")
+def recommendation_review_summary():
+    """Decision-review dashboard data.  It reads the established lifecycle
+    records; it does not regenerate recommendations or alter their state."""
+    conn = get_db()
+    today = datetime.now().date().isoformat()
+    rows = [dict(row) for row in conn.execute(
+        "SELECT status, review_date FROM recommendations WHERE status != 'invalidated'"
+    ).fetchall()]
+    conn.close()
+    counts = {status: sum(row["status"] == status for row in rows) for status in ("proposed", "reviewing", "accepted", "deferred", "completed", "rejected")}
+    due = sum(row["status"] == "deferred" and row["review_date"] and row["review_date"] <= today for row in rows)
+    return {"counts": counts, "reviews_due": due, "today": today}
+
 @app.get("/api/recommendations/{recommendation_id}")
 def get_recommendation_detail(recommendation_id: int):
     conn = get_db()

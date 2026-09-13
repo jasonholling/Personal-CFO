@@ -134,6 +134,7 @@ export default function PortfolioCoach({ onNavigate }) {
   const [requestError, setRequestError] = useState('')
   const [loadError, setLoadError] = useState(false)
   const [accounts, setAccounts] = useState([])
+  const [reviewSummary, setReviewSummary] = useState(null)
 
   const load = (pending = 0) => {
     setLoading(true)
@@ -142,10 +143,12 @@ export default function PortfolioCoach({ onNavigate }) {
       axios.get('/api/recommendations', { params: { pending_contribution: pending || 0 } }),
       axios.get('/api/portfolio/allocation').catch(() => ({ data: { has_holdings: false } })),
       axios.get('/api/accounts').catch(() => ({ data: [] })),
-    ]).then(([rec, alloc, accountResponse]) => {
+      axios.get('/api/recommendations/review-summary').catch(() => ({ data: null })),
+    ]).then(([rec, alloc, accountResponse, summary]) => {
       setData(rec.data)
       setAllocation(alloc.data)
       setAccounts(Array.isArray(accountResponse.data) ? accountResponse.data : [])
+      setReviewSummary(summary.data)
     }).catch(() => setLoadError(true)).finally(() => setLoading(false))
   }
 
@@ -235,6 +238,7 @@ export default function PortfolioCoach({ onNavigate }) {
         </div>
         <button className="btn-secondary" onClick={() => onNavigate?.('portfoliosetup')}>Edit holdings & policy</button>
       </div>
+      {reviewSummary && <div className="card" style={{ marginBottom: 20 }}><div className="label">Decision review</div><div style={{ display: 'flex', gap: 18, flexWrap: 'wrap', marginTop: 8, fontSize: 13 }}><span><strong>{reviewSummary.counts?.proposed || 0}</strong> open</span><span><strong>{reviewSummary.counts?.accepted || 0}</strong> accepted</span><span><strong>{reviewSummary.counts?.deferred || 0}</strong> deferred</span><span style={{ color: reviewSummary.reviews_due ? 'var(--amber)' : 'var(--green)' }}><strong>{reviewSummary.reviews_due || 0}</strong> reviews due</span></div></div>}
 
       {loadError && <div className="card" role="alert">Could not refresh your portfolio. <button className="btn-secondary" onClick={() => load()}>Try again</button></div>}
       {requestError && <p role="alert">{requestError}</p>}
