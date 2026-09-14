@@ -30,6 +30,13 @@ const POLICY_TARGET_FIELDS = [
   ['target_international_bonds_pct', 'Int\'l bonds'], ['target_cash_pct', 'Cash'],
   ['target_real_estate_pct', 'Real estate'], ['target_alternatives_pct', 'Alternatives'],
 ]
+const POLICY_TARGET_GROUPS = [
+  { label: 'US stocks', fields: ['target_us_large_cap_pct', 'target_us_mid_cap_pct', 'target_us_small_cap_pct'] },
+  { label: 'International stocks', fields: ['target_international_developed_pct', 'target_emerging_markets_pct'] },
+  { label: 'Bonds and cash', fields: ['target_us_bonds_pct', 'target_international_bonds_pct', 'target_cash_pct'] },
+  { label: 'Other', fields: ['target_real_estate_pct', 'target_alternatives_pct'] },
+]
+const POLICY_TARGET_LABELS = Object.fromEntries(POLICY_TARGET_FIELDS)
 
 const fmt = n => isPrivacyMode() ? MASK_CURRENCY : (n == null ? '—' : new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 }).format(n))
 
@@ -395,13 +402,15 @@ function HoldingsTab({ accounts, excludedAccounts, onEditPolicy }) {
               </span>
               <span>
                 {fmt(h.market_value)}
-                <button className="btn-secondary" style={{ marginLeft: 10, padding: '2px 8px', fontSize: 11 }} onClick={() => setManagementMode(h, h.management_mode === 'externally_managed' ? 'self_directed' : 'externally_managed')}>
-                  {h.management_mode === 'externally_managed' ? 'Manage yourself' : 'Mark externally managed'}
-                </button>
-                <button className="btn-secondary" style={{ marginLeft: 10, padding: '2px 8px', fontSize: 11 }} onClick={() => setRefreshingHolding({ holding: h, market_value: h.market_value, as_of_date: (h.as_of_date || new Date().toISOString().slice(0, 10)).slice(0, 10), source: 'manual' })}>Refresh value</button>
-                {h.provider_identifier && <button className="btn-secondary" style={{ marginLeft: 10, padding: '2px 8px', fontSize: 11 }} onClick={() => checkQuote(h)}>Check quote</button>}
-                {['taxable', 'brokerage'].includes(g.portfolio_account_type) && <button className="btn-secondary" style={{ marginLeft: 10, padding: '2px 8px', fontSize: 11 }} onClick={() => openTaxLots(h)}>Tax lots</button>}
-                <button className="btn-secondary" style={{ marginLeft: 10, padding: '2px 8px', fontSize: 11 }} onClick={() => remove(h.id)}>Remove</button>
+                <details className="holding-actions"><summary>Actions</summary><div className="holding-actions-menu">
+                  <button className="btn-secondary" onClick={() => setManagementMode(h, h.management_mode === 'externally_managed' ? 'self_directed' : 'externally_managed')}>
+                    {h.management_mode === 'externally_managed' ? 'Manage yourself' : 'Mark externally managed'}
+                  </button>
+                  <button className="btn-secondary" onClick={() => setRefreshingHolding({ holding: h, market_value: h.market_value, as_of_date: (h.as_of_date || new Date().toISOString().slice(0, 10)).slice(0, 10), source: 'manual' })}>Refresh value</button>
+                  {h.provider_identifier && <button className="btn-secondary" onClick={() => checkQuote(h)}>Check quote</button>}
+                  {['taxable', 'brokerage'].includes(g.portfolio_account_type) && <button className="btn-secondary" onClick={() => openTaxLots(h)}>Tax lots</button>}
+                  <button className="btn-secondary holding-remove" onClick={() => remove(h.id)}>Remove holding</button>
+                </div></details>
               </span>
             </div>
             {quotePreviews[h.id] && <div className="setup-helper" style={{ marginTop: 5 }}>
@@ -499,14 +508,20 @@ function PolicyTab({ accounts }) {
     <div className="card" onChange={() => setSaved(false)}>
       <h2 style={{ fontSize: 18, margin: '0 0 6px' }}>Your target investment mix</h2>
       <p className="setup-helper">Set percentages for the accounts included in Coach. Use the sections below for exclusions and account-specific rules.</p>
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 1fr))', gap: 10 }}>
-        {POLICY_TARGET_FIELDS.map(([field, label]) => (
-          <div key={field}>
-            <label htmlFor={field} style={{ fontSize: 12, color: 'var(--muted)' }}>{label} (%)</label>
-            <input id={field} className="input" type="number" min="0" max="100" step="any" value={policy[field] ?? 0}
-                   onChange={e => setPolicy(p => ({ ...p, [field]: parseFloat(e.target.value) || 0 }))} />
-          </div>
-        ))}
+      <div className="policy-target-groups">
+        {POLICY_TARGET_GROUPS.map(group => {
+          const subtotal = group.fields.reduce((sum, field) => sum + (parseFloat(policy[field]) || 0), 0)
+          return <section key={group.label} className="policy-target-group">
+            <div className="policy-target-group-heading"><strong>{group.label}</strong><span>{subtotal.toFixed(1)}%</span></div>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(160px, 1fr))', gap: 10 }}>
+              {group.fields.map(field => <div key={field}>
+                <label htmlFor={field} style={{ fontSize: 12, color: 'var(--muted)' }}>{POLICY_TARGET_LABELS[field]} (%)</label>
+                <input id={field} className="input" type="number" min="0" max="100" step="any" value={policy[field] ?? 0}
+                  onChange={e => setPolicy(p => ({ ...p, [field]: parseFloat(e.target.value) || 0 }))} />
+              </div>)}
+            </div>
+          </section>
+        })}
       </div>
       <div style={{ marginTop: 10, fontSize: 13, color: totalValid ? 'var(--green)' : 'var(--red)' }}>
         Total: {total.toFixed(1)}% {!totalValid && '— targets must sum to 100% (±0.5) before saving'}
@@ -551,7 +566,7 @@ function PolicyTab({ accounts }) {
           Use this for checking, bill-pay cash, or any account the Coach should leave alone. The account still counts in net worth and cash planning.
         </div>
         <div className="setup-account-grid">
-          {accounts.map(account => {
+          {accounts.filter(account => INVESTMENT_ACCOUNT_TYPES.has(account.account_type)).map(account => {
             const excluded = (policy.excluded_accounts || []).includes(account.id)
             return (
               <label key={account.id} className="setup-account-row" style={{ fontSize: 13 }}>
@@ -565,11 +580,23 @@ function PolicyTab({ accounts }) {
           })}
           {!accounts.length && <div style={{ fontSize: 12, color: 'var(--muted)' }}>No accounts entered yet.</div>}
         </div>
+        {accounts.some(account => !INVESTMENT_ACCOUNT_TYPES.has(account.account_type)) && <details style={{ marginTop: 12 }}><summary>Other accounts</summary><div className="setup-account-grid" style={{ marginTop: 10 }}>
+          {accounts.filter(account => !INVESTMENT_ACCOUNT_TYPES.has(account.account_type)).map(account => {
+            const excluded = (policy.excluded_accounts || []).includes(account.id)
+            return <label key={account.id} className="setup-account-row" style={{ fontSize: 13 }}>
+              <input aria-label={`Exclude ${account.name} from investing advice`} type="checkbox" checked={excluded}
+                onChange={e => setPolicy(p => ({ ...p, excluded_accounts: e.target.checked
+                  ? [...new Set([...(p.excluded_accounts || []), account.id])]
+                  : (p.excluded_accounts || []).filter(id => id !== account.id) }))} />
+              <div>{account.name} <span style={{ color: 'var(--muted)', fontSize: 12 }}>{account.account_type || 'account'}{account.balance != null ? ` · ${fmt(account.balance)}` : ''}</span></div>
+            </label>
+          })}
+        </div></details>}
       </details>
       <PolicyRestrictions accounts={accounts} policy={policy} onChange={setPolicy} />
       <details style={{ marginTop: 20, paddingTop: 16, borderTop: '1px solid var(--border)' }} open={showGlidePath} onToggle={e => setShowGlidePath(e.currentTarget.open)}>
         <summary>Glide path <span className="setup-badge">{glide.enabled ? 'Enabled' : 'Preview only'}</span></summary>
-        <p className="setup-helper">Set a future target mix. It is saved for review and does not change Coach recommendations until its activation step is added.</p>
+        <p className="setup-helper">Set a future target mix. When enabled, Coach uses the target mix for your current age.</p>
         <label className="setup-toggle"><input type="checkbox" checked={!!glide.enabled} onChange={e => setGlide({ enabled: e.target.checked })} />Enable this saved glide-path plan</label>
         <div className="setup-form" style={{ marginTop: 12 }}>
           <label>Start age<input className="input" type="number" value={glide.start_age} onChange={e => setGlide({ start_age: Number(e.target.value) })} /></label>
@@ -600,6 +627,8 @@ function OptionsTab({ accounts, excludedAccounts, onEditPolicy }) {
   const [menuMode, setMenuMode] = useState('auto')
   const [menuModeSaving, setMenuModeSaving] = useState(false)
   const [menuModeNotice, setMenuModeNotice] = useState('')
+  const selectedAccount = accounts.find(account => account.id === Number(accountId))
+  const effectiveRestricted = menuMode === 'restricted' || (menuMode === 'auto' && ['traditional_401k', 'roth_401k', 'hsa', '529', 'trust'].includes(selectedAccount?.portfolio_account_type))
 
   const load = id => {
     if (!id) { setOptions([]); return }
@@ -672,11 +701,9 @@ function OptionsTab({ accounts, excludedAccounts, onEditPolicy }) {
               </select>
             </label>
             <div role="status" className="setup-helper" style={{ marginTop: 6 }}>
-              {menuModeNotice || (menuMode === 'restricted'
-                ? 'Coach will only make actionable suggestions from the options recorded for this account.'
-                : menuMode === 'open'
-                  ? 'Coach can identify a needed asset class, but it will not assume any security is available until you record it here.'
-                  : 'Coach will use the account type’s usual investment-access rule.')}
+              {menuModeNotice || (effectiveRestricted
+                ? 'Restricted menu: Coach only makes actionable suggestions from options recorded below.'
+                : 'Open brokerage: Coach can identify a needed asset class. Record an approved shortlist here when you want a specific fund named.')}
             </div>
           </div>
           <form onSubmit={submit} className="card setup-form" style={{ marginBottom: 16, display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
@@ -710,7 +737,7 @@ function OptionsTab({ accounts, excludedAccounts, onEditPolicy }) {
 
           <div className="card" style={{ marginBottom: 16 }}>
             {options.length === 0 && <div style={{ color: 'var(--muted)', fontSize: 13 }}>{menuMode === 'open'
-              ? 'No approved choices recorded yet. Coach can identify the asset class to add, but record a fund or security here before treating a suggestion as actionable.'
+              ? 'No approved shortlist recorded yet. Coach can still identify an asset class; add only funds you want it to name specifically.'
               : 'No investment options recorded for this account yet — Coach will only recommend options you record here.'}</div>}
             {options.map(o => (
               <div key={o.id} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, padding: '6px 0', borderTop: '1px solid var(--border)' }}>

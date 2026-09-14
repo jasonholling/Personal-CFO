@@ -40,6 +40,30 @@ afterEach(async () => {
 })
 
 describe('PortfolioSetup workflows', () => {
+  it('groups policy targets and accurately explains an enabled glide path', async () => {
+    axios.get.mockImplementation(url => Promise.resolve({ data:
+      url === '/api/accounts' ? [{ id: 1, name: '401k', account_type: '401k' }] :
+      url === '/api/holdings/grouped' ? { groups: [] } :
+      url === '/api/account-investment-options' ? [] :
+      url === '/api/investment-policy' ? { has_policy: true, policy: {
+        name: 'Policy', target_us_large_cap_pct: 40, target_us_mid_cap_pct: 10, target_us_small_cap_pct: 10,
+        target_international_developed_pct: 20, target_emerging_markets_pct: 5, target_us_bonds_pct: 10,
+        target_international_bonds_pct: 0, target_cash_pct: 5, target_real_estate_pct: 0, target_alternatives_pct: 0,
+        drift_band_pct: 5, minimum_cash_reserve: 0, rebalance_cadence: 'annual', use_contributions_before_sales: true,
+        excluded_accounts: [], excluded_holdings: [], employer_stock_exceptions: [], legacy_holding_exceptions: [], account_constraints: [],
+        glide_path: { enabled: true, start_age: 55, end_age: 65, end_targets: {} },
+      } } : []
+    }))
+    await act(async () => root.render(<PortfolioSetup />))
+    await flush()
+    await act(async () => [...container.querySelectorAll('button')].find(b => b.textContent === 'Investment Policy').click())
+    await flush()
+    expect(container.textContent).toContain('US stocks')
+    expect(container.textContent).toContain('International stocks')
+    expect(container.textContent).toContain('Bonds and cash')
+    expect(container.textContent).toContain('When enabled, Coach uses the target mix for your current age.')
+  })
+
   it('explains missing required fields instead of silently ignoring Add holding', async () => {
     await act(async () => root.render(<PortfolioSetup />))
     await flush()
@@ -151,6 +175,7 @@ describe('PortfolioSetup workflows', () => {
     expect(container.textContent).toContain('Holdings entered')
     expect(container.textContent).toContain('Difference')
     expect(container.textContent).toContain('Managed elsewhere — tracked, not traded')
+    expect(container.textContent).toContain('Actions')
     await act(async () => [...container.querySelectorAll('button')].find(b => b.textContent === 'Manage yourself').click())
     expect(axios.patch).toHaveBeenCalledWith('/api/holdings/7/management-mode', { management_mode: 'self_directed' })
   })

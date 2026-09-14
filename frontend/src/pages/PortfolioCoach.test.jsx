@@ -104,6 +104,23 @@ describe('PortfolioCoach', () => {
     expect(container.textContent).toContain('→ 50%')
     expect(container.textContent).toContain('+15%')
     expect(container.querySelectorAll('.allocation-donut svg').length).toBe(2)
+    expect(container.textContent).toContain('Takeaway:')
+    expect(container.textContent).toContain('Overweight us large cap by 15%')
+  })
+
+  it('shows a calm allocation message when every class is within its drift band', async () => {
+    const onTarget = structuredClone(allocationResponse)
+    onTarget.comparison.by_class.us_large_cap.within_drift_band = true
+    axios.get.mockImplementation(url => {
+      if (url === '/api/recommendations') return Promise.resolve({ data: recommendationsResponse })
+      if (url === '/api/portfolio/allocation') return Promise.resolve({ data: onTarget })
+      if (url === '/api/accounts') return Promise.resolve({ data: [{ id: 1, name: 'Retirement IRA' }] })
+      return Promise.resolve({ data: {} })
+    })
+    await act(async () => root.render(<PortfolioCoach />))
+    await flush()
+    expect(container.textContent).toContain('Your allocation is within its saved drift bands.')
+    expect(container.textContent).not.toContain('Takeaway:')
   })
 
   it('renders an account-and-fund rebalance checklist with its tax warning', async () => {
@@ -119,6 +136,18 @@ describe('PortfolioCoach', () => {
     expect(container.textContent).toContain('Workplace 401k')
     expect(container.textContent).toContain('Bond Index (BND)')
     expect(container.textContent).toContain('Review tax lots')
+  })
+
+  it('can build a rebalance checklist without applying entered new money', async () => {
+    axios.post.mockResolvedValueOnce({ data: { rebalance_actions: [] } })
+    await act(async () => root.render(<PortfolioCoach />))
+    await flush()
+    await setInput(container.querySelector('input[placeholder="Amount to invest"]'), '5000')
+    const useNewMoney = [...container.querySelectorAll('input[type="checkbox"]')].find(input => input.parentElement.textContent.includes('Use available new money first'))
+    await act(async () => useNewMoney.click())
+    await act(async () => [...container.querySelectorAll('button')].find(b => b.textContent === 'Generate rebalance checklist').click())
+    expect(axios.post).toHaveBeenCalledWith('/api/portfolio/rebalance', { amount: 0 })
+    expect(container.textContent).toContain('No new money will be applied before trades.')
   })
 
   it('clears a stale contribution result when the amount changes', async () => {
@@ -152,6 +181,8 @@ describe('PortfolioCoach', () => {
     axios.post.mockResolvedValue({ data: {} })
     await act(async () => root.render(<PortfolioCoach />))
     await flush()
+    const moreActions = [...container.querySelectorAll('button')].find(b => b.textContent === 'More actions')
+    await act(async () => { moreActions.click(); await Promise.resolve() })
     const date = container.querySelector('input[aria-label="Review date"]')
     await setInput(date, '2030-01-15')
     const button = [...container.querySelectorAll('button')].find(b => b.textContent === 'Defer until date')
@@ -159,6 +190,15 @@ describe('PortfolioCoach', () => {
     expect(axios.post).toHaveBeenCalledWith('/api/recommendations/1/decide', expect.objectContaining({
       status: 'deferred', review_date: '2030-01-15',
     }))
+  })
+
+  it('keeps secondary recommendation controls out of the initial card view', async () => {
+    await act(async () => root.render(<PortfolioCoach />))
+    await flush()
+    expect(container.textContent).toContain('Keep on review plan')
+    expect(container.querySelector('input[aria-label="Review date"]')).toBeNull()
+    await act(async () => [...container.querySelectorAll('button')].find(b => b.textContent === 'More actions').click())
+    expect(container.querySelector('input[aria-label="Review date"]')).not.toBeNull()
   })
 
   it('shows the annual portfolio review summary and expands its detail sections (item 3)', async () => {
