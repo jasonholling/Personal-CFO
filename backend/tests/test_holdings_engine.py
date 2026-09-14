@@ -708,6 +708,14 @@ class TestFundQualityFlags:
     def test_unclassified_flagged(self):
         assert len(unclassified_flags([holding(1, 1, security_name="Mystery", market_value=8000, asset_class="unclassified")])) == 1
 
+    def test_managed_target_date_fund_not_flagged_as_unclassified(self):
+        household = [holding(
+            1, 1, security_name="Target 2055", market_value=8000,
+            asset_class="unclassified", management_mode="externally_managed",
+            security_type="target_date_fund",
+        )]
+        assert unclassified_flags(household) == []
+
     def test_classified_not_flagged(self):
         assert unclassified_flags([holding(1, 1, security_name="Fund", market_value=1000, asset_class="us_large_cap")]) == []
 

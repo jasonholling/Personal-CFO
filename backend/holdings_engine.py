@@ -1287,6 +1287,13 @@ def duplicate_exposure_flags(household_holdings: List[Dict]) -> List[Dict]:
 def unclassified_flags(household_holdings: List[Dict]) -> List[Dict]:
     flagged = []
     for h in household_holdings:
+        # Managed target-date funds are intentionally represented without a
+        # static look-through asset class. Their allocation is maintained by
+        # the fund's glide path, so they should not appear as data-quality
+        # warnings (the Coach recommendation builder applies the same rule).
+        if (h.get("management_mode") == "externally_managed"
+                and h.get("security_type") == "target_date_fund"):
+            continue
         asset_class = h.get("asset_class") or "unclassified"
         if asset_class not in ASSET_CLASSES or asset_class == "unclassified":
             flagged.append({
