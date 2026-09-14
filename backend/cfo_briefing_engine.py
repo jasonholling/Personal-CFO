@@ -26,6 +26,7 @@ def _age_in_days(timestamp: Optional[str]) -> Optional[int]:
 def build_cfo_briefing(
     accounts: List[Dict], inputs: Dict, snapshots: List[Dict], tasks: List[Dict],
     retirement: Optional[Dict] = None, education: Optional[Dict] = None, cash_flow: Optional[Dict] = None,
+    portfolio_recommendations: Optional[List[Dict]] = None,
 ) -> Dict:
     """Return a transparent, ranked household agenda.
 
@@ -41,6 +42,36 @@ def build_cfo_briefing(
         if amount is not None:
             item["amount"] = round(amount)
         priorities.append(item)
+
+    # The Briefing is a short agenda, not a second Portfolio Coach. Surface
+    # only the first two high-signal portfolio issues and leave the detailed
+    # trade/rebalance queue on the Coach page. Emergency-fund items are
+    # already represented by the canonical briefing rule below.
+    portfolio_items = []
+    allowed_categories = {
+        "policy_violation", "concentration_or_liquidity_risk", "missing_data",
+        "taxable_rebalance", "tax_advantaged_rebalance",
+    }
+    for recommendation in portfolio_recommendations or []:
+        category = recommendation.get("category")
+        payload = recommendation.get("payload") or recommendation
+        key = payload.get("recommendation_key") or recommendation.get("recommendation_key") or ""
+        if category not in allowed_categories or key.startswith("liquidity_shortfall"):
+            continue
+        portfolio_items.append((recommendation.get("priority", payload.get("priority", 99)), payload))
+    portfolio_items.sort(key=lambda item: item[0])
+    seen_portfolio_categories = set()
+    for _, payload in portfolio_items:
+        category = payload.get("category")
+        if category in seen_portfolio_categories:
+            continue
+        seen_portfolio_categories.add(category)
+        add(2 if category in {"policy_violation", "concentration_or_liquidity_risk"} else 3,
+            f"Portfolio review: {payload.get('title') or 'Review your investment portfolio'}",
+            payload.get("action_text") or payload.get("reason") or "Review the related portfolio recommendation.",
+            "coach")
+        if len(seen_portfolio_categories) >= 2:
+            break
 
     if not accounts:
         add(1, "Build your household balance sheet", "Add checking, investment, real-estate, and debt balances so every recommendation is based on current data.", "accounts")

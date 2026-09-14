@@ -3298,7 +3298,7 @@ def get_emergency_fund():
 
 @app.get("/api/cfo-briefing")
 def get_cfo_briefing():
-    """A read-only, prioritized summary of the existing household plan."""
+    """A prioritized summary of the household plan and top portfolio issues."""
     conn = get_db()
     inputs_row = conn.execute("SELECT * FROM planning_inputs WHERE id=1").fetchone()
     accounts = [dict(r) for r in conn.execute("SELECT * FROM accounts").fetchall()]
@@ -3313,6 +3313,10 @@ def get_cfo_briefing():
     surplus_allocations = _get_relevant_surplus_allocations(conn)
     kids = _get_kids(conn)
     surplus_529 = _get_kids_surplus_529_monthly(conn, kids)
+    try:
+        portfolio_recommendations, _ = _refresh_recommendation_queue(conn)
+    except (KeyError, TypeError, ValueError, ZeroDivisionError):
+        portfolio_recommendations = []
     conn.close()
     inputs = dict(inputs_row) if inputs_row else {}
     try:
@@ -3322,7 +3326,10 @@ def get_cfo_briefing():
         # Empty or partially completed setup should still receive useful
         # data-quality guidance instead of an unusable dashboard error.
         retirement, education = {}, {}
-    return build_cfo_briefing(accounts, inputs, snapshots, tasks, retirement, education, summarize_cash_flow(cash_flow_items))
+    return build_cfo_briefing(
+        accounts, inputs, snapshots, tasks, retirement, education,
+        summarize_cash_flow(cash_flow_items), portfolio_recommendations,
+    )
 
 @app.get("/api/rental/analysis")
 def get_rental_analysis():

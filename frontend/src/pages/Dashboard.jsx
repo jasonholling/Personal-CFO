@@ -100,8 +100,8 @@ export default function Dashboard({ onNavigate }) {
                 <div>
                   <div className="label" style={{ color:'var(--accent)', marginBottom:6 }}>CFO BRIEFING</div>
                   <div style={{ fontSize:18, fontWeight:650 }}>Your highest-value next moves</div>
-                  <div style={{ color:'var(--text2)', fontSize:12, marginTop:4 }}>
-                    {briefing.data_health?.planning_ready ? 'Based on your current household inputs and projections.' : 'Complete the missing inputs below to turn this into a fully personalized plan.'}
+                <div style={{ color:'var(--text2)', fontSize:12, marginTop:4 }}>
+                    {briefing.data_health?.planning_ready ? 'Based on your current household inputs, projections, and portfolio review.' : 'Complete the missing inputs below to turn this into a fully personalized plan.'}
                   </div>
                 </div>
                 <div style={{ textAlign:'right', color:'var(--text2)', fontSize:11, whiteSpace:'nowrap' }}>
