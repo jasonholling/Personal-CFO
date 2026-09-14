@@ -1615,6 +1615,7 @@ def get_portfolio_allocation():
         concentration_flags, expense_ratio_flags, duplicate_exposure_flags, unclassified_flags,
         policy_included_holdings, reconcile_account_holdings, POLICY_TARGET_FIELD_TO_ASSET_CLASS,
     )
+    all_holdings = list(holdings)
     holdings = policy_included_holdings(holdings, policy)
     classified = classify_holdings(accounts, holdings)
     current = compute_current_allocation(classified["household"])
@@ -1627,7 +1628,9 @@ def get_portfolio_allocation():
     )
     included_account_ids = {h.get("account_id") for h in included_portfolio_holdings}
     reconciliations = [
-        {**reconcile_account_holdings(a, [h for h in holdings if h.get("account_id") == a["id"]]),
+        # Reconciliation includes every entered position in the account,
+        # including holdings excluded from allocation (such as cash).
+        {**reconcile_account_holdings(a, [h for h in all_holdings if h.get("account_id") == a["id"]]),
          "account_name": a.get("name") or f"Account {a.get('id')}"}
         for a in accounts if a.get("id") in included_account_ids
     ]
