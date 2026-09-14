@@ -135,15 +135,6 @@ export default function Dashboard({ onNavigate }) {
               })}</div>
             </div>
           )}
-          {emergencyFund?.has_data && emergencyFund.status === 'underfunded' && (
-            <div
-              style={{ padding: '12px 16px', background: 'rgba(251,191,36,0.08)', border: '1px solid rgba(251,191,36,0.2)', borderRadius: 8, marginBottom: 24, fontSize: 13, color: 'var(--amber)', fontWeight: 500, cursor: 'pointer' }}
-              onClick={() => onNavigate('settings')}
-            >
-              ⚠ Emergency fund: only {emergencyFund.months_covered} months of expenses liquid — {fmt(emergencyFund.gap_to_min)} more would reach the 3-month floor →
-            </div>
-          )}
-
           {/* Top KPIs */}
           <div className="grid-4" style={{ marginBottom: 24 }}>
             <div className="card">
