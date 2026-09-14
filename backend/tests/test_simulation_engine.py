@@ -408,6 +408,19 @@ class TestRunStressTests:
         result = run_stress_tests(sample_inputs, sample_accounts, ret_age=age, ss_timing="early")
         assert "base" in result["scenarios"]
 
+    def test_bridge_job_loss_description_reflects_the_actual_ret_age(self, sample_inputs, sample_accounts):
+        """Regression (follow-up audit, 2026-09-14, P2): the description
+        was a fixed string ("age 57 instead of 60 -- 3 years") written
+        for the old fixed 5-year (55->60) bridge model -- wrong for
+        every ret_age under the 2026-09-13 `65 - ret_age` duration
+        formula. Same fix as the two-age copy's identical test."""
+        inputs = {**sample_inputs, "jason_age": 58, "bridge_income_55": 30000}
+        st = run_stress_tests(inputs, sample_accounts, ret_age=58, ss_timing="early")
+        desc = st["scenarios"]["bridge_job_loss"]["description"]
+        assert "age 60" in desc
+        assert "instead of 65" in desc
+        assert "age 57" not in desc  # not the stale ret-55 string
+
     def test_second_earner_gap_income_matches_deterministic_engine(self, sample_inputs, monkeypatch):
         """Same fix and same idiom as TestRunMonteCarlo's identical test
         -- Stress Tests shares _run_single, so this closes backlog item 1

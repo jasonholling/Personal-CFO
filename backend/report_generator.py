@@ -223,6 +223,15 @@ def _estate_status(data):
         return 'ON TRACK'
     return 'ATTENTION'
 
+def _fi_inflation_text(data):
+    """The Financial Independence footer used to hardcode "2.00%"
+    regardless of what the household actually has saved (audit finding,
+    2026-09-14, P2) -- inflation_rate is a fully user-editable Settings
+    field, and the projection numbers above this disclaimer are computed
+    with whatever the household actually set, not a fixed 2%."""
+    inflation_rate = data.get('inflation_rate')
+    return f'{inflation_rate*100:.2f}%' if inflation_rate is not None else 'the rate set in Settings'
+
 def _fi_status(data):
     scenarios = data.get('retirement', {}).get('scenarios', [])
     s = next((x for x in scenarios if x['label'] == 'age_60_early'), None)
@@ -398,7 +407,7 @@ def build_fi(story, data, styles):
     story.append(Spacer(1, 0.1*inch))
     story.append(Paragraph(
         'Projected values are for planning purposes only and are not a promise of future performance. '
-        'Calculated using long-term inflation rate of 2.00%.',
+        f'Calculated using long-term inflation rate of {_fi_inflation_text(data)}.',
         styles['disclaimer']
     ))
     story.append(PageBreak())

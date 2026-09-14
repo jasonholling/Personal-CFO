@@ -3849,6 +3849,12 @@ def generate_annual_report():
         "estate_documents": estate_documents,
         "policy_allocation_summary": policy_allocation_summary,
         "policy_risk_profile": (dict(policy_row).get("risk_profile") if policy_row else None),
+        # The Financial Independence footer used to print a hardcoded
+        # "2.00%" regardless of what the household actually has saved --
+        # a household running the projection at a different rate saw a
+        # disclaimer contradicting the very numbers above it (audit
+        # finding, 2026-09-14, P2).
+        "inflation_rate": inputs.get("inflation_rate"),
         "names": {
             "person1": inputs.get("person1_name", "Person 1"),
             "person2": inputs.get("person2_name", "Person 2"),

@@ -278,6 +278,35 @@ class TestPreviouslySkippedScenariosNowRunInTwoAgeMode:
         st = run_stress_tests(inputs, TAXABLE(1000000), jason_ret_age=55, justin_ret_age=55)
         assert st["scenarios"]["bridge_job_loss"]["final_balance"] < st["scenarios"]["base"]["final_balance"]
 
+    def test_bridge_job_loss_description_reflects_the_actual_ret_age(self):
+        """Regression (follow-up audit, 2026-09-14, P2): the description
+        was a fixed string ("age 57 instead of 60 -- 3 years") written
+        for the old fixed 5-year (55->60) bridge model -- wrong for
+        every ret_age under the 2026-09-13 `65 - ret_age` duration
+        formula. Must now name the real ages/duration this scenario
+        actually models, for a retirement age other than 55."""
+        inputs = base_inputs(jason_age=58, justin_age=58, retirement_end_age=68,
+                              bridge_income_55=30000)
+        st = run_stress_tests(inputs, TAXABLE(1000000), jason_ret_age=58, justin_ret_age=58)
+        desc = st["scenarios"]["bridge_job_loss"]["description"]
+        # Normal bridge for ret_age 58 runs to 65 (7 years); the stress
+        # scenario caps it at 2 years, ending at age 60.
+        assert "age 60" in desc
+        assert "instead of 65" in desc
+        assert "5 years" in desc
+        assert "age 57" not in desc  # not the stale ret-55 string
+
+    def test_bridge_job_loss_description_says_not_applicable_when_bridge_already_ends_early(self):
+        """At ret_age 63, the base plan's own bridge (65-63=2 years)
+        already matches the stress cap -- there's no early loss to
+        model, and the description must say so rather than claim a
+        scenario that has zero actual effect."""
+        inputs = base_inputs(jason_age=63, justin_age=63, retirement_end_age=68,
+                              bridge_income_55=30000)
+        st = run_stress_tests(inputs, TAXABLE(1000000), jason_ret_age=63, justin_ret_age=63)
+        assert "Not applicable" in st["scenarios"]["bridge_job_loss"]["description"]
+        assert st["scenarios"]["bridge_job_loss"]["final_balance"] == st["scenarios"]["base"]["final_balance"]
+
     def test_stagflation_applies_variable_inflation_to_spending_need(self):
         """Both spouses 60, retiring together at 62 (2yrs away, so phase2
         starts 2 years of today's-dollar inflation ahead already), 3-year

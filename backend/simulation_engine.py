@@ -73,7 +73,13 @@ SCENARIOS = {
     },
     "bridge_job_loss": {
         "label": "Bridge Job Loss at Year 2",
-        "description": "Bridge job ends at age 57 instead of 60 — 3 years of full retirement costs early",
+        # This literal string is a template default only -- both
+        # consumers (single-axis and two-age run_stress_tests) always
+        # override it with a description computed from the household's
+        # actual ret_age/bridge duration before display (follow-up
+        # audit, 2026-09-14: this fixed text was stale for every ret_age
+        # under the 2026-09-13 `65 - ret_age` bridge-duration formula).
+        "description": "Bridge job ends 2 years earlier than the base plan's own bridge duration",
         "overrides": {},
         "inflation_mult": 1.0,
         "bridge_years_override": 2,
@@ -2079,6 +2085,25 @@ def _run_stress_tests_two_age(inputs: Dict, accounts: List[Dict], jason_ret_age:
             scenario_description = "Not applicable to this scenario — no bridge job is modeled for this household (Settings has no bridge income configured)."
         elif key == "bridge_job_loss" and jason_ret_age >= 65:
             scenario_description = "Not applicable to this scenario — retiring at or after 65 means Medicare is already available, so there's no bridge period to lose."
+        elif key == "bridge_job_loss":
+            # See the single-axis copy's identical comment (follow-up
+            # audit finding, 2026-09-14) -- the literal "age 57 instead
+            # of 60 -- 3 years" text was written for the old fixed 5-year
+            # bridge model and is wrong for every ret_age under the
+            # 2026-09-13 `65 - ret_age` duration formula.
+            normal_years = max(0, 65 - jason_ret_age)
+            stressed_years = min(normal_years, bridge_override) if bridge_override is not None else normal_years
+            years_cut = normal_years - stressed_years
+            if years_cut <= 0:
+                scenario_description = (
+                    f"Not applicable to this scenario — at retirement age {jason_ret_age}, the base plan's own "
+                    f"bridge already ends by age {jason_ret_age + normal_years}, so there's no early loss left to model."
+                )
+            else:
+                scenario_description = (
+                    f"Bridge job ends at age {jason_ret_age + stressed_years} instead of {jason_ret_age + normal_years} — "
+                    f"{years_cut} year{'s' if years_cut != 1 else ''} of full retirement costs early"
+                )
 
         scenario_jason_ss  = jason_ss_annual * ss_mult
         scenario_justin_ss = justin_ss_annual * ss_mult
@@ -2339,6 +2364,29 @@ def run_stress_tests(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_t
             scenario_description = "Not applicable to this scenario — no bridge job is modeled for this household (Settings has no bridge income configured)."
         elif key == "bridge_job_loss" and ret_age >= 65:
             scenario_description = "Not applicable to this scenario — retiring at or after 65 means Medicare is already available, so there's no bridge period to lose."
+        elif key == "bridge_job_loss":
+            # The literal "age 57 instead of 60 — 3 years" text on the
+            # SCENARIOS template above was written for the OLD fixed
+            # 5-year (55->60) bridge model. The 2026-09-13 generalization
+            # (bridge now runs `65 - ret_age` years, capped to
+            # bridge_years_override=2 here) made that string wrong for
+            # every retirement age except by coincidence -- it named the
+            # wrong "instead of" age and the wrong year count regardless
+            # of ret_age (follow-up audit finding, 2026-09-14). Computed
+            # fresh from the actual duration this scenario models.
+            normal_years = max(0, 65 - ret_age)
+            stressed_years = min(normal_years, bridge_override) if bridge_override is not None else normal_years
+            years_cut = normal_years - stressed_years
+            if years_cut <= 0:
+                scenario_description = (
+                    f"Not applicable to this scenario — at retirement age {ret_age}, the base plan's own bridge "
+                    f"already ends by age {ret_age + normal_years}, so there's no early loss left to model."
+                )
+            else:
+                scenario_description = (
+                    f"Bridge job ends at age {ret_age + stressed_years} instead of {ret_age + normal_years} — "
+                    f"{years_cut} year{'s' if years_cut != 1 else ''} of full retirement costs early"
+                )
 
         # For SS reduction. Independent review, 2026-09-08, ninth
         # follow-up, finding 2 (P1): scenario_justin_ss used to reduce

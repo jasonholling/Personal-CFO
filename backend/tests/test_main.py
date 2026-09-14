@@ -519,6 +519,24 @@ class TestAnnualReport:
         assert r.headers["content-type"] == "application/pdf"
         assert r.content[:4] == b"%PDF"
 
+    def test_report_inflation_footer_reflects_the_saved_rate(self, client, sample_inputs, sample_accounts):
+        # Regression (follow-up audit, 2026-09-14, P2): the FI section's
+        # footer used to hardcode "2.00%" regardless of the household's
+        # actual saved inflation_rate -- a household running at, say, 3%
+        # saw a disclaimer contradicting the very numbers computed above
+        # it. Exercised at the unit level (report_generator._fi_inflation_text)
+        # since PDF bytes aren't practically greppable for text.
+        from report_generator import _fi_inflation_text
+        assert _fi_inflation_text({"inflation_rate": 0.03}) == "3.00%"
+        assert _fi_inflation_text({"inflation_rate": 0.02}) == "2.00%"
+        assert _fi_inflation_text({}) == "the rate set in Settings"
+
+        _seed_planning_inputs(client, {**sample_inputs, "inflation_rate": 0.035})
+        _seed_accounts(client, sample_accounts)
+        r = client.get("/api/report/annual")
+        assert r.status_code == 200
+        assert r.content[:4] == b"%PDF"
+
     def test_report_reflects_saved_estate_document_status(self, client, sample_inputs, sample_accounts):
         # Regression (audit finding, 2026-09-14, P3): the report's Estate
         # Planning section used to always render a static 'ATTENTION' /
