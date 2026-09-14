@@ -1506,6 +1506,11 @@ def _run_monte_carlo_two_age(inputs: Dict, accounts: List[Dict], jason_ret_age: 
 
     return {
         "success_rate": success_rate,
+        # Echo the assumptions that generated this result so a large change
+        # in success rate is auditable from the result itself.
+        "expected_return_pre_retirement": inputs["expected_return_pre_retirement"],
+        "expected_return_post_retirement": post_ret,
+        "inflation_rate": inflation,
         "mode": "two_age",
         "jason_ret_age": jason_ret_age,
         "justin_ret_age": justin_ret_age,
@@ -1730,6 +1735,11 @@ def run_monte_carlo(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_ti
 
     return {
         "success_rate": success_rate,
+        # Echo the assumptions that generated this result so a large change
+        # in success rate is auditable from the result itself.
+        "expected_return_pre_retirement": pre_ret,
+        "expected_return_post_retirement": post_ret,
+        "inflation_rate": inflation,
         "retirement_age": ret_age,
         "retirement_end_age": end_age,
         "ss_timing": ss_timing,

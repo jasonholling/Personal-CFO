@@ -94,6 +94,12 @@ function AssumptionsUsed({ retAge, ssTiming, jasonRetAge, justinRetAge, jasonSsC
       : `${person2Name}: 50% of ${person1Name}'s toggle age above`,
   ].join(' · ')
   const pct = (v) => v == null ? null : `${(v * 100).toFixed(1)}%`
+  // Use the assumptions echoed by the simulation response whenever present.
+  // This prevents the page from displaying a stale saved-input value when a
+  // What-If override (or a server-side resolver) actually drove the run.
+  const preReturn = data?.expected_return_pre_retirement ?? overrides?.pre_return
+  const postReturn = data?.expected_return_post_retirement ?? overrides?.post_return
+  const inflationRate = data?.inflation_rate ?? overrides?.inflation
   // External audit follow-up, 2026-09-09: the whole list used to sit
   // behind one collapsed <details> -- "the actual result depends on
   // those overrides, but the user has to discover and expand the
@@ -106,9 +112,9 @@ function AssumptionsUsed({ retAge, ssTiming, jasonRetAge, justinRetAge, jasonSsC
   const primaryRows = [
     ['Retirement age(s)', ageLine],
     ['Social Security', ssLine],
-    overrides?.pre_return  != null && ['Pre-retirement return', pct(overrides.pre_return)],
-    overrides?.post_return != null && ['Post-retirement return', pct(overrides.post_return)],
-    overrides?.inflation   != null && ['Inflation', pct(overrides.inflation)],
+    preReturn  != null && ['Pre-retirement return', pct(preReturn)],
+    postReturn != null && ['Post-retirement return', pct(postReturn)],
+    inflationRate != null && ['Inflation', pct(inflationRate)],
     overrides?.income_target != null && ['Income target', `${fmtK(overrides.income_target)}/yr`],
   ].filter(Boolean)
   const secondaryRows = overrides ? [

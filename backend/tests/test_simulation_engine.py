@@ -152,6 +152,17 @@ class TestRunSwrAnalysis:
 
 
 class TestRunMonteCarlo:
+    def test_result_echoes_return_and_inflation_assumptions(self, sample_inputs, sample_accounts):
+        """The displayed success rate must be auditable against the exact
+        return assumptions used by the simulation, rather than whatever is
+        currently saved in Settings after the run."""
+        inputs = {**sample_inputs, "expected_return_pre_retirement": 0.05,
+                  "expected_return_post_retirement": 0.035, "inflation_rate": 0.03}
+        result = run_monte_carlo(inputs, sample_accounts, ret_age=58, ss_timing="early")
+        assert result["expected_return_pre_retirement"] == pytest.approx(0.05)
+        assert result["expected_return_post_retirement"] == pytest.approx(0.035)
+        assert result["inflation_rate"] == pytest.approx(0.03)
+
     @pytest.mark.parametrize("age", INTERMEDIATE_AGES)
     def test_intermediate_ages_do_not_crash(self, sample_inputs, sample_accounts, age):
         """Regression test: this used to raise KeyError for any age not in
