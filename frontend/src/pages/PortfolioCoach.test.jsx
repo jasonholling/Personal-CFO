@@ -161,6 +161,38 @@ describe('PortfolioCoach', () => {
     }))
   })
 
+  it('shows the annual portfolio review summary and expands its detail sections (item 3)', async () => {
+    const annualReviewResponse = {
+      as_of: '2026-09-13', has_policy: true,
+      open_recommendations: { count: 1, items: [] },
+      deferred_reviews_due: { count: 1, items: [{ id: 9, title: 'Establish your investment policy', review_date: '2026-08-01' }] },
+      stale_holding_values: [{ id: 10, title: 'Refresh the value of Old Fund' }],
+      unreconciled_accounts: [],
+      allocation_drift: [{ id: 11, title: 'Us Bonds is overweight vs. target' }],
+      concentrated_positions: [],
+      taxable_loss_candidates: [],
+    }
+    axios.get.mockImplementation(url => {
+      if (url === '/api/recommendations') return Promise.resolve({ data: recommendationsResponse })
+      if (url === '/api/portfolio/allocation') return Promise.resolve({ data: allocationResponse })
+      if (url === '/api/accounts') return Promise.resolve({ data: [{ id: 1, name: 'Retirement IRA' }] })
+      if (url === '/api/portfolio/annual-review') return Promise.resolve({ data: annualReviewResponse })
+      return Promise.resolve({ data: {} })
+    })
+    await act(async () => root.render(<PortfolioCoach />))
+    await flush()
+    expect(container.textContent).toContain('Annual portfolio review')
+    expect(container.textContent).toContain('1 deferred reviews due')
+    expect(container.textContent).not.toContain('Establish your investment policy')
+
+    const toggle = [...container.querySelectorAll('button')].find(b => b.textContent === 'Show details')
+    await act(async () => { toggle.click(); await Promise.resolve() })
+    expect(container.textContent).toContain('Establish your investment policy')
+    expect(container.textContent).toContain('Review by 2026-08-01')
+    expect(container.textContent).toContain('Refresh the value of Old Fund')
+    expect(container.textContent).toContain('Us Bonds is overweight vs. target')
+  })
+
   it('shows an asset-location tax warning verbatim instead of claiming cost basis is missing', async () => {
     const assetLocation = structuredClone(recommendationsResponse)
     assetLocation.recommendations[0].payload.tax_impact = 'Selling in taxable may realize a gain or loss; Coach does not estimate it here without a complete replacement plan.'

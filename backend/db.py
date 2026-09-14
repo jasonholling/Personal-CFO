@@ -322,6 +322,14 @@ def init_tasks_table():
             updated_at TEXT DEFAULT (datetime('now'))
         );
     """)
+    # `due_date` (optional, YYYY-MM-DD): additive column so a task created
+    # from a deferred Portfolio Coach recommendation can carry the exact
+    # review date rather than only a due_year -- see Portfolio Coach
+    # item 3 (household review-workflow integration). Every other task
+    # creator leaves this NULL; nothing existing changes behavior.
+    task_cols = [r[1] for r in conn.execute("PRAGMA table_info(tasks)").fetchall()]
+    if "due_date" not in task_cols:
+        conn.execute("ALTER TABLE tasks ADD COLUMN due_date TEXT")
     conn.commit()
     conn.close()
 
@@ -892,6 +900,27 @@ def init_portfolio_coach_tables():
     recommendation_cols = [r[1] for r in conn.execute("PRAGMA table_info(recommendations)").fetchall()]
     if "review_date" not in recommendation_cols:
         conn.execute("ALTER TABLE recommendations ADD COLUMN review_date TEXT")
+    # Provenance (Portfolio Coach item 3 -- household review-workflow
+    # integration): which saved scenario, assumption review, planning
+    # inputs, holdings snapshot, and investment policy were in effect
+    # when this exact row was generated. Recorded so a later change can
+    # be attributed by name in a human-readable invalidation reason
+    # instead of a single generic sentence -- see
+    # main.py's `_invalidation_reason()`. `linked_task_id` records the
+    # single household Task this recommendation created or is linked to
+    # (accepted, or deferred-and-high-priority); NULL when no task has
+    # been created for this recommendation yet.
+    recommendation_provenance_migrations = [
+        ("saved_scenario_id", "INTEGER"),
+        ("assumption_review_id", "INTEGER"),
+        ("planning_inputs_hash", "TEXT"),
+        ("holdings_snapshot_hash", "TEXT"),
+        ("policy_hash", "TEXT"),
+        ("linked_task_id", "INTEGER"),
+    ]
+    for col, typedef in recommendation_provenance_migrations:
+        if col not in recommendation_cols:
+            conn.execute(f"ALTER TABLE recommendations ADD COLUMN {col} {typedef}")
 
     # Migrate holdings/investment_policies: CREATE TABLE IF NOT EXISTS above
     # is a no-op against a table that already exists, so a cfo.db created
