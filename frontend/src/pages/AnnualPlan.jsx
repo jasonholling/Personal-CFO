@@ -115,7 +115,8 @@ export default function AnnualPlan({ onNavigate }) {
               <div style={{ flex:1 }}>
                 <div style={{ display:'flex', gap:8, alignItems:'center', flexWrap:'wrap' }}>
                   <span style={{ fontSize:13, fontWeight:550, textDecoration:task.completed ? 'line-through' : 'none' }}>{task.title}</span>
-                  {task.task_type === 'calculated' && <span style={{ color:'var(--amber)', fontSize:10, fontWeight:700 }}>CALCULATED</span>}
+                  {task.task_type === 'calculated' && <span style={{ color:'var(--amber)', fontSize:10, fontWeight:700 }}>FROM COACH</span>}
+                  {task.recommendation_status && <span style={{ color:task.recommendation_status === 'completed' ? 'var(--green)' : 'var(--accent)', fontSize:10, fontWeight:700 }}>{task.recommendation_status.toUpperCase()}</span>}
                   {task.recurrence === 'annual' && <span style={{ color:'var(--accent)', fontSize:10, fontWeight:700 }}>ANNUAL</span>}
                 </div>
                 {task.description && <div style={{ color:'var(--text2)', fontSize:12, lineHeight:1.45, marginTop:3 }}>{task.description}</div>}

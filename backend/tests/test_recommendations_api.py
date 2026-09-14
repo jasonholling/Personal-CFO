@@ -273,15 +273,20 @@ class TestRecommendationsDecisionLifecycle:
 
         r = client.post(f"/api/recommendations/{rec_id}/decide", json={"status": "accepted", "notes": "Will act on this"})
         assert r.json()["status"] == "accepted"
+        tasks = client.get("/api/tasks").json()
+        linked = next(task for task in tasks if task.get("recommendation_id") == rec_id)
+        assert linked["recommendation_status"] == "accepted"
+        completed_task = client.patch(f"/api/tasks/{linked['id']}", json={"completed": True}).json()
+        assert completed_task["recommendation_status"] == "completed"
         # Accepted recommendations stay in the active queue (reused, not duplicated).
         body_after = client.get("/api/recommendations").json()
-        assert any(c["id"] == rec_id and c["status"] == "accepted" for c in body_after["recommendations"])
+        assert not any(c["id"] == rec_id for c in body_after["recommendations"])
 
+        client.patch(f"/api/tasks/{linked['id']}", json={"completed": False})
         r2 = client.post(f"/api/recommendations/{rec_id}/decide", json={"status": "completed"})
         assert r2.json()["status"] == "completed"
         detail = client.get(f"/api/recommendations/{rec_id}").json()
-        assert len(detail["events"]) == 2
-        assert [e["event_type"] for e in detail["events"]] == ["accepted", "completed"]
+        assert [e["event_type"] for e in detail["events"]] == ["accepted", "completed", "accepted", "completed"]
 
     def test_unknown_status_rejected(self, client):
         acc = _create_account(client)

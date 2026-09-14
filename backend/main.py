@@ -3524,13 +3524,14 @@ class TaskUpdate(BaseModel):
 @app.get("/api/tasks")
 def get_tasks(section: Optional[str] = None):
     conn = get_db()
+    select = "SELECT t.*, r.id AS recommendation_id, r.status AS recommendation_status FROM tasks t LEFT JOIN recommendations r ON r.linked_task_id=t.id"
     if section:
         rows = conn.execute(
-            "SELECT * FROM tasks WHERE section=? ORDER BY completed ASC, created_at DESC", (section,)
+            select + " WHERE t.section=? ORDER BY t.completed ASC, t.created_at DESC", (section,)
         ).fetchall()
     else:
         rows = conn.execute(
-            "SELECT * FROM tasks ORDER BY section, completed ASC, created_at DESC"
+            select + " ORDER BY t.section, t.completed ASC, t.created_at DESC"
         ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
@@ -3556,8 +3557,15 @@ def update_task(task_id: int, update: TaskUpdate):
         "UPDATE tasks SET completed=?, completed_date=?, updated_at=datetime('now') WHERE id=?",
         (1 if update.completed else 0, completed_date, task_id)
     )
+    linked = conn.execute("SELECT id, status FROM recommendations WHERE linked_task_id=? LIMIT 1", (task_id,)).fetchone()
+    if linked and update.completed and linked["status"] != "completed":
+        conn.execute("UPDATE recommendations SET status='completed', decision_date=datetime('now'), updated_at=datetime('now') WHERE id=?", (linked["id"],))
+        conn.execute("INSERT INTO recommendation_events (recommendation_id, event_type, notes) VALUES (?,?,?)", (linked["id"], "completed", "Completed from the Action Tracker."))
+    elif linked and not update.completed and linked["status"] == "completed":
+        conn.execute("UPDATE recommendations SET status='accepted', decision_date=datetime('now'), updated_at=datetime('now') WHERE id=?", (linked["id"],))
+        conn.execute("INSERT INTO recommendation_events (recommendation_id, event_type, notes) VALUES (?,?,?)", (linked["id"], "accepted", "Reopened from the Action Tracker."))
     conn.commit()
-    row = conn.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
+    row = conn.execute("SELECT t.*, r.id AS recommendation_id, r.status AS recommendation_status FROM tasks t LEFT JOIN recommendations r ON r.linked_task_id=t.id WHERE t.id=?", (task_id,)).fetchone()
     conn.close()
     return dict(row)
 
