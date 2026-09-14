@@ -339,6 +339,12 @@ export default function Settings() {
           <span style={{ fontSize:13, fontWeight:600, color:'var(--accent)' }}>{(roth_pct*100).toFixed(1)}%</span>
         </Row>
         <Row label="Annual HSA Contribution" hint="Household/family HSA, not split per person"><NumInput value={form.annual_hsa_contribution} onChange={v => set('annual_hsa_contribution', v)} prefix="$" /></Row>
+        <Row label="Withdrawal Order in Retirement" hint="Taxable-first defers tax the longest (usually the better lifetime outcome); Proportional draws all three buckets blended by balance every year, starting the moment you retire">
+          <select value={form.withdrawal_strategy ?? 'taxable_first'} onChange={e => set('withdrawal_strategy', e.target.value)} style={{ fontSize:13 }}>
+            <option value="taxable_first">Taxable-first (tax-deferred growth)</option>
+            <option value="proportional">Proportional (blend all buckets)</option>
+          </select>
+        </Row>
       </Section>
 
       <Section title="Kids (0-5)" >
@@ -361,6 +367,17 @@ export default function Settings() {
         <Row label="Pension at Age 55" hint="Monthly × 12"><NumInput value={form.pension_55 ?? 0} onChange={v => set('pension_55', v)} prefix="$" suffix="/yr" /></Row>
         <Row label="Pension at Age 60" hint="Monthly × 12"><NumInput value={form.pension_60 ?? 0} onChange={v => set('pension_60', v)} prefix="$" suffix="/yr" /></Row>
         <Row label="Pension at Age 65" hint="Monthly × 12"><NumInput value={form.pension_65 ?? 0} onChange={v => set('pension_65', v)} prefix="$" suffix="/yr" /></Row>
+      </Section>
+
+      <Section title="Bridge Income (to Medicare)">
+        <div style={{ fontSize:11, color:'var(--text3)', marginBottom:12 }}>
+          Income from a part-time/consulting "bridge job" after retiring early — covers the
+          gap until Medicare eligibility at 65. Applies automatically for however many years
+          separate {p1}'s retirement age from 65 (e.g. retiring at 60 gets 5 years of bridge
+          income, retiring at 55 gets 10) — no separate duration field needed. Set to $0 if
+          you don't plan to work after retiring.
+        </div>
+        <Row label="Bridge job income" hint="Until age 65"><NumInput value={form.bridge_income_55 ?? 0} onChange={v => set('bridge_income_55', v)} prefix="$" suffix="/yr" /></Row>
       </Section>
 
       <Section title={`${p1} — Life Insurance`}>

@@ -1085,8 +1085,27 @@ def run_retirement_projection(inputs: Dict, accounts: List[Dict], ret_ages: List
             healthcare_kids      = inputs.get("healthcare_kids", 0)
             kids_annual_cost     = inputs.get("kids_annual_cost", 0)
             bridge_income        = inputs.get("bridge_income_55", 0)
-            bridge_years         = inputs.get("bridge_years_55", 0)
             kids_years           = inputs.get("kids_years_at_home_55", 0)
+            # Bridge duration (2026-09-13): no longer the fixed
+            # bridge_years_55 input -- bridge income is a bridge to
+            # Medicare eligibility (65), so it now runs for however many
+            # years separate the SELECTED retirement age from 65,
+            # whatever that age is (previously this whole feature was
+            # gated to exactly ret_age==55, a single anchor age, with a
+            # fixed 5-year duration that didn't even reach 65 from 55).
+            # bridge_years_override (not a persisted planning input --
+            # only ever set transiently by run_stress_tests's own
+            # bridge_job_loss scenario, see simulation_engine.py) caps
+            # this shorter, for "the bridge job ends early" specifically.
+            bridge_years = max(0, 65 - ret_age)
+            if inputs.get("bridge_years_override") is not None:
+                bridge_years = min(bridge_years, inputs["bridge_years_override"])
+            # No actual bridge job configured -- don't treat a household
+            # retiring before 65 as bridge-active just because the
+            # computed duration is nonzero (that would wrongly zero out
+            # healthcare for years 55-64 for anyone without a bridge job).
+            if bridge_income <= 0:
+                bridge_years = 0
 
             # Convert today's-dollar expenses and bridge income once;
             # both annual rows and headline funding use these cash flows.
@@ -1136,8 +1155,12 @@ def run_retirement_projection(inputs: Dict, accounts: List[Dict], ret_ages: List
 
                 # Income need this year (includes healthcare, phased for age 55)
                 bridge_this_year = 0
-                if ret_age == 55:
-                    kids_still_home = yr < kids_years
+                if ret_age < 65:
+                    # kids-at-home is intentionally still gated to exactly
+                    # age 55 (2026-09-13) -- only the bridge-income half of
+                    # this branch was asked to widen to any pre-65
+                    # retirement age; kids-at-home policy is unchanged.
+                    kids_still_home = ret_age == 55 and yr < kids_years
                     bridge_active   = yr < bridge_years
                     if bridge_active:
                         # Phase 1: bridge job covers healthcare, net of bridge income
@@ -1271,6 +1294,7 @@ def run_retirement_projection(inputs: Dict, accounts: List[Dict], ret_ages: List
                     tax_model=marginal_bracket_tax_model(pretax_rate=pretax_tax_rate, taxable_rate=0.0),
                     growth_rate=post_ret,
                     order=DEFAULT_ORDER,
+                    proportional=inputs.get("withdrawal_strategy") == "proportional",
                 )
 
                 withdrawal_taxable = year_result.draws.get("taxable", 0.0)
@@ -1343,7 +1367,7 @@ def run_retirement_projection(inputs: Dict, accounts: List[Dict], ret_ages: List
                     "healthcare_cost":   round(healthcare_inflated),
                     "pension":          round(year_pen),
                     "social_security":  round(year_jss + year_uss),
-                    "bridge_income":    round(bridge_income_at_ret * ((1+inflation)**yr)) if ret_age == 55 and yr < bridge_years else 0,
+                    "bridge_income":    round(bridge_income_at_ret * ((1+inflation)**yr)) if ret_age < 65 and yr < bridge_years else 0,
                     # Backlog item 5 (CALCULATION_CONTRACT.md section 13):
                     # exposed as its own line so a lower income_need during
                     # the gap years is explained, not just implied.
@@ -1506,8 +1530,22 @@ def two_age_spending_need_fn(inputs: Dict, income_today: float, inflation: float
     healthcare_kids      = inputs.get("healthcare_kids", 0)
     kids_annual_cost     = inputs.get("kids_annual_cost", 0)
     bridge_income        = inputs.get("bridge_income_55", 0)
-    bridge_years         = inputs.get("bridge_years_55", 0)
     kids_years           = inputs.get("kids_years_at_home_55", 0)
+    # Bridge duration (2026-09-13): computed to Medicare eligibility (65)
+    # from JASON's own retirement age, same widening as the single-age
+    # run_retirement_projection version of this branch (see its own
+    # comment) -- no longer the fixed bridge_years_55 input. bridge_years_
+    # override is the same transient, non-persisted cap run_stress_tests'
+    # bridge_job_loss scenario uses to end the bridge early.
+    bridge_years = max(0, 65 - jason_ret_age)
+    if inputs.get("bridge_years_override") is not None:
+        bridge_years = min(bridge_years, inputs["bridge_years_override"])
+    # No actual bridge job configured -- don't treat a household retiring
+    # before 65 as bridge-active just because the computed duration is
+    # nonzero (that would wrongly zero out healthcare for anyone without
+    # a bridge job).
+    if bridge_income <= 0:
+        bridge_years = 0
 
     # Every dollar figure's pre-loop compounding anchors to phase2_start
     # -- the TRUE pre-loop boundary -- never to jason_effective_start_age,
@@ -1553,9 +1591,11 @@ def two_age_spending_need_fn(inputs: Dict, income_today: float, inflation: float
 
     def need_for_year(age, yr):
         cum = cum_inflation[yr]
-        if jason_ret_age == 55 and age >= jason_effective_start_age:
+        if jason_ret_age < 65 and age >= jason_effective_start_age:
             jason_yr = age - jason_effective_start_age  # duration counter only -- see docstring above
-            kids_still_home = jason_yr < kids_years
+            # kids-at-home stays gated to exactly age 55 (2026-09-13) --
+            # only bridge income widened to any pre-65 retirement age.
+            kids_still_home = jason_ret_age == 55 and jason_yr < kids_years
             bridge_active   = jason_yr < bridge_years
             if bridge_active:
                 healthcare_this_year = 0
@@ -1893,6 +1933,7 @@ def run_two_dimensional_retirement_projection(inputs: Dict, accounts: List[Dict]
             tax_model=marginal_bracket_tax_model(pretax_rate=pretax_tax_rate, taxable_rate=0.0),
             growth_rate=post_ret,
             order=DEFAULT_ORDER,
+            proportional=inputs.get("withdrawal_strategy") == "proportional",
         )
 
         withdrawal_taxable = year_result.draws.get("taxable", 0.0)
@@ -2360,7 +2401,7 @@ def run_owner_split_two_dimensional_projection(inputs: Dict, accounts: List[Dict
         # joins pension/SS here (pooled call) and, below, "jason"'s own
         # owner_cash bucket specifically -- bridge_income_55 only ever
         # applies during JASON's own bridge-job phase (need_for_year's
-        # own `jason_ret_age == 55` gate), so it's unambiguously his
+        # own `jason_ret_age < 65` gate, 2026-09-13), so it's unambiguously his
         # individual income, same reasoning as pension_annual/jason_ss
         # already being attributed to "jason" a few lines below. Was
         # previously discarded entirely (captured as `_bridge_income`,

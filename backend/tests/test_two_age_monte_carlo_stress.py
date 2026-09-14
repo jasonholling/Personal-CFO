@@ -236,23 +236,32 @@ class TestPreviouslySkippedScenariosNowRunInTwoAgeMode:
 
     def test_bridge_job_loss_never_extends_a_shorter_or_zero_bridge(self):
         """Independent review, 2026-09-08, third follow-up (P2) --
-        reproduced exactly: $30,000/yr bridge income configured but
-        bridge_years_55=0 (no bridge job at all). The buggy version
-        unconditionally set the stressed scenario's bridge duration to
-        2 years regardless of what the household actually configured,
-        INVENTING two years of income a household with 0 bridge years
-        never has -- final_balance ended $60,000 higher than base
-        ($820,000 vs $760,000) instead of identical to it. Fixed: capped
-        at min(override, existing bridge_years_55) -- this scenario
-        models the bridge job ending EARLY, never lasting longer than
-        planned."""
+        originally reproduced with bridge_years_55=0 meaning "no bridge
+        job configured" under the old fixed-duration design. 2026-09-13:
+        bridge_years_55 no longer controls duration at all (duration is
+        computed to Medicare eligibility) -- the only way to express "no
+        bridge job" now is bridge_income_55<=0. This test now confirms
+        THAT invariant still holds: a household with no bridge income at
+        all sees bridge_job_loss produce an identical result to base,
+        never inventing income out of nothing."""
         inputs = base_inputs(jason_age=55, justin_age=55, retirement_end_age=58,
-                              bridge_income_55=30000, bridge_years_55=0)
+                              bridge_income_55=0)
         st = run_stress_tests(inputs, TAXABLE(1000000), jason_ret_age=55, justin_ret_age=55)
         assert st["scenarios"]["base"]["final_balance"] == 760000
         assert st["scenarios"]["bridge_job_loss"]["final_balance"] == 760000
-        old_buggy_value = 820000  # matches the independent review's own reported old value
-        assert st["scenarios"]["bridge_job_loss"]["final_balance"] != old_buggy_value
+
+    def test_bridge_job_loss_cap_never_extends_the_computed_bridge(self):
+        """The override that models the bridge job ending EARLY must
+        never accidentally EXTEND a shorter, already-capped bridge --
+        i.e. min(override, computed_duration), not a bare override.
+        3-year horizon (55-57), bridge income configured but the
+        computed 65-55=10-year duration far exceeds it -- bridge_job_loss
+        (which caps at 2 years) must still be strictly worse than base
+        (base gets bridge all 3 years; job-loss only gets it for 2)."""
+        inputs = base_inputs(jason_age=55, justin_age=55, retirement_end_age=58,
+                              bridge_income_55=30000)
+        st = run_stress_tests(inputs, TAXABLE(1000000), jason_ret_age=55, justin_ret_age=55)
+        assert st["scenarios"]["bridge_job_loss"]["final_balance"] < st["scenarios"]["base"]["final_balance"]
 
     def test_stagflation_applies_variable_inflation_to_spending_need(self):
         """Both spouses 60, retiring together at 62 (2yrs away, so phase2

@@ -434,17 +434,19 @@ export function MonteCarloSection({ retAge, ssTiming, overrides, jasonRetAge, ju
             <div style={{ fontSize:11, color:'var(--text3)', marginTop:6, lineHeight:1.5 }}>
               A simplified single-rate check, separate from the Monte Carlo simulation above — the two can disagree.
             </div>
-            {retAge === 55 && data.mode !== 'two_age' ? (
+            {retAge < 65 && data.mode !== 'two_age' ? (
               <div style={{ marginTop:12, fontSize:12, lineHeight:1.7 }}>
-                <div style={{ color:'var(--text2)', marginBottom:8 }}>Phased plan modeled — see Settings for your bridge income/years inputs:</div>
+                <div style={{ color:'var(--text2)', marginBottom:8 }}>Phased plan modeled — see Settings for your bridge job income:</div>
                 <div style={{ display:'flex', justifyContent:'space-between' }}>
-                  <span style={{ color:'var(--text2)' }}>Age 55–60 (bridge job)</span>
+                  <span style={{ color:'var(--text2)' }}>Age {retAge}–65 (bridge job)</span>
                   <span>Net draw reduced by bridge income</span>
                 </div>
-                <div style={{ display:'flex', justifyContent:'space-between' }}>
-                  <span style={{ color:'var(--text2)' }}>Kids-at-home years</span>
-                  <span>Includes kids annual cost</span>
-                </div>
+                {retAge === 55 && (
+                  <div style={{ display:'flex', justifyContent:'space-between' }}>
+                    <span style={{ color:'var(--text2)' }}>Kids-at-home years</span>
+                    <span>Includes kids annual cost</span>
+                  </div>
+                )}
                 <div style={{ display:'flex', justifyContent:'space-between' }}>
                   <span style={{ color:'var(--text2)' }}>Age 65+ (Medicare)</span>
                   <span>Healthcare cost drops post-Medicare</span>

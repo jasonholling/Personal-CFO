@@ -283,17 +283,22 @@ class TestAge55BridgeAndKidsRulesPreserved:
 
         Bridge-active year: year_need = max(0, 80000 - 30000) = 50000,
         not the plain 80000 a household outside the age-55 bridge would
-        see -- draw 50000/yr for 5 years, matching
-        run_retirement_projection's own ret_age=55 output exactly for
-        the same inputs (direct parity check below), not just this
-        function's own arithmetic."""
+        see -- draw 50000/yr, matching run_retirement_projection's own
+        ret_age=55 output exactly for the same inputs (direct parity
+        check below), not just this function's own arithmetic.
+
+        2026-09-13: bridge duration is computed to Medicare eligibility
+        (65-55=10 years), not the old fixed bridge_years_55=5 -- all 6
+        modeled years (55-60) are within that 10-year window, so bridge
+        stays active (and draw stays 50000) through every year here,
+        unlike the old fixed-5-year behavior this test used to assert."""
         inputs = base_inputs(jason_age=55, justin_age=55, retirement_end_age=61,
-                              bridge_income_55=30000, bridge_years_55=5)
+                              bridge_income_55=30000)
         result = run_two_dimensional_retirement_projection(inputs, TAXABLE(200000), jason_ret_age=55, justin_ret_age=55)
         yearly = result["yearly_detail"]
         assert [y["jason_age"] for y in yearly] == [55, 56, 57, 58, 59, 60]
-        assert [y["draw"] for y in yearly] == [50000, 50000, 50000, 50000, 50000, 80000]
-        assert [y["bridge_income"] for y in yearly] == [30000, 30000, 30000, 30000, 30000, 0]
+        assert [y["draw"] for y in yearly] == [50000] * 6
+        assert [y["bridge_income"] for y in yearly] == [30000] * 6
         assert [y["portfolio_balance"] for y in yearly] == [150000, 100000, 50000, 0, 0, 0]
 
         from projection_engine import run_retirement_projection
@@ -307,11 +312,15 @@ class TestAge55BridgeAndKidsRulesPreserved:
 
     def test_kids_still_home_phase_uses_family_healthcare(self):
         """Bridge phase ends, kids still home (kids_years_at_home_55 >
-        bridge_years_55) -- the family-healthcare-cost phase, distinct
-        from the pre-Medicare default. Same household as above, but
-        bridge only 2 years, kids home for 4."""
+        the bridge duration) -- the family-healthcare-cost phase,
+        distinct from the pre-Medicare default. Same household as above,
+        but bridge cut short to 2 years (via bridge_years_override --
+        2026-09-13: duration is normally computed to Medicare eligibility,
+        65-55=10 years, way past this test's 3-year horizon, so the
+        override is needed to reach the kids-still-home phase at all),
+        kids home for 4."""
         inputs = base_inputs(jason_age=55, justin_age=55, retirement_end_age=58,
-                              bridge_income_55=30000, bridge_years_55=2, kids_years_at_home_55=4,
+                              bridge_income_55=30000, bridge_years_override=2, kids_years_at_home_55=4,
                               healthcare_kids=10000)
         result = run_two_dimensional_retirement_projection(inputs, TAXABLE(500000), jason_ret_age=55, justin_ret_age=55)
         yearly = result["yearly_detail"]

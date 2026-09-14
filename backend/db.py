@@ -291,6 +291,14 @@ def init_db():
         ("disability_funded_by",       "TEXT DEFAULT 'Employer group policy'"),
         ("disability_to_age",          "INTEGER DEFAULT 65"),
         ("ltc_premium_annual",         "REAL DEFAULT 369"),
+        # Withdrawal-phase bucket order (2026-09-13, CALCULATION_CONTRACT.md
+        # section 81): "taxable_first" is the existing DEFAULT_ORDER
+        # behavior every consumer always had (drain taxable, then pretax,
+        # then HSA, then Roth) -- the default here keeps every existing
+        # household's numbers unchanged until they opt in.
+        # "proportional" draws taxable/pretax/Roth blended by balance share
+        # every year instead, per the household's own explicit choice.
+        ("withdrawal_strategy",        "TEXT DEFAULT 'taxable_first'"),
     ]
     for col, typedef in migrations:
         if col not in existing_cols:

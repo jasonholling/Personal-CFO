@@ -160,10 +160,14 @@ export default function SideBySide({ onNavigate }) {
       highlight: 65,
     },
     {
+      // Bridge income applies from whatever age you retire until Medicare
+      // eligibility (65) -- so retiring at 55 OR 60 both need it, just for
+      // different lengths of time; only retiring at 65 needs none.
       label: 'Bridge Job Required',
       values: {
-        55: `${fmt(inputs?.bridge_income_55)}/yr job age 55-60`,
-        60: 'None needed', 65: 'None needed',
+        55: `${fmt(inputs?.bridge_income_55)}/yr job age 55-65`,
+        60: `${fmt(inputs?.bridge_income_55)}/yr job age 60-65`,
+        65: 'None needed',
       },
       highlight: 60,
     },
