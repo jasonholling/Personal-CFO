@@ -48,7 +48,10 @@ export default function AnnualPlan({ onNavigate }) {
   const [showComplete, setShowComplete] = useState(false)
   const [allocation, setAllocation] = useState(null)
 
-  const load = () => Promise.all([axios.get('/api/tasks'), axios.get('/api/portfolio/allocation')])
+  const load = () => Promise.all([
+    axios.get('/api/tasks').catch(() => ({ data: [] })),
+    axios.get('/api/portfolio/allocation').catch(() => ({ data: null })),
+  ])
     .then(([tasksResponse, allocationResponse]) => { setTasks(tasksResponse.data); setAllocation(allocationResponse.data) })
     .finally(() => setLoading(false))
 
