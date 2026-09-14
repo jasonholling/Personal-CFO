@@ -170,7 +170,7 @@ function SurvivorScenarioSection({ retAge, jasonSsClaimAge, justinSsClaimAge, se
           default -- see Retirement.jsx's identical comment. */}
       <details className="card" style={{ marginBottom:24 }} open={jasonSsClaimAge != null || justinSsClaimAge != null}>
         <summary style={{ cursor:'pointer', fontSize:13, fontWeight:600, padding:'4px 0', marginBottom:4 }}>Custom Social Security Claim Age (62-70)</summary>
-        <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:24, marginTop:8, marginBottom:16 }}>
+        <div className="grid-2" style={{ gap:24, marginTop:8, marginBottom:16 }}>
           <ClaimAgeSlider
             label={`${person1Name}'s claim age`}
             claimAge={jasonSsClaimAge}
@@ -419,7 +419,7 @@ export default function StressTestWhatIf({ onNavigate }) {
           screen without scrolling). Purely a layout change: every
           conditional below is unchanged, just wrapped in a 2-column grid. */}
       {(tab === 'monte_carlo' || tab === 'stress') && (
-      <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:24, alignItems:'start', marginBottom:20 }}>
+      <div className="grid-2" style={{ gap:24, alignItems:'start', marginBottom:20 }}>
       <div>
       {/* What-If Builder has its own full 55-67 retirement-age slider, and
           Survivor Scenario has its own controls, so the coarse retAge/
@@ -559,7 +559,7 @@ export default function StressTestWhatIf({ onNavigate }) {
               </span>
             )}
           </summary>
-          <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:24, marginTop:8 }}>
+          <div className="grid-2" style={{ gap:24, marginTop:8 }}>
             {/* External audit review, 2026-09-09: this preview used to
                 read raw Settings anchors even though the simulation
                 these sliders feed applies the What-If Builder's own SS
