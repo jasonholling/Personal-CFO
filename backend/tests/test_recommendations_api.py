@@ -211,7 +211,7 @@ class TestRecommendationsGenerate:
             "success_rate": 65, "median_depletion_age": 80,
         })
         body = client.get("/api/recommendations").json()
-        assert any(c["title"] == "Monte Carlo success rate is below 80%" for c in body["recommendations"])
+        assert not any(c["title"] == "Monte Carlo success rate is below 80%" for c in body["recommendations"])
 
 
 class TestRecommendationsDecisionLifecycle:

@@ -536,10 +536,10 @@ class TestMinorOptimizationRecommendations:
         cards = minor_optimization_recommendations([], context)
         assert not any("near-term" in c["title"].lower() for c in cards)
 
-    def test_low_success_rate_flagged(self):
+    def test_low_success_rate_is_left_to_planning_views(self):
         context = {"monte_carlo_success_rate": 65}
         cards = minor_optimization_recommendations([], context)
-        assert any("success rate" in c["title"].lower() for c in cards)
+        assert not any("success rate" in c["title"].lower() for c in cards)
 
 
 class TestValueUnitTagging:

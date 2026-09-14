@@ -708,7 +708,10 @@ def minor_optimization_recommendations(household_holdings: List[Dict], goal_cont
     years_to_retirement = goal_context.get("years_to_retirement")
     depletion_age = goal_context.get("median_depletion_age")
     retirement_age = goal_context.get("retirement_age")
-    success_rate = goal_context.get("monte_carlo_success_rate")
+    # Monte Carlo success is intentionally left in the Monte Carlo and
+    # planning views. It is not a portfolio-action recommendation: without
+    # the full spending, tax, and retirement context it produces a generic
+    # warning that is easy to mistake for an allocation diagnosis.
     if years_to_retirement is not None and depletion_age is not None and retirement_age is not None:
         if years_to_retirement <= 10 and depletion_age < retirement_age + 30:
             cards.append(_card(
@@ -728,18 +731,6 @@ def minor_optimization_recommendations(household_holdings: List[Dict], goal_cont
                 invalidates_on=["Retirement age or the Monte Carlo assumptions change materially."],
                 assumptions_hash_input=goal_context, value_unit="age",
             ))
-    if success_rate is not None and success_rate < 80:
-        cards.append(_card(
-            "minor_optimization", recommendation_key("low_success_rate"),
-            2, "Monte Carlo success rate is below 80%",
-            f"Your plan's Monte Carlo success rate is {success_rate}%. Review spending, savings rate, or retirement "
-            f"age assumptions before treating any allocation change as the primary fix.",
-            [], [], current_value=success_rate, target_value=80,
-            proposed_change="Review broader plan assumptions, not just allocation", expected_effect="Better-informed planning decision.",
-            tax_impact=None, assumptions=["Success rate per the last Monte Carlo run."], confidence="medium",
-            invalidates_on=["Monte Carlo is re-run with different assumptions."],
-            assumptions_hash_input=goal_context, value_unit="percent",
-        ))
     return cards
 
 # Backwards-compatible alias -- earlier internal draft's name. Signature
