@@ -1255,7 +1255,12 @@ def run_retirement_projection(inputs: Dict, accounts: List[Dict], ret_ages: List
                 # surplus-sweep logic see and save any bridge income left
                 # over after spending is covered, instead of silently
                 # discarding it.
-                year_pen = pension_annual
+                # pension_stop_age (2026-09-14, section 83): optional
+                # lump-sum-buyout override -- ends the annuity at a
+                # specific age instead of paying for life. None (default,
+                # every existing caller) leaves this untouched.
+                _pension_stop_age = inputs.get("_pension_stop_age")
+                year_pen = 0.0 if (_pension_stop_age is not None and age >= _pension_stop_age) else pension_annual
                 year_jss = income.jason_ss
                 year_uss = income.justin_ss
                 fixed_income = year_pen + year_jss + year_uss + bridge_this_year
@@ -1640,11 +1645,20 @@ def two_age_spending_need_fn(inputs: Dict, income_today: float, inflation: float
     return need_for_year
 
 
-def two_age_pension_for_year(pension_annual: float, age: int, jason_effective_start_age: int) -> float:
+def two_age_pension_for_year(pension_annual: float, age: int, jason_effective_start_age: int,
+                              pension_stop_age: int = None) -> float:
     """Jason's own pension starts only once he's actually retired --
     shared by run_two_dimensional_retirement_projection and its Monte
     Carlo/Stress Tests counterparts so this one-line gate isn't a second
-    independent copy (CALCULATION_CONTRACT.md section 20)."""
+    independent copy (CALCULATION_CONTRACT.md section 20).
+
+    pension_stop_age (2026-09-14, CALCULATION_CONTRACT.md section 83):
+    optional -- models a pension lump-sum buyout ending the annuity at a
+    specific age (instead of paying for life, the default/None
+    behavior). None at every one of this function's other call sites,
+    unaffected."""
+    if pension_stop_age is not None and age >= pension_stop_age:
+        return 0.0
     return pension_annual if age >= jason_effective_start_age else 0.0
 
 
@@ -1906,7 +1920,8 @@ def run_two_dimensional_retirement_projection(inputs: Dict, accounts: List[Dict]
         # here instead since that builder is coupled to Timeline's
         # single-axis fields (effective_start_age/claim_year_index), not
         # TwoPersonTimeline's.
-        year_pen = two_age_pension_for_year(pension_annual, age, jason_effective_start_age)
+        year_pen = two_age_pension_for_year(pension_annual, age, jason_effective_start_age,
+                                             pension_stop_age=inputs.get("_pension_stop_age"))
         year_jss = jason_ss_annual * ((1 + inflation) ** max(0, age - jason_ss_age)) if age >= jason_ss_age else 0.0
         year_uss = (justin_ss_annual * ((1 + inflation) ** max(0, justin_age_this_year - justin_ss_age))
                     if justin_age_this_year >= justin_ss_age else 0.0)

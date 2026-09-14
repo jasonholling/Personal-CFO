@@ -339,10 +339,11 @@ export default function Settings() {
           <span style={{ fontSize:13, fontWeight:600, color:'var(--accent)' }}>{(roth_pct*100).toFixed(1)}%</span>
         </Row>
         <Row label="Annual HSA Contribution" hint="Household/family HSA, not split per person"><NumInput value={form.annual_hsa_contribution} onChange={v => set('annual_hsa_contribution', v)} prefix="$" /></Row>
-        <Row label="Withdrawal Order in Retirement" hint="Taxable-first defers tax the longest (usually the better lifetime outcome); Proportional draws all three buckets blended by balance every year, starting the moment you retire">
+        <Row label="Withdrawal Order in Retirement" hint="Taxable-first defers tax the longest (usually the better lifetime outcome); Proportional draws all three buckets blended by balance every year, starting the moment you retire; Hold Back Reserved Accounts spends pension/SS/401k/Roth/IRA only, leaving any account you've flagged as 'held back' (on the Accounts page) untouched as an emergency reserve">
           <select value={form.withdrawal_strategy ?? 'taxable_first'} onChange={e => set('withdrawal_strategy', e.target.value)} style={{ fontSize:13 }}>
             <option value="taxable_first">Taxable-first (tax-deferred growth)</option>
             <option value="proportional">Proportional (blend all buckets)</option>
+            <option value="hold_back_reserved">Hold Back Reserved Accounts</option>
           </select>
         </Row>
       </Section>

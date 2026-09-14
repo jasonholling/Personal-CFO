@@ -8132,3 +8132,126 @@ conversion leaving more in pretax than the more aggressive bracket-fill
 default, as expected.
 
 Branch: `codex/portfolio-coach-finish` (continued in this session).
+
+## 83. Pension lump-sum buyout: estimate + full plan impact (2026-09-14)
+
+User-requested: the household's employer reportedly offers a one-time
+pension lump-sum buyout around age 58, instead of the lifetime joint-and-
+survivor annuity currently modeled (`pension_55`/`pension_60`/`pension_65`).
+No real quoted figure exists yet, so the tool estimates one (actuarial
+present value of the household's own modeled pension) and runs the buyout
+through the real Retirement Projection/Monte Carlo engine — not just a
+standalone PV comparison.
+
+**Reused, not reinvented**: `pension_for_age(inputs, age)`
+(`projection_engine.py`) already interpolates the correct annuity amount
+at any age between the 55/60/65 anchors; `_pv_annuity` (already used by
+`retirement_tools_engine.pension_vs_lump_sum`, a pre-existing standalone
+PV calculator that takes manually-typed numbers) computes the estimate;
+`life_events`' existing one-time-cash-delta mechanism injects the lump
+sum at the right calendar year with zero new code.
+
+**New engine code**: `pension_annual` is computed once per scenario and
+applied as a flat constant every year once retired —
+`two_age_pension_for_year` had an on/off start gate but no "stops at age
+X" concept. Added an optional `pension_stop_age: int = None` parameter
+(zero-blast-radius change: this function has 11 call sites across
+`projection_engine.py`/`simulation_engine.py` — Roth Conversion x2, Tax
+Efficiency, Survivor Scenario x2, owner-split — all 9 unrelated ones are
+completely unaffected by adding an optional trailing parameter with a
+backward-compatible default; only the 2 call sites this feature actually
+needs — `run_two_dimensional_retirement_projection` and
+`_run_single_two_age`, shared by two-age Monte Carlo/Stress Tests — pass
+it explicitly, read from a transient `inputs.get("_pension_stop_age")`
+override, same non-persisted-override pattern as `withdrawal_strategy`/
+`bridge_years_override` earlier this session). Single-age
+`run_retirement_projection`'s flat `year_pen = pension_annual` line got
+the analogous inline guard.
+
+**`estimate_pension_lump_sum(inputs, buyout_age=58, discount_rate=0.06)`**
+(`retirement_tools_engine.py`): `pension_for_age(inputs, buyout_age)` for
+the annuity amount, `inputs.get("retirement_end_age") or 99` as the
+assumed payout horizon (the household's own modeled planning horizon —
+consistent with every other longevity assumption in this app; there is no
+separate mortality table anywhere in this codebase, and adding one just
+for this tool would be inconsistent with that).
+
+**New endpoint** `POST /api/retirement-tools/pension-lump-sum-impact`:
+computes the estimate, then runs `run_two_dimensional_retirement_projection`
++ `run_monte_carlo` (two-age) twice — baseline (pension continues
+unmodified) vs. buyout (`_pension_stop_age` set, lump sum injected as a
+one-time life event dated to the buyout year) — returning success rate,
+median final balance, first RMD amount, and end-of-plan balance for both,
+for the frontend to diff. New card on `RetirementTools.jsx`: "Pension
+Buyout: Full Plan Impact" — distinct from the pre-existing standalone
+"Pension vs. Lump Sum Decision" calculator above it (manually-typed
+numbers, no projection-engine interaction) — additive, not a replacement.
+
+**Verified**: real household data — pension interpolates correctly at a
+between-anchor age (58 → $34,018/yr from the 55/60 anchors), buyout
+scenario's yearly detail shows pension dropping to exactly $0 starting at
+the buyout age while the baseline continues paying it every year after.
+11 new tests: `TestEstimatePensionLumpSum` (6, hand-calculated PV/
+interpolation/boundary cases) and `TestPensionStopAge` (3, zero-regression
+guard + exact stop-age behavior + stop-before-retirement edge case) in
+`retirement_tools_engine`/`test_two_dimensional_retirement.py`
+respectively. Full backend suite green.
+
+Branch: `codex/bridge-and-withdrawal-strategy` (continued in this
+session).
+
+## 84. Hold Back Reserved Accounts — a third withdrawal strategy (2026-09-14)
+
+User-requested, alongside section 83: a withdrawal strategy that spends
+pension/SS/401k/Roth/IRA only, leaving one specific named account (their
+Schwab taxable brokerage) untouched as an emergency reserve — confirmed
+explicitly (not the entire taxable asset class, since other taxable
+accounts like the Conagra Equity Plan should stay in the normal pool).
+
+**Turned out to need zero engine code.** `simulate_withdrawal_year` and
+every consumer built on it sum `accounts` into pretax/roth/taxable/hsa
+buckets purely from whatever list they're handed — there's no per-account
+identity retained past that summation point. So excluding one specific
+account from the withdrawal pool doesn't need new bucket-splitting logic
+(unlike section 81's proportional strategy, which needed a real algorithm
+change) — it only needs the account removed from the `accounts` list
+*before* it reaches the engine at all, the same way `_pension_stop_age`
+(section 83) works via a pre-computed override rather than new per-year
+logic.
+
+**New per-account flag**: `accounts.held_back_from_withdrawal` (boolean,
+default `False`). New `Account` Pydantic model field (`main.py`), added to
+both the `INSERT`/`UPDATE` column lists (this model doesn't use `extra:
+allow` + a dynamic column whitelist the way `PlanningInputs` does — every
+field needs to be threaded through explicitly). New checkbox on
+`Accounts.jsx`'s edit form ("Hold back as emergency reserve"), shown
+alongside the existing investment-only fields (stock allocation %, expense
+ratio).
+
+**New `_apply_account_holdback(accounts, inputs)` helper** (`main.py`):
+a no-op returning the accounts list unchanged unless
+`inputs["withdrawal_strategy"] == "hold_back_reserved"`, in which case it
+filters out every flagged account. Wired into the same 4 call sites
+section 81's `withdrawal_strategy` reached — `get_monte_carlo`,
+`post_monte_carlo`, `get_stress_tests`, `post_stress_tests` — right after
+`accounts` is loaded and `inputs` (with any What-If overrides already
+applied) is available. `/api/projections/retirement` (the 55-67 age-sweep
+endpoint used by SideBySide.jsx/WhatIf.jsx/saved-scenario round-tripping)
+is deliberately NOT wired — its response gets echoed back verbatim into a
+saved scenario's own record (`resolved_assumptions`), and filtering
+`accounts` there would mean a saved scenario silently stops representing
+the household's real, complete account list. A named gap, not silently
+skipped.
+
+**Third Settings option**: "Hold Back Reserved Accounts", alongside
+Taxable-first and Proportional.
+
+**Verified**: `TestAccountHoldback` (`test_main.py`, 3 tests) — the flag
+is a byte-identical no-op under `taxable_first` (same accounts, flag set
+vs. unset), `hold_back_reserved` produces a materially different
+deterministic Stress Tests "base" result when a $300,000 account is
+excluded, and Monte Carlo also respects the flag (smoke test). Full
+backend suite green.
+
+Branch: `codex/bridge-and-withdrawal-strategy` (continued in this
+session).

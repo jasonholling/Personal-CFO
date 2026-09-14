@@ -589,7 +589,8 @@ def _run_single_two_age(
             yr, phase2_duration_years, still_working_income_at_start, salary_growth_pct)
         year_need -= still_working_income_this_year
 
-        year_pen = two_age_pension_for_year(pension_annual, age, jason_effective_start_age)
+        year_pen = two_age_pension_for_year(pension_annual, age, jason_effective_start_age,
+                                             pension_stop_age=inputs.get("_pension_stop_age"))
         year_jss = _cola(jason_ss_annual, jason_ss_offset, yr) if age >= jason_ss_age else 0.0
         year_uss = _cola(justin_ss_annual, justin_ss_offset, yr) if justin_age_this_year >= justin_ss_age else 0.0
         # Two-age bridge-surplus fix (2026-09-10): same fix as every

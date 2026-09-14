@@ -171,6 +171,14 @@ def init_db():
         # say a particular HSA, 529, or trust is open-universe, or that a
         # brokerage is restricted to a recorded menu.
         ("investment_menu_mode", "TEXT DEFAULT 'auto'"),
+        # Withdrawal-pool exclusion (2026-09-14, CALCULATION_CONTRACT.md
+        # section 84): a specific account marked as an emergency reserve
+        # -- excluded entirely from the accounts list before Retirement
+        # Projection/Monte Carlo/Stress Tests compute starting bucket
+        # balances, when withdrawal_strategy == 'hold_back_reserved'.
+        # Default 0 (every existing account, every other strategy) is a
+        # complete no-op.
+        ("held_back_from_withdrawal", "INTEGER DEFAULT 0"),
     ]
     for col, typedef in accounts_migrations:
         if col not in accounts_cols:

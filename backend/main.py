@@ -196,6 +196,12 @@ class Account(BaseModel):
     # calculations; it tells Coach whether recommendations are limited to
     # the recorded fund menu for this particular account.
     investment_menu_mode: str = "auto"
+    # Withdrawal-pool exclusion (2026-09-14, CALCULATION_CONTRACT.md
+    # section 84) — unlike investment_menu_mode above, this DOES affect
+    # retirement calculations, but only when Settings' withdrawal_strategy
+    # is 'hold_back_reserved' (see _apply_account_holdback in this file);
+    # a no-op under every other strategy, including the default.
+    held_back_from_withdrawal: bool = False
 
     @field_validator("investment_menu_mode")
     @classmethod
@@ -896,10 +902,11 @@ def get_account_freshness():
 def create_account(account: Account):
     conn = get_db()
     cur = conn.execute(
-        "INSERT INTO accounts (name, account_type, owner, institution, balance, notes, interest_rate, minimum_payment, term_months, stock_allocation_pct, expense_ratio, monthly_rental_income, monthly_rental_expenses, portfolio_account_type, investment_menu_mode) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO accounts (name, account_type, owner, institution, balance, notes, interest_rate, minimum_payment, term_months, stock_allocation_pct, expense_ratio, monthly_rental_income, monthly_rental_expenses, portfolio_account_type, investment_menu_mode, held_back_from_withdrawal) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (account.name, account.account_type, account.owner, account.institution, account.balance, account.notes,
          account.interest_rate, account.minimum_payment, account.term_months, account.stock_allocation_pct, account.expense_ratio,
-         account.monthly_rental_income, account.monthly_rental_expenses, account.portfolio_account_type, account.investment_menu_mode)
+         account.monthly_rental_income, account.monthly_rental_expenses, account.portfolio_account_type, account.investment_menu_mode,
+         account.held_back_from_withdrawal)
     )
     conn.commit()
     account.id = cur.lastrowid
@@ -910,10 +917,11 @@ def create_account(account: Account):
 def update_account(account_id: int, account: Account):
     conn = get_db()
     conn.execute(
-        "UPDATE accounts SET name=?, account_type=?, owner=?, institution=?, balance=?, notes=?, interest_rate=?, minimum_payment=?, term_months=?, stock_allocation_pct=?, expense_ratio=?, monthly_rental_income=?, monthly_rental_expenses=?, portfolio_account_type=?, investment_menu_mode=? WHERE id=?",
+        "UPDATE accounts SET name=?, account_type=?, owner=?, institution=?, balance=?, notes=?, interest_rate=?, minimum_payment=?, term_months=?, stock_allocation_pct=?, expense_ratio=?, monthly_rental_income=?, monthly_rental_expenses=?, portfolio_account_type=?, investment_menu_mode=?, held_back_from_withdrawal=? WHERE id=?",
         (account.name, account.account_type, account.owner, account.institution, account.balance, account.notes,
          account.interest_rate, account.minimum_payment, account.term_months, account.stock_allocation_pct, account.expense_ratio,
-         account.monthly_rental_income, account.monthly_rental_expenses, account.portfolio_account_type, account.investment_menu_mode, account_id)
+         account.monthly_rental_income, account.monthly_rental_expenses, account.portfolio_account_type, account.investment_menu_mode,
+         account.held_back_from_withdrawal, account_id)
     )
     conn.commit()
     conn.close()
@@ -2597,6 +2605,26 @@ def get_plan_confidence():
     conn.close()
     return plan_confidence(accounts, dict(inputs_row) if inputs_row else {}, summarize_cash_flow(cash_flow_items), holdings)
 
+def _apply_account_holdback(accounts: List[dict], inputs: dict) -> List[dict]:
+    """Withdrawal-pool exclusion (2026-09-14, CALCULATION_CONTRACT.md
+    section 84): when withdrawal_strategy == 'hold_back_reserved',
+    removes every account with held_back_from_withdrawal set from the
+    list ENTIRELY before it reaches Retirement Projection/Monte Carlo/
+    Stress Tests — those functions sum accounts into pretax/roth/
+    taxable/hsa buckets purely from whatever list they're handed, so
+    excluding an account here (not inside the engine) is enough; no
+    engine code needed. The excluded account isn't drawn from, isn't
+    grown by the projection's own return assumptions, and doesn't count
+    toward any success-rate/balance figure the engine returns — it's
+    simply treated as if it doesn't exist for planning purposes, same as
+    a real emergency fund sitting outside the retirement plan. Every
+    other withdrawal_strategy value (including unset) is a complete
+    no-op — the full accounts list passes through unchanged."""
+    if inputs.get("withdrawal_strategy") != "hold_back_reserved":
+        return accounts
+    return [a for a in accounts if not a.get("held_back_from_withdrawal")]
+
+
 def _get_active_life_events(conn) -> List[dict]:
     """Rows from life_events with included_in_projection true — the list
     fed into run_retirement_projection()/simulation_engine.py so a
@@ -3010,6 +3038,80 @@ def post_pension_vs_lump_sum(body: PensionVsLumpSumRequest):
     from retirement_tools_engine import pension_vs_lump_sum
     return pension_vs_lump_sum(body.monthly_pension, body.lump_sum, body.current_age,
                                 body.pension_start_age, body.life_expectancy_age, body.discount_rate)
+
+class PensionLumpSumImpactRequest(BaseModel):
+    """buyout_age (2026-09-14, CALCULATION_CONTRACT.md section 83): unlike
+    PensionVsLumpSumRequest above (a standalone PV calculator taking
+    manually-typed numbers), this reads the household's OWN modeled
+    pension_55/60/65 and runs the buyout through the real projection/
+    Monte Carlo engine -- estimating the lump sum rather than comparing
+    against a real employer quote (this household doesn't have one yet)."""
+    buyout_age: int = 58
+    discount_rate: float = 0.06
+    jason_ret_age: int = 60
+    justin_ret_age: int = 60
+    ss_timing: str = "early"
+
+@app.post("/api/retirement-tools/pension-lump-sum-impact")
+def post_pension_lump_sum_impact(body: PensionLumpSumImpactRequest):
+    conn = get_db()
+    inputs_row = conn.execute("SELECT * FROM planning_inputs WHERE id=1").fetchone()
+    accounts   = [dict(r) for r in conn.execute("SELECT * FROM accounts").fetchall()]
+    life_events = _get_active_life_events(conn)
+    surplus_allocations = _get_relevant_surplus_allocations(conn)
+    conn.close()
+    if not inputs_row:
+        raise HTTPException(status_code=400, detail="Planning inputs not set yet")
+    inputs = dict(inputs_row)
+
+    from retirement_tools_engine import estimate_pension_lump_sum
+    from projection_engine import run_two_dimensional_retirement_projection, CURRENT_YEAR
+    from simulation_engine import run_monte_carlo
+
+    estimate = estimate_pension_lump_sum(inputs, buyout_age=body.buyout_age, discount_rate=body.discount_rate)
+    lump_sum_amount = estimate["estimated_lump_sum"]
+
+    # Baseline: pension continues for life, inputs/life_events unchanged.
+    baseline_proj = run_two_dimensional_retirement_projection(
+        inputs, accounts, jason_ret_age=body.jason_ret_age, justin_ret_age=body.justin_ret_age,
+        ss_timing=body.ss_timing, life_events=life_events, surplus_allocations=surplus_allocations)
+    baseline_mc = run_monte_carlo(
+        inputs, accounts, ss_timing=body.ss_timing, life_events=life_events, surplus_allocations=surplus_allocations,
+        jason_ret_age=body.jason_ret_age, justin_ret_age=body.justin_ret_age)
+
+    # Buyout: pension stops at buyout_age (transient _pension_stop_age
+    # override, never persisted -- same pattern as today's
+    # withdrawal_strategy/bridge_years_override), lump sum injected as a
+    # one-time life event dated to buyout_age's calendar year, same
+    # mechanism every other one-time cash event in this app already uses.
+    buyout_inputs = {**inputs, "_pension_stop_age": body.buyout_age}
+    buyout_year = CURRENT_YEAR + max(0, body.buyout_age - inputs["jason_age"])
+    buyout_life_events = life_events + [{
+        "event_year": buyout_year, "one_time_cash_delta": lump_sum_amount,
+        "monthly_cash_flow_delta": 0, "duration_months": 0, "target_debt_account_id": None,
+    }]
+    buyout_proj = run_two_dimensional_retirement_projection(
+        buyout_inputs, accounts, jason_ret_age=body.jason_ret_age, justin_ret_age=body.justin_ret_age,
+        ss_timing=body.ss_timing, life_events=buyout_life_events, surplus_allocations=surplus_allocations)
+    buyout_mc = run_monte_carlo(
+        buyout_inputs, accounts, ss_timing=body.ss_timing, life_events=buyout_life_events,
+        surplus_allocations=surplus_allocations, jason_ret_age=body.jason_ret_age, justin_ret_age=body.justin_ret_age)
+
+    def _summary(proj, mc):
+        yearly = proj["yearly_detail"]
+        first_rmd = next((y["rmd"] for y in yearly if y.get("rmd", 0) > 0), 0)
+        return {
+            "success_rate": mc.get("success_rate"),
+            "median_final_balance": mc.get("median_final_balance"),
+            "first_rmd_amount": first_rmd,
+            "end_of_plan_balance": yearly[-1]["portfolio_balance"] if yearly else 0,
+        }
+
+    return {
+        "estimate": estimate,
+        "baseline": _summary(baseline_proj, baseline_mc),
+        "buyout": _summary(buyout_proj, buyout_mc),
+    }
 
 class BackdoorRothRequest(BaseModel):
     magi: float
@@ -3753,6 +3855,7 @@ def get_monte_carlo(ret_age: int = 60, ss_timing: str = "early",
         raise HTTPException(status_code=400, detail="Planning inputs not set yet")
     from simulation_engine import run_monte_carlo
     _inputs = dict(inputs_row)
+    accounts = _apply_account_holdback(accounts, _inputs)
     _jason_ss_claim_age, _justin_ss_claim_age = _ss_claim_ages(_inputs, jason_ss_claim_age, justin_ss_claim_age)
     try:
         return run_monte_carlo(_inputs, accounts, ret_age, ss_timing, life_events=life_events,
@@ -3792,6 +3895,7 @@ def post_monte_carlo(body: dict):
     if not inputs_row:
         raise HTTPException(status_code=400, detail="Planning inputs not set yet")
     inputs = _apply_whatif_overrides(dict(inputs_row), body)
+    accounts = _apply_account_holdback(accounts, inputs)
     _jason_ss_claim_age, _justin_ss_claim_age = _ss_claim_ages(inputs)
     _jason_ss_claim_age = body.get("jason_ss_claim_age", _jason_ss_claim_age)
     _justin_ss_claim_age = body.get("justin_ss_claim_age", _justin_ss_claim_age)
@@ -4217,6 +4321,7 @@ def get_stress_tests(ret_age: int = 60, ss_timing: str = "early",
         raise HTTPException(status_code=400, detail="Planning inputs not set yet")
     from simulation_engine import run_stress_tests
     _inputs = dict(inputs_row)
+    accounts = _apply_account_holdback(accounts, _inputs)
     _jason_ss_claim_age, _justin_ss_claim_age = _ss_claim_ages(_inputs, jason_ss_claim_age, justin_ss_claim_age)
     try:
         return run_stress_tests(_inputs, accounts, ret_age, ss_timing, life_events=life_events,
@@ -4248,6 +4353,7 @@ def post_stress_tests(body: dict):
     if not inputs_row:
         raise HTTPException(status_code=400, detail="Planning inputs not set yet")
     inputs = _apply_whatif_overrides(dict(inputs_row), body)
+    accounts = _apply_account_holdback(accounts, inputs)
     _jason_ss_claim_age, _justin_ss_claim_age = _ss_claim_ages(inputs, jason_ss_claim_age, justin_ss_claim_age)
     from simulation_engine import run_stress_tests
     try:

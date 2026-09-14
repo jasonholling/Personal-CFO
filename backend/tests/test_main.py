@@ -790,6 +790,61 @@ class TestSimulationEndpoints:
         assert ages == set(range(55, 68))
 
 
+class TestAccountHoldback:
+    """held_back_from_withdrawal (2026-09-14, CALCULATION_CONTRACT.md
+    section 84) -- a no-op under every withdrawal_strategy except
+    'hold_back_reserved', which excludes the flagged account from the
+    accounts list before it ever reaches Retirement Projection/Monte
+    Carlo/Stress Tests."""
+
+    def _seed(self, client, sample_inputs, strategy):
+        _seed_planning_inputs(client, {**sample_inputs, "withdrawal_strategy": strategy})
+        accounts = [
+            {"name": "401k", "account_type": "401k", "owner": "jason", "institution": "", "balance": 500000},
+            {"name": "Reserved Brokerage", "account_type": "taxable", "owner": "joint", "institution": "",
+             "balance": 300000, "held_back_from_withdrawal": True},
+        ]
+        for a in accounts:
+            r = client.post("/api/accounts", json=a)
+            assert r.status_code == 200, r.text
+
+    def test_flag_is_a_no_op_under_taxable_first(self, client, sample_inputs):
+        """Zero-regression guard: the SAME accounts (one flagged) produce
+        an IDENTICAL result under taxable_first whether or not the flag
+        is set -- it only has an effect under hold_back_reserved."""
+        self._seed(client, sample_inputs, "taxable_first")
+        with_flag = client.get("/api/simulation/stress-tests?ret_age=60&ss_timing=early").json()
+
+        client.delete(f"/api/accounts/{client.get('/api/accounts').json()[-1]['id']}")
+        r = client.post("/api/accounts", json={
+            "name": "Reserved Brokerage", "account_type": "taxable", "owner": "joint", "institution": "",
+            "balance": 300000, "held_back_from_withdrawal": False,
+        })
+        assert r.status_code == 200, r.text
+        without_flag = client.get("/api/simulation/stress-tests?ret_age=60&ss_timing=early").json()
+
+        assert with_flag["scenarios"]["base"]["final_balance"] == without_flag["scenarios"]["base"]["final_balance"]
+
+    def test_hold_back_reserved_excludes_the_flagged_account(self, client, sample_inputs):
+        """The flagged $300,000 account must be genuinely absent from the
+        plan under hold_back_reserved -- a materially different (never
+        better than keeping it available) deterministic result versus
+        taxable_first with the identical accounts."""
+        self._seed(client, sample_inputs, "taxable_first")
+        default_result = client.get("/api/simulation/stress-tests?ret_age=60&ss_timing=early").json()
+
+        _seed_planning_inputs(client, {**sample_inputs, "withdrawal_strategy": "hold_back_reserved"})
+        holdback_result = client.get("/api/simulation/stress-tests?ret_age=60&ss_timing=early").json()
+
+        assert holdback_result["scenarios"]["base"]["final_balance"] != default_result["scenarios"]["base"]["final_balance"]
+
+    def test_monte_carlo_also_respects_the_flag(self, client, sample_inputs):
+        self._seed(client, sample_inputs, "hold_back_reserved")
+        r = client.get("/api/simulation/monte-carlo?ret_age=60&ss_timing=early")
+        assert r.status_code == 200
+        assert "success_rate" in r.json()
+
+
 class TestLifeEventsAffectRealProjectionAndSimulation:
     """End-to-end: a life event actually moves the numbers on
     /api/projections/retirement and /api/simulation/monte-carlo — and
@@ -1311,6 +1366,23 @@ class TestRetirementToolsEndpoints:
         })
         assert r.status_code == 200
         assert r.json()["favors"] in ("pension", "lump_sum")
+
+    def test_pension_lump_sum_impact_endpoint(self, client, sample_inputs, sample_accounts):
+        """End-to-end: estimates the buyout, runs baseline (pension
+        continues) vs. buyout (pension stops at buyout_age, lump sum
+        injected) through the real two-age Retirement Projection/Monte
+        Carlo, and returns both summaries."""
+        _seed_planning_inputs(client, {**sample_inputs, "pension_55": 30000, "pension_60": 30000, "pension_65": 30000})
+        _seed_accounts(client, sample_accounts)
+        r = client.post("/api/retirement-tools/pension-lump-sum-impact", json={
+            "buyout_age": 58, "discount_rate": 0.06, "jason_ret_age": 55, "justin_ret_age": 55,
+        })
+        assert r.status_code == 200, r.text
+        data = r.json()
+        assert data["estimate"]["estimated_lump_sum"] > 0
+        for key in ("success_rate", "median_final_balance", "first_rmd_amount", "end_of_plan_balance"):
+            assert key in data["baseline"]
+            assert key in data["buyout"]
 
     def test_backdoor_roth_endpoint(self, client):
         r = client.post("/api/retirement-tools/backdoor-roth", json={

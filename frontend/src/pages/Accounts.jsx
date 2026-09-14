@@ -60,7 +60,7 @@ const TYPE_GROUPS = {
   'Liabilities': ['mortgage', 'credit_card', 'student_loan', 'car_loan', 'personal_loan'],
 }
 
-const EMPTY = { name: '', account_type: 'taxable', owner: 'jason', institution: '', balance: '', notes: '', interest_rate: '', minimum_payment: '', term_months: '', stock_allocation_pct: '', expense_ratio: '', monthly_rental_income: '', monthly_rental_expenses: '' }
+const EMPTY = { name: '', account_type: 'taxable', owner: 'jason', institution: '', balance: '', notes: '', interest_rate: '', minimum_payment: '', term_months: '', stock_allocation_pct: '', expense_ratio: '', monthly_rental_income: '', monthly_rental_expenses: '', held_back_from_withdrawal: false }
 
 export default function Accounts() {
   const personNames = usePersonNames()
@@ -225,6 +225,18 @@ export default function Accounts() {
                 <div>
                   <div className="label" style={{ marginBottom: 6 }}>Expense Ratio (%, optional)</div>
                   <input type="number" step="0.01" value={form.expense_ratio} onChange={e => setForm({ ...form, expense_ratio: e.target.value })} placeholder="e.g. 0.04 — used for fee audit" />
+                </div>
+                <div>
+                  {/* Withdrawal-pool exclusion (2026-09-14, CALCULATION_CONTRACT.md
+                      section 84) -- only has an effect when Settings' Withdrawal
+                      Order is set to "Hold Back Reserved Accounts"; a no-op under
+                      Taxable-first/Proportional. */}
+                  <label style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 20 }}>
+                    <input type="checkbox" checked={!!form.held_back_from_withdrawal}
+                           onChange={e => setForm({ ...form, held_back_from_withdrawal: e.target.checked })} />
+                    <span style={{ fontSize: 13 }}>Hold back as emergency reserve</span>
+                  </label>
+                  <div className="label" style={{ marginTop: 2 }}>Excluded from retirement withdrawals when Settings' Withdrawal Order is "Hold Back Reserved Accounts"</div>
                 </div>
               </>
             )}

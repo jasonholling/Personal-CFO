@@ -270,6 +270,41 @@ class TestPensionGatedToJasonsOwnRetirement:
         assert [y["pension"] for y in yearly] == [30000, 30000, 30000]
 
 
+class TestPensionStopAge:
+    """_pension_stop_age (2026-09-14, CALCULATION_CONTRACT.md section 83)
+    -- transient, non-persisted override (same pattern as withdrawal_
+    strategy/bridge_years_override) modeling a pension lump-sum buyout:
+    the annuity ends at a specific age instead of paying for life."""
+
+    def test_unset_is_byte_identical_to_omitting_it(self):
+        """Zero-regression guard."""
+        inputs = base_inputs(retirement_end_age=64, pension_55=30000, pension_60=30000, pension_65=30000)
+        omitted = run_two_dimensional_retirement_projection(inputs, TAXABLE(200000), jason_ret_age=61, justin_ret_age=61)
+        explicit_none = run_two_dimensional_retirement_projection({**inputs, "_pension_stop_age": None}, TAXABLE(200000),
+                                                                     jason_ret_age=61, justin_ret_age=61)
+        assert omitted["yearly_detail"] == explicit_none["yearly_detail"]
+
+    def test_pension_stops_exactly_at_the_given_age(self):
+        """Both retire at 55, pension $30,000/yr, buyout taken at 58 --
+        pension pays through 57, then $0 from 58 on."""
+        inputs = base_inputs(jason_age=55, justin_age=55, retirement_end_age=60,
+                              pension_55=30000, pension_60=30000, pension_65=30000, _pension_stop_age=58)
+        result = run_two_dimensional_retirement_projection(inputs, TAXABLE(200000), jason_ret_age=55, justin_ret_age=55)
+        yearly = result["yearly_detail"]
+        assert [y["jason_age"] for y in yearly] == [55, 56, 57, 58, 59]
+        assert [y["pension"] for y in yearly] == [30000, 30000, 30000, 0, 0]
+
+    def test_stop_age_before_retirement_means_pension_never_pays(self):
+        """The pension never started in the first place if the buyout is
+        taken before Jason's own retirement -- both gates (start age,
+        stop age) apply independently."""
+        inputs = base_inputs(retirement_end_age=62, pension_55=30000, pension_60=30000, pension_65=30000,
+                              _pension_stop_age=58)
+        result = run_two_dimensional_retirement_projection(inputs, TAXABLE(200000), jason_ret_age=60, justin_ret_age=60)
+        yearly = result["yearly_detail"]
+        assert all(y["pension"] == 0 for y in yearly)
+
+
 class TestAge55BridgeAndKidsRulesPreserved:
     def test_bridge_income_phase_matches_single_axis_reference_exactly(self):
         """Independent review, 2026-09-08 (P1) -- the age-55 bridge-job/

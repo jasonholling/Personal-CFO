@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
 import axios from 'axios'
 import { isPrivacyMode, MASK_CURRENCY, MASK_PERCENT } from '../utils/privacy'
+import { usePersonNames } from '../hooks/usePersonNames'
 
 const fmt  = (n) => isPrivacyMode() ? MASK_CURRENCY : (n == null ? '—' : new Intl.NumberFormat('en-US', { style:'currency', currency:'USD', maximumFractionDigits:0 }).format(n))
 const fpct = (n) => isPrivacyMode() ? MASK_PERCENT : (n == null ? '—' : `${(n*100).toFixed(0)}%`)
@@ -11,11 +12,20 @@ const RED    = '#f87171'
 const ACCENT = '#4f9cf9'
 
 export default function RetirementTools() {
+  const { person1Name } = usePersonNames()
   const [rmd, setRmd]           = useState(null)
   const [loading, setLoading]   = useState(true)
 
   const [lump, setLump]         = useState({ monthly_pension:'', lump_sum:'', current_age:'', pension_start_age:'', life_expectancy_age:90, discount_rate:6 })
   const [lumpResult, setLumpResult] = useState(null)
+
+  // Buyout impact (2026-09-14, CALCULATION_CONTRACT.md section 83) --
+  // unlike the manual PV calculator above, this reads YOUR actual modeled
+  // pension_55/60/65 and runs the buyout through the real projection/
+  // Monte Carlo engine instead of a standalone present-value comparison.
+  const [buyout, setBuyout] = useState({ buyout_age:58, discount_rate:6, jason_ret_age:60, justin_ret_age:60 })
+  const [buyoutResult, setBuyoutResult] = useState(null)
+  const [buyoutLoading, setBuyoutLoading] = useState(false)
 
   const [roth, setRoth]         = useState({ magi:'', existing_traditional_ira_balance:'', existing_traditional_ira_basis:'', planned_contribution:7500 })
   const [rothResult, setRothResult] = useState(null)
@@ -63,6 +73,16 @@ export default function RetirementTools() {
       life_expectancy_age: parseInt(lump.life_expectancy_age) || 90,
       discount_rate: (parseFloat(lump.discount_rate) || 6) / 100,
     }).then(r => setLumpResult(r.data))
+  }
+
+  const runBuyoutImpact = () => {
+    setBuyoutLoading(true)
+    axios.post('/api/retirement-tools/pension-lump-sum-impact', {
+      buyout_age: parseInt(buyout.buyout_age) || 58,
+      discount_rate: (parseFloat(buyout.discount_rate) || 6) / 100,
+      jason_ret_age: parseInt(buyout.jason_ret_age) || 60,
+      justin_ret_age: parseInt(buyout.justin_ret_age) || 60,
+    }).then(r => setBuyoutResult(r.data)).finally(() => setBuyoutLoading(false))
   }
 
   const runRoth = () => {
@@ -221,6 +241,80 @@ export default function RetirementTools() {
                 <div className="label">Implied Discount Rate</div>
                 <div style={{ fontSize:16, fontWeight:600, marginTop:4 }}>{lumpResult.implied_discount_rate_pct == null ? '—' : (isPrivacyMode() ? MASK_PERCENT : `${lumpResult.implied_discount_rate_pct.toFixed(1)}%`)}</div>
               </div>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Pension Buyout — Full Plan Impact (2026-09-14, section 83) */}
+      <div className="card" style={{ marginBottom:24 }}>
+        <div className="label" style={{ marginBottom:4 }}>Pension Buyout: Full Plan Impact</div>
+        <div style={{ fontSize:12, color:'var(--text3)', marginBottom:16 }}>
+          Unlike the calculator above (manually-typed numbers), this reads your actual modeled pension
+          (Settings — Pension) and runs the buyout through your real Retirement Projection and Monte Carlo,
+          so you can see the effect on RMDs and success rate, not just present value. The lump-sum amount
+          is an <em>estimate</em> — an actuarial present value of your own modeled pension — not a real offer
+          from your employer.
+        </div>
+        <div className="grid-3" style={{ marginBottom:12 }}>
+          <div>
+            <div className="label" style={{ marginBottom:6 }}>Buyout Offered At Age</div>
+            <input type="number" value={buyout.buyout_age} onChange={e => setBuyout({ ...buyout, buyout_age:e.target.value })} placeholder="58" />
+          </div>
+          <div>
+            <div className="label" style={{ marginBottom:6 }}>Discount Rate (%)</div>
+            <input type="number" step="0.1" value={buyout.discount_rate} onChange={e => setBuyout({ ...buyout, discount_rate:e.target.value })} placeholder="6" />
+          </div>
+          <div>
+            <div className="label" style={{ marginBottom:6 }}>{person1Name}'s Retirement Age</div>
+            <input type="number" value={buyout.jason_ret_age} onChange={e => setBuyout({ ...buyout, jason_ret_age:e.target.value })} placeholder="60" />
+          </div>
+        </div>
+        <button className="btn-primary" onClick={runBuyoutImpact} disabled={buyoutLoading}>
+          {buyoutLoading ? 'Calculating…' : 'Calculate Impact'}
+        </button>
+        {buyoutResult && (
+          <div style={{ marginTop:16 }}>
+            <div style={{
+              padding:'12px 16px', borderRadius:8, fontSize:13, lineHeight:1.6, marginBottom:16,
+              background: 'rgba(79,156,249,0.08)',
+            }}>
+              Estimated lump sum at age {buyoutResult.estimate.buyout_age}: <strong style={{ color:ACCENT }}>{fmt(buyoutResult.estimate.estimated_lump_sum)}</strong> —
+              {' '}present value of {fmt(buyoutResult.estimate.annual_pension_at_buyout_age)}/yr for {buyoutResult.estimate.years_receiving_assumed} years
+              (to age {buyoutResult.estimate.life_expectancy_age_assumed}) at a {buyoutResult.estimate.discount_rate_pct}% discount rate.
+            </div>
+            <div style={{ overflowX:'auto' }}>
+              <table style={{ width:'100%', borderCollapse:'collapse' }}>
+                <thead>
+                  <tr style={{ borderBottom:'1px solid var(--border)' }}>
+                    <th style={{ textAlign:'left', padding:'8px 12px', fontSize:12, color:'var(--text3)' }}></th>
+                    <th style={{ textAlign:'right', padding:'8px 12px', fontSize:12, color:'var(--text3)' }}>Keep Pension</th>
+                    <th style={{ textAlign:'right', padding:'8px 12px', fontSize:12, color:'var(--text3)' }}>Take Buyout</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr style={{ borderBottom:'1px solid var(--border)' }}>
+                    <td style={{ padding:'8px 12px', fontSize:13 }}>Monte Carlo Success Rate</td>
+                    <td style={{ padding:'8px 12px', fontSize:13, textAlign:'right' }}>{buyoutResult.baseline.success_rate}%</td>
+                    <td style={{ padding:'8px 12px', fontSize:13, textAlign:'right' }}>{buyoutResult.buyout.success_rate}%</td>
+                  </tr>
+                  <tr style={{ borderBottom:'1px solid var(--border)' }}>
+                    <td style={{ padding:'8px 12px', fontSize:13 }}>Median Final Balance</td>
+                    <td style={{ padding:'8px 12px', fontSize:13, textAlign:'right' }}>{fmt(buyoutResult.baseline.median_final_balance)}</td>
+                    <td style={{ padding:'8px 12px', fontSize:13, textAlign:'right' }}>{fmt(buyoutResult.buyout.median_final_balance)}</td>
+                  </tr>
+                  <tr style={{ borderBottom:'1px solid var(--border)' }}>
+                    <td style={{ padding:'8px 12px', fontSize:13 }}>First RMD Amount</td>
+                    <td style={{ padding:'8px 12px', fontSize:13, textAlign:'right' }}>{fmt(buyoutResult.baseline.first_rmd_amount)}</td>
+                    <td style={{ padding:'8px 12px', fontSize:13, textAlign:'right' }}>{fmt(buyoutResult.buyout.first_rmd_amount)}</td>
+                  </tr>
+                  <tr>
+                    <td style={{ padding:'8px 12px', fontSize:13 }}>End-of-Plan Balance</td>
+                    <td style={{ padding:'8px 12px', fontSize:13, textAlign:'right' }}>{fmt(buyoutResult.baseline.end_of_plan_balance)}</td>
+                    <td style={{ padding:'8px 12px', fontSize:13, textAlign:'right' }}>{fmt(buyoutResult.buyout.end_of_plan_balance)}</td>
+                  </tr>
+                </tbody>
+              </table>
             </div>
           </div>
         )}
