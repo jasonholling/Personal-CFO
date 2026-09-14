@@ -34,10 +34,10 @@ def lot(id, holding_id, acquired_date, shares, cost_basis, notes=None):
 
 
 def option(id, account_id, option_name="Fund", ticker=None, asset_class="us_large_cap",
-           available_for_new_contributions=True, available_for_exchange=True, exposures=None):
+           available_for_new_contributions=True, available_for_exchange=True, exposures=None, **extra):
     return {"id": id, "account_id": account_id, "option_name": option_name, "ticker": ticker,
             "asset_class": asset_class, "available_for_new_contributions": available_for_new_contributions,
-            "available_for_exchange": available_for_exchange, "exposures": exposures}
+            "available_for_exchange": available_for_exchange, "exposures": exposures, **extra}
 
 
 def account(id, account_type=None, portfolio_account_type=None, balance=0, owner="jason"):
@@ -973,6 +973,22 @@ class TestAccountInvestmentOptionEligibility:
     def test_open_universe_types_not_closed_menu(self):
         for t in OPEN_UNIVERSE_TYPES:
             assert not is_closed_menu_account(t)
+
+    def test_option_mix_honors_recorded_minimum_and_maximum_allocations(self):
+        result = propose_account_option_mix([
+            option(1, 1, option_name="Stock", asset_class="us_large_cap", minimum_allocation_pct=40, maximum_allocation_pct=60),
+            option(2, 1, option_name="Bond", asset_class="us_bonds", minimum_allocation_pct=40, maximum_allocation_pct=60),
+        ], {"us_large_cap": 90, "us_bonds": 10})
+        by_name = {row["option_name"]: row["pct"] for row in result["mix"]}
+        assert result["allocation_constraints_feasible"] is True
+        assert by_name == {"Stock": 60.0, "Bond": 40.0}
+
+    def test_option_mix_reports_infeasible_recorded_allocation_caps(self):
+        result = propose_account_option_mix([
+            option(1, 1, option_name="Stock", asset_class="us_large_cap", maximum_allocation_pct=30),
+            option(2, 1, option_name="Bond", asset_class="us_bonds", maximum_allocation_pct=30),
+        ], {"us_large_cap": 50, "us_bonds": 50})
+        assert result["allocation_constraints_feasible"] is False
 
     def test_reference_case_8_same_fund_available_in_one_account_not_another(self):
         """A fund recorded as available in account 1 does not become

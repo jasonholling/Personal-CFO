@@ -595,7 +595,10 @@ def propose_account_option_mix(options: List[Dict], target_weights_by_class: Dic
     hold that exposure instead.
 
     Never ranks by recent performance and never claims a fund will
-    outperform -- selection is cost/purity/coverage only."""
+    outperform -- selection is cost/purity/coverage only.  When an
+    option records a minimum/maximum allocation, those bounds apply to
+    this proposed account mix; an infeasible set of bounds is surfaced,
+    never worked around by silently breaking a recorded constraint."""
     target = {c: w for c, w in target_weights_by_class.items() if w and w > 0 and c != "unclassified"}
     if not target or not options:
         return {"mix": [], "unavailable_classes": sorted(target.keys()), "alternatives_considered": {}}
@@ -633,6 +636,8 @@ def propose_account_option_mix(options: List[Dict], target_weights_by_class: Dic
             selected_by_option_id[oid] = {
                 "option_id": chosen_opt.get("id"), "option_name": chosen_opt.get("option_name"),
                 "ticker": chosen_opt.get("ticker"), "expense_ratio": chosen_opt.get("expense_ratio"),
+                "minimum_allocation_pct": chosen_opt.get("minimum_allocation_pct"),
+                "maximum_allocation_pct": chosen_opt.get("maximum_allocation_pct"),
                 "asset_classes_covered": [], "is_single_class": chosen_is_single, "exposures": chosen_weights,
             }
         selected_by_option_id[oid]["asset_classes_covered"].append(asset_class)
@@ -655,6 +660,7 @@ def propose_account_option_mix(options: List[Dict], target_weights_by_class: Dic
         class_list = sorted(covered_classes)
         target_vec = [target[c] / covered_target_total for c in class_list]
         weights = _solve_option_mix_weights([e["exposures"] for e in entries], class_list, target_vec)
+        weights, bounds_feasible = _apply_option_allocation_bounds(entries, weights)
         for entry, w in zip(entries, weights):
             if w <= 1e-6:
                 continue
@@ -677,7 +683,37 @@ def propose_account_option_mix(options: List[Dict], target_weights_by_class: Dic
         "mix": sorted(mix, key=lambda m: -m["pct"]),
         "unavailable_classes": sorted(unavailable_classes),
         "alternatives_considered": alternatives_considered,
+        "allocation_constraints_feasible": bounds_feasible if covered_target_total > 0 and selected_by_option_id else True,
     }
+
+
+def _apply_option_allocation_bounds(entries: List[Dict], weights: List[float]):
+    """Project a proposed option mix onto its recorded allocation bounds.
+
+    This is deliberately a small bounded-simplex adjustment, not a new
+    portfolio optimiser: it preserves the shared mix solver's output as
+    closely as possible while honoring explicit option limits.  Returning
+    ``False`` means the recorded limits cannot fill a complete account
+    mix (for example two options capped at 30% each).
+    """
+    lower = [max(0.0, (entry.get("minimum_allocation_pct") or 0) / 100) for entry in entries]
+    upper = [min(1.0, (entry.get("maximum_allocation_pct") if entry.get("maximum_allocation_pct") is not None else 100) / 100) for entry in entries]
+    if sum(lower) > 1.0 + 1e-9 or sum(upper) < 1.0 - 1e-9:
+        return weights, False
+    result = [min(max(weight, low), high) for weight, low, high in zip(weights, lower, upper)]
+    for _ in range(len(result) * 3):
+        delta = 1.0 - sum(result)
+        if abs(delta) <= 1e-9:
+            return result, True
+        candidates = [i for i in range(len(result)) if (upper[i] - result[i] > 1e-9 if delta > 0 else result[i] - lower[i] > 1e-9)]
+        if not candidates:
+            return result, False
+        capacity = sum((upper[i] - result[i]) if delta > 0 else (result[i] - lower[i]) for i in candidates)
+        amount = min(abs(delta), capacity)
+        for i in candidates:
+            share = ((upper[i] - result[i]) if delta > 0 else (result[i] - lower[i])) / capacity
+            result[i] += amount * share if delta > 0 else -amount * share
+    return result, abs(1.0 - sum(result)) <= 1e-7
 
 
 def _gaussian_solve(matrix: List[List[float]], vector: List[float]) -> Optional[List[float]]:

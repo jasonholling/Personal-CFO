@@ -781,6 +781,11 @@ function OptionsTab({ accounts, excludedAccounts, onEditPolicy }) {
                     Not covered by any option in this account: {mixResult.unavailable_classes.map(c => c.replace(/_/g, ' ')).join(', ')} — consider whether another account should hold this exposure.
                   </div>
                 )}
+                {mixResult.allocation_constraints_feasible === false && (
+                  <div style={{ fontSize: 12, color: 'var(--amber)', marginTop: 10 }}>
+                    The recorded option minimums and maximums cannot form a complete mix. Review those constraints before acting.
+                  </div>
+                )}
               </div>
             )}
           </div>
