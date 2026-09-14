@@ -15,9 +15,10 @@ def _days_since(value):
         return None
 
 
-def plan_confidence(accounts: List[Dict], inputs: Dict, cash_flow: Dict) -> Dict:
+def plan_confidence(accounts: List[Dict], inputs: Dict, cash_flow: Dict, holdings: List[Dict] = None) -> Dict:
     """Return specific evidence and limitations rather than a magic score."""
     checks = []
+    holdings = holdings or []
     latest_update = max((_days_since(a.get("updated_at")) for a in accounts), default=None)
     stale = [a for a in accounts if (_days_since(a.get("updated_at")) if _days_since(a.get("updated_at")) is not None else 10_000) > 35]
     checks.append({
@@ -36,10 +37,22 @@ def plan_confidence(accounts: List[Dict], inputs: Dict, cash_flow: Dict) -> Dict
         "status": "ready" if has_retirement else "attention",
         "detail": "Age, spending target, and return assumptions are set." if has_retirement else "Set current age, retirement spending, and return assumptions before relying on retirement results.",
     })
+    stale_holdings = []
+    for holding in holdings:
+        reported = holding.get("as_of_date") or holding.get("updated_at") or holding.get("created_at")
+        age = _days_since(reported) if reported else None
+        if age is None or age > 180:
+            stale_holdings.append(holding)
     checks.append({
-        "key": "tax_precision", "label": "Tax precision",
-        "status": "limited",
-        "detail": "Uses a simplified income-tax estimate. It does not model transaction-level tax lots, deductions, credits, or investment gains.",
+        "key": "holdings_freshness", "label": "Holdings are current",
+        "status": "ready" if holdings and not stale_holdings else "attention",
+        "detail": (
+            "Holdings were updated within the last 6 months."
+            if holdings and not stale_holdings
+            else ("Enter holdings so allocation and portfolio guidance can be checked."
+                  if not holdings else
+                  f"Refresh {len(stale_holdings)} holding{'s' if len(stale_holdings) != 1 else ''} older than 6 months.")
+        ),
     })
     attention = sum(1 for check in checks if check["status"] == "attention")
     return {

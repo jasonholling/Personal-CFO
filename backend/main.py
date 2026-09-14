@@ -2584,10 +2584,11 @@ def recalculate_saved_scenario(scenario_id: int):
 def get_plan_confidence():
     conn = get_db()
     accounts = [dict(r) for r in conn.execute("SELECT * FROM accounts").fetchall()]
+    holdings = [dict(r) for r in conn.execute("SELECT * FROM holdings").fetchall()]
     inputs_row = conn.execute("SELECT * FROM planning_inputs WHERE id=1").fetchone()
     cash_flow_items = [dict(r) for r in conn.execute("SELECT * FROM cash_flow_items").fetchall()]
     conn.close()
-    return plan_confidence(accounts, dict(inputs_row) if inputs_row else {}, summarize_cash_flow(cash_flow_items))
+    return plan_confidence(accounts, dict(inputs_row) if inputs_row else {}, summarize_cash_flow(cash_flow_items), holdings)
 
 def _get_active_life_events(conn) -> List[dict]:
     """Rows from life_events with included_in_projection true — the list

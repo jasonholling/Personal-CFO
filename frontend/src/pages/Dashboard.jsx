@@ -130,7 +130,7 @@ export default function Dashboard({ onNavigate }) {
                 <div><div className="label" style={{ marginBottom:4 }}>PLAN SETUP</div><div style={{ fontSize:16, fontWeight:650 }}>{confidence.status === 'ready' ? 'Your core plan inputs are ready' : `${confidence.checks.filter(check => check.status === 'attention').length} items needed to complete your plan`}</div></div>
               </div>
               <div style={{ display:'flex', flexWrap:'wrap', gap:10, marginTop:14 }}>{confidence.checks.map(check => {
-                const destination = check.key === 'balances' ? 'accounts' : check.key === 'cash_flow' ? 'cashflow' : 'settings'
+                const destination = check.key === 'balances' ? 'accounts' : check.key === 'cash_flow' ? 'cashflow' : check.key === 'holdings_freshness' ? 'portfoliosetup' : 'settings'
                 return check.status === 'attention' ? <button key={check.key} className="btn-secondary" onClick={() => onNavigate(destination)} style={{ textAlign:'left', padding:'9px 12px' }}><span style={{ color:'var(--amber)', fontWeight:700 }}>! </span><span style={{ fontWeight:650 }}>{check.label}</span><span style={{ display:'block', fontSize:11, color:'var(--text2)', marginTop:3 }}>{check.detail} →</span></button> : <span key={check.key} style={{ fontSize:12, padding:'8px 10px', borderRadius:6, background:check.status === 'ready' ? 'rgba(52,211,153,0.10)' : 'rgba(79,156,249,0.10)', color:check.status === 'ready' ? 'var(--green)' : 'var(--accent)' }}>{check.status === 'ready' ? '✓' : 'i'} {check.label}</span>
               })}</div>
             </div>
