@@ -15,6 +15,15 @@
 .portfolio-setup .setup-account-row { display: flex; align-items: center; gap: 12px; padding: 12px; border-radius: 8px; background: var(--bg3); }
 .portfolio-setup .setup-account-row span { display: block; }
 .portfolio-setup .setup-account-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 300px), 1fr)); gap: 8px; }
+.portfolio-setup .policy-target-groups { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 360px), 1fr)); gap: 12px; }
+.portfolio-setup .policy-target-group { border: 1px solid var(--border); border-radius: 8px; padding: 12px; background: var(--bg3); }
+.portfolio-setup .policy-target-group-heading { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; font-size: 13px; }
+.portfolio-setup .policy-target-group-heading span { color: var(--muted); font-variant-numeric: tabular-nums; }
+.portfolio-setup .holding-actions { display: inline-block; position: relative; margin-left: 10px; }
+.portfolio-setup .holding-actions > summary { display: inline-block; padding: 2px 8px; border: 1px solid var(--border); border-radius: 5px; cursor: pointer; font-size: 11px; color: var(--text); }
+.portfolio-setup .holding-actions-menu { position: absolute; z-index: 4; right: 0; top: calc(100% + 4px); display: grid; gap: 5px; min-width: 175px; padding: 8px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg2); box-shadow: 0 8px 24px #0005; }
+.portfolio-setup .holding-actions-menu button { text-align: left; font-size: 12px; }
+.portfolio-setup .holding-remove { color: var(--red); }
 .portfolio-setup .setup-save { position: sticky; bottom: 12px; display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-top: 20px; padding: 14px 18px; border: 1px solid var(--border); border-radius: 10px; background: var(--bg2); box-shadow: 0 5px 24px #0004; z-index: 2; }
 .portfolio-setup .setup-form { display: grid !important; grid-template-columns: repeat(auto-fit, minmax(min(100%, 190px), 1fr)); align-items: start !important; gap: 16px !important; }
 .portfolio-setup .setup-form > input, .portfolio-setup .setup-form > select { min-width: 0 !important; max-width: none !important; }
@@ -43,6 +52,7 @@
 .portfolio-coach .allocation-drift { color: var(--amber); }
 .portfolio-coach .allocation-table-details { margin-top: 14px; }
 .portfolio-coach .allocation-privacy-note { margin-top: 14px; color: var(--muted); font-size: 13px; }
+.portfolio-coach .allocation-all-clear { margin: 14px 0 2px; color: var(--green); font-size: 13px; }
 @media (max-width: 640px) {
   .portfolio-setup .card { padding: 16px; }
   .portfolio-setup .setup-save { bottom: 0; flex-wrap: wrap; }

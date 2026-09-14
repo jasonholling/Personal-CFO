@@ -56,6 +56,7 @@ function AllocationComparisonChart({ comparison }) {
     }))
 
   if (!rows.length) return null
+  const outOfBandRows = rows.filter(row => !row.within_drift_band)
   if (isPrivacyMode()) {
     return <div className="allocation-privacy-note">Allocation chart is hidden while privacy mode is on.</div>
   }
@@ -74,8 +75,10 @@ function AllocationComparisonChart({ comparison }) {
           </div>
         ))}
       </div>
-      <div className="allocation-legend" aria-label="Allocation values and drift">
-        {rows.map(row => {
+      {outOfBandRows.length === 0 ? (
+        <div className="allocation-all-clear">✓ Your allocation is within its saved drift bands.</div>
+      ) : <div className="allocation-legend" aria-label="Allocation values and drift">
+        {outOfBandRows.map(row => {
           const drift = Number(row.deviation_pct) || 0
           return <div className="allocation-legend-row" key={row.assetClass}>
             <span className="allocation-swatch" style={{ background: row.color }} aria-hidden="true" />
@@ -84,7 +87,7 @@ function AllocationComparisonChart({ comparison }) {
             <span className={row.within_drift_band ? 'allocation-ok' : 'allocation-drift'}>{drift > 0 ? '+' : ''}{drift}%</span>
           </div>
         })}
-      </div>
+      </div>}
     </section>
   )
 }
@@ -92,7 +95,8 @@ function AllocationComparisonChart({ comparison }) {
 function ActionCard({ card, onDecide, busy, onNavigate, accounts }) {
   const p = card.payload
   const [notes, setNotes] = useState('')
-  const [showDecide, setShowDecide] = useState(false)
+  const [showMoreActions, setShowMoreActions] = useState(false)
+  const [showReject, setShowReject] = useState(false)
   const [reviewDate, setReviewDate] = useState('')
   // Contextual link: a data-quality card about an account's own type
   // being unresolved should jump straight to where that gets fixed
@@ -148,21 +152,27 @@ function ActionCard({ card, onDecide, busy, onNavigate, accounts }) {
           )}
           {card.category === 'missing_data' && !isAccountTypeIssue && <button className="btn-primary" onClick={() => onNavigate?.('portfoliosetup')}>Review portfolio setup</button>}
           {card.status !== 'accepted' && (
-            <button className="btn-secondary" disabled={busy} onClick={() => onDecide(card.id, 'accepted', notes)}>Accept</button>
+            <button className="btn-primary" disabled={busy} onClick={() => onDecide(card.id, 'accepted', notes)}>Keep on review plan</button>
           )}
           {card.status === 'accepted' && (
             <button className="btn-primary" disabled={busy} onClick={() => onDecide(card.id, 'completed', notes)}>Mark complete</button>
           )}
-          <label style={{ fontSize: 12, color: 'var(--muted)', marginTop: 8 }}>Review later on
-          <input aria-label="Review date" className="input" type="date" value={reviewDate} onChange={e => setReviewDate(e.target.value)} /></label>
-          <button className="btn-secondary" disabled={busy || !reviewDate} onClick={() => onDecide(card.id, 'deferred', notes, reviewDate)}>Defer until date</button>
-          <button className="btn-secondary" disabled={busy} onClick={() => setShowDecide(v => !v)}>Reject…</button>
+          <button className="btn-secondary" disabled={busy} onClick={() => setShowMoreActions(v => !v)}>{showMoreActions ? 'Hide more actions' : 'More actions'}</button>
         </div>
       </div>
-      {showDecide && (
-        <div style={{ marginTop: 10, display: 'flex', gap: 8 }}>
-          <input className="input" placeholder="Reason (optional)" value={notes} onChange={e => setNotes(e.target.value)} style={{ flex: 1 }} />
-          <button className="btn-secondary" disabled={busy} onClick={() => { onDecide(card.id, 'rejected', notes); setShowDecide(false) }}>Confirm reject</button>
+      {showMoreActions && (
+        <div className="card" style={{ marginTop: 10, padding: 12, background: 'var(--bg3)' }}>
+          <label style={{ display: 'block', fontSize: 12, color: 'var(--muted)' }}>Review later on
+            <input aria-label="Review date" className="input" type="date" value={reviewDate} onChange={e => setReviewDate(e.target.value)} />
+          </label>
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 8 }}>
+            <button className="btn-secondary" disabled={busy || !reviewDate} onClick={() => onDecide(card.id, 'deferred', notes, reviewDate)}>Defer until date</button>
+            <button className="btn-secondary" disabled={busy} onClick={() => setShowReject(v => !v)}>{showReject ? 'Cancel reject' : 'Dismiss recommendation'}</button>
+          </div>
+          {showReject && <div style={{ marginTop: 8, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+            <input className="input" placeholder="Reason (optional)" value={notes} onChange={e => setNotes(e.target.value)} style={{ flex: '1 1 220px' }} />
+            <button className="btn-secondary" disabled={busy} onClick={() => { onDecide(card.id, 'rejected', notes); setShowReject(false) }}>Confirm dismissal</button>
+          </div>}
         </div>
       )}
     </div>
@@ -175,6 +185,8 @@ export default function PortfolioCoach({ onNavigate }) {
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState(false)
   const [contribAmount, setContribAmount] = useState('')
+  const [contributionMode, setContributionMode] = useState('anywhere')
+  const [useNewMoneyForRebalance, setUseNewMoneyForRebalance] = useState(true)
   const [contribResult, setContribResult] = useState(null)
   const [rebalanceResult, setRebalanceResult] = useState(null)
   const [multiAmounts, setMultiAmounts] = useState({})
@@ -239,7 +251,7 @@ export default function PortfolioCoach({ onNavigate }) {
     setRequestError('')
     setBusy(true)
     setRebalanceResult(null)
-    axios.post('/api/portfolio/rebalance', { amount: parseFloat(contribAmount) || 0 })
+    axios.post('/api/portfolio/rebalance', { amount: useNewMoneyForRebalance ? parseFloat(contribAmount) || 0 : 0 })
       .then(r => { if (version === requestVersion.current) setRebalanceResult(r.data) })
       .catch(() => { if (version === requestVersion.current) setRequestError('Could not generate the rebalance checklist. Please try again.') })
       .finally(() => { if (version === requestVersion.current) setBusy(false) })
@@ -278,6 +290,9 @@ export default function PortfolioCoach({ onNavigate }) {
     [cards, filterCategory],
   )
   const categoriesPresent = useMemo(() => [...new Set(cards.map(c => c.category))], [cards])
+  const allocationTakeaway = useMemo(() => Object.entries(allocation?.comparison?.by_class || {})
+    .filter(([, d]) => !d.within_drift_band)
+    .map(([assetClass, d]) => `${d.deviation_pct > 0 ? 'Overweight' : 'Underweight'} ${assetClassLabel(assetClass)} by ${Math.abs(d.deviation_pct)}%`), [allocation])
   const nextActions = <section className="annual-review-actions" aria-label="Recommended next actions" style={{ marginBottom: 28 }}>
     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12, flexWrap: 'wrap', gap: 8 }}>
       <h2 style={{ fontSize: 18, fontWeight: 600 }}>What should I do next?</h2>
@@ -413,8 +428,9 @@ export default function PortfolioCoach({ onNavigate }) {
           <div className="label">Allocation alignment</div>
           <h2 style={{ fontSize: 18, margin: '5px 0 4px' }}>Current vs. target allocation</h2>
           <p style={{ fontSize: 13, color: 'var(--muted)', margin: 0 }}>Each row compares what you hold now with the target in your saved policy. Amber rows are outside your drift band.</p>
+          {allocationTakeaway.length > 0 && <p style={{ fontSize: 13, margin: '10px 0 0' }}><strong>Takeaway:</strong> {allocationTakeaway.join('; ')}.</p>}
           <AllocationComparisonChart comparison={allocation.comparison} />
-          <details className="allocation-table-details"><summary>Show allocation table</summary>
+          <details className="allocation-table-details"><summary>Show all asset classes</summary>
             <div style={{ overflowX: 'auto' }}>
               <table style={{ width: '100%', fontSize: 13, borderCollapse: 'collapse' }}>
                 <thead>
@@ -452,13 +468,18 @@ export default function PortfolioCoach({ onNavigate }) {
       {nextActions}
 
       <div className="card coach-workflow-controls" style={{ marginBottom: 24 }}>
-        <div className="label" style={{ marginBottom: 10 }}>Where should new money go?</div>
-        <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+        <div className="label" style={{ marginBottom: 6 }}>Invest new money</div>
+        <p style={{ fontSize: 12, color: 'var(--muted)', marginTop: 0 }}>Choose whether this money is available anywhere or has already been assigned to specific accounts.</p>
+        <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap', fontSize: 13, marginBottom: 12 }}>
+          <label><input type="radio" name="contribution-mode" checked={contributionMode === 'anywhere'} onChange={() => setContributionMode('anywhere')} /> One amount available anywhere</label>
+          <label><input type="radio" name="contribution-mode" checked={contributionMode === 'specific'} onChange={() => setContributionMode('specific')} /> Amounts assigned to specific accounts</label>
+        </div>
+        {contributionMode === 'anywhere' && <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
           <label style={{ fontSize: 12, color: 'var(--muted)' }}>New money available ($)<input className="input" type="number" min="0" placeholder="Amount to invest" value={contribAmount}
                  onChange={e => { requestVersion.current += 1; setBusy(false); setRequestError(''); setContribAmount(e.target.value); setContribResult(null); setRebalanceResult(null) }} style={{ maxWidth: 200 }} />
           </label><button className="btn-primary" disabled={busy || !allocation?.has_policy || !(Number(contribAmount) > 0)} onClick={runContribution}>Get contribution recommendation</button>
-        </div>
-        {contribResult && (
+        </div>}
+        {contributionMode === 'anywhere' && contribResult && (
           <div style={{ marginTop: 14 }}>
             {(contribResult.actions || []).length === 0 && <div style={{ color: 'var(--muted)', fontSize: 13 }}>No eligible contribution recommendation was returned. Review your allocation, account exclusions, and available funds.</div>}
             {(contribResult.actions || []).map((a, i) => (
@@ -474,10 +495,7 @@ export default function PortfolioCoach({ onNavigate }) {
             ))}
           </div>
         )}
-      </div>
-      <details className="card coach-workflow-controls" style={{ marginBottom: 24 }}>
-        <summary>Contributions in specific accounts</summary>
-        <p style={{ fontSize: 12, color: 'var(--muted)' }}>Use this only when money is already earmarked for more than one account. Add the accounts receiving money, then Coach will respect each account’s available options and policy restrictions.</p>
+        {contributionMode === 'specific' && <div style={{ marginTop: 12 }}>
         {accountsStillAvailable.length > 0 && <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'end', marginBottom: 12 }}>
           <label style={{ fontSize: 12, color: 'var(--muted)', minWidth: 240 }}>Account receiving money
             <select className="input" aria-label="Account receiving money" value={accountToAdd} onChange={e => setAccountToAdd(e.target.value)}>
@@ -499,11 +517,17 @@ export default function PortfolioCoach({ onNavigate }) {
           <button className="btn-primary" onClick={runMultiContribution} disabled={busy || !Object.values(multiAmounts).some(amount => Number(amount) > 0)}>Get account-specific recommendation</button>
         </div>}
         {multiResult && <div style={{ marginTop: 12, fontSize: 13 }}>{(multiResult.actions || []).map((action, i) => <div key={i}><strong>{fmt(action.amount)}</strong> → {action.asset_class?.replace(/_/g, ' ')} in {accounts.find(account => account.id === action.account_id)?.name || `account ${action.account_id}`}</div>)}{(multiResult.unallocated || []).map((item, i) => <div key={`u${i}`} style={{ color: 'var(--amber)' }}>{fmt(item.amount)} remains unallocated: {item.reason}</div>)}</div>}
-      </details>
+        </div>}
+      </div>
 
       <div className="card coach-workflow-controls" style={{ marginBottom: 24 }}>
         <div className="label" style={{ marginBottom: 10 }}>Build a rebalance checklist</div>
-        <p style={{ fontSize: 12, color: 'var(--muted)' }}>Uses new money first when your policy requests it, keeps exchanges inside the funding account, and flags taxable sales.</p>
+        <p style={{ fontSize: 12, color: 'var(--muted)' }}>Keeps exchanges inside the funding account and flags taxable sales.</p>
+        <label style={{ display: 'flex', gap: 7, alignItems: 'center', fontSize: 13, marginBottom: 10 }}>
+          <input type="checkbox" checked={useNewMoneyForRebalance} onChange={e => { setUseNewMoneyForRebalance(e.target.checked); setRebalanceResult(null) }} />
+          Use available new money first {useNewMoneyForRebalance && (Number(contribAmount) > 0 ? `(${fmt(Number(contribAmount))})` : '(none entered)')}
+        </label>
+        <div className="setup-helper" style={{ marginTop: -4 }}> {useNewMoneyForRebalance && Number(contribAmount) > 0 ? `The checklist will apply ${fmt(Number(contribAmount))} before proposing trades.` : 'No new money will be applied before trades.'}</div>
         <button className="btn-primary" disabled={busy || !allocation?.has_policy} onClick={runRebalance}>Generate rebalance checklist</button>
         {rebalanceResult && (
           <div style={{ marginTop: 12 }}>
