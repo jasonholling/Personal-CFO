@@ -7666,3 +7666,183 @@ call, and the CSV quote-drift review message. Exact pass counts and
 coverage are reported in this branch's final status report rather than
 restated here, since a contract section should not go stale the moment
 a later commit changes a number.
+
+## 81. Coach integration with the household review workflow (item 3) (2026-09-13, `codex/portfolio-coach-item3-review-workflow`)
+
+Branch: `codex/portfolio-coach-item3-review-workflow`, from `origin/main`
+at `076484a` ("Harden portfolio coach inputs and tax warnings" — the
+review-finding hardening pass that followed section 79/80's own
+branch). This closes item 3 of the six-item backlog referenced in
+section 79. Before writing any code this pass read the two small
+follow-on commits already on `main` ("Show next portfolio decision
+review", "Add printable annual portfolio review") — both real but
+narrow: a `next_review_date` field on the existing
+`GET /api/recommendations/review-summary` endpoint, and a
+`window.print()` button on the Portfolio Coach page. Neither is the
+provenance/task-linkage/stale-marking/annual-review-summary integration
+item 3 asks for; this section documents what closes the remaining gap,
+not a re-description of that prior work.
+
+### What already existed (not duplicated here)
+
+- The Coach's own decision lifecycle (`proposed → reviewing →
+  accepted/deferred/rejected → completed/invalidated`,
+  `coach_engine.reconcile_recommendation_queue()`) — unchanged in this
+  pass except for the two additions below.
+- `decide_recommendation()` already created one linked Action-Tracker
+  task on `accepted` (`auto_key=f"portfolio_coach_{recommendation_id}"`)
+  and closed it on `completed`, and already stored a `review_date` on
+  `deferred`. This pass extends, not replaces, that flow.
+- The review-date "surfacing" mechanism already existed twice over:
+  `reconcile_recommendation_queue()` resurfaces a deferred candidate as
+  a fresh `proposed` row once `today >= review_date`, and
+  `GET /api/recommendations/review-summary` already reported
+  `reviews_due`/`next_review_date` for the Coach's own page. Item 3's
+  "must surface through the existing review-date workflow" is
+  satisfied by connecting THAT existing mechanism to the household task
+  list (below), not by inventing a second scheduling system.
+
+### Recommendation provenance (`coach_engine.recommendation_provenance()`)
+
+New pure function, called once per `GET /api/recommendations`
+generation run (`main.py`'s `_recommendation_provenance_for_run()`) and
+stored on every freshly-inserted `recommendations` row via five new
+additive columns (`db.py`'s `init_portfolio_coach_tables()` migration):
+`saved_scenario_id`, `assumption_review_id`, `planning_inputs_hash`,
+`holdings_snapshot_hash`, `policy_hash`. `saved_scenario_id`/
+`assumption_review_id` are the latest saved-scenario/assumption-review
+row ids at generation time (or `NULL` when none exist yet); the three
+`_hash` fields are `coach_engine.stable_hash()` of the actual
+planning_inputs row, the actual holdings list, and the actual policy
+dict used to generate that batch — a CONTENT hash, not a row-version
+number, because none of `planning_inputs`/`holdings`/
+`investment_policies` carries an `updated_at`-style column that only
+changes on a real edit; hashing the values actually used is the only
+way to tell "the facts moved" from "the row was merely re-read."
+
+A sixth new column, `linked_task_id`, records the single household Task
+(see below) a recommendation created or is linked to; `NULL` until one
+exists.
+
+### Human-readable stale/invalidated reasons (`coach_engine.invalidation_reason()`)
+
+Every row `reconcile_recommendation_queue()` marks `invalidated` used to
+get the exact same one-sentence note ("Underlying holdings, policy, or
+contribution input changed before this was acted on."). `main.py` now
+compares the row's OWN stored provenance (from when it was inserted)
+against the current run's provenance and builds a specific sentence
+naming what actually changed — holdings, the investment policy,
+planning inputs/assumptions, a newer saved scenario, or a newer
+assumption review, any combination of which can be true at once (e.g.
+"Invalidated because recorded holdings changed and the investment
+policy changed."). Falls back to the original generic sentence in two
+cases, both deliberate rather than a bug: a row created before these
+columns existed (no provenance to compare, so nothing specific can
+honestly be claimed), or an invalidation whose cause provenance hashing
+can't see at all (e.g. only the pending-contribution-amount input
+changed, which is never part of the persisted provenance). This never
+introduces a new `stale` status — `invalidated` already meant exactly
+this per section 77's own STATUSES tuple; the requirement is a
+better-explained reason on the existing status, not a new one.
+
+### Task linkage for accepted or deferred HIGH-PRIORITY recommendations
+
+`coach_engine.HIGH_PRIORITY_TASK_CATEGORIES = {"missing_data",
+"concentration_or_liquidity_risk", "policy_violation"}` — exactly
+tiers 1-3 of section 77's own 8-tier ordering, the same three tiers
+whose classification is `data_quality_problem`/`urgent_risk`/
+`policy_violation` rather than `optimization_opportunity`/
+`ordinary_review_item`.
+
+- `accepted` (any category, unchanged from before this pass) still
+  creates/reuses one `tasks` row (`task_type='calculated'`,
+  `recurrence='once'`, `auto_key=f"portfolio_coach_{id}"`) and now also
+  records that task's id on the recommendation's new `linked_task_id`
+  column.
+- `deferred` on a HIGH-PRIORITY recommendation now also creates/updates
+  that same linked task, with its `due_date` (an additive `tasks`
+  column, `db.py`) and `due_year` set from the supplied `review_date` —
+  so the deferred item actually appears in the household's general
+  Action Tracker, not only inside the Coach's own review-summary
+  widget. `deferred` on a non-high-priority recommendation creates NO
+  task (verified by test) — every other category keeps surfacing
+  exclusively through the review-date mechanism described above, so the
+  general task list isn't cluttered with routine optimization reviews.
+- Every task created this way is `recurrence='once'` and is only ever
+  created in direct response to this specific, explicit user API call
+  (accepting or deferring a recommendation) — never a background job,
+  never recurring, and no existing task-creation behavior (`task_engine.py`'s
+  own annual/calculated tasks) is touched.
+
+### Annual portfolio review summary (`GET /api/portfolio/annual-review`)
+
+A single endpoint assembling every section item 3 names: open
+recommendations, deferred reviews due, stale holding values,
+unreconciled accounts, allocation drift, concentrated positions, and
+taxable-loss candidates. It performs **no calculation of its own** —
+`main.py`'s `_refresh_recommendation_queue()` (factored out of
+`GET /api/recommendations` so the two endpoints can never silently
+diverge) generates/persists/reconciles the exact same active queue
+`GET /api/recommendations` returns, and the new pure
+`coach_engine.partition_annual_review_items()` buckets those already-
+built cards by their existing `recommendation_key` prefix
+(`stale_holding_value:` / `unreconciled_remainder:` / `drift:` /
+`severe_concentration:`+`moderate_concentration:`+`liquidity_shortfall:`
+/ `tax_loss_review:`+`tax_lot_loss_review:`) into the named sections.
+Anything that doesn't match a named prefix (e.g. `new_money`,
+`tax_advantaged_rebalance`, `high_cost_or_redundant` cards) is kept
+under `other_open` rather than silently dropped, so the sum of every
+section always accounts for the full active queue.
+`deferred_reviews_due` is read separately (deferred rows are excluded
+from the active queue by design) with the same `review_date <= today`
+rule `recommendation_review_summary()` already used.
+
+Frontend: `PortfolioCoach.jsx` fetches this endpoint alongside the
+existing recommendation/allocation/review-summary calls and renders an
+"Annual portfolio review" card with per-section counts plus an
+expandable detail list (title + review date per item) — the same card
+the existing "Print annual review" button already prints, since no new
+print path was introduced.
+
+### Known limitations / deferred work (not silently assumed complete)
+
+- `planning_inputs_hash`/`holdings_snapshot_hash`/`policy_hash` are
+  content hashes of the CURRENT row at generation time, not a stored
+  history of every prior version — the invalidation-reason comparison
+  can say "planning inputs changed" but not show a diff of exactly
+  which field changed.
+- The annual-review endpoint's `other_open` bucket intentionally holds
+  categories item 3's brief didn't name a section for
+  (`new_money`/`tax_advantaged_rebalance`/`taxable_rebalance`/
+  `high_cost_or_redundant`) — surfaced so nothing is silently dropped,
+  but not broken out into their own named sections.
+- A deferred task's `due_date` is set once, at defer time, from the
+  `review_date` supplied in that same request; changing the
+  recommendation's `review_date` on a LATER `deferred` decision updates
+  the same linked task (verified by test), but nothing currently keeps
+  a task's `due_date` in sync if a household edits the task directly
+  from the Tasks page instead of through Portfolio Coach.
+- `saved_scenario_id`/`assumption_review_id` provenance record the
+  latest row's id at generation time; they are not (yet) consulted to
+  invalidate a recommendation when an OLDER saved scenario is deleted
+  out of order — deletion of saved scenarios/assumption reviews is rare
+  and out of scope for this pass.
+
+### Verification
+
+Backend: `tests/test_coach_engine.py` (`TestRecommendationProvenance`,
+`TestInvalidationReason`, `TestPartitionAnnualReviewItems`, and a
+directly-asserted `HIGH_PRIORITY_TASK_CATEGORIES` set), and new classes
+in `tests/test_recommendations_api.py`
+(`TestRecommendationProvenance`, `TestDeferredHighPriorityTaskLinkage`,
+`TestAnnualPortfolioReview`) exercising the full `TestClient` round
+trip: provenance fields on a generated card, a human-readable
+policy-change and holdings-change invalidation reason, a deferred
+high-priority recommendation creating a dated task while a deferred
+non-high-priority one does not, an accepted recommendation recording
+`linked_task_id`, and the annual-review endpoint's section partitioning
+plus its deferred-reviews-due listing. Frontend:
+`PortfolioCoach.test.jsx` covers the new annual-review card's summary
+counts and its expand/collapse detail sections. Exact pass counts,
+coverage, frontend build, and the sensitive-data check are reported in
+this branch's own final status report rather than restated here.
