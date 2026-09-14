@@ -221,6 +221,25 @@ describe('PortfolioCoach', () => {
     expect(container.querySelector('input[aria-label="Review date"]')).not.toBeNull()
   })
 
+  it('shows the recommendation state and its real invalidation conditions', async () => {
+    const response = structuredClone(recommendationsResponse)
+    response.recommendations[0].status = 'accepted'
+    response.recommendations[0].payload.conditions_that_would_invalidate = ['Holdings change.', 'The policy target changes.']
+    axios.get.mockImplementation(url => {
+      if (url === '/api/recommendations') return Promise.resolve({ data: response })
+      if (url === '/api/portfolio/allocation') return Promise.resolve({ data: allocationResponse })
+      if (url === '/api/accounts') return Promise.resolve({ data: [{ id: 1, name: 'Retirement IRA' }] })
+      return Promise.resolve({ data: {} })
+    })
+    await act(async () => root.render(<PortfolioCoach />))
+    await flush()
+    expect(container.textContent).toContain('On review plan')
+    expect(container.textContent).toContain('Status: On review plan')
+    const details = container.querySelector('details')
+    await act(async () => { details.open = true; details.dispatchEvent(new Event('toggle', { bubbles: true })) })
+    expect(container.textContent).toContain('Review again if: Holdings change. The policy target changes.')
+  })
+
   it('shows the annual portfolio review summary and expands its detail sections (item 3)', async () => {
     const annualReviewResponse = {
       as_of: '2026-09-13', has_policy: true,
@@ -231,6 +250,7 @@ describe('PortfolioCoach', () => {
       allocation_drift: [{ id: 11, title: 'Us Bonds is overweight vs. target' }],
       concentrated_positions: [],
       taxable_loss_candidates: [],
+      other_open: [{ id: 12, title: 'Review fund expense ratio' }],
     }
     axios.get.mockImplementation(url => {
       if (url === '/api/recommendations') return Promise.resolve({ data: recommendationsResponse })
@@ -251,6 +271,8 @@ describe('PortfolioCoach', () => {
     expect(container.textContent).toContain('Review by 2026-08-01')
     expect(container.textContent).toContain('Refresh the value of Old Fund')
     expect(container.textContent).toContain('Us Bonds is overweight vs. target')
+    expect(container.textContent).toContain('1 other open reviews')
+    expect(container.textContent).toContain('Review fund expense ratio')
   })
 
   it('shows an asset-location tax warning verbatim instead of claiming cost basis is missing', async () => {

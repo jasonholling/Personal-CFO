@@ -102,12 +102,22 @@ function ActionCard({ card, onDecide, busy, onNavigate, accounts }) {
   // being unresolved should jump straight to where that gets fixed
   // (Accounts), not just describe the problem.
   const isAccountTypeIssue = card.category === 'missing_data' && p.recommendation_key?.startsWith('missing_account_type')
+  const statusLabel = {
+    proposed: 'Open', reviewing: 'Reviewing', accepted: 'On review plan',
+    deferred: 'Deferred', completed: 'Completed', rejected: 'Dismissed',
+  }[card.status] || card.status || 'Open'
+  const invalidationConditions = p.conditions_that_would_invalidate || p.invalidates_on || []
   return (
     <div className="card" style={{ marginBottom: 12, borderLeft: `3px solid ${CATEGORY_COLORS[card.category] || 'var(--border)'}` }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
         <div style={{ flex: 1, minWidth: 260 }}>
-          <div style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.5, color: CATEGORY_COLORS[card.category] }}>
-            {CATEGORY_LABELS[card.category] || card.category}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+            <div style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.5, color: CATEGORY_COLORS[card.category] }}>
+              {CATEGORY_LABELS[card.category] || card.category}
+            </div>
+            <span style={{ fontSize: 10, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.4, color: card.status === 'completed' ? 'var(--green)' : card.status === 'deferred' ? 'var(--amber)' : 'var(--accent)', border: '1px solid currentColor', borderRadius: 999, padding: '2px 7px' }}>
+              {statusLabel}
+            </span>
           </div>
           <div style={{ fontWeight: 600, fontSize: 15, marginTop: 4 }}>{p.title}</div>
           {p.affected_accounts?.length > 0 && <div style={{ fontSize: 13, color: 'var(--accent)', marginTop: 4 }}>{p.affected_accounts.map(id => accounts.find(a => a.id === id)?.name || `Account ${id}`).join(' · ')}</div>}
@@ -130,6 +140,7 @@ function ActionCard({ card, onDecide, busy, onNavigate, accounts }) {
             <strong>If you do nothing:</strong> This condition stays as-is until holdings, the policy, or a related planning input changes.
           </div>
           {p.assumptions?.length > 0 && <div style={{ fontSize: 11, marginTop: 8, color: 'var(--muted)' }}>Assumptions: {p.assumptions.join(' ')}</div>}
+          {invalidationConditions.length > 0 && <div style={{ fontSize: 11, marginTop: 8, color: 'var(--muted)' }}><strong>Review again if:</strong> {invalidationConditions.join(' ')}</div>}
           </details>
           {p.tax_impact && (
             <div style={{ fontSize: 12, marginTop: 6, color: 'var(--amber)' }}>
@@ -141,7 +152,7 @@ function ActionCard({ card, onDecide, busy, onNavigate, accounts }) {
             </div>
           )}
           <div style={{ fontSize: 11, marginTop: 4, color: 'var(--muted)' }}>
-            Confidence: {p.confidence} · Status: {card.status}
+            Confidence: {p.confidence} · Status: {statusLabel}
             {card.decision_date ? ` · Last decision: ${card.decision_date}` : ''}
             {card.review_date ? ` · Review again: ${card.review_date}` : ''}
           </div>
@@ -340,6 +351,7 @@ export default function PortfolioCoach({ onNavigate }) {
             <span><strong>{annualReview.allocation_drift?.length || 0}</strong> allocation drift items</span>
             <span><strong>{annualReview.concentrated_positions?.length || 0}</strong> concentrated positions</span>
             <span><strong>{annualReview.taxable_loss_candidates?.length || 0}</strong> taxable-loss candidates</span>
+            <span><strong>{annualReview.other_open?.length || 0}</strong> other open reviews</span>
           </div>
           {showAnnualReview && (
             <div style={{ marginTop: 14 }}>
@@ -350,6 +362,7 @@ export default function PortfolioCoach({ onNavigate }) {
                 ['Allocation drift', annualReview.allocation_drift],
                 ['Concentrated positions', annualReview.concentrated_positions],
                 ['Taxable-loss candidates', annualReview.taxable_loss_candidates],
+                ['Other open reviews', annualReview.other_open],
               ].map(([label, items]) => (
                 <div key={label} style={{ marginTop: 10 }}>
                   <div style={{ fontSize: 12, fontWeight: 600 }}>{label} ({(items || []).length})</div>
