@@ -84,6 +84,7 @@ export default function AnnualPlan({ onNavigate }) {
         <div style={{ display:'flex', gap:8, alignItems:'center' }}>
           <button className="btn-secondary" onClick={() => setShowComplete(value => !value)}>{showComplete ? 'Hide completed' : 'Show completed'}</button>
           <button className="btn-primary" onClick={sync} disabled={syncing}>{syncing ? 'Syncing...' : '↻ Refresh plan'}</button>
+          <button className="btn-secondary" onClick={() => onNavigate('annualreview')}>Open annual review</button>
         </div>
       </div>
 
@@ -125,6 +126,9 @@ export default function AnnualPlan({ onNavigate }) {
           ))}
         </section>
       ))}
+      <div className="card" style={{ marginTop: 18, color:'var(--text2)', fontSize:13 }}>
+        The Action Tracker is your live queue. The annual review checklist is a once-a-year reset that appears on the Dashboard when your yearly snapshot is due.
+      </div>
     </div>
   )
 }

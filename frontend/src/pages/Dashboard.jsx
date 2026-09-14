@@ -72,6 +72,7 @@ export default function Dashboard({ onNavigate }) {
   }))
 
   const generateReport = () => onNavigate('report')
+  const annualReviewDue = briefing && (briefing.data_health?.snapshot_age_days == null || briefing.data_health.snapshot_age_days >= 335)
 
   return (
     <div>
@@ -108,6 +109,10 @@ export default function Dashboard({ onNavigate }) {
                   {briefing.data_health?.open_task_count || 0} open actions
                   <div style={{ marginTop:3 }}>{briefing.data_health?.snapshot_age_days == null ? 'No snapshot yet' : `Snapshot ${briefing.data_health.snapshot_age_days}d ago`}</div>
                 </div>
+              </div>
+              <div style={{ display:'flex', gap:8, flexWrap:'wrap', marginBottom: briefing.priorities?.length ? 8 : 0 }}>
+                <button className="btn-secondary" onClick={() => onNavigate('annualplan')}>View all actions →</button>
+                {annualReviewDue && <button className="btn-primary" onClick={() => onNavigate('annualreview')}>Start annual review →</button>}
               </div>
               {briefing.priorities?.length > 0 ? briefing.priorities.map((item, index) => (
                 <button key={`${item.title}-${index}`} onClick={() => onNavigate(item.destination)} style={{ width:'100%', display:'flex', alignItems:'center', gap:12, textAlign:'left', padding:'11px 0', background:'transparent', border:'none', borderTop: index ? '1px solid var(--border)' : 'none', color:'var(--text)', cursor:'pointer' }}>

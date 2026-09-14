@@ -51,7 +51,6 @@ const NAV = [
   { group:'OVERVIEW' },
   { id:'dashboard',  label:'Dashboard',      icon:'◈' },
   { id:'annualplan', label:'Action Tracker', icon:'✓' },
-  { id:'annualreview', label:'Annual Review Checklist', icon:'↻' },
   { id:'operating', label:'Review & Decision Rules', icon:'◉' },
   { id:'coach',      label:'Portfolio Coach', icon:'◈' },
 
