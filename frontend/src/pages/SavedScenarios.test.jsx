@@ -11,7 +11,7 @@ import { setSsTiming as setGlobalSsTiming } from '../utils/scenario'
 // overwrite), the legacy badge on pre-migration rows, and Recalculate
 // creating a distinct new row rather than mutating the original.
 
-vi.mock('axios', () => ({ default: { get: vi.fn(), post: vi.fn() } }))
+vi.mock('axios', () => ({ default: { get: vi.fn(), post: vi.fn(), delete: vi.fn() } }))
 globalThis.IS_REACT_ACT_ENVIRONMENT = true
 
 let container, root
@@ -106,6 +106,30 @@ describe('Saved Scenarios', () => {
     expect(axios.post).toHaveBeenCalledWith('/api/saved-scenarios/1/recalculate')
     // load() is called again after recalculating — GET fires a second time.
     expect(axios.get).toHaveBeenCalledTimes(2)
+  })
+
+  it('Delete asks for confirmation, then deletes and reloads the list', async () => {
+    axios.delete.mockResolvedValue({ data: { deleted: 1 } })
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
+    await act(async () => root.render(<SavedScenarios />))
+    await flush()
+    await click('Delete')
+    await flush()
+    expect(confirmSpy).toHaveBeenCalledWith(expect.stringContaining('Retire at 60'))
+    expect(axios.delete).toHaveBeenCalledWith('/api/saved-scenarios/1')
+    // load() is called again after deleting — GET fires a second time.
+    expect(axios.get).toHaveBeenCalledTimes(2)
+    confirmSpy.mockRestore()
+  })
+
+  it('Delete does nothing if the confirmation is declined', async () => {
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false)
+    await act(async () => root.render(<SavedScenarios />))
+    await flush()
+    await click('Delete')
+    await flush()
+    expect(axios.delete).not.toHaveBeenCalled()
+    confirmSpy.mockRestore()
   })
 
   it('checking two scenarios to compare shows their outcome and assumption diff', async () => {

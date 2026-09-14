@@ -62,7 +62,7 @@ function SavedInputsSnapshot({ assumptions }) {
   )
 }
 
-function ScenarioCard({ x, onRecalculate, recalculating, onToggleCompare, compareChecked }) {
+function ScenarioCard({ x, onRecalculate, recalculating, onToggleCompare, compareChecked, onDelete }) {
   return (
     <div className="card" style={{ position: 'relative' }}>
       <label style={{ position: 'absolute', top: 14, right: 14, display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, color: 'var(--text3)' }}>
@@ -91,15 +91,24 @@ function ScenarioCard({ x, onRecalculate, recalculating, onToggleCompare, compar
         <summary style={{ cursor: 'pointer', fontSize: 12, color: 'var(--text2)' }}>View saved inputs</summary>
         <SavedInputsSnapshot assumptions={x.assumptions} />
       </details>
-      <button
-        className="btn-secondary"
-        style={{ marginTop: 10, fontSize: 12, padding: '4px 10px' }}
-        disabled={recalculating === x.id}
-        onClick={() => onRecalculate(x.id)}
-        title="Re-run this scenario's exact retirement age / SS choice against today's household data — the original save is preserved, this creates a new revision"
-      >
-        {recalculating === x.id ? 'Recalculating…' : 'Recalculate with current data'}
-      </button>
+      <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
+        <button
+          className="btn-secondary"
+          style={{ fontSize: 12, padding: '4px 10px' }}
+          disabled={recalculating === x.id}
+          onClick={() => onRecalculate(x.id)}
+          title="Re-run this scenario's exact retirement age / SS choice against today's household data — the original save is preserved, this creates a new revision"
+        >
+          {recalculating === x.id ? 'Recalculating…' : 'Recalculate with current data'}
+        </button>
+        <button
+          className="btn-secondary"
+          style={{ fontSize: 12, padding: '4px 10px', color: 'var(--red)' }}
+          onClick={() => onDelete(x.id, x.name)}
+        >
+          Delete
+        </button>
+      </div>
     </div>
   )
 }
@@ -219,6 +228,15 @@ export default function SavedScenarios() {
     }
   }
 
+  // Added 2026-09-14, at the user's request -- the feature had save/
+  // list/recalculate but no way to delete a saved scenario at all.
+  const deleteScenario = async (id, name) => {
+    if (!window.confirm(`Delete the saved scenario "${name}"? This can't be undone.`)) return
+    await axios.delete(`/api/saved-scenarios/${id}`)
+    setCompareIds(prev => prev.filter(x => x !== id))
+    await load()
+  }
+
   const toggleCompare = id => setCompareIds(prev =>
     prev.includes(id) ? prev.filter(x => x !== id) : prev.length >= 2 ? [prev[1], id] : [...prev, id]
   )
@@ -247,6 +265,7 @@ export default function SavedScenarios() {
             key={x.id} x={x}
             onRecalculate={recalculate} recalculating={recalculating}
             onToggleCompare={toggleCompare} compareChecked={compareIds.includes(x.id)}
+            onDelete={deleteScenario}
           />
         ))}
       </div>
