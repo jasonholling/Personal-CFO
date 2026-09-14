@@ -1618,6 +1618,11 @@ def get_portfolio_allocation():
     holdings = policy_included_holdings(holdings, policy)
     classified = classify_holdings(accounts, holdings)
     current = compute_current_allocation(classified["household"])
+    reconciliations = [
+        {**reconcile_account_holdings(a, [h for h in holdings if h.get("account_id") == a["id"]]),
+         "account_name": a.get("name") or f"Account {a.get('id')}"}
+        for a in accounts
+    ]
     result = {
         "has_holdings": True, "current_allocation": current,
         "hsa_allocation": compute_current_allocation(classified["hsa"]),
@@ -1636,7 +1641,12 @@ def get_portfolio_allocation():
         "unclassified_flags": unclassified_flags(classified["household"]),
     }
     result["health"] = {
-        "reconciled": not any(reconcile_account_holdings(a, [h for h in holdings if h.get("account_id") == a["id"]])["has_warning"] for a in accounts),
+        "reconciled": not any(r["has_warning"] for r in reconciliations),
+        "unreconciled_accounts": [
+            {"account_id": r["account_id"], "account_name": r["account_name"],
+             "difference": r["unreconciled_remainder"]}
+            for r in reconciliations if r["has_warning"]
+        ],
         "unclassified_count": len(result["unclassified_flags"]),
         "concentration_count": len(result["concentration_flags"]),
         "high_fee_count": len(result["expense_ratio_flags"]),

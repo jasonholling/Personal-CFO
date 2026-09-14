@@ -40,6 +40,7 @@ const allocationResponse = {
   has_holdings: true, has_policy: true,
   current_allocation: { total: 543210, by_class: {} },
   unclassified_flags: [], concentration_flags: [],
+  health: { reconciled: true, unreconciled_accounts: [], unclassified_count: 0, concentration_count: 0, high_fee_count: 0 },
   comparison: {
     by_class: {
       us_large_cap: { current_pct: 65, target_pct: 50, deviation_pct: 15, within_drift_band: false },
@@ -106,6 +107,25 @@ describe('PortfolioCoach', () => {
     expect(container.querySelectorAll('.allocation-donut svg').length).toBe(2)
     expect(container.textContent).toContain('Takeaway:')
     expect(container.textContent).toContain('Overweight us large cap by 15%')
+  })
+
+  it('names the account when holdings do not reconcile', async () => {
+    const response = structuredClone(allocationResponse)
+    response.health = {
+      reconciled: false,
+      unreconciled_accounts: [{ account_id: 1, account_name: 'Creative Planning Brokerage', difference: 2803.60 }],
+      unclassified_count: 0, concentration_count: 0, high_fee_count: 0,
+    }
+    axios.get.mockImplementation(url => {
+      if (url === '/api/recommendations') return Promise.resolve({ data: recommendationsResponse })
+      if (url === '/api/portfolio/allocation') return Promise.resolve({ data: response })
+      if (url === '/api/accounts') return Promise.resolve({ data: [{ id: 1, name: 'Creative Planning Brokerage' }] })
+      return Promise.resolve({ data: {} })
+    })
+    await act(async () => root.render(<PortfolioCoach />))
+    await flush()
+    expect(container.textContent).toContain('Creative Planning Brokerage')
+    expect(container.textContent).toContain('$2,804 difference')
   })
 
   it('shows a calm allocation message when every class is within its drift band', async () => {

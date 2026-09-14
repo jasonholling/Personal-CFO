@@ -417,6 +417,13 @@ export default function PortfolioCoach({ onNavigate }) {
           <div style={{ marginTop: 8, color: allocation.health?.reconciled ? 'var(--green)' : 'var(--amber)' }}>
             {allocation.health?.reconciled ? '✓ Account balances reconcile with entered holdings.' : '⚠ At least one account balance does not reconcile with its entered holdings.'}
           </div>
+          {!allocation.health?.reconciled && allocation.health?.unreconciled_accounts?.length > 0 && (
+            <div style={{ color: 'var(--muted)', marginTop: 6 }}>
+              Check: {allocation.health.unreconciled_accounts.map((item, index) => (
+                <span key={item.account_id}>{index > 0 ? ' · ' : ''}<strong>{item.account_name}</strong> ({fmt(item.difference)} difference)</span>
+              ))}
+            </div>
+          )}
           <div style={{ color: 'var(--muted)', marginTop: 5 }}>{allocation.health?.high_fee_count || 0} fee review{allocation.health?.high_fee_count === 1 ? '' : 's'} · {allocation.health?.concentration_count || 0} concentration flag{allocation.health?.concentration_count === 1 ? '' : 's'} · {allocation.health?.unclassified_count || 0} unclassified holding{allocation.health?.unclassified_count === 1 ? '' : 's'}</div>
         </div>
         </>
