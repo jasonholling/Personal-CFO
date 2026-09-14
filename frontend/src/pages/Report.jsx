@@ -5,7 +5,7 @@ import {
   XAxis, YAxis, Tooltip, Legend, ResponsiveContainer
 } from 'recharts'
 import { usePersonNames } from '../hooks/usePersonNames'
-import { isPrivacyMode, MASK_CURRENCY } from '../utils/privacy'
+import { isPrivacyMode, MASK_CURRENCY, MASK_PERCENT } from '../utils/privacy'
 
 const NAVY = '#5C7CE0' // was #1B3A6B — nearly the same luminance as the dark card background, effectively invisible
 
@@ -105,9 +105,10 @@ export default function Report() {
       axios.get('/api/projections/education'),
       axios.get('/api/projections/kids'),
       axios.get('/api/projections/insurance'),
-    ]).then(([nw, ret, edu, kids, ins]) => {
+      axios.get('/api/portfolio/allocation'),
+    ]).then(([nw, ret, edu, kids, ins, allocation]) => {
       const scenario = ret.data.scenarios?.find(s => s.label==='age_60_early')
-      setData({ nw:nw.data, ret:scenario, edu:edu.data.goals, kids:kids.data.kids, ins:ins.data })
+      setData({ nw:nw.data, ret:scenario, edu:edu.data.goals, kids:kids.data.kids, ins:ins.data, allocation:allocation.data })
       setLoading(false)
     }).catch(() => setLoading(false))
   }, [])
@@ -115,7 +116,7 @@ export default function Report() {
   if (loading) return <div className="loading">Generating report...</div>
   if (!data)   return <div className="loading">Error loading report</div>
 
-  const { nw, ret, edu, kids, ins } = data
+  const { nw, ret, edu, kids, ins, allocation } = data
   const jason_ins  = ins?.jason
   const justin_ins = ins?.justin
 
@@ -149,6 +150,11 @@ export default function Report() {
     { label:'Business',            key:'business',    color:'#f97316' },
     { label:'Other',               key:'other',       color:'#8b8fa8' },
   ].filter(c=>(nw[c.key]||0)>0)
+  const allocationRows = Object.entries(allocation?.comparison?.by_class || {})
+    .filter(([, value]) => Number(value.current_pct) || Number(value.target_pct))
+    .map(([assetClass, value], index) => ({ assetClass, ...value, color: ['#6ea8fe', '#56c7b5', '#f4b860', '#b894ee', '#f08080', '#79b8ff', '#c5d86d', '#f4a261', '#9aa7bd'][index % 9] }))
+  const allocationDonut = key => allocationRows.filter(row => Number(row[key]) > 0).map(row => ({ name: row.assetClass, value: Number(row[key]), color: row.color }))
+  const allocationPct = value => isPrivacyMode() ? MASK_PERCENT : `${Number(value || 0).toFixed(1)}%`
 
   return (
     <div>
@@ -199,6 +205,16 @@ export default function Report() {
             <span style={{ color:'var(--red)', fontWeight:600 }}>{fmt(nw?.liabilities)}</span>
           </div>
         </div>
+        {allocation?.has_policy && allocationRows.length > 0 && <div className="card" style={{ marginTop:16 }}>
+          <div className="label" style={{ marginBottom:4 }}>Household investment posture</div>
+          <div style={{ color:'var(--text2)', fontSize:12, marginBottom:10 }}>Included accounts and entered holdings · allocation, not performance</div>
+          <div style={{ display:'flex', alignItems:'center', gap:24, flexWrap:'wrap' }}>
+            <div style={{ display:'flex', gap:8 }}>
+              {[['Current', 'current_pct'], ['Policy target', 'target_pct']].map(([label, key]) => <div key={key} style={{ textAlign:'center' }}><PieChart width={150} height={150}><Pie data={allocationDonut(key)} dataKey="value" innerRadius={42} outerRadius={62} paddingAngle={1} stroke="none">{allocationDonut(key).map(row => <Cell key={row.name} fill={row.color} />)}</Pie><text x="75" y="73" textAnchor="middle" fill="var(--text)" fontSize="12">{label === 'Current' ? 'Now' : 'Target'}</text></PieChart><div style={{ color:'var(--text2)', fontSize:11 }}>{label}</div></div>)}
+            </div>
+            <div style={{ flex:1, minWidth:220 }}><div style={{ fontSize:12, color:'var(--text2)', marginBottom:5 }}>Largest differences</div>{[...allocationRows].sort((a,b) => Math.abs(Number(b.deviation_pct)||0)-Math.abs(Number(a.deviation_pct)||0)).slice(0,3).map(row => <div key={row.assetClass} style={{ display:'flex', gap:8, alignItems:'center', borderTop:'1px solid var(--border)', padding:'7px 0', fontSize:12 }}><span style={{ width:8, height:8, borderRadius:4, background:row.color }} /><span style={{ flex:1, textTransform:'capitalize' }}>{row.assetClass.replace(/_/g,' ')}</span><span>{allocationPct(row.current_pct)} → {allocationPct(row.target_pct)}</span><strong style={{ color:row.within_drift_band?'var(--green)':'var(--amber)' }}>{Number(row.deviation_pct)>0?'+':''}{allocationPct(row.deviation_pct)}</strong></div>)}</div>
+          </div>
+        </div>}
       </div>
 
       {/* ── Financial Independence ── */}
