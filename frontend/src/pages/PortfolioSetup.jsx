@@ -53,6 +53,25 @@ const EMPTY_HOLDING_FORM = {
 
 const INVESTMENT_ACCOUNT_TYPES = new Set(['401k', '403b', 'ira', 'roth_ira', 'hsa', '529', 'custodial', 'taxable', 'brokerage'])
 
+// Display labels for Coach's own portfolio_account_type vocabulary
+// (holdings_engine.PORTFOLIO_ACCOUNT_TYPES -- deliberately separate from
+// accounts.account_type, see that module's docstring) and its legacy
+// account_type fallback. Audit finding, 2026-09-14: this page used to
+// render the raw internal string ("brokerage", "traditional_401k", ...)
+// straight onto the screen -- an internal-vocabulary leak, and
+// inconsistent with Accounts.jsx's own "Taxable Brokerage" label for the
+// same concept. "taxable" and "brokerage" intentionally share one label:
+// the internal distinction (legacy account_type vs. Coach's own enum)
+// is exactly what a household never needs to see.
+const ACCOUNT_TYPE_LABELS = {
+  brokerage: 'Taxable brokerage', taxable: 'Taxable brokerage',
+  traditional_401k: 'Traditional 401(k)', roth_401k: 'Roth 401(k)', '401k': '401(k)', '403b': '403(b)',
+  traditional_ira: 'Traditional IRA', ira: 'Traditional IRA', roth_ira: 'Roth IRA',
+  hsa: 'HSA', '529': '529 Education', custodial: 'Custodial (UGMA/UTMA)',
+  checking: 'Checking', savings: 'Savings', trust: 'Trust', other: 'Other',
+}
+const accountTypeLabel = t => ACCOUNT_TYPE_LABELS[t] || (t ? t.replace(/_/g, ' ') : t)
+
 const optionLabel = option => `${option.ticker ? `${option.ticker} — ` : ''}${option.option_name}`
 
 function holdingFormFromOption(option) {
@@ -130,6 +149,14 @@ function HoldingsTab({ accounts, excludedAccounts, onEditPolicy }) {
         expense_ratio: form.expense_ratio ? parseFloat(form.expense_ratio) / 100 : null,
         cost_basis: form.cost_basis ? parseFloat(form.cost_basis) : null,
         management_mode: form.externallyManaged ? 'externally_managed' : 'self_directed',
+        // Audit finding, 2026-09-14: this form posted management_mode but
+        // never security_type, so a manually-entered target-date/age-based
+        // fund had no way to clear holdings_engine.py's unclassified_flags
+        // check (which requires BOTH management_mode=='externally_managed'
+        // AND security_type=='target_date_fund' to suppress the warning) --
+        // the "Multi-asset" checkbox alone only records per-class exposure
+        // weights, a different field entirely.
+        security_type: form.multiAsset ? 'target_date_fund' : null,
         as_of_date: form.as_of_date || null,
       })
       setForm(EMPTY_HOLDING_FORM)
@@ -376,7 +403,7 @@ function HoldingsTab({ accounts, excludedAccounts, onEditPolicy }) {
           <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8 }}>
             <div>
               <strong>{g.account_name}</strong>
-              <span style={{ color: 'var(--muted)', fontSize: 12, marginLeft: 8 }}>{g.portfolio_account_type || g.account_type}</span>
+              <span style={{ color: 'var(--muted)', fontSize: 12, marginLeft: 8 }}>{accountTypeLabel(g.portfolio_account_type || g.account_type)}</span>
               {g.allocation_blocked && <span style={{ color: 'var(--red)', fontSize: 12, marginLeft: 8 }}>⚠ blocked — unresolved account type</span>}
             </div>
             {g.has_warning && (
@@ -737,7 +764,13 @@ function OptionsTab({ accounts, excludedAccounts, onEditPolicy }) {
 
           <div className="card" style={{ marginBottom: 16 }}>
             {options.length === 0 && <div style={{ color: 'var(--muted)', fontSize: 13 }}>{menuMode === 'open'
-              ? 'No approved shortlist recorded yet. Coach can still identify an asset class; add only funds you want it to name specifically.'
+              // Audit finding, 2026-09-14: this used to imply Coach could
+              // still do something useful right here without a shortlist --
+              // true for its OWN recommendations elsewhere, but "Compare
+              // eligible options" below specifically needs at least one
+              // candidate fund to compare (it has nothing to rank against
+              // otherwise), so it stays disabled regardless of menu mode.
+              ? 'No approved shortlist recorded yet. Coach can still identify an asset class for this account elsewhere (Portfolio Coach); add funds here only if you want "Compare eligible options" below to rank them for you.'
               : 'No investment options recorded for this account yet — Coach will only recommend options you record here.'}</div>}
             {options.map(o => (
               <div key={o.id} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, padding: '6px 0', borderTop: '1px solid var(--border)' }}>

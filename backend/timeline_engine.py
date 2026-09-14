@@ -19,6 +19,7 @@ pick" reporting fields) has always varied by consumer on purpose and
 isn't a timeline question.
 """
 
+import datetime
 from dataclasses import dataclass
 from typing import List, Optional
 
@@ -29,7 +30,21 @@ from typing import List, Optional
 # CURRENT_YEAR "from projection_engine" unchanged elsewhere; Python
 # re-exports it there via projection_engine's own `from timeline_engine
 # import CURRENT_YEAR`, so no other call site needed to change.
-CURRENT_YEAR = 2026
+#
+# The actual system year (audit finding, 2026-09-14, P1) -- this used to
+# be hardcoded to the literal 2026, while rmd_start_age's birth-year
+# approximation and every main.py display date already used the real
+# system clock. Harmless today (2026 IS the real current year), but
+# every calendar-dated life event, retirement-year label, and asset-sale
+# timing calculation would silently drift wrong the moment the real
+# calendar rolls to 2027, with nothing in the app surfacing the mismatch.
+# Evaluated once at import time (module-level, matching every existing
+# consumer's assumption that this is a plain constant, not a per-call
+# clock read) -- a long-running process started before a new year and
+# still running after it would need a restart to pick up the change,
+# same tradeoff every other module-level constant in this app already
+# has, and no worse than the previous hardcoded value.
+CURRENT_YEAR = datetime.date.today().year
 
 
 @dataclass(frozen=True)

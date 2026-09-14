@@ -67,6 +67,18 @@ class TestRunRmdPlanning:
         assert result["first_rmd_age"] == 75
         assert result["last_rmd_age"] >= 75
 
+    def test_kid_owned_401k_excluded_from_pretax_balance(self, sample_inputs):
+        """Audit finding, 2026-09-14, P1: the main projection already
+        filters is_kid_owner for every bucket, but this tool's own
+        separate pretax_start sum for 401k didn't -- a child-owned 401k
+        (unusual, but not disallowed by the account model) inflated
+        pretax_start into a phantom RMD recommendation. A kid-owned-only
+        401k must report no pretax balance at all, same as an account
+        list with no adult pretax money."""
+        accounts = [{"account_type": "401k", "balance": 500000, "owner": "kid_1"}]
+        result = run_rmd_planning(sample_inputs, accounts)
+        assert result == {"has_pretax_balance": False}
+
     def test_bracket_jump_detection_with_large_balance(self, sample_inputs):
         accounts = [{"account_type": "401k", "balance": 5_000_000, "owner": "jason"}]
         inputs = {**sample_inputs, "pension_65": 0, "jason_social_security": 0, "justin_social_security": 0}

@@ -140,3 +140,27 @@ class TestBuildCumulativeInflation:
         cum = build_cumulative_inflation(0.03, retire_yrs=2, inflation_mults=[2.0, 1.0])
         assert cum[1] == pytest.approx(1.06)          # one year at 6%
         assert cum[2] == pytest.approx(1.06 * 1.03)   # then one year at 3%
+
+
+class TestCurrentYearTracksTheRealSystemClock:
+    """Audit finding, 2026-09-14, P1: CURRENT_YEAR used to be a bare
+    literal (2026) instead of the real system year, while
+    rmd_start_age's birth-year approximation and every main.py display
+    date already used datetime.now()/date.today(). Harmless only because
+    2026 IS the real current year today -- every calendar-dated life
+    event, retirement-year label, and asset-sale timing calculation
+    would have silently drifted wrong the moment the real calendar
+    rolled to 2027, with nothing surfacing the mismatch."""
+
+    def test_matches_the_real_system_year(self):
+        import datetime
+        assert CURRENT_YEAR == datetime.date.today().year
+
+    def test_is_not_a_hardcoded_literal(self):
+        """Guards against a future "simplify this back to a constant"
+        edit -- reads timeline_engine's own source and confirms the
+        assignment is a call, not a bare integer literal."""
+        import inspect
+        import timeline_engine
+        source = inspect.getsource(timeline_engine)
+        assert "CURRENT_YEAR = datetime.date.today().year" in source

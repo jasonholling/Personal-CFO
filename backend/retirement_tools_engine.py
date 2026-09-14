@@ -69,7 +69,12 @@ def run_rmd_planning(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_t
     pre_ret  = inputs["expected_return_pre_retirement"]
     post_ret = inputs["expected_return_post_retirement"]
 
-    total_401k = sum(a["balance"] for a in accounts if a.get("account_type") == "401k")
+    # Kid-owned 401(k) excluded (audit finding, 2026-09-14, P1) -- the main
+    # projection already filters is_kid_owner for every bucket; this tool's
+    # own separate balance-to-RMD-age projection didn't, so a child-owned
+    # 401(k) (unusual, but not disallowed by the account model) could
+    # inflate pretax_start into a phantom RMD recommendation.
+    total_401k = sum(a["balance"] for a in accounts if a.get("account_type") == "401k" and not is_kid_owner(a.get("owner")))
     pretax_pct = inputs.get("pretax_401k_pct", 0.75)
     pretax_start = total_401k * pretax_pct + sum(
         a["balance"] for a in accounts
