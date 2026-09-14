@@ -403,18 +403,27 @@ def _constraint_for_account(policy: Optional[Dict], account_id: int) -> Dict:
     return {}
 
 
-def option_allowed_by_policy(option: Dict, account_id: int, asset_class: str,
-                             policy: Optional[Dict], amount: Optional[float] = None) -> bool:
-    """Apply the policy and option limits that can be evaluated without
-    inventing account eligibility or a post-trade balance."""
+def account_allows_asset_class(account_id: int, asset_class: str, policy: Optional[Dict]) -> bool:
+    """Whether the saved policy permits this asset class in an account.
+
+    This intentionally does not infer that an account *offers* the class;
+    callers that select a fund must also check its recorded menu. Keeping the
+    policy half of that decision here lets contribution, rebalance, and
+    tax-location review flows apply the same exclusions and account rules.
+    """
     if account_id in set((policy or {}).get("excluded_accounts") or []):
         return False
     constraint = _constraint_for_account(policy, account_id)
     allowed = constraint.get("allowed_asset_classes")
     excluded = constraint.get("excluded_asset_classes") or []
-    if allowed is not None and asset_class not in allowed:
-        return False
-    if asset_class in excluded:
+    return (allowed is None or asset_class in allowed) and asset_class not in excluded
+
+
+def option_allowed_by_policy(option: Dict, account_id: int, asset_class: str,
+                             policy: Optional[Dict], amount: Optional[float] = None) -> bool:
+    """Apply the policy and option limits that can be evaluated without
+    inventing account eligibility or a post-trade balance."""
+    if not account_allows_asset_class(account_id, asset_class, policy):
         return False
     if amount is not None and option.get("minimum_investment") is not None and amount < option["minimum_investment"]:
         return False

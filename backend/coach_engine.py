@@ -24,6 +24,7 @@ from holdings_engine import (
     evaluate_tax_lots, is_lot_loss_candidate, detect_wash_sale_conflicts,
     DEFAULT_TAX_LOT_LOSS_REVIEW_THRESHOLD_PCT,
     PRETAX_RMD_TYPES, ROTH_TYPES, HSA_TYPES, resolve_portfolio_account_type,
+    account_allows_asset_class,
 )
 
 # ── Decision lifecycle ────────────────────────────────────────────────────
@@ -430,7 +431,8 @@ def new_money_recommendations(contribution_actions: List[Dict]) -> List[Dict]:
 # ── Asset location review ────────────────────────────────────────────────
 
 def asset_location_recommendations(classified: Dict, options_by_account: Optional[Dict[int, List[Dict]]] = None,
-                                     accounts: Optional[List[Dict]] = None) -> List[Dict]:
+                                     accounts: Optional[List[Dict]] = None,
+                                     policy: Optional[Dict] = None) -> List[Dict]:
     """Return review-only tax-location opportunities from recorded facts.
 
     The calculation uses the same resolved account taxonomy as the rest of
@@ -461,8 +463,6 @@ def asset_location_recommendations(classified: Dict, options_by_account: Optiona
         account for account in account_by_id.values()
         if resolve_portfolio_account_type(account) in tax_sheltered_types
     ]
-    if not sheltered_accounts:
-        return []
 
     cards = []
     for holding in classified.get("household", []):
@@ -472,11 +472,19 @@ def asset_location_recommendations(classified: Dict, options_by_account: Optiona
         if account_type not in TAXABLE_GAIN_TYPES or asset_class not in tax_sensitive_classes:
             continue
 
+        eligible_destinations = [
+            candidate for candidate in sheltered_accounts
+            if account_allows_asset_class(candidate.get("id"), asset_class, policy)
+        ]
+        if not eligible_destinations:
+            continue
+
         destinations = []
-        for candidate in sheltered_accounts:
+        for candidate in eligible_destinations:
             matching_options = [
                 option for option in options_by_account.get(candidate.get("id"), [])
                 if option.get("asset_class") == asset_class
+                and account_allows_asset_class(candidate.get("id"), asset_class, policy)
                 and (option.get("available_for_new_contributions") or option.get("available_for_exchange"))
             ]
             destinations.append({

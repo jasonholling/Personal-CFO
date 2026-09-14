@@ -7869,3 +7869,10 @@ limit, fee, or withdrawal-timing model is implied.
 pretax, and Roth accounts can be possible destinations, but a holding already
 in one of those accounts never produces a location card merely because of its
 asset class.
+
+Tax-location destination accounts also obey the saved investment policy.
+An excluded account, or an account whose constraint excludes the relevant asset
+class, is not presented as a destination. The same pure
+`account_allows_asset_class()` policy check is used by contribution routing,
+rebalance routing, and location review so an account cannot appear permissible
+in one Coach workflow and forbidden in another.

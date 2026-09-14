@@ -106,6 +106,18 @@ class TestRecommendationsGenerate:
         assert "future purchases" in card["payload"]["action_text"]
         assert "do not sell solely" in card["payload"]["proposed_change"]
 
+    def test_tax_location_does_not_offer_a_policy_excluded_ira(self, client):
+        brokerage = _create_account(client, "taxable", "Brokerage", 20000)
+        ira = _create_account(client, "ira", "Excluded IRA", 0)
+        client.post("/api/holdings", json={
+            "account_id": brokerage["id"], "security_name": "Bond Fund", "market_value": 20000,
+            "asset_class": "us_bonds",
+        })
+        _save_policy(client, excluded_accounts=[ira["id"]])
+        body = client.get("/api/recommendations").json()
+        assert not any(c["payload"]["recommendation_key"].startswith("asset_location_review:")
+                       for c in body["recommendations"])
+
     def test_no_policy_yields_establish_policy_card(self, client):
         _create_account(client)
         client.post("/api/holdings", json={

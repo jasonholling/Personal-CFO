@@ -1947,7 +1947,7 @@ def _generate_candidate_cards(accounts, holdings, policy, pending_contribution: 
     household_cash = current["by_class"].get("cash")
     cards += ce.concentration_and_liquidity_recommendations(classified["household"], policy, household_cash)
     cards += ce.high_cost_or_redundant_recommendations(classified["household"])
-    cards += ce.asset_location_recommendations(classified, options_by_account, accounts)
+    cards += ce.asset_location_recommendations(classified, options_by_account, accounts, policy)
     lots_by_holding_id = lots_by_holding_id or {}
     holding_ids_with_lots = {h.get("id") for h in classified["household"] if lots_by_holding_id.get(h.get("id"))}
     cards += ce.tax_lot_loss_review_recommendations(

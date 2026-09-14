@@ -175,6 +175,18 @@ class TestAssetLocationRecommendations:
         classified = classify_holdings([taxable], [holding(1, 1, market_value=20000, asset_class="us_bonds")])
         assert asset_location_recommendations(classified, accounts=[taxable]) == []
 
+    def test_excluded_or_asset_class_constrained_destination_is_not_offered(self):
+        taxable = account(1, "taxable")
+        ira = account(2, "ira")
+        classified = classify_holdings([taxable, ira], [holding(1, 1, market_value=20000, asset_class="us_bonds")])
+        assert asset_location_recommendations(
+            classified, accounts=[taxable, ira],
+            policy={"account_constraints": [{"account_id": 2, "excluded_asset_classes": ["us_bonds"]}]},
+        ) == []
+        assert asset_location_recommendations(
+            classified, accounts=[taxable, ira], policy={"excluded_accounts": [2]},
+        ) == []
+
     def test_taxable_stock_and_tax_deferred_bonds_do_not_raise_a_location_card(self):
         classified = classify_holdings([account(1, "taxable"), account(2, "ira")], [
             holding(1, 1, market_value=20000, asset_class="us_large_cap"),
