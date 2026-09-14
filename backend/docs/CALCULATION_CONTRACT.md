@@ -7164,10 +7164,16 @@ the contribution amount changes, and persists a dated defer decision.
 Rendered-DOM tests exercise each of these workflows, including the
 cash-only account-exclusion checkbox and privacy masking.
 
-`maximum_allocation_pct` is captured and displayed but is not used as a
-trade cap yet: an investment-option row is not linked to the currently
-owned holding balance, so enforcing it would require guessing the
-post-trade option balance. The engine refuses to invent that link.
+Recorded option minimum and maximum allocation percentages are enforced
+when Coach proposes a complete account option mix. The shared option-mix
+solver first selects the lowest-cost eligible implementation of the target,
+then projects that mix onto the recorded bounds. If the bounds cannot add to
+100% (for example, all available options are capped below a complete mix),
+the result is explicitly marked infeasible rather than presented as a valid
+allocation. Standalone contribution and rebalance actions still do not infer a
+post-trade option percentage when the current holding-to-option mapping is
+unknown; they respect account/class policy rules and minimum investment
+amounts, but do not fabricate that unavailable balance data.
 
 ### Planning comparison and Coach context (findings 9 and 10)
 

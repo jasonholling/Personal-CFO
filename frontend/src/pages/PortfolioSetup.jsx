@@ -746,6 +746,7 @@ function OptionsTab({ accounts, excludedAccounts, onEditPolicy }) {
                   {!o.available_for_new_contributions && <span style={{ color: 'var(--muted)' }}> · closed to new money</span>}
                   {o.expense_ratio != null && <span> · {(o.expense_ratio * 100).toFixed(2)}% fee</span>}
                   {o.minimum_investment != null && <span> · {fmt(o.minimum_investment)} minimum</span>}
+                  {o.minimum_allocation_pct != null && <span> · min {o.minimum_allocation_pct}%</span>}
                   {o.maximum_allocation_pct != null && <span> · max {o.maximum_allocation_pct}%</span>}
                   {o.trading_fee != null && <span> · {fmt(o.trading_fee)} trade fee</span>}
                   {o.employer_match_eligible === true && <span> · match eligible</span>}
