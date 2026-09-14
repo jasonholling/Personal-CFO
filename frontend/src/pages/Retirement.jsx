@@ -227,6 +227,15 @@ export default function Retirement({ onNavigate }) {
     ['Modeled through age', `${s.retirement_end_age}`],
     ['State tax rate on distributions', `${((s.state_income_tax_rate || 0) * 100).toFixed(1)}%`],
   ]
+  // Hold Back Reserved Accounts (audit finding, 2026-09-14,
+  // CALCULATION_CONTRACT.md section 84): deliberately NOT wired into this
+  // endpoint (a saved scenario must echo the household's real, complete
+  // account list), unlike Monte Carlo/Stress Tests which do exclude
+  // flagged accounts. Surface that gap explicitly rather than let the two
+  // pages silently disagree with no explanation.
+  const holdBackAccounts = (data.resolved_assumptions?.accounts || []).filter(a => a.held_back_from_withdrawal)
+  const holdBackActive = data.resolved_assumptions?.planning_inputs?.withdrawal_strategy === 'hold_back_reserved'
+    && holdBackAccounts.length > 0
 
   return (
     <div>
@@ -243,6 +252,9 @@ export default function Retirement({ onNavigate }) {
         flows={explainerFlows}
         notes={[
           "Monte Carlo, Stress Test, and this page can show different funded percentages for what looks like the same household — each runs its own return sequence/assumptions set, not a shared single number. See each page's own methodology if two figures disagree.",
+          ...(holdBackActive ? [
+            `Settings' Withdrawal Order is "Hold Back Reserved Accounts", but this page still spends from ${holdBackAccounts.length === 1 ? holdBackAccounts[0].name : `all ${holdBackAccounts.length} accounts you've flagged as held back`} — only Monte Carlo and Stress Tests actually exclude reserved accounts from withdrawals. Expect a more optimistic funded number here than on those pages.`,
+          ] : []),
         ]}
       />
 

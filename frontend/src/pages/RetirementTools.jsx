@@ -12,7 +12,7 @@ const RED    = '#f87171'
 const ACCENT = '#4f9cf9'
 
 export default function RetirementTools() {
-  const { person1Name } = usePersonNames()
+  const { person1Name, person2Name } = usePersonNames()
   const [rmd, setRmd]           = useState(null)
   const [loading, setLoading]   = useState(true)
 
@@ -50,6 +50,20 @@ export default function RetirementTools() {
       const jasonAge = inputsRes?.data?.jason_age
       if (jasonAge) setLump(l => ({ ...l, current_age: jasonAge.toString() }))
       if (jasonAge) setQcd(q => ({ ...q, age: jasonAge.toString() }))
+
+      // Pre-fill the buyout card's ages from Settings (audit finding,
+      // 2026-09-14) -- both fields stay editable, this just stops the
+      // comparison from silently defaulting to 60/60 for a household
+      // that's planned something else. justin_ret_age of 0 means "not
+      // independently set" (db.py convention), so fall back to Jason's
+      // own age the same way the backend's own retirement-age fields do.
+      const savedJasonRetAge  = inputsRes?.data?.retirement_age
+      const savedJustinRetAge = inputsRes?.data?.justin_ret_age
+      setBuyout(b => ({
+        ...b,
+        jason_ret_age: savedJasonRetAge ? savedJasonRetAge.toString() : b.jason_ret_age,
+        justin_ret_age: (savedJustinRetAge || savedJasonRetAge) ? (savedJustinRetAge || savedJasonRetAge).toString() : b.justin_ret_age,
+      }))
 
       const existingIraBalance = accountsRes.data
         .filter(a => a.account_type === 'ira' && !a.owner?.startsWith('kid_'))
@@ -256,7 +270,7 @@ export default function RetirementTools() {
           is an <em>estimate</em> — an actuarial present value of your own modeled pension — not a real offer
           from your employer.
         </div>
-        <div className="grid-3" style={{ marginBottom:12 }}>
+        <div className="grid-4" style={{ marginBottom:12 }}>
           <div>
             <div className="label" style={{ marginBottom:6 }}>Buyout Offered At Age</div>
             <input type="number" value={buyout.buyout_age} onChange={e => setBuyout({ ...buyout, buyout_age:e.target.value })} placeholder="58" />
@@ -268,6 +282,16 @@ export default function RetirementTools() {
           <div>
             <div className="label" style={{ marginBottom:6 }}>{person1Name}'s Retirement Age</div>
             <input type="number" value={buyout.jason_ret_age} onChange={e => setBuyout({ ...buyout, jason_ret_age:e.target.value })} placeholder="60" />
+          </div>
+          <div>
+            {/* Was hardcoded to 60 with no way to change it (audit finding,
+                2026-09-14) -- silently ran the buyout comparison against the
+                wrong second-earner retirement timeline for any household
+                whose real plan isn't Justin-retires-at-60. Now an explicit,
+                editable field pre-filled from Settings, same convention
+                RothConversion.jsx's two-age mode already uses. */}
+            <div className="label" style={{ marginBottom:6 }}>{person2Name}'s Retirement Age</div>
+            <input type="number" value={buyout.justin_ret_age} onChange={e => setBuyout({ ...buyout, justin_ret_age:e.target.value })} placeholder="60" />
           </div>
         </div>
         <button className="btn-primary" onClick={runBuyoutImpact} disabled={buyoutLoading}>

@@ -142,7 +142,7 @@ export default function App() {
         return Promise.reject(error)
       }
     )
-    return () => axios.interceptors.eject(id)
+    return () => axios.interceptors.response.eject(id)
   }, [authState])
 
   // First-run guidance: auto-show once the app is actually usable (past
