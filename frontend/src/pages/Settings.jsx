@@ -143,10 +143,15 @@ const TextInput = ({ value, onChange, style={} }) => (
 // household actually touches these: day-to-day identity/income first,
 // then the assumptions behind projections, then family/protection, then
 // the stuff edited rarely (asset sales, healthcare cost assumptions).
+// Split further same day: "Family & Insurance" was the single densest tab
+// (24 rows across 8 sections, two genuinely different concerns bundled
+// together) -- kids' own money vs. the household's insurance coverage --
+// so it's now two smaller tabs instead of one large one.
 const SETTINGS_TABS = [
   { id:'people',     label:'People & Income' },
   { id:'planning',   label:'Spending & Goals' },
-  { id:'family',     label:'Family & Insurance' },
+  { id:'family',     label:'Family' },
+  { id:'insurance',  label:'Insurance' },
   { id:'advanced',   label:'Advanced' },
 ]
 
@@ -437,7 +442,9 @@ export default function Settings() {
         </div>
         <Row label="Bridge job income" hint="Until age 65"><NumInput value={form.bridge_income_55 ?? 0} onChange={v => set('bridge_income_55', v)} prefix="$" suffix="/yr" /></Row>
       </Section>
+      </>}
 
+      {tab === 'insurance' && <>
       <Section title={`${p1} — Life Insurance`}>
         <p style={{ fontSize:12, color:'var(--text3)', marginTop:-8, marginBottom:12 }}>
           Detailed per-policy tracking (insurer, policy #, premium) lives on the Risk Management page. These totals feed the insurance-gap calculations here.
