@@ -39,7 +39,7 @@ const Row = ({ label, value, sub, highlight }) => (
   </div>
 )
 
-export default function Insurance({ onNavigate }) {
+export default function Insurance({ onNavigate, hideTitle = false }) {
   const { person1Name, person2Name } = usePersonNames()
   const [data, setData]     = useState(null)
   const [loading, setLoading] = useState(true)
@@ -54,7 +54,7 @@ export default function Insurance({ onNavigate }) {
   if (loading) return <div className="loading">Analyzing coverage...</div>
   if (error)   return (
     <div>
-      <h1 className="section-title">Insurance Analysis</h1>
+      {!hideTitle && <h1 className="section-title">Insurance Analysis</h1>}
       <div className="card" style={{ marginTop:24, textAlign:'center', padding:'48px 24px' }}>
         <div style={{ color:'var(--amber)', marginBottom:12 }}>⚠ {error}</div>
         <button className="btn-primary" onClick={() => onNavigate('settings')}>Set Up Planning Inputs →</button>
@@ -67,7 +67,7 @@ export default function Insurance({ onNavigate }) {
   return (
     <div>
       <div style={{ marginBottom:32 }}>
-        <h1 className="section-title">Insurance Analysis</h1>
+        {!hideTitle && <h1 className="section-title">Insurance Analysis</h1>}
         <p className="section-sub">Coverage gaps and needs across life, property, disability, and LTC</p>
       </div>
 

@@ -17,7 +17,7 @@ const namesList = (goals) => {
   return `${names.slice(0, -1).join(', ')} & ${names[names.length - 1]}`
 }
 
-export default function Education({ onNavigate }) {
+export default function Education({ onNavigate, hideTitle = false }) {
   const [data, setData] = useState(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
@@ -33,7 +33,7 @@ export default function Education({ onNavigate }) {
   if (loading) return <div className="loading">Calculating 529 projections...</div>
   if (error) return (
     <div>
-      <h1 className="section-title">Education Planning</h1>
+      {!hideTitle && <h1 className="section-title">Education Planning</h1>}
       <div className="card" style={{ marginTop: 24, textAlign: 'center', padding: '48px 24px' }}>
         <div style={{ color: 'var(--amber)', marginBottom: 12 }}>⚠ {error}</div>
         <button className="btn-primary" onClick={() => onNavigate('settings')}>Set Up Planning Inputs →</button>
@@ -47,7 +47,7 @@ export default function Education({ onNavigate }) {
     <div>
       <div style={{ display:'flex', justifyContent:'space-between', alignItems:'flex-start', marginBottom: 32, flexWrap:'wrap', gap:16 }}>
         <div>
-          <h1 className="section-title">Education Planning</h1>
+          {!hideTitle && <h1 className="section-title">Education Planning</h1>}
           <p className="section-sub">529 projections for {namesList(goals)} — assumes 7% growth, 4% college inflation</p>
         </div>
         <label style={{ display:'flex', alignItems:'center', gap:8, fontSize:12, color:'var(--text2)', cursor:'pointer', whiteSpace:'nowrap' }}>

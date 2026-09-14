@@ -174,7 +174,7 @@ function KidView({ kid }) {
   )
 }
 
-export default function Kids() {
+export default function Kids({ hideTitle = false }) {
   const [data, setData]       = useState(null)
   const [loading, setLoading] = useState(true)
   const [activeKid, setActiveKid] = useState(0)
@@ -196,7 +196,7 @@ export default function Kids() {
   // Quicken import.
   if (!kids.length) return (
     <div>
-      <h1 className="section-title">Kids</h1>
+      {!hideTitle && <h1 className="section-title">Kids</h1>}
       <div style={{ padding:'20px', background:'rgba(251,191,36,0.08)', border:'1px solid rgba(251,191,36,0.2)', borderRadius:8, color:'var(--amber)', fontSize:13 }}>
         ⚠ No kids added yet — add one in Settings to see 529/Roth/custodial projections here.
       </div>
@@ -208,7 +208,7 @@ export default function Kids() {
   return (
     <div>
       <div style={{ marginBottom:28 }}>
-        <h1 className="section-title">Kids</h1>
+        {!hideTitle && <h1 className="section-title">Kids</h1>}
         <p className="section-sub">All accounts projected at 7% — excluded from your retirement numbers</p>
       </div>
       {!hasAccounts && (

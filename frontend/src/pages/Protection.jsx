@@ -49,10 +49,10 @@ export default function Protection({ onNavigate }) {
         ))}
       </div>
 
-      {tab === 'scorecard'  && <ProtectionScorecard onNavigate={onNavigate} />}
-      {tab === 'estate'     && <Estate />}
-      {tab === 'insurance'  && <Insurance onNavigate={onNavigate} />}
-      {tab === 'risk'       && <Risk />}
+      {tab === 'scorecard'  && <ProtectionScorecard onNavigate={onNavigate} hideTitle />}
+      {tab === 'estate'     && <Estate hideTitle />}
+      {tab === 'insurance'  && <Insurance onNavigate={onNavigate} hideTitle />}
+      {tab === 'risk'       && <Risk hideTitle />}
     </div>
   )
 }

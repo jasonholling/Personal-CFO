@@ -8,7 +8,7 @@ import { maskDigitsInText } from '../utils/privacy'
 const EMPTY_POLICY  = { who: '', policy_type: '', benefit: '', premium: '', notes: '' }
 const EMPTY_PROPERTY = { item: '', coverage: '', renewal: '' }
 
-export default function Risk() {
+export default function Risk({ hideTitle = false }) {
   const { person1Name, person2Name } = usePersonNames()
   const { kids } = useKids()
   const [policies, setPolicies]   = useState([])
@@ -41,7 +41,7 @@ export default function Risk() {
   return (
     <div>
       <div style={{ marginBottom: 32 }}>
-        <h1 className="section-title">Risk Management</h1>
+        {!hideTitle && <h1 className="section-title">Risk Management</h1>}
         <p className="section-sub">Life, disability, LTC, property, and umbrella coverage</p>
       </div>
 

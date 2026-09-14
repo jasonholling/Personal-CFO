@@ -45,9 +45,9 @@ export default function Family({ onNavigate }) {
         ))}
       </div>
 
-      {tab === 'education' && <Education onNavigate={onNavigate} />}
-      {tab === 'kids'      && <Kids />}
-      {tab === 'goals'     && <GoalsFunding onNavigate={onNavigate} />}
+      {tab === 'education' && <Education onNavigate={onNavigate} hideTitle />}
+      {tab === 'kids'      && <Kids hideTitle />}
+      {tab === 'goals'     && <GoalsFunding onNavigate={onNavigate} hideTitle />}
     </div>
   )
 }

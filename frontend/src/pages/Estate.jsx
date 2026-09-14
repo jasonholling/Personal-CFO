@@ -57,7 +57,7 @@ const StatusBadge = ({ status }) => {
   return <span style={{ fontSize:11, fontWeight:600, color:s.color }}>● {s.label}</span>
 }
 
-export default function Estate() {
+export default function Estate({ hideTitle = false }) {
   const personNames = usePersonNames()
   const { kids, loading: kidsLoading } = useKids()
   const [docs,  setDocs]  = useState(null)
@@ -150,7 +150,7 @@ export default function Estate() {
     <div>
       <div style={{ display:'flex', justifyContent:'space-between', alignItems:'flex-start', marginBottom:28 }}>
         <div>
-          <h1 className="section-title">Estate Planning</h1>
+          {!hideTitle && <h1 className="section-title">Estate Planning</h1>}
           <p className="section-sub">Documents, beneficiaries, and action items</p>
         </div>
         <button className="btn-primary" onClick={save} disabled={saving}>{saved ? '✓ Saved' : saving ? 'Saving…' : 'Save Changes'}</button>

@@ -18,7 +18,7 @@ function GoalCard({ eyebrow, title, status, detail, amount, progress, color, act
   </div>
 }
 
-export default function GoalsFunding({ onNavigate }) {
+export default function GoalsFunding({ onNavigate, hideTitle = false }) {
   const [data, setData] = useState(null)
   const [error, setError] = useState('')
   useEffect(() => {
@@ -27,7 +27,7 @@ export default function GoalsFunding({ onNavigate }) {
     ]).then(([briefing, retirement, education, debt]) => setData({ briefing:briefing.data, retirement:retirement.data, education:education.data, debt:debt.data }))
       .catch(() => setError('Complete your planning inputs to see the funding map.'))
   }, [])
-  if (error) return <div><h1 className="section-title">Goals & Funding</h1><div className="card" style={{ marginTop:24, textAlign:'center', padding:40 }}><div style={{ color:'var(--amber)', marginBottom:14 }}>⚠ {error}</div><button className="btn-primary" onClick={() => onNavigate('settings')}>Set planning inputs →</button></div></div>
+  if (error) return <div>{!hideTitle && <h1 className="section-title">Goals & Funding</h1>}<div className="card" style={{ marginTop:24, textAlign:'center', padding:40 }}><div style={{ color:'var(--amber)', marginBottom:14 }}>⚠ {error}</div><button className="btn-primary" onClick={() => onNavigate('settings')}>Set planning inputs →</button></div></div>
   if (!data) return <div className="loading">Building goal-funding map...</div>
 
   const emergency = data.briefing.emergency_fund || {}
@@ -39,7 +39,7 @@ export default function GoalsFunding({ onNavigate }) {
   const retirementColor = age60?.on_track ? 'var(--green)' : 'var(--amber)'
 
   return <div>
-    <div style={{ marginBottom:28 }}><h1 className="section-title">Goals & Funding</h1><p className="section-sub">See the household’s funding priorities together before assigning monthly surplus.</p></div>
+    <div style={{ marginBottom:28 }}>{!hideTitle && <h1 className="section-title">Goals & Funding</h1>}<p className="section-sub">See the household’s funding priorities together before assigning monthly surplus.</p></div>
     <div className="card" style={{ marginBottom:24, background:'var(--bg2)' }}>
       <div style={{ display:'flex', justifyContent:'space-between', gap:16, flexWrap:'wrap', alignItems:'center' }}>
         <div><div className="label" style={{ marginBottom:5 }}>MONTHLY CAPACITY</div><div style={{ fontSize:15, fontWeight:600 }}>{cashFlow.has_data ? (cashFlow.monthly_surplus >= 0 ? 'Surplus available to direct' : 'Shortfall to stabilize first') : 'Cash flow not set up yet'}</div></div>
