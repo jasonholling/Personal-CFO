@@ -451,3 +451,74 @@ class TestSingleAgeModeUnaffected:
         r = run_roth_conversion_analysis(sample_inputs, sample_accounts, ret_age=60, ss_timing="early")
         assert "mode" not in r
         assert "jason_ret_age" not in r
+
+
+class TestCustomAnnualConversion:
+    """custom_annual_conversion (2026-09-13, CALCULATION_CONTRACT.md
+    section 82) -- an explicit per-year target that overrides the auto
+    "fill the 22% bracket" target, still subject to the same
+    affordability guards."""
+
+    def test_custom_amount_overrides_bracket_fill_target(self):
+        """$300,000 pretax, plenty of taxable to fund the tax bill, no
+        other income (base_taxable_income = -32,200, the unused
+        deduction) -- auto fills the full 211,400-(-32,200)=$243,600
+        room up to the top of the 22% bracket (well under the $300k
+        balance). A custom $50,000/yr target must land at exactly
+        $50,000, not the bracket figure."""
+        inputs = base_inputs()
+        auto = run_roth_conversion_analysis(inputs, PRETAX(300000) + TAXABLE(500000), jason_ret_age=71, justin_ret_age=71)
+        custom = run_roth_conversion_analysis(inputs, PRETAX(300000) + TAXABLE(500000), jason_ret_age=71, justin_ret_age=71,
+                                               custom_annual_conversion=50000)
+        assert auto["schedule"][0]["optimal_conversion"] == pytest.approx(243600)
+        assert custom["schedule"][0]["optimal_conversion"] == pytest.approx(50000)
+        assert custom["schedule"][0]["room_in_22_bracket"] == pytest.approx(243600)  # still reported, just not used as the target
+
+    def test_custom_amount_still_capped_by_available_pretax_balance(self):
+        """A custom target larger than what's actually left in pretax
+        must still cap at the balance -- never invents money that isn't
+        there, same guarantee the auto target always had."""
+        inputs = base_inputs()
+        r = run_roth_conversion_analysis(inputs, PRETAX(30000) + TAXABLE(500000), jason_ret_age=71, justin_ret_age=71,
+                                          custom_annual_conversion=100000)
+        assert r["schedule"][0]["optimal_conversion"] == pytest.approx(30000)
+
+    def test_custom_amount_still_capped_by_tax_affordability(self):
+        """A custom target whose tax bill can't be funded from taxable
+        must still cap at what's actually affordable -- same guarantee
+        the auto target always had (see TestAffordabilityCapIncludesUnusedDeductionRoom
+        above for the underlying formula this reuses unchanged)."""
+        # state tax on top of the unused-deduction free zone (same setup
+        # as TestAffordabilityCapIncludesUnusedDeductionRoom above) is
+        # what makes $0-taxable-cash genuinely mean $0-affordable --
+        # without it, the first $32,200 is federally free and would
+        # convert even with no cash on hand, per that class's own fix.
+        inputs = base_inputs(retirement_income_today_dollars=0, state_income_tax_rate=0.05)
+        r = run_roth_conversion_analysis(inputs, PRETAX(1000000) + TAXABLE(0), jason_ret_age=71, justin_ret_age=71,
+                                          custom_annual_conversion=500000)
+        assert r["schedule"][0]["optimal_conversion"] == 0  # $0 taxable cash -> $0 affordable, same as the auto-target case
+        assert r["schedule"][0]["taxable_after"] == 0
+
+    def test_none_is_a_complete_no_op(self):
+        """Zero-regression guard: custom_annual_conversion=None (the
+        default) must be byte-identical to never passing the parameter
+        at all -- both two-age and single-age."""
+        inputs = base_inputs()
+        omitted = run_roth_conversion_analysis(inputs, PRETAX(300000) + TAXABLE(500000), jason_ret_age=71, justin_ret_age=71)
+        explicit_none = run_roth_conversion_analysis(inputs, PRETAX(300000) + TAXABLE(500000), jason_ret_age=71, justin_ret_age=71,
+                                                       custom_annual_conversion=None)
+        assert omitted["schedule"] == explicit_none["schedule"]
+
+    def test_none_is_a_complete_no_op_single_age(self, sample_inputs, sample_accounts):
+        omitted = run_roth_conversion_analysis(sample_inputs, sample_accounts, ret_age=60, ss_timing="early")
+        explicit_none = run_roth_conversion_analysis(sample_inputs, sample_accounts, ret_age=60, ss_timing="early",
+                                                       custom_annual_conversion=None)
+        assert omitted["schedule"] == explicit_none["schedule"]
+
+    def test_custom_amount_applies_single_age_too(self):
+        """Same override, single-age mode -- not just the two-age path."""
+        inputs = base_inputs(jason_age=71)
+        auto = run_roth_conversion_analysis(inputs, PRETAX(300000) + TAXABLE(500000), ret_age=71)
+        custom = run_roth_conversion_analysis(inputs, PRETAX(300000) + TAXABLE(500000), ret_age=71, custom_annual_conversion=50000)
+        assert custom["schedule"][0]["optimal_conversion"] == pytest.approx(50000)
+        assert custom["schedule"][0]["optimal_conversion"] != auto["schedule"][0]["optimal_conversion"]

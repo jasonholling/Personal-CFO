@@ -68,6 +68,12 @@ export default function RothConversion() {
   const [twoAgeMode, setTwoAgeMode]   = useState(false)
   const [jasonRetAge, setJasonRetAge] = useState(65)
   const [justinRetAge, setJustinRetAge] = useState(65)
+  // Custom annual conversion (2026-09-13, CALCULATION_CONTRACT.md section
+  // 82): null means "auto" -- the backend's own default "fill the 22%
+  // bracket each year" target. A number here overrides that target for
+  // every year of the conversion window, still subject to the same
+  // affordability caps the auto target always had.
+  const [customConversion, setCustomConversion] = useState(null)
 
   // Bumped on every effect firing (any age/timing/mode change) -- a
   // response is only applied if this counter still matches the value
@@ -99,16 +105,17 @@ export default function RothConversion() {
   useEffect(() => {
     const gen = ++genRef.current
     setLoading(true)
+    const customParams = customConversion != null ? { custom_annual_conversion: customConversion } : {}
     const request = twoAgeMode
       ? axios.post('/api/simulation/roth-conversion', {
-          ...ssClaimAgeParams, ss_timing: ssTiming, jason_ret_age: jasonRetAge, justin_ret_age: justinRetAge,
+          ...ssClaimAgeParams, ...customParams, ss_timing: ssTiming, jason_ret_age: jasonRetAge, justin_ret_age: justinRetAge,
         })
-      : axios.get('/api/simulation/roth-conversion', { params: { ret_age: retAge, ss_timing: ssTiming, ...ssClaimAgeParams } })
+      : axios.get('/api/simulation/roth-conversion', { params: { ret_age: retAge, ss_timing: ssTiming, ...ssClaimAgeParams, ...customParams } })
     request
       .then(r => { if (gen === genRef.current) setData(r.data) })
       .catch(() => { if (gen === genRef.current) setData(null) })
       .finally(() => { if (gen === genRef.current) setLoading(false) })
-  }, [retAge, ssTiming, twoAgeMode, jasonRetAge, justinRetAge, jasonSsClaimAge, justinSsClaimAge])
+  }, [retAge, ssTiming, twoAgeMode, jasonRetAge, justinRetAge, jasonSsClaimAge, justinSsClaimAge, customConversion])
 
   // SecondEarnerNote's amount/years/personLabel differ by mode, same
   // convention Simulation.jsx's own secondEarnerNoteProps already uses
@@ -241,6 +248,30 @@ export default function RothConversion() {
             )}
           </div>
         )}
+      </div>
+
+      {/* Custom annual conversion amount (2026-09-13, CALCULATION_CONTRACT.md
+          section 82) -- Auto fills the 22% bracket each year (the
+          original, tax-minimizing target); Custom lets a household pull a
+          specific amount every year instead, e.g. to draw the pretax
+          balance down faster than the bracket-fill default would. */}
+      <div className="card" style={{ marginBottom:24 }}>
+        <div className="label" style={{ marginBottom:8 }}>Annual Conversion Amount</div>
+        <div style={{ display:'flex', gap:8, alignItems:'center', flexWrap:'wrap' }}>
+          <button className={customConversion == null ? 'btn-primary' : 'btn-secondary'}
+                  onClick={() => setCustomConversion(null)}>Auto (fill 22% bracket)</button>
+          <button className={customConversion != null ? 'btn-primary' : 'btn-secondary'}
+                  onClick={() => setCustomConversion(c => c ?? 100000)}>Custom</button>
+          {customConversion != null && (
+            <div style={{ display:'flex', alignItems:'center', gap:4 }}>
+              <span style={{ fontSize:12, color:'var(--text3)' }}>$</span>
+              <input type="number" min={0} step={5000} value={customConversion}
+                     onChange={e => setCustomConversion(Math.max(0, parseFloat(e.target.value) || 0))}
+                     style={{ width:120 }} />
+              <span style={{ fontSize:12, color:'var(--text3)' }}>/yr, every year of the conversion window</span>
+            </div>
+          )}
+        </div>
       </div>
 
       {loading && <div className="loading">Calculating conversion ladder...</div>}
