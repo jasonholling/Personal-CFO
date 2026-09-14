@@ -441,3 +441,163 @@ class TestRecommendationsPrivacy:
         r = client.post("/api/backup/restore", params={"confirm": "true"},
                          files={"file": ("b.json", json.dumps(payload), "application/json")})
         assert r.status_code == 200, r.text
+
+
+class TestRecommendationProvenance:
+    """Item 3: a recommendation records which saved scenario, planning
+    inputs, holdings snapshot, and investment policy generated it, and a
+    later change is reported with a human-readable reason instead of one
+    generic sentence."""
+
+    def test_recommendation_records_holdings_and_policy_provenance(self, client):
+        acc = _create_account(client)
+        client.post("/api/holdings", json={
+            "account_id": acc["id"], "security_name": "All Stock", "market_value": 100000, "asset_class": "us_large_cap",
+        })
+        _save_policy(client, target_us_large_cap_pct=60, target_us_bonds_pct=40)
+        body = client.get("/api/recommendations").json()
+        card = next(c for c in body["recommendations"] if c["category"] == "policy_violation")
+        assert card["holdings_snapshot_hash"]
+        assert card["policy_hash"]
+        # No saved scenario or assumption review exists yet in this test.
+        assert card["saved_scenario_id"] is None
+        assert card["assumption_review_id"] is None
+
+    def test_policy_change_invalidation_reason_names_the_policy(self, client):
+        acc = _create_account(client)
+        client.post("/api/holdings", json={
+            "account_id": acc["id"], "security_name": "All Stock", "market_value": 100000, "asset_class": "us_large_cap",
+        })
+        _save_policy(client, target_us_large_cap_pct=60, target_us_bonds_pct=40)
+        body = client.get("/api/recommendations").json()
+        drift_card = next(c for c in body["recommendations"] if c["category"] == "policy_violation")
+        rec_id = drift_card["id"]
+
+        _save_policy(client, target_us_large_cap_pct=100, target_us_bonds_pct=0)
+        client.get("/api/recommendations")
+
+        detail = client.get(f"/api/recommendations/{rec_id}").json()
+        assert detail["status"] == "invalidated"
+        invalidated_event = next(e for e in detail["events"] if e["event_type"] == "invalidated")
+        assert "investment policy changed" in invalidated_event["notes"]
+
+    def test_holdings_change_invalidation_reason_names_holdings(self, client):
+        acc = _create_account(client)
+        holding = client.post("/api/holdings", json={
+            "account_id": acc["id"], "security_name": "All Stock", "market_value": 100000, "asset_class": "us_large_cap",
+        }).json()
+        _save_policy(client, target_us_large_cap_pct=60, target_us_bonds_pct=40)
+        body = client.get("/api/recommendations").json()
+        drift_card = next(c for c in body["recommendations"] if c["category"] == "policy_violation")
+        rec_id = drift_card["id"]
+
+        # Holdings move enough to change the drift facts without touching the policy.
+        client.put(f"/api/holdings/{holding['id']}", json={
+            "account_id": acc["id"], "security_name": "All Stock", "market_value": 40000, "asset_class": "us_bonds",
+        })
+        client.get("/api/recommendations")
+
+        detail = client.get(f"/api/recommendations/{rec_id}").json()
+        assert detail["status"] == "invalidated"
+        invalidated_event = next(e for e in detail["events"] if e["event_type"] == "invalidated")
+        assert "holdings changed" in invalidated_event["notes"]
+
+
+class TestDeferredHighPriorityTaskLinkage:
+    """Item 3: an accepted OR deferred HIGH-PRIORITY recommendation
+    creates/links an Action-Tracker task; a deferred but not
+    high-priority recommendation does not clutter the general task list,
+    and no recurring task is ever created."""
+
+    def test_deferred_high_priority_recommendation_creates_a_dated_task(self, client):
+        # No policy saved -> the only candidate is the tier-1 missing_data
+        # "no_investment_policy" card, which is high priority.
+        acc = _create_account(client)
+        client.post("/api/holdings", json={
+            "account_id": acc["id"], "security_name": "Fund", "market_value": 10000, "asset_class": "us_large_cap",
+        })
+        rec_id = client.get("/api/recommendations").json()["recommendations"][0]["id"]
+        r = client.post(f"/api/recommendations/{rec_id}/decide", json={"status": "deferred", "review_date": "2030-06-01"})
+        assert r.status_code == 200, r.text
+        assert r.json()["linked_task_id"] is not None
+
+        tasks = client.get("/api/tasks").json()
+        task = next(t for t in tasks if t["auto_key"] == f"portfolio_coach_{rec_id}")
+        assert task["due_date"] == "2030-06-01"
+        assert task["recurrence"] == "once"
+        assert task["completed"] == 0
+
+    def test_deferred_non_high_priority_recommendation_does_not_create_a_task(self, client):
+        acc = _create_account(client)
+        # A high-expense-ratio holding produces only a tier-4
+        # high_cost_or_redundant card -- not high priority -- while the
+        # policy matches current allocation exactly, so no drift card
+        # also appears.
+        client.post("/api/holdings", json={
+            "account_id": acc["id"], "security_name": "Pricey Fund", "market_value": 100000,
+            "asset_class": "us_large_cap", "expense_ratio": 0.02,
+        })
+        _save_policy(client, target_us_large_cap_pct=100, target_us_bonds_pct=0)
+        body = client.get("/api/recommendations").json()
+        card = next(c for c in body["recommendations"] if c["category"] == "high_cost_or_redundant")
+        r = client.post(f"/api/recommendations/{card['id']}/decide", json={
+            "status": "deferred", "review_date": "2030-06-01",
+        })
+        assert r.status_code == 200, r.text
+        assert r.json()["linked_task_id"] is None
+        tasks = client.get("/api/tasks").json()
+        assert not any(t["auto_key"] == f"portfolio_coach_{card['id']}" for t in tasks)
+
+    def test_accepted_recommendation_records_linked_task_id(self, client):
+        acc = _create_account(client, balance=10000)
+        client.post("/api/holdings", json={
+            "account_id": acc["id"], "security_name": "Fund", "market_value": 10000, "asset_class": "us_large_cap",
+        })
+        rec_id = client.get("/api/recommendations").json()["recommendations"][0]["id"]
+        r = client.post(f"/api/recommendations/{rec_id}/decide", json={"status": "accepted"})
+        task_id = r.json()["linked_task_id"]
+        assert task_id is not None
+        tasks = client.get("/api/tasks").json()
+        assert any(t["id"] == task_id and t["auto_key"] == f"portfolio_coach_{rec_id}" for t in tasks)
+
+
+class TestAnnualPortfolioReview:
+    """Item 3: an annual-review summary including open recommendations,
+    deferred reviews due, stale holding values, unreconciled accounts,
+    allocation drift, concentrated positions, and taxable-loss
+    candidates -- built from the same recommendation queue
+    GET /api/recommendations persists, not a second calculation."""
+
+    def test_summary_partitions_every_required_section(self, client):
+        acc = _create_account(client, balance=210000)
+        big = client.post("/api/holdings", json={
+            "account_id": acc["id"], "security_name": "Concentrated Stock", "market_value": 200000,
+            "asset_class": "us_large_cap", "cost_basis": 250000,
+        }).json()
+        client.post("/api/holdings", json={
+            "account_id": acc["id"], "security_name": "Bond Fund", "market_value": 10000, "asset_class": "us_bonds",
+        })
+        _save_policy(client, target_us_large_cap_pct=50, target_us_bonds_pct=50, max_single_security_pct=20)
+
+        r = client.get("/api/portfolio/annual-review")
+        assert r.status_code == 200, r.text
+        body = r.json()
+        for key in ("open_recommendations", "deferred_reviews_due", "stale_holding_values",
+                    "unreconciled_accounts", "allocation_drift", "concentrated_positions",
+                    "taxable_loss_candidates", "other_open", "counts", "as_of", "has_policy"):
+            assert key in body
+        assert body["open_recommendations"]["count"] == len(body["open_recommendations"]["items"])
+        assert any(c["payload"]["affected_holdings"] == [big["id"]] for c in body["concentrated_positions"])
+        assert any(c["category"] == "policy_violation" for c in body["allocation_drift"])
+        assert any(c["payload"]["affected_holdings"] == [big["id"]] for c in body["taxable_loss_candidates"])
+
+    def test_deferred_reviews_due_reflects_a_past_review_date(self, client):
+        acc = _create_account(client)
+        client.post("/api/holdings", json={
+            "account_id": acc["id"], "security_name": "Fund", "market_value": 10000, "asset_class": "us_large_cap",
+        })
+        rec_id = client.get("/api/recommendations").json()["recommendations"][0]["id"]
+        client.post(f"/api/recommendations/{rec_id}/decide", json={"status": "deferred", "review_date": "2000-01-01"})
+        body = client.get("/api/portfolio/annual-review").json()
+        assert body["deferred_reviews_due"]["count"] >= 1
+        assert any(item["id"] == rec_id for item in body["deferred_reviews_due"]["items"])

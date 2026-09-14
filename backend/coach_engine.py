@@ -68,6 +68,16 @@ CATEGORY_CLASSIFICATION = {
 }
 
 
+# Household-review-workflow integration (item 3): categories whose
+# recommendations are urgent/foundational enough that accepting OR
+# deferring one should be able to create/link a household Task, so it
+# surfaces in the same Action Tracker every other financial task uses
+# -- not just in the Coach's own review-summary widget. Tiers 1-3
+# (missing_data / concentration_or_liquidity_risk / policy_violation),
+# per section 77's own priority ordering.
+HIGH_PRIORITY_TASK_CATEGORIES = {"missing_data", "concentration_or_liquidity_risk", "policy_violation"}
+
+
 def stable_hash(obj) -> str:
     """Deterministic hash of whatever inputs produced a recommendation
     card — used as `assumptions_hash` so the sync logic below can tell
@@ -689,6 +699,86 @@ def prioritize(cards: List[Dict]) -> List[Dict]:
 
 
 # ── Decision lifecycle: sync candidates against existing DB rows ────────
+
+def recommendation_provenance(planning_inputs: Optional[Dict], holdings: List[Dict], policy: Optional[Dict],
+                               saved_scenario_id=None, assumption_review_id=None) -> Dict:
+    """What actually generated one batch of recommendations, so a later
+    change can be attributed by name rather than a single generic
+    "something changed" sentence (item 3: "let a recommendation record
+    which saved scenario, planning inputs version, holdings snapshot,
+    and policy version generated it"). Pure -- main.py supplies the rows
+    already read from the DB; this only hashes/packages them.
+
+    `planning_inputs_hash`/`holdings_snapshot_hash`/`policy_hash` are
+    content hashes, not row-version numbers -- this app's
+    planning_inputs/holdings/investment_policies tables have no
+    updated_at-style version column that changes only on a real edit, so
+    a deterministic hash of the actual values used is the only way to
+    detect "the facts moved" versus "the row was merely re-read."""
+    return {
+        "saved_scenario_id": saved_scenario_id,
+        "assumption_review_id": assumption_review_id,
+        "planning_inputs_hash": stable_hash(planning_inputs) if planning_inputs is not None else None,
+        "holdings_snapshot_hash": stable_hash(sorted(holdings, key=lambda h: h.get("id") or 0)),
+        "policy_hash": stable_hash(policy) if policy else None,
+    }
+
+
+_INVALIDATION_REASON_LABELS = (
+    ("holdings_snapshot_hash", "recorded holdings changed"),
+    ("policy_hash", "the investment policy changed"),
+    ("planning_inputs_hash", "planning inputs/assumptions changed"),
+    ("saved_scenario_id", "a newer saved scenario was created"),
+    ("assumption_review_id", "a newer assumption review was recorded"),
+)
+
+
+def invalidation_reason(old_row: Dict, new_provenance: Dict) -> str:
+    """Human-readable reason a recommendation was marked invalidated/
+    stale, built by comparing the provenance recorded on the row being
+    invalidated against the provenance of the batch that triggered the
+    invalidation. Falls back to a generic sentence when neither row
+    carries provenance (e.g. rows created before this field existed) or
+    when nothing in the compared provenance actually differs (the
+    invalidation came from a candidate that disappeared for a reason
+    provenance hashing can't see, such as a contribution amount input)."""
+    reasons = [label for field, label in _INVALIDATION_REASON_LABELS
+               if old_row.get(field) is not None and old_row.get(field) != new_provenance.get(field)]
+    if not reasons:
+        return "Underlying holdings, policy, or contribution input changed before this was acted on."
+    return "Invalidated because " + " and ".join(reasons) + "."
+
+
+def partition_annual_review_items(rows: List[Dict]) -> Dict[str, List[Dict]]:
+    """Buckets an already-generated/persisted recommendation list into
+    the annual-portfolio-review sections item 3 requires: stale holding
+    values, unreconciled accounts, allocation drift, concentrated
+    positions, and taxable-loss candidates -- by the same
+    `recommendation_key` prefixes coach_engine's own card generators
+    above already use. Pure partitioning only; it never re-derives a
+    number the underlying cards don't already carry, and any
+    recommendation_key that doesn't match one of the review's named
+    buckets is kept under "other_open" rather than silently dropped."""
+    sections = {
+        "stale_holding_values": [], "unreconciled_accounts": [], "allocation_drift": [],
+        "concentrated_positions": [], "taxable_loss_candidates": [], "other_open": [],
+    }
+    prefix_to_section = {
+        "stale_holding_value": "stale_holding_values",
+        "unreconciled_remainder": "unreconciled_accounts",
+        "drift": "allocation_drift",
+        "severe_concentration": "concentrated_positions",
+        "moderate_concentration": "concentrated_positions",
+        "liquidity_shortfall": "concentrated_positions",
+        "tax_loss_review": "taxable_loss_candidates",
+        "tax_lot_loss_review": "taxable_loss_candidates",
+    }
+    for row in rows:
+        key = row.get("recommendation_key") or (row.get("payload") or {}).get("recommendation_key") or ""
+        prefix = key.split(":", 1)[0]
+        sections[prefix_to_section.get(prefix, "other_open")].append(row)
+    return sections
+
 
 def reconcile_recommendation_queue(candidates: List[Dict], existing_by_key: Dict[str, List[Dict]], today: Optional[str] = None) -> Dict:
     """Pure sync logic (main.py does the actual DB reads/writes). For

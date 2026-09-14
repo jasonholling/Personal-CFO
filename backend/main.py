@@ -2023,12 +2023,32 @@ def _portfolio_goal_context(conn, accounts: List[Dict], policy: Optional[Dict]) 
         pass
     return context
 
-def _reconcile_and_persist_recommendations(conn, candidates: List[Dict]) -> None:
+def _recommendation_provenance_for_run(conn, accounts, holdings, policy) -> Dict:
+    """Builds the provenance item 3 requires every recommendation to
+    record: which saved scenario, planning inputs, holdings snapshot,
+    and investment policy were in effect for this generation run. Reads
+    only -- callers pass the result to `_reconcile_and_persist_recommendations`
+    for both the new-row INSERT and the invalidation-reason comparison."""
+    import coach_engine as ce
+    inputs_row = conn.execute("SELECT * FROM planning_inputs WHERE id=1").fetchone()
+    saved = conn.execute("SELECT id FROM saved_scenarios ORDER BY id DESC LIMIT 1").fetchone()
+    review = conn.execute("SELECT id FROM assumption_reviews ORDER BY id DESC LIMIT 1").fetchone()
+    return ce.recommendation_provenance(
+        dict(inputs_row) if inputs_row else None, holdings, policy,
+        saved_scenario_id=saved["id"] if saved else None,
+        assumption_review_id=review["id"] if review else None,
+    )
+
+
+def _reconcile_and_persist_recommendations(conn, candidates: List[Dict], provenance: Optional[Dict] = None) -> None:
     """Syncs freshly-generated candidates against existing DB rows via
     coach_engine.reconcile_recommendation_queue's pure logic, then
     performs the actual writes (main.py owns all DB I/O; coach_engine.py
-    stays pure)."""
+    stays pure). `provenance` (from `_recommendation_provenance_for_run`)
+    is stored on every freshly-inserted row and used to build a
+    human-readable reason for every row this run invalidates."""
     import coach_engine as ce
+    provenance = provenance or {}
     keys = {c["recommendation_key"] for c in candidates}
     # Fetches every row matching a fresh candidate's key (for the
     # suppression/reuse checks below) PLUS every currently-active row
@@ -2048,21 +2068,30 @@ def _reconcile_and_persist_recommendations(conn, candidates: List[Dict]) -> None
             "SELECT * FROM recommendations WHERE status IN ('proposed','reviewing','accepted') ORDER BY id DESC"
         ).fetchall()
     existing_by_key: Dict[str, List[Dict]] = {}
+    rows_by_id: Dict[int, Dict] = {}
     for r in rows:
-        existing_by_key.setdefault(r["recommendation_key"], []).append(dict(r))
+        d = dict(r)
+        existing_by_key.setdefault(r["recommendation_key"], []).append(d)
+        rows_by_id[d["id"]] = d
     result = ce.reconcile_recommendation_queue(candidates, existing_by_key, today=datetime.now().date().isoformat())
     for c in result["to_insert"]:
         conn.execute(
             "INSERT INTO recommendations (recommendation_key, category, priority, title, action_text, payload_json, "
-            "assumptions_hash, status, updated_at) VALUES (?,?,?,?,?,?,?,?,datetime('now'))",
+            "assumptions_hash, status, saved_scenario_id, assumption_review_id, planning_inputs_hash, "
+            "holdings_snapshot_hash, policy_hash, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,datetime('now'))",
             (c["recommendation_key"], c["category"], c["priority"], c["title"], c["action_text"],
-             json.dumps(c), c["assumptions_hash"], "proposed"),
+             json.dumps(c), c["assumptions_hash"], "proposed",
+             provenance.get("saved_scenario_id"), provenance.get("assumption_review_id"),
+             provenance.get("planning_inputs_hash"), provenance.get("holdings_snapshot_hash"),
+             provenance.get("policy_hash")),
         )
     for rid in result["invalidate_ids"]:
+        old_row = rows_by_id.get(rid, {})
+        reason = ce.invalidation_reason(old_row, provenance)
         conn.execute("UPDATE recommendations SET status='invalidated', updated_at=datetime('now') WHERE id=?", (rid,))
         conn.execute(
             "INSERT INTO recommendation_events (recommendation_id, event_type, notes) VALUES (?,?,?)",
-            (rid, "invalidated", "Underlying holdings, policy, or contribution input changed before this was acted on."),
+            (rid, "invalidated", reason),
         )
     conn.commit()
 
@@ -2071,13 +2100,16 @@ def _recommendation_row_to_dict(row) -> Dict:
     d["payload"] = json.loads(d.pop("payload_json"))
     return d
 
-@app.get("/api/recommendations")
-def get_recommendations(pending_contribution: float = 0.0):
-    """Generates fresh candidates, reconciles them against the decision
-    lifecycle (never resurfaces a rejected/deferred recommendation whose
-    underlying facts haven't changed), and returns the active queue —
-    the "What should I do next?" list — sorted by priority."""
-    conn = get_db()
+def _refresh_recommendation_queue(conn, pending_contribution: float = 0.0):
+    """Generates fresh candidates, records their provenance, reconciles
+    them against the decision lifecycle (never resurfaces a rejected/
+    deferred recommendation whose underlying facts haven't changed), and
+    returns the active queue — the "What should I do next?" list —
+    sorted by priority, plus whether a policy exists. Shared by
+    `GET /api/recommendations` and `GET /api/portfolio/annual-review` so
+    the annual review reads the exact same freshly-reconciled queue
+    rather than a second, possibly-divergent generation pass. Caller
+    owns the connection's lifecycle (opens/closes it)."""
     accounts, holdings, policy = _load_portfolio_context(conn)
     if policy and (policy.get("glide_path") or {}).get("enabled"):
         glide = policy["glide_path"]
@@ -2106,14 +2138,26 @@ def get_recommendations(pending_contribution: float = 0.0):
                                             lots_by_holding_id=lots_by_holding_id,
                                             household_lots_for_wash_sale=household_lots_for_wash_sale,
                                             today=datetime.now().date().isoformat())
-    _reconcile_and_persist_recommendations(conn, candidates)
+    provenance = _recommendation_provenance_for_run(conn, accounts, holdings, policy)
+    _reconcile_and_persist_recommendations(conn, candidates, provenance)
     active_statuses = ("proposed", "reviewing", "accepted")
     placeholders = ",".join("?" * len(active_statuses))
     rows = conn.execute(
         f"SELECT * FROM recommendations WHERE status IN ({placeholders}) ORDER BY priority ASC", active_statuses,
     ).fetchall()
+    return [_recommendation_row_to_dict(r) for r in rows], policy is not None
+
+
+@app.get("/api/recommendations")
+def get_recommendations(pending_contribution: float = 0.0):
+    """Generates fresh candidates, reconciles them against the decision
+    lifecycle (never resurfaces a rejected/deferred recommendation whose
+    underlying facts haven't changed), and returns the active queue —
+    the "What should I do next?" list — sorted by priority."""
+    conn = get_db()
+    recommendations, has_policy = _refresh_recommendation_queue(conn, pending_contribution)
     conn.close()
-    return {"recommendations": [_recommendation_row_to_dict(r) for r in rows], "has_policy": policy is not None}
+    return {"recommendations": recommendations, "has_policy": has_policy}
 
 
 @app.get("/api/recommendations/review-summary")
@@ -2130,6 +2174,43 @@ def recommendation_review_summary():
     due = sum(row["status"] == "deferred" and row["review_date"] and row["review_date"] <= today for row in rows)
     future_dates = sorted(row["review_date"] for row in rows if row["status"] == "deferred" and row["review_date"] and row["review_date"] > today)
     return {"counts": counts, "reviews_due": due, "next_review_date": future_dates[0] if future_dates else None, "today": today}
+
+
+@app.get("/api/portfolio/annual-review")
+def portfolio_annual_review():
+    """The annual portfolio review summary (item 3): one household-facing
+    view of everything worth looking at before the year closes out --
+    open recommendations, deferred reviews due, stale holding values,
+    unreconciled accounts, allocation drift, concentrated positions, and
+    taxable-loss candidates. This performs no calculation of its own: it
+    refreshes/reconciles the exact same recommendation queue
+    `GET /api/recommendations` persists (via `_refresh_recommendation_queue`,
+    so this and that endpoint never silently disagree) and partitions it
+    by `recommendation_key` prefix via `coach_engine.partition_annual_review_items`."""
+    import coach_engine as ce
+    conn = get_db()
+    active_rows, has_policy = _refresh_recommendation_queue(conn)
+    today = datetime.now().date().isoformat()
+    lifecycle_rows = [dict(row) for row in conn.execute(
+        "SELECT id, status, review_date, title, action_text, category FROM recommendations WHERE status != 'invalidated'"
+    ).fetchall()]
+    conn.close()
+    deferred_due = [row for row in lifecycle_rows if row["status"] == "deferred" and row["review_date"] and row["review_date"] <= today]
+    counts = {status: sum(row["status"] == status for row in lifecycle_rows) for status in ("proposed", "reviewing", "accepted", "deferred", "completed", "rejected")}
+    sections = ce.partition_annual_review_items(active_rows)
+    return {
+        "as_of": today,
+        "has_policy": has_policy,
+        "counts": counts,
+        "open_recommendations": {"count": len(active_rows), "items": active_rows},
+        "deferred_reviews_due": {"count": len(deferred_due), "items": deferred_due},
+        "stale_holding_values": sections["stale_holding_values"],
+        "unreconciled_accounts": sections["unreconciled_accounts"],
+        "allocation_drift": sections["allocation_drift"],
+        "concentrated_positions": sections["concentrated_positions"],
+        "taxable_loss_candidates": sections["taxable_loss_candidates"],
+        "other_open": sections["other_open"],
+    }
 
 @app.get("/api/recommendations/{recommendation_id}")
 def get_recommendation_detail(recommendation_id: int):
@@ -2167,17 +2248,53 @@ def decide_recommendation(recommendation_id: int, decision: RecommendationDecisi
          json.dumps(decision.resulting_allocation) if decision.resulting_allocation is not None else None,
          recommendation_id),
     )
+    # Household review-workflow integration (item 3): an accepted
+    # recommendation always creates/links one Action-Tracker task (as
+    # before). A DEFERRED recommendation only does so when it's
+    # high-priority (coach_engine.HIGH_PRIORITY_TASK_CATEGORIES --
+    # missing_data/concentration_or_liquidity_risk/policy_violation) --
+    # every other deferred recommendation still surfaces via the
+    # existing review-date mechanism (recommendation_review_summary's
+    # reviews_due/next_review_date and reconcile_recommendation_queue's
+    # own review-date resurfacing) without also cluttering the
+    # household's general task list. Both a task_type='calculated'/
+    # recurrence='once' insert -- never a recurring task, and only ever
+    # triggered by this explicit user decision, never automatically.
+    import coach_engine as ce
     task_key = f"portfolio_coach_{recommendation_id}"
+    linked_task_id = row["linked_task_id"] if "linked_task_id" in row.keys() else None
     if decision.status == "accepted":
-        if not conn.execute("SELECT 1 FROM tasks WHERE auto_key=? LIMIT 1", (task_key,)).fetchone():
-            conn.execute(
+        existing_task = conn.execute("SELECT id FROM tasks WHERE auto_key=? LIMIT 1", (task_key,)).fetchone()
+        if existing_task:
+            linked_task_id = existing_task["id"]
+        else:
+            cur = conn.execute(
                 "INSERT INTO tasks (section,title,description,task_type,recurrence,auto_key,due_year) "
                 "VALUES ('investments',?,?, 'calculated','once',?,CAST(strftime('%Y','now') AS INTEGER))",
                 (row["title"], row["action_text"], task_key),
             )
+            linked_task_id = cur.lastrowid
+    elif decision.status == "deferred" and row["category"] in ce.HIGH_PRIORITY_TASK_CATEGORIES:
+        due_year = int(decision.review_date[:4]) if decision.review_date else datetime.now().year
+        description = f"Deferred Portfolio Coach recommendation — review by {decision.review_date or 'the noted date'}. {row['action_text']}"
+        existing_task = conn.execute("SELECT id FROM tasks WHERE auto_key=? LIMIT 1", (task_key,)).fetchone()
+        if existing_task:
+            linked_task_id = existing_task["id"]
+            conn.execute(
+                "UPDATE tasks SET due_date=?, due_year=?, description=?, updated_at=datetime('now') WHERE id=?",
+                (decision.review_date, due_year, description, existing_task["id"]),
+            )
+        else:
+            cur = conn.execute(
+                "INSERT INTO tasks (section,title,description,task_type,recurrence,auto_key,due_year,due_date) "
+                "VALUES ('investments',?,?, 'calculated','once',?,?,?)",
+                (f"Review: {row['title']}", description, task_key, due_year, decision.review_date),
+            )
+            linked_task_id = cur.lastrowid
     elif decision.status == "completed":
         conn.execute("UPDATE tasks SET completed=1, completed_date=date('now'), updated_at=datetime('now') WHERE auto_key=?",
                      (task_key,))
+    conn.execute("UPDATE recommendations SET linked_task_id=? WHERE id=?", (linked_task_id, recommendation_id))
     conn.execute(
         "INSERT INTO recommendation_events (recommendation_id, event_type, notes) VALUES (?,?,?)",
         (recommendation_id, decision.status, decision.notes),

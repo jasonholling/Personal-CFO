@@ -17,6 +17,8 @@ from coach_engine import (
     tax_lot_loss_review_recommendations,
     no_policy_recommendation, _card,
     prioritize, reconcile_recommendation_queue, CATEGORY_BASE_PRIORITY, CATEGORIES,
+    recommendation_provenance, invalidation_reason, partition_annual_review_items,
+    HIGH_PRIORITY_TASK_CATEGORIES,
 )
 
 
@@ -674,3 +676,132 @@ def test_deferred_recommendation_returns_on_review_date_only():
     assert reconcile_recommendation_queue([candidate], existing, today="2030-01-14")["to_insert"] == []
     assert reconcile_recommendation_queue([candidate], existing, today="2030-01-15")["to_insert"] == [candidate]
     assert reconcile_recommendation_queue([candidate], existing, today="2030-01-16")["to_insert"] == [candidate]
+
+
+class TestRecommendationProvenance:
+    """Item 3: 'let a recommendation record which saved scenario,
+    planning inputs version, holdings snapshot, and policy version
+    generated it.'"""
+
+    def test_records_every_provenance_field(self):
+        prov = recommendation_provenance(
+            {"jason_age": 45}, [holding(1, 10, market_value=1000)], policy(),
+            saved_scenario_id=7, assumption_review_id=3,
+        )
+        assert prov["saved_scenario_id"] == 7
+        assert prov["assumption_review_id"] == 3
+        assert prov["planning_inputs_hash"]
+        assert prov["holdings_snapshot_hash"]
+        assert prov["policy_hash"]
+
+    def test_no_policy_or_planning_inputs_yields_none_not_a_fabricated_hash(self):
+        prov = recommendation_provenance(None, [], None)
+        assert prov["planning_inputs_hash"] is None
+        assert prov["policy_hash"] is None
+        # Holdings hash still exists (an empty list is a real, hashable fact).
+        assert prov["holdings_snapshot_hash"]
+
+    def test_hash_changes_when_holdings_change(self):
+        prov_a = recommendation_provenance(None, [holding(1, 10, market_value=1000)], None)
+        prov_b = recommendation_provenance(None, [holding(1, 10, market_value=2000)], None)
+        assert prov_a["holdings_snapshot_hash"] != prov_b["holdings_snapshot_hash"]
+
+    def test_hash_changes_when_policy_changes(self):
+        prov_a = recommendation_provenance(None, [], policy(target_us_large_cap_pct=60))
+        prov_b = recommendation_provenance(None, [], policy(target_us_large_cap_pct=70))
+        assert prov_a["policy_hash"] != prov_b["policy_hash"]
+
+
+class TestInvalidationReason:
+    """Item 3: 'mark affected recommendations stale/invalidated with a
+    human-readable reason' -- naming what actually changed rather than
+    one generic sentence."""
+
+    def test_policy_change_is_named(self):
+        old_row = {"holdings_snapshot_hash": "h1", "policy_hash": "p1", "planning_inputs_hash": "i1",
+                   "saved_scenario_id": None, "assumption_review_id": None}
+        new_provenance = {"holdings_snapshot_hash": "h1", "policy_hash": "p2", "planning_inputs_hash": "i1",
+                           "saved_scenario_id": None, "assumption_review_id": None}
+        reason = invalidation_reason(old_row, new_provenance)
+        assert "investment policy changed" in reason
+        assert "holdings" not in reason
+
+    def test_holdings_change_is_named(self):
+        old_row = {"holdings_snapshot_hash": "h1", "policy_hash": "p1", "planning_inputs_hash": "i1",
+                   "saved_scenario_id": None, "assumption_review_id": None}
+        new_provenance = {"holdings_snapshot_hash": "h2", "policy_hash": "p1", "planning_inputs_hash": "i1",
+                           "saved_scenario_id": None, "assumption_review_id": None}
+        reason = invalidation_reason(old_row, new_provenance)
+        assert "recorded holdings changed" in reason
+        assert "policy" not in reason
+
+    def test_multiple_changes_are_all_named(self):
+        old_row = {"holdings_snapshot_hash": "h1", "policy_hash": "p1", "planning_inputs_hash": "i1",
+                   "saved_scenario_id": None, "assumption_review_id": None}
+        new_provenance = {"holdings_snapshot_hash": "h2", "policy_hash": "p2", "planning_inputs_hash": "i1",
+                           "saved_scenario_id": None, "assumption_review_id": None}
+        reason = invalidation_reason(old_row, new_provenance)
+        assert "recorded holdings changed" in reason
+        assert "investment policy changed" in reason
+
+    def test_no_prior_provenance_falls_back_to_generic_reason(self):
+        # A row created before this field existed carries no provenance
+        # at all -- never fabricate a specific-sounding reason from
+        # nothing.
+        reason = invalidation_reason({}, {"holdings_snapshot_hash": "h2"})
+        assert reason == "Underlying holdings, policy, or contribution input changed before this was acted on."
+
+    def test_nothing_actually_differs_falls_back_to_generic_reason(self):
+        # e.g. invalidated because a contribution-amount input changed,
+        # which provenance hashing can't see.
+        row = {"holdings_snapshot_hash": "h1", "policy_hash": "p1", "planning_inputs_hash": "i1",
+               "saved_scenario_id": None, "assumption_review_id": None}
+        reason = invalidation_reason(row, row)
+        assert reason == "Underlying holdings, policy, or contribution input changed before this was acted on."
+
+
+class TestPartitionAnnualReviewItems:
+    """Item 3: the annual-review summary buckets an already-generated
+    recommendation list by category without re-deriving any number."""
+
+    def _row(self, key, category="minor_optimization"):
+        return {"category": category, "payload": {"recommendation_key": key}}
+
+    def test_every_named_section_is_recognized(self):
+        rows = [
+            self._row("stale_holding_value:1:2", "missing_data"),
+            self._row("unreconciled_remainder:1:None", "missing_data"),
+            self._row("drift:None:us_bonds", "policy_violation"),
+            self._row("severe_concentration:1:2", "concentration_or_liquidity_risk"),
+            self._row("moderate_concentration:1:2"),
+            self._row("liquidity_shortfall:None:None", "concentration_or_liquidity_risk"),
+            self._row("tax_loss_review:1:2"),
+            self._row("tax_lot_loss_review:1:2:extra"),
+        ]
+        sections = partition_annual_review_items(rows)
+        assert len(sections["stale_holding_values"]) == 1
+        assert len(sections["unreconciled_accounts"]) == 1
+        assert len(sections["allocation_drift"]) == 1
+        assert len(sections["concentrated_positions"]) == 3
+        assert len(sections["taxable_loss_candidates"]) == 2
+        assert sections["other_open"] == []
+
+    def test_unrecognized_key_falls_into_other_open_not_dropped(self):
+        rows = [self._row("new_money:None:us_bonds", "new_money")]
+        sections = partition_annual_review_items(rows)
+        assert sections["other_open"] == rows
+        assert sum(len(v) for v in sections.values()) == 1
+
+    def test_reads_top_level_recommendation_key_when_no_payload(self):
+        # main.py's actual rows carry recommendation_key at the top level
+        # (not nested in payload) -- both shapes must partition correctly.
+        rows = [{"category": "policy_violation", "recommendation_key": "drift:None:us_bonds"}]
+        sections = partition_annual_review_items(rows)
+        assert len(sections["allocation_drift"]) == 1
+
+
+def test_high_priority_task_categories_match_tiers_one_through_three():
+    """Item 3: 'Accepted or deferred high-priority recommendations should
+    be able to create or link to a Task.' High priority is exactly the
+    first three (most urgent) tiers from section 77's own ordering."""
+    assert HIGH_PRIORITY_TASK_CATEGORIES == {"missing_data", "concentration_or_liquidity_risk", "policy_violation"}
