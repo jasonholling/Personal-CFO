@@ -29,7 +29,7 @@ function InvestmentPosture({ allocation, onNavigate }) {
   const donut = key => rows.filter(row => Number(row[key]) > 0).map(row => ({ name: row.assetClass, value: Number(row[key]), color: row.color }))
   return <section className="card" style={{ marginBottom: 24 }}>
     <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'flex-start', flexWrap: 'wrap' }}>
-      <div><div className="label">HOUSEHOLD INVESTMENT POSTURE</div><div style={{ marginTop: 5, fontSize: 16, fontWeight: 650 }}>Current allocation vs. policy target</div><div style={{ color: 'var(--text2)', fontSize: 12, marginTop: 4 }}>Included accounts and entered holdings · allocation, not performance</div></div>
+      <div><div className="label">HOUSEHOLD INVESTMENT POSTURE</div><div style={{ marginTop: 5, fontSize: 16, fontWeight: 650 }}>Current allocation vs. policy target</div><div style={{ color: 'var(--text2)', fontSize: 12, marginTop: 4 }}>Included accounts and entered holdings · allocation, not performance · {allocation.included_account_count || 0} account{allocation.included_account_count === 1 ? '' : 's'} · as of {allocation.holdings_as_of || 'date unavailable'}</div></div>
       <button className="btn-secondary" onClick={() => onNavigate('coach')}>Review in Portfolio Coach →</button>
     </div>
     <div style={{ display: 'flex', alignItems: 'center', gap: 18, flexWrap: 'wrap', marginTop: 12 }}>

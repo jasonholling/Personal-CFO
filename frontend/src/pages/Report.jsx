@@ -206,7 +206,7 @@ export default function Report({ onNavigate }) {
         </div>
         {allocation?.has_policy && allocationRows.length > 0 && <div className="card" style={{ marginTop:16 }}>
           <div className="label" style={{ marginBottom:4 }}>Household investment posture</div>
-          <div style={{ color:'var(--text2)', fontSize:12, marginBottom:10 }}>Included accounts and entered holdings · allocation, not performance · current as of the latest entered holdings</div>
+          <div style={{ color:'var(--text2)', fontSize:12, marginBottom:10 }}>Included accounts and entered holdings · allocation, not performance · {allocation.included_account_count || 0} account{allocation.included_account_count === 1 ? '' : 's'} · as of {allocation.holdings_as_of || 'date unavailable'}</div>
           <div style={{ display:'flex', alignItems:'center', gap:24, flexWrap:'wrap' }}>
             <div style={{ display:'flex', gap:8 }}>
               {[['Current', 'current_pct'], ['Policy target', 'target_pct']].map(([label, key]) => <div key={key} style={{ textAlign:'center' }}><PieChart width={150} height={150}><Pie data={allocationDonut(key)} dataKey="value" innerRadius={42} outerRadius={62} paddingAngle={1} stroke="none">{allocationDonut(key).map(row => <Cell key={row.name} fill={row.color} />)}</Pie><text x="75" y="73" textAnchor="middle" fill="var(--text)" fontSize="12">{label === 'Current' ? 'Now' : 'Target'}</text></PieChart><div style={{ color:'var(--text2)', fontSize:11 }}>{label}</div></div>)}

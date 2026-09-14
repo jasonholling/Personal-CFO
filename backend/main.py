@@ -1627,6 +1627,11 @@ def get_portfolio_allocation():
         classified["household"] + classified["hsa"] + classified["child_specific"]
     )
     included_account_ids = {h.get("account_id") for h in included_portfolio_holdings}
+    included_dates = [
+        h.get("as_of_date") or h.get("updated_at") or h.get("created_at")
+        for h in included_portfolio_holdings
+        if h.get("as_of_date") or h.get("updated_at") or h.get("created_at")
+    ]
     reconciliations = [
         # Reconciliation includes every entered position in the account,
         # including holdings excluded from allocation (such as cash).
@@ -1636,6 +1641,8 @@ def get_portfolio_allocation():
     ]
     result = {
         "has_holdings": True, "current_allocation": current,
+        "included_account_count": len(included_account_ids),
+        "holdings_as_of": max(included_dates)[:10] if included_dates else None,
         "hsa_allocation": compute_current_allocation(classified["hsa"]),
         "child_specific_total": round(sum(h.get("market_value", 0) or 0 for h in classified["child_specific"]), 2),
         "liquidity_total": round(sum(h.get("market_value", 0) or 0 for h in classified["liquidity"]), 2),
