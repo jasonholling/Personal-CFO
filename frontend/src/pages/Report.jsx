@@ -93,7 +93,7 @@ const Donut = ({ pct, color, size=90 }) => (
   </div>
 )
 
-export default function Report() {
+export default function Report({ onNavigate }) {
   const { person1Name, person2Name } = usePersonNames()
   const [data, setData] = useState(null)
   const [loading, setLoading] = useState(true)
@@ -105,12 +105,11 @@ export default function Report() {
       axios.get('/api/projections/education'),
       axios.get('/api/projections/kids'),
       axios.get('/api/projections/insurance'),
-      axios.get('/api/portfolio/allocation'),
-    ]).then(([nw, ret, edu, kids, ins, allocation]) => {
+    ]).then(([nw, ret, edu, kids, ins]) => axios.get('/api/portfolio/allocation').catch(() => ({ data: null })).then(allocation => {
       const scenario = ret.data.scenarios?.find(s => s.label==='age_60_early')
       setData({ nw:nw.data, ret:scenario, edu:edu.data.goals, kids:kids.data.kids, ins:ins.data, allocation:allocation.data })
       setLoading(false)
-    }).catch(() => setLoading(false))
+    })).catch(() => setLoading(false))
   }, [])
 
   if (loading) return <div className="loading">Generating report...</div>
@@ -207,12 +206,12 @@ export default function Report() {
         </div>
         {allocation?.has_policy && allocationRows.length > 0 && <div className="card" style={{ marginTop:16 }}>
           <div className="label" style={{ marginBottom:4 }}>Household investment posture</div>
-          <div style={{ color:'var(--text2)', fontSize:12, marginBottom:10 }}>Included accounts and entered holdings · allocation, not performance</div>
+          <div style={{ color:'var(--text2)', fontSize:12, marginBottom:10 }}>Included accounts and entered holdings · allocation, not performance · current as of the latest entered holdings</div>
           <div style={{ display:'flex', alignItems:'center', gap:24, flexWrap:'wrap' }}>
             <div style={{ display:'flex', gap:8 }}>
               {[['Current', 'current_pct'], ['Policy target', 'target_pct']].map(([label, key]) => <div key={key} style={{ textAlign:'center' }}><PieChart width={150} height={150}><Pie data={allocationDonut(key)} dataKey="value" innerRadius={42} outerRadius={62} paddingAngle={1} stroke="none">{allocationDonut(key).map(row => <Cell key={row.name} fill={row.color} />)}</Pie><text x="75" y="73" textAnchor="middle" fill="var(--text)" fontSize="12">{label === 'Current' ? 'Now' : 'Target'}</text></PieChart><div style={{ color:'var(--text2)', fontSize:11 }}>{label}</div></div>)}
             </div>
-            <div style={{ flex:1, minWidth:220 }}><div style={{ fontSize:12, color:'var(--text2)', marginBottom:5 }}>Largest differences</div>{[...allocationRows].sort((a,b) => Math.abs(Number(b.deviation_pct)||0)-Math.abs(Number(a.deviation_pct)||0)).slice(0,3).map(row => <div key={row.assetClass} style={{ display:'flex', gap:8, alignItems:'center', borderTop:'1px solid var(--border)', padding:'7px 0', fontSize:12 }}><span style={{ width:8, height:8, borderRadius:4, background:row.color }} /><span style={{ flex:1, textTransform:'capitalize' }}>{row.assetClass.replace(/_/g,' ')}</span><span>{allocationPct(row.current_pct)} → {allocationPct(row.target_pct)}</span><strong style={{ color:row.within_drift_band?'var(--green)':'var(--amber)' }}>{Number(row.deviation_pct)>0?'+':''}{allocationPct(row.deviation_pct)}</strong></div>)}</div>
+            <div style={{ flex:1, minWidth:220 }}><div style={{ fontSize:12, color:'var(--text2)', marginBottom:5 }}>Largest differences</div>{[...allocationRows].sort((a,b) => Math.abs(Number(b.deviation_pct)||0)-Math.abs(Number(a.deviation_pct)||0)).slice(0,3).map(row => <div key={row.assetClass} style={{ display:'flex', gap:8, alignItems:'center', borderTop:'1px solid var(--border)', padding:'7px 0', fontSize:12 }}><span style={{ width:8, height:8, borderRadius:4, background:row.color }} /><span style={{ flex:1, textTransform:'capitalize' }}>{row.assetClass.replace(/_/g,' ')}</span><span>{allocationPct(row.current_pct)} → {allocationPct(row.target_pct)}</span><strong style={{ color:row.within_drift_band?'var(--green)':'var(--amber)' }}>{Number(row.deviation_pct)>0?'+':''}{allocationPct(row.deviation_pct)}</strong></div>)}<button className="btn-secondary" onClick={() => onNavigate?.('coach')} style={{ marginTop:12 }}>Review allocation actions →</button></div>
           </div>
         </div>}
       </div>
