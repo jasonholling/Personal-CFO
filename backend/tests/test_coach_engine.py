@@ -144,14 +144,36 @@ class TestDataQualityRecommendations:
 
 class TestAssetLocationRecommendations:
     def test_taxable_bonds_get_a_review_card_without_becoming_a_trade_instruction(self):
-        classified = classify_holdings([account(1, "taxable")], [
+        taxable, ira = account(1, "taxable"), account(2, "ira")
+        ira["name"] = "Rollover IRA"
+        classified = classify_holdings([taxable, ira], [
             holding(1, 1, market_value=20000, asset_class="us_bonds", data_source="statement", confidence="high"),
         ])
-        cards = asset_location_recommendations(classified)
+        cards = asset_location_recommendations(classified, accounts=[taxable, ira])
         assert len(cards) == 1
         assert cards[0]["category"] == "minor_optimization"
-        assert "location heuristic" in cards[0]["assumptions"][0]
+        assert "future purchases" in cards[0]["action_text"]
         assert "sell recommendation" in cards[0]["assumptions"][0]
+
+    def test_current_account_types_and_recorded_options_drive_the_destination_note(self):
+        taxable = account(1, "taxable")
+        traditional = account(2, "401k", portfolio_account_type="traditional_401k")
+        traditional["name"] = "Work 401(k)"
+        classified = classify_holdings([taxable, traditional], [
+            holding(1, 1, market_value=20000, asset_class="us_bonds"),
+        ])
+        cards = asset_location_recommendations(classified, {
+            2: [{"option_name": "Total Bond Index", "asset_class": "us_bonds", "available_for_exchange": True,
+                 "available_for_new_contributions": True}],
+        }, [taxable, traditional])
+        assert len(cards) == 1
+        assert "Work 401(k): Total Bond Index" in cards[0]["action_text"]
+        assert cards[0]["affected_accounts"] == [1, 2]
+
+    def test_no_tax_sheltered_account_means_no_unactionable_location_card(self):
+        taxable = account(1, "taxable")
+        classified = classify_holdings([taxable], [holding(1, 1, market_value=20000, asset_class="us_bonds")])
+        assert asset_location_recommendations(classified, accounts=[taxable]) == []
 
     def test_taxable_stock_and_tax_deferred_bonds_do_not_raise_a_location_card(self):
         classified = classify_holdings([account(1, "taxable"), account(2, "ira")], [

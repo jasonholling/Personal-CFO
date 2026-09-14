@@ -23,6 +23,7 @@ from holdings_engine import (
     estimate_taxable_gain_warning,
     evaluate_tax_lots, is_lot_loss_candidate, detect_wash_sale_conflicts,
     DEFAULT_TAX_LOT_LOSS_REVIEW_THRESHOLD_PCT,
+    PRETAX_RMD_TYPES, ROTH_TYPES, HSA_TYPES, resolve_portfolio_account_type,
 )
 
 # ── Decision lifecycle ────────────────────────────────────────────────────
@@ -428,41 +429,93 @@ def new_money_recommendations(contribution_actions: List[Dict]) -> List[Dict]:
 
 # ── Asset location review ────────────────────────────────────────────────
 
-def asset_location_recommendations(classified: Dict, options_by_account: Optional[Dict[int, List[Dict]]] = None) -> List[Dict]:
-    """Surface tax-location questions without pretending a heuristic is a
-    trade instruction.  This deliberately produces review cards only:
-    it does not model embedded gains, state tax, withdrawal timing, or an
-    account-specific replacement security."""
-    cards = []
+def asset_location_recommendations(classified: Dict, options_by_account: Optional[Dict[int, List[Dict]]] = None,
+                                     accounts: Optional[List[Dict]] = None) -> List[Dict]:
+    """Return review-only tax-location opportunities from recorded facts.
+
+    The calculation uses the same resolved account taxonomy as the rest of
+    Portfolio Coach -- it never falls back to account-name guesses or legacy
+    labels.  A card appears only when a holding in a brokerage account and at
+    least one tax-sheltered account are both on file.  It identifies a useful
+    *future-placement* question; it does not estimate tax savings, select a
+    replacement fund, or recommend selling the taxable holding.
+    """
     options_by_account = options_by_account or {}
-    taxable_types = {"taxable", "brokerage"}
-    tax_inefficient = {"us_bonds", "international_bonds", "real_estate"}
+    tax_sheltered_types = PRETAX_RMD_TYPES | ROTH_TYPES | HSA_TYPES
+    # These categories often distribute ordinary income, interest, or other
+    # income that may be less convenient in taxable.  This is deliberately a
+    # small, conservative set -- broad equity holdings are not inferred to be
+    # incorrectly located from their asset class alone.
+    tax_sensitive_classes = {"us_bonds", "international_bonds", "real_estate"}
+
+    account_by_id = {}
+    for bucket in ("household", "hsa", "child_specific", "liquidity", "blocked", "review_required"):
+        for holding in classified.get(bucket, []):
+            account = holding.get("_account")
+            if account:
+                account_by_id[account.get("id")] = account
+    for account in accounts or []:
+        account_by_id[account.get("id")] = account
+
+    sheltered_accounts = [
+        account for account in account_by_id.values()
+        if resolve_portfolio_account_type(account) in tax_sheltered_types
+    ]
+    if not sheltered_accounts:
+        return []
+
+    cards = []
     for holding in classified.get("household", []):
-        account_type = (holding.get("_account") or {}).get("account_type")
+        account = holding.get("_account") or {}
+        account_type = holding.get("_portfolio_account_type") or resolve_portfolio_account_type(account)
         asset_class = holding.get("asset_class")
-        if account_type not in taxable_types or asset_class not in tax_inefficient:
+        if account_type not in TAXABLE_GAIN_TYPES or asset_class not in tax_sensitive_classes:
             continue
+
+        destinations = []
+        for candidate in sheltered_accounts:
+            matching_options = [
+                option for option in options_by_account.get(candidate.get("id"), [])
+                if option.get("asset_class") == asset_class
+                and (option.get("available_for_new_contributions") or option.get("available_for_exchange"))
+            ]
+            destinations.append({
+                "account_id": candidate.get("id"),
+                "account_name": candidate.get("name") or "tax-advantaged account",
+                "portfolio_account_type": resolve_portfolio_account_type(candidate),
+                "matching_options": sorted({option.get("option_name") or option.get("ticker") for option in matching_options if option.get("option_name") or option.get("ticker")}),
+            })
+
+        recorded_matches = [
+            f"{destination['account_name']}: {', '.join(destination['matching_options'][:2])}"
+            for destination in destinations if destination["matching_options"]
+        ]
+        destination_note = (
+            " Recorded same-class choices: " + "; ".join(recorded_matches[:3]) + "."
+            if recorded_matches else
+            " No same-class option has been recorded in those accounts, so confirm the menu before changing anything."
+        )
         name = holding.get("security_name") or holding.get("ticker") or "This holding"
-        alternatives = []
-        for candidate in classified.get("household", []) + classified.get("hsa", []):
-            candidate_type = (candidate.get("_account") or {}).get("account_type")
-            if candidate_type not in {"ira", "401k", "403b", "roth_ira", "hsa"}:
-                continue
-            for option in options_by_account.get(candidate.get("account_id"), []):
-                if option.get("asset_class") == asset_class and option.get("available_for_exchange"):
-                    alternatives.append(option.get("option_name") or option.get("ticker"))
-        alternative_note = (" Recorded alternatives: " + ", ".join(sorted(set(alternatives))[:3]) + ".") if alternatives else " No recorded tax-advantaged replacement option is available yet."
         cards.append(_card(
             "minor_optimization", recommendation_key("asset_location_review", account_id=holding.get("account_id"), holding_id=holding.get("id")),
-            5, f"Review tax location for {name}",
-            f"{asset_class.replace('_', ' ').title()} is held in a taxable account. Interest, distributions, or REIT income can be less tax-efficient there than in a tax-advantaged account." + alternative_note,
-            [holding.get("account_id")], [holding.get("id")], current_value=holding.get("market_value"), target_value=None,
-            proposed_change="Compare this holding with the bond or real-estate exposure already available in pretax, Roth, or HSA accounts before making any change.",
-            expected_effect="May reduce annual taxable distributions; any move still needs a gain, fee, and available-fund review.",
-            tax_impact="Selling in taxable may realize a gain or loss; Coach does not estimate it here without a complete replacement plan.",
-            assumptions=["This is a location heuristic, not a sell recommendation.", "Taxable account type and asset classification are correct."],
-            confidence="medium", invalidates_on=["Account type, tax status, holdings, or tax circumstances change."],
-            assumptions_hash_input={"holding_id": holding.get("id"), "account_type": account_type, "asset_class": asset_class, "market_value": holding.get("market_value")},
+            5, f"Review future tax location for {name}",
+            f"{asset_class.replace('_', ' ').title()} is recorded in a taxable brokerage account. For future purchases or a separately justified rebalance, compare placing this exposure in one of the tax-sheltered accounts already on file." + destination_note,
+            [holding.get("account_id")] + [destination["account_id"] for destination in destinations], [holding.get("id")],
+            current_value=holding.get("market_value"), target_value=None,
+            proposed_change="Use this as a future-placement review; do not sell solely to change location.",
+            expected_effect="May reduce taxable distributions from future holdings. Coach does not estimate a dollar tax benefit.",
+            tax_impact="Selling in taxable may realize a gain or loss; Coach does not calculate taxes, fees, or a replacement trade here.",
+            assumptions=[
+                "This is a location heuristic for future purchases or separately justified rebalancing, not a sell recommendation.",
+                "Recorded account tax types and asset classifications are correct.",
+                "It does not model tax brackets, state tax, fund distributions, contribution limits, or withdrawal timing.",
+            ],
+            confidence="medium", invalidates_on=["Account type, available menu, holdings, or tax circumstances change."],
+            assumptions_hash_input={
+                "holding_id": holding.get("id"), "account_type": account_type,
+                "asset_class": asset_class, "market_value": holding.get("market_value"),
+                "destinations": destinations,
+            },
         ))
     return cards
 

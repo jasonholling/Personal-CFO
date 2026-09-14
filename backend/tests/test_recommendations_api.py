@@ -86,6 +86,26 @@ class TestInvestmentPolicyValidation:
 
 
 class TestRecommendationsGenerate:
+    def test_tax_location_uses_resolved_current_account_types_and_real_destinations(self, client):
+        """A brokerage bond plus an otherwise-empty traditional IRA is a
+        location-review opportunity. Older code looked only at accounts with
+        a holding and compared obsolete ``ira``/``401k`` strings, so it
+        missed this real setup."""
+        brokerage = _create_account(client, "taxable", "Brokerage", 20000)
+        ira = _create_account(client, "ira", "Rollover IRA", 0)
+        client.post("/api/holdings", json={
+            "account_id": brokerage["id"], "security_name": "Bond Fund", "market_value": 20000,
+            "asset_class": "us_bonds",
+        })
+        _save_policy(client)
+
+        body = client.get("/api/recommendations").json()
+        card = next(c for c in body["recommendations"]
+                    if c["payload"]["recommendation_key"].startswith("asset_location_review:"))
+        assert card["payload"]["affected_accounts"] == [brokerage["id"], ira["id"]]
+        assert "future purchases" in card["payload"]["action_text"]
+        assert "do not sell solely" in card["payload"]["proposed_change"]
+
     def test_no_policy_yields_establish_policy_card(self, client):
         _create_account(client)
         client.post("/api/holdings", json={

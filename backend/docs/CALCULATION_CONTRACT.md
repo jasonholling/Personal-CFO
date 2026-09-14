@@ -7846,3 +7846,26 @@ plus its deferred-reviews-due listing. Frontend:
 counts and its expand/collapse detail sections. Exact pass counts,
 coverage, frontend build, and the sensitive-data check are reported in
 this branch's own final status report rather than restated here.
+
+## Tax-aware asset-location review
+
+Portfolio Coach's asset-location cards are review-only and intentionally
+separate from allocation, rebalancing, and retirement calculations. The engine
+uses the resolved portfolio account type (`brokerage`, `traditional_401k`,
+`traditional_ira`, `roth_401k`, `roth_ira`, or `hsa`) rather than account names
+or obsolete legacy strings. It considers only recorded bond and real-estate
+holdings in a brokerage account, and only when at least one tax-sheltered
+account exists in the recorded household.
+
+A card directs future purchases or a separately justified rebalance to review
+tax-sheltered placement. It never estimates tax savings, chooses a replacement
+security, or directs a taxable sale. If the account's recorded fund menu has a
+same-class option available for purchase or exchange, the card names it;
+otherwise it says that the menu must be confirmed. The stated limitations are
+part of every card: no tax-bracket, state-tax, fund-distribution, contribution-
+limit, fee, or withdrawal-timing model is implied.
+
+529 and custodial accounts are outside the household location review. HSA,
+pretax, and Roth accounts can be possible destinations, but a holding already
+in one of those accounts never produces a location card merely because of its
+asset class.
