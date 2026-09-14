@@ -450,6 +450,18 @@ class TestHoldingExposuresRoundTrip:
         assert body["current_allocation"]["by_class"]["us_large_cap"] == 60000
         assert body["current_allocation"]["by_class"]["us_bonds"] == 40000
 
+    def test_allocation_reconciliation_only_lists_included_accounts(self, client):
+        invested = _create_account(client, account_type="taxable", name="Included Brokerage")
+        _create_account(client, account_type="checking", name="Checking Reserve")
+        client.post("/api/holdings", json={
+            "account_id": invested["id"], "security_name": "Index fund", "market_value": 90000,
+            "asset_class": "us_large_cap",
+        })
+        body = client.get("/api/portfolio/allocation").json()
+        issues = body["health"]["unreconciled_accounts"]
+        assert [item["account_name"] for item in issues] == ["Included Brokerage"]
+        assert issues[0]["difference"] == 10000
+
     def test_included_in_backup_export_and_restore(self, client):
         acc = _create_account(client)
         exposures = [{"asset_class": "us_large_cap", "weight_pct": 50}, {"asset_class": "us_bonds", "weight_pct": 50}]

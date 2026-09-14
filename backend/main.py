@@ -1618,10 +1618,18 @@ def get_portfolio_allocation():
     holdings = policy_included_holdings(holdings, policy)
     classified = classify_holdings(accounts, holdings)
     current = compute_current_allocation(classified["household"])
+    # Reconcile only accounts represented in the included portfolio views.
+    # Checking/savings, vehicles, property, debt, insurance, and unresolved
+    # "other" accounts are intentionally outside this workflow and should
+    # not create noisy zero-holdings mismatches.
+    included_portfolio_holdings = (
+        classified["household"] + classified["hsa"] + classified["child_specific"]
+    )
+    included_account_ids = {h.get("account_id") for h in included_portfolio_holdings}
     reconciliations = [
         {**reconcile_account_holdings(a, [h for h in holdings if h.get("account_id") == a["id"]]),
          "account_name": a.get("name") or f"Account {a.get('id')}"}
-        for a in accounts
+        for a in accounts if a.get("id") in included_account_ids
     ]
     result = {
         "has_holdings": True, "current_allocation": current,
