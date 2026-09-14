@@ -526,10 +526,10 @@ class TestMinorOptimizationRecommendations:
         assert "review" in concentration_cards[0]["proposed_change"].lower()
         assert "sell" not in concentration_cards[0]["proposed_change"].lower()
 
-    def test_near_term_depletion_risk_flagged(self):
+    def test_near_term_depletion_risk_is_left_to_planning_views(self):
         context = {"years_to_retirement": 8, "median_depletion_age": 82, "retirement_age": 60, "monte_carlo_success_rate": 90}
         cards = minor_optimization_recommendations([], context)
-        assert any("near-term" in c["action_text"].lower() or "reserve" in c["action_text"].lower() for c in cards)
+        assert not any("near-term" in c["action_text"].lower() or "reserve" in c["action_text"].lower() for c in cards)
 
     def test_no_card_when_no_depletion_risk(self):
         context = {"years_to_retirement": 8, "median_depletion_age": 99, "retirement_age": 60, "monte_carlo_success_rate": 95}

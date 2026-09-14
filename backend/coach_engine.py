@@ -705,6 +705,9 @@ def minor_optimization_recommendations(household_holdings: List[Dict], goal_cont
             confidence="medium", assumptions_hash_input=f, value_unit="percent",
         ))
     goal_context = goal_context or {}
+    # Timeline-wide spending and depletion guidance belongs in the planning
+    # views. Coach should stay focused on concrete portfolio evidence rather
+    # than turning one Monte Carlo summary statistic into a trade prompt.
     years_to_retirement = goal_context.get("years_to_retirement")
     depletion_age = goal_context.get("median_depletion_age")
     retirement_age = goal_context.get("retirement_age")
@@ -712,25 +715,6 @@ def minor_optimization_recommendations(household_holdings: List[Dict], goal_cont
     # planning views. It is not a portfolio-action recommendation: without
     # the full spending, tax, and retirement context it produces a generic
     # warning that is easy to mistake for an allocation diagnosis.
-    if years_to_retirement is not None and depletion_age is not None and retirement_age is not None:
-        if years_to_retirement <= 10 and depletion_age < retirement_age + 30:
-            cards.append(_card(
-                "minor_optimization", recommendation_key("near_term_depletion_risk"),
-                1, "Review near-term spending reserve before increasing equity exposure",
-                (
-                    f"Retirement is {years_to_retirement} years away and the downside Monte Carlo scenario "
-                    f"depletes the portfolio at age {depletion_age}. Review whether your near-term spending "
-                    f"reserve is large enough before increasing equity exposure."
-                ),
-                [], [], current_value=depletion_age, target_value=None,
-                proposed_change="Review cash reserve / spending cushion before any equity-weighting increase",
-                expected_effect="Better-informed near-term risk decision -- not a specific trade.",
-                tax_impact=None,
-                assumptions=[f"Retirement projection assumes age {retirement_age}.", "Monte Carlo downside scenario per the last run."],
-                confidence="medium",
-                invalidates_on=["Retirement age or the Monte Carlo assumptions change materially."],
-                assumptions_hash_input=goal_context, value_unit="age",
-            ))
     return cards
 
 # Backwards-compatible alias -- earlier internal draft's name. Signature
