@@ -382,6 +382,32 @@ export function MonteCarloSection({ retAge, ssTiming, overrides, jasonRetAge, ju
   const rate = data.success_rate
   const rateColor = rate >= 95 ? GREEN : rate >= 85 ? AMBER : RED
 
+  // Success rate is "did this trial ever deplete before the end of the
+  // plan" -- a different statistic than any single year's p10 line, which
+  // can still show a positive balance at a given age even for a household
+  // that eventually depletes. Surfacing where p10 actually hits $0 (and
+  // the median/typical outcome right next to it) makes that distinction
+  // visible instead of letting the fan chart's early years read as
+  // reassuring when the tail is really mid-collapse.
+  const p10DepletionRow = (data.chart || []).find(r => (r.p10 ?? 0) <= 0)
+  const medianFinalBalance = data.median_final_balance
+
+  const RunSummaryContext = medianFinalBalance != null ? (
+    <div style={{ fontSize:12, color:'var(--text2)', marginTop:10, lineHeight:1.6 }}>
+      <div>Typical (median) outcome: <strong style={{ color:'var(--text1)' }}>{fmtK(medianFinalBalance)}</strong> remaining at the end of the plan — most simulations look like this, not the worst case.</div>
+      {p10DepletionRow && (
+        <div style={{ color:RED, marginTop:2 }}>Bottom 10% of outcomes run out of money around age {p10DepletionRow.age}.</div>
+      )}
+      {data.randomize_accumulation && (
+        <div style={{ marginTop:2 }}>
+          Market-Aware Retirement Timing is on: {data.delayed_trials_pct}% of simulations waited
+          {data.avg_delay_years_when_delayed ? ` ~${data.avg_delay_years_when_delayed} yrs` : ''} to retire
+          because their own simulated pre-retirement returns came in well below expectations.
+        </div>
+      )}
+    </div>
+  ) : null
+
   return (
     <div>
       <AssumptionsUsed retAge={retAge} ssTiming={ssTiming} jasonRetAge={jasonRetAge} justinRetAge={justinRetAge}
@@ -403,6 +429,7 @@ export function MonteCarloSection({ retAge, ssTiming, overrides, jasonRetAge, ju
               <div className="progress-bar-fill" style={{ width:`${rate}%`, background:rateColor }} />
             </div>
           </div>
+          {RunSummaryContext}
         </div>
         <div className="card">
           <div className="label">Portfolio at Retirement</div>

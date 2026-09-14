@@ -3861,7 +3861,8 @@ def get_monte_carlo(ret_age: int = 60, ss_timing: str = "early",
         return run_monte_carlo(_inputs, accounts, ret_age, ss_timing, life_events=life_events,
                                 surplus_allocations=surplus_allocations,
                                 jason_ret_age=jason_ret_age, justin_ret_age=justin_ret_age,
-                                jason_ss_claim_age=_jason_ss_claim_age, justin_ss_claim_age=_justin_ss_claim_age)
+                                jason_ss_claim_age=_jason_ss_claim_age, justin_ss_claim_age=_justin_ss_claim_age,
+                                randomize_accumulation=bool(_inputs.get("randomize_accumulation")))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -3904,7 +3905,8 @@ def post_monte_carlo(body: dict):
         return run_monte_carlo(inputs, accounts, ret_age, ss_timing, life_events=life_events,
                                 surplus_allocations=surplus_allocations,
                                 jason_ret_age=jason_ret_age, justin_ret_age=justin_ret_age,
-                                jason_ss_claim_age=_jason_ss_claim_age, justin_ss_claim_age=_justin_ss_claim_age)
+                                jason_ss_claim_age=_jason_ss_claim_age, justin_ss_claim_age=_justin_ss_claim_age,
+                                randomize_accumulation=bool(body.get("randomize_accumulation", inputs.get("randomize_accumulation"))))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 

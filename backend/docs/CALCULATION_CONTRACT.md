@@ -8255,3 +8255,200 @@ backend suite green.
 
 Branch: `codex/bridge-and-withdrawal-strategy` (continued in this
 session).
+
+## 85. Age-banded spending curve — go-go / slow-go / no-go (2026-09-14)
+
+User-requested after looking at the real household's numbers: a flat
+`retirement_income_today_dollars` for the entire 42-year retirement
+(55/58→100) forces an all-or-nothing tradeoff between spending more now
+and success rate, because a flat increase gets tested against every
+remaining year of every simulated path, not just the "enjoy it" years.
+Verified against the real household: $125K/yr → 83.6% success, $14.4M
+median ending balance; $150K/yr (flat) → 65.1% success. The fix isn't a
+bigger flat number — it's letting spending taper by age like an actual
+retirement does.
+
+**`spending_band_multiplier(age, inputs)`** (`projection_engine.py`): a
+pure function returning a multiplier (1.0 = no change) on the base
+today's-dollars spending target for a given age, keyed to three new
+optional `planning_inputs` columns — `spending_gogo_end_age` (default
+70), `spending_slowgo_end_age` (default 85), `spending_slowgo_dollars`
+and `spending_nogo_dollars` (both default 0, meaning "same as the band
+before it"). `retirement_income_today_dollars` itself is unchanged — it
+remains the go-go (baseline) figure. Every household/test that hasn't
+touched the new fields gets byte-identical output, same convention as
+`pension_stop_age` (section 83).
+
+Only the base income term is scaled — healthcare, kids costs, and bridge
+income are fixed/near-fixed costs, not discretionary lifestyle spending,
+and are deliberately excluded at every call site.
+
+**Applied at**: `run_retirement_projection`'s single-age inline loop,
+`two_age_spending_need_fn`/`need_for_year` (the shared two-age factory,
+used by `run_two_dimensional_retirement_projection` and every two-age
+Monte Carlo/Stress Tests trial), and `_run_single`'s single-age inline
+loop (Monte Carlo/Stress Tests) — one multiplier computed per iteration
+from `age`/`inputs`, multiplied into the base spending term in all 4 age-
+phase branches (bridge/kids/pre-65/post-65) each of these functions
+already has.
+
+**Explicitly out of scope**: SWR Analysis, Roth Conversion Analysis, Tax
+Efficiency Analysis, Survivor Scenario, Insurance Analysis, Contribution
+Sensitivity — each already has its own simplified spending formula (no
+bridge/kids phase split either), a pre-existing gap unrelated to this
+feature. Same scoping call as section 83's "9 unrelated call sites
+unaffected."
+
+**Follow-up audit (2026-09-14), a real leak caught and closed**: the
+two-age variants of SWR Analysis (`_household_spending_success_rate_
+two_age`), Roth Conversion Analysis (`_run_roth_conversion_analysis_
+two_age`), and Tax Efficiency Analysis (`_run_tax_efficiency_simulation_
+two_age`) all call the SAME shared `two_age_spending_need_fn`/
+`need_for_year` factory Monte Carlo/Stress Tests use — unlike their
+single-age counterparts, which have their own independent simplified
+formulas. Because the multiplier was added inside that shared factory,
+these three two-age functions silently picked up spending-band behavior
+the very first time this feature shipped, contradicting the "out of
+scope" line above and creating a single-age/two-age asymmetry for the
+same three tools. Fixed by stripping `spending_slowgo_dollars`/
+`spending_nogo_dollars` from the `inputs` dict at those three call sites
+only, before constructing `need_for_year` — `spending_band_multiplier`
+sees a base with no slow-go/no-go figures and returns 1.0 unconditionally,
+restoring the exact originally-documented "out of scope" behavior for
+both age modes of all four named tools. Survivor Scenario (both age
+modes) was independently confirmed never to call `two_age_spending_need_
+fn`/`need_for_year` at all — no leak there. The one call site that
+SHOULD carry the multiplier (`_run_single_two_age`, line 560) is
+untouched, still passing the real `inputs`.
+
+**Verified**: `spending_band_multiplier` reference tests (band
+boundaries, zero-regression default, slowgo-only vs. both set, plus
+explicit age-69/70 and age-84/85 boundary assertions at the DEFAULT
+70/85 ages); integration tests confirming `run_retirement_projection`/
+`run_two_dimensional_retirement_projection` yearly_detail spending steps
+down at the configured ages; Monte Carlo/Stress Tests zero-regression
+guard plus a directional test showing a lower no-go figure reduces
+late-life RMD relative to an equal-total-spend flat baseline; a
+regression test confirming SWR/Roth Conversion/Tax Efficiency (two-age)
+are unaffected by slow-go/no-go dollars, closing the leak above. Full
+backend suite green.
+
+Branch: `codex/bridge-and-withdrawal-strategy` (continued in this
+session).
+
+## 87. Adaptive retirement timing in Monte Carlo (two-age) (2026-09-14)
+
+User's own framing: "if we are hitting the worst market conditions, I
+am not going to retire, I would wait." Investigated and confirmed: the
+pre-retirement accumulation phase was 100% deterministic in every
+consumer -- `run_monte_carlo`/`run_stress_tests` each call
+`run_retirement_projection`/`run_two_dimensional_retirement_projection`
+ONCE, outside the N=1000 trial loop, so every trial started withdrawal
+from the identical fixed balance regardless of what markets did leading
+up to retirement. `random.gauss` was called only for withdrawal-phase
+years. This makes a household's blind on-schedule retirement a robot's
+behavior, not a person's -- someone facing a crash right before their
+planned date would realistically delay, not walk into it.
+
+**`randomize_accumulation_trial(inputs, accounts, jason_ret_age,
+justin_ret_age, life_events, surplus_allocations, pre_ret_returns)`**
+(`projection_engine.py`): a deliberately SEPARATE function from
+`run_two_dimensional_retirement_projection`, not a refactor of it --
+that function's closed-form helpers (`_fv`/`_fv_annuity`/`_fv_growing_
+annuity`/`_fv_annuity_monthly`) only support a single flat rate;
+replacing them with an iterative per-year loop risked floating-point
+drift against existing hand-calculated `==` tests. Key insight: the
+contribution AMOUNT entering each bucket each year doesn't need
+randomizing (it's a deterministic function of salary/inputs) -- only
+the RETURN compounding the growing balance does. So this derives each
+stream's per-year nominal contribution into a schedule (via
+`_linear_contribution_schedule`), then walks it forward with
+`pre_ret_returns[k]`. Two schedule conventions, matched exactly to the
+deterministic path's own two conventions: annuity-style streams (401k,
+RSU, bonus, HSA, recurring life events, surplus) are added AFTER that
+year's return (ordinary-annuity convention, no growth in their own
+year); one-time lump sums (life events' one_time delta, asset-sale
+proceeds) are added BEFORE that year's return (full growth including
+their own year) -- conflating the two during implementation undercounted
+one-time events by exactly one year of growth, caught via a parity
+check against the deterministic function using real $190,000/$89,639
+asset-sale figures (a genuine bug, not just float noise: off by
+~$1,804 on a small test case, traced to the wrong schedule).
+
+**Verified exact parity** (to floating-point precision) against
+`run_two_dimensional_retirement_projection` for every stream EXCEPT
+surplus allocations, fed a flat list of the deterministic `pre_ret`
+rate: 401k (both spouses, growing/flat), RSU (Jason flat-dollar/Justin
+growing -- the pre-existing asymmetry preserved, not resolved), bonus,
+HSA, asset sales (both, with asset1's own pre-sale appreciation), life
+events (one-time and recurring), and unequal-retirement-age dormant-
+years handling. **Documented, deliberate approximation**: surplus
+allocations walk as a flat annual (monthly×12) contribution rather than
+true monthly compounding (`_fv_annuity_monthly`) -- a secondary, usually
+small stream; verified close (~5% relative) but not exact, with a test
+that would fail loudly if a future change accidentally made it exact
+without updating the expectation (a sign true monthly compounding had
+been silently reintroduced without re-verifying the simplification is
+still intended).
+
+**Delay rule** (`simulation_engine.py`, `_run_monte_carlo_two_age`, new
+`randomize_accumulation: bool = False` param, threaded from
+`run_monte_carlo`): per trial, when opted in, randomizes that trial's
+own `phase2_years`-long pre-retirement return sequence, compares the
+resulting portfolio against the shared deterministic baseline via
+`ratio = trial_portfolio / deterministic_portfolio`, and delays both
+spouses' retirement together (a joint decision, not modeled per-spouse
+independently) by 2 years if `ratio < ACCUMULATION_SHORTFALL_DELAY_
+THRESHOLD_2YR` (0.60) or 1 year if `< ..._1YR` (0.75) -- named
+constants, not buried magic numbers. A delayed trial extends its own
+already-drawn return sequence (not re-sampled from scratch) by the
+delay years, re-derives its `TwoPersonTimeline` via `build_two_person_
+timeline` with shifted ages (bridge/spending-band/Medicare gating all
+fall out of this automatically, since those are pure functions of age),
+and recomputes `pension_for_age` for the shifted age. One check, no
+iterative re-check -- bounded compute, avoids infinite deferral chains.
+
+**Percentile-chart alignment**: the chart's `ages` array is anchored to
+the ORIGINAL (undelayed) `phase2_start_age`. A delayed trial's balances
+array is padded at the front with `delay_years` copies of its own pre-
+delay portfolio total (held flat -- a simplification, not tracking the
+exact intra-delay growth path) so every trial's array stays the same
+length and age-indexed the same way, rather than reading as a false $0
+dip during years that trial simply hadn't retired yet. Verified this
+padding produces exactly `retire_yrs`-length arrays for the typical
+case (`end_age` fixed, `retire_yrs` shrinks by exactly `delay_years`);
+a documented edge case exists when a household's own `retirement_end_
+age` sits within `delay_years` of their planned retirement (the
+`max(phase2_start_age+1, ...)` floor in `build_two_person_timeline`
+can then keep `end_age` from shrinking as expected) -- success_rate/
+median_final_balance are unaffected either way; only chart display
+could be marginally short in this rare boundary case, gracefully
+handled by the existing `if yr < len(b) else 0` fallback.
+
+**Zero regression**: `randomize_accumulation=False` (every existing
+caller, including Stress Tests and every other Monte Carlo consumer)
+is byte-identical to omitting the param -- the single deterministic
+accumulation call and shared starting balance are completely
+unaffected. Backed by `db.py`'s new `randomize_accumulation` column
+(INTEGER DEFAULT 0) and a Settings toggle ("Market-Aware Retirement
+Timing", two-age Monte Carlo only, off by default).
+
+**Scope**: two-age Monte Carlo only (where this household actually
+lives). Explicitly NOT built for: single-age Monte Carlo, Stress Tests
+(its fixed deterministic override-scenario model doesn't naturally fit
+per-trial accumulation variance), SWR/Roth Conversion/Tax Efficiency/
+Survivor Scenario. A deliberate, documented follow-up scope, not an
+oversight -- same scoping-call pattern as prior sections.
+
+**Verified**: `TestRandomizeAccumulationTrial` (5 tests, hand-calculated
+parity against the deterministic function across every stream);
+`TestAdaptiveRetirementTiming` (7 tests: zero-regression guard, result
+always carries the new fields, monkeypatched always-catastrophic
+returns → 100% of trials delay 2yrs, monkeypatched always-excellent
+returns → 0% delay, directional guard that randomizing can only lower
+or match success rate for identical inputs, zero-phase2-years is a
+no-op, delayed trials' balances arrays stay correctly aligned/lengthed
+for the percentile chart). Full backend suite green.
+
+Branch: `codex/bridge-and-withdrawal-strategy` (continued in this
+session).

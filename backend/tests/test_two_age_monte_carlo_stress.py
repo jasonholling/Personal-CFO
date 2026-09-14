@@ -86,6 +86,18 @@ class TestDeterministicMonteCarloParity:
         assert mc["second_earner_net_of_tax_factor"] == 0.65
         assert proj["yearly_detail"][-1]["portfolio_balance"] == 90000  # sanity-check against the known hand-calc
 
+    def test_spending_band_matches_projection_two_age(self, monkeypatch):
+        """spending_band_multiplier (2026-09-14, CALCULATION_CONTRACT.md
+        section 85) reaches two-age Monte Carlo via the same shared
+        need_for_year factory run_two_dimensional_retirement_projection
+        uses -- the deterministic-parity helper above already proves this
+        exactly, same idiom as every other two-age feature in this file."""
+        inputs = base_inputs(jason_age=65, justin_age=65, retirement_end_age=80,
+                              retirement_income_today_dollars=100000,
+                              spending_gogo_end_age=70, spending_slowgo_end_age=90,
+                              spending_slowgo_dollars=40000)
+        assert_deterministic_mc_matches_projection(monkeypatch, inputs, TAXABLE(2_000_000), 65, 65)
+
     def test_justin_retires_first_jason_still_working(self, monkeypatch):
         """Mirror direction -- proves the two-age Monte Carlo/Stress
         wiring is symmetric, not hardcoded to Justin as the still-
@@ -498,3 +510,98 @@ class TestStartingBalancesRetainFullPrecision:
         accounts = [{"name": "401k", "account_type": "401k", "owner": "joint", "balance": 100001}]
         proj = run_two_dimensional_retirement_projection(inputs, accounts, jason_ret_age=61, justin_ret_age=61)
         assert proj["pretax_at_phase2_start"] == 75000.75
+
+
+class TestAdaptiveRetirementTiming:
+    """CALCULATION_CONTRACT.md section 87 -- randomize_accumulation on
+    run_monte_carlo's two-age dispatch."""
+
+    def test_default_false_is_byte_identical_to_omitting_it(self):
+        inputs = base_inputs(retirement_end_age=90, w2_salary=200000, employee_401k_pct=0.06,
+                              employer_401k_pct=0.09)
+        accounts = [{"name": "401k", "account_type": "401k", "owner": "joint", "balance": 300000}]
+        omitted = run_monte_carlo(inputs, accounts, jason_ret_age=60, justin_ret_age=60)
+        explicit_false = run_monte_carlo(inputs, accounts, jason_ret_age=60, justin_ret_age=60,
+                                          randomize_accumulation=False)
+        assert omitted == explicit_false
+
+    def test_result_always_carries_the_new_fields(self):
+        inputs = base_inputs(retirement_end_age=90)
+        accounts = [{"name": "401k", "account_type": "401k", "owner": "joint", "balance": 300000}]
+        result = run_monte_carlo(inputs, accounts, jason_ret_age=60, justin_ret_age=60)
+        assert result["randomize_accumulation"] is False
+        assert result["delayed_trials_pct"] == 0.0
+        assert result["avg_delay_years_when_delayed"] == 0.0
+
+    def test_always_bad_pre_retirement_returns_delay_every_trial(self, monkeypatch):
+        """Monkeypatch random.gauss to always return far below pre_ret --
+        every trial's simulated accumulation should come in short enough
+        to trigger a delay."""
+        calls = {"n": 0}
+
+        def _bad_gauss(mu, sigma):
+            calls["n"] += 1
+            return -0.30  # catastrophic pre-retirement return, every year
+
+        monkeypatch.setattr(random_module, "gauss", _bad_gauss)
+        inputs = base_inputs(jason_age=50, justin_age=50, retirement_end_age=90, w2_salary=200000,
+                              employee_401k_pct=0.06, employer_401k_pct=0.09)
+        accounts = [{"name": "401k", "account_type": "401k", "owner": "joint", "balance": 300000}]
+        result = run_monte_carlo(inputs, accounts, jason_ret_age=58, justin_ret_age=58,
+                                  randomize_accumulation=True)
+        assert result["delayed_trials_pct"] == 100.0
+        assert result["avg_delay_years_when_delayed"] == 2.0
+
+    def test_always_good_pre_retirement_returns_never_delay(self, monkeypatch):
+        def _good_gauss(mu, sigma):
+            return 0.30  # far above expectation, every year
+
+        monkeypatch.setattr(random_module, "gauss", _good_gauss)
+        inputs = base_inputs(jason_age=50, justin_age=50, retirement_end_age=90, w2_salary=200000,
+                              employee_401k_pct=0.06, employer_401k_pct=0.09)
+        accounts = [{"name": "401k", "account_type": "401k", "owner": "joint", "balance": 300000}]
+        result = run_monte_carlo(inputs, accounts, jason_ret_age=58, justin_ret_age=58,
+                                  randomize_accumulation=True)
+        assert result["delayed_trials_pct"] == 0.0
+
+    def test_success_rate_with_randomization_never_exceeds_flat_baseline(self):
+        """Directional guard: adding a previously-unmodeled risk (pre-
+        retirement sequence risk) can only hurt or leave unchanged the
+        reported success rate for the same inputs, never improve it."""
+        inputs = base_inputs(jason_age=50, justin_age=50, retirement_end_age=90, w2_salary=200000,
+                              employee_401k_pct=0.06, employer_401k_pct=0.09,
+                              retirement_income_today_dollars=60000,
+                              expected_return_pre_retirement=0.06, expected_return_post_retirement=0.05)
+        accounts = [{"name": "401k", "account_type": "401k", "owner": "joint", "balance": 500000},
+                    {"name": "Brokerage", "account_type": "taxable", "owner": "joint", "balance": 300000}]
+        flat = run_monte_carlo(inputs, accounts, jason_ret_age=58, justin_ret_age=60)
+        adaptive = run_monte_carlo(inputs, accounts, jason_ret_age=58, justin_ret_age=60,
+                                    randomize_accumulation=True)
+        assert adaptive["success_rate"] <= flat["success_rate"]
+
+    def test_zero_phase2_years_is_a_no_op(self):
+        """Simultaneous retirement at the household's current age (both
+        already retired) has no accumulation phase to randomize --
+        confirms this doesn't crash and simply never delays."""
+        inputs = base_inputs(jason_age=60, justin_age=60, retirement_end_age=90)
+        accounts = [{"name": "Brokerage", "account_type": "taxable", "owner": "joint", "balance": 500000}]
+        result = run_monte_carlo(inputs, accounts, jason_ret_age=60, justin_ret_age=60,
+                                  randomize_accumulation=True)
+        assert result["delayed_trials_pct"] == 0.0
+
+    def test_delayed_trials_balances_array_length_matches_every_other_trial(self):
+        """The chart-padding scheme must keep a delayed trial's balances
+        array the same length as an undelayed trial's -- otherwise the
+        percentile chart's per-year comparison silently misaligns ages.
+        Checked indirectly via the chart itself not raising and covering
+        the full expected age range."""
+        inputs = base_inputs(jason_age=50, justin_age=50, retirement_end_age=95, w2_salary=200000,
+                              employee_401k_pct=0.06, employer_401k_pct=0.09,
+                              retirement_income_today_dollars=90000)
+        accounts = [{"name": "401k", "account_type": "401k", "owner": "joint", "balance": 400000}]
+        result = run_monte_carlo(inputs, accounts, jason_ret_age=58, justin_ret_age=58,
+                                  randomize_accumulation=True)
+        assert result["delayed_trials_pct"] > 0  # sanity: this scenario actually exercises delays
+        assert len(result["chart"]) > 0
+        first_age = result["chart"][0]["age"]
+        assert first_age == result["phase2_start_age"]

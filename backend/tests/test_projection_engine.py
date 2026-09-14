@@ -14,6 +14,9 @@ from projection_engine import (
     run_kids_projection,
     run_insurance_analysis,
     pension_for_age,
+    spending_band_multiplier,
+    randomize_accumulation_trial,
+    run_two_dimensional_retirement_projection,
     _fv, _fv_annuity, _fv_annuity_monthly, _fv_growing_annuity, _pv_annuity,
     _project_529_saving_phase,
     _project_college_drawdown,
@@ -107,6 +110,117 @@ class TestPensionForAge:
         result = pension_for_age(sample_inputs, age)
         assert isinstance(result, (int, float))
         assert result >= 0
+
+
+class TestSpendingBandMultiplier:
+    """CALCULATION_CONTRACT.md section 85. Zero-regression default (1.0)
+    is the load-bearing guarantee here -- every existing household/test
+    that hasn't touched the new Settings fields must see no change."""
+
+    def test_defaults_to_1_when_bands_are_unset(self, sample_inputs):
+        inputs = dict(sample_inputs)
+        for age in (55, 58, 69, 70, 84, 85, 99):
+            assert spending_band_multiplier(age, inputs) == 1.0
+
+    def test_zero_base_spending_never_divides_by_zero(self):
+        inputs = {"retirement_income_today_dollars": 0, "spending_slowgo_dollars": 50000}
+        assert spending_band_multiplier(80, inputs) == 1.0
+
+    def test_gogo_band_is_always_1_regardless_of_slowgo_nogo(self):
+        inputs = {
+            "retirement_income_today_dollars": 100000,
+            "spending_slowgo_dollars": 70000,
+            "spending_nogo_dollars": 50000,
+        }
+        # default gogo_end_age is 70 -- every age below it is full go-go.
+        for age in (55, 60, 69):
+            assert spending_band_multiplier(age, inputs) == 1.0
+
+    def test_slowgo_band_uses_slowgo_dollars_as_a_fraction_of_base(self):
+        inputs = {"retirement_income_today_dollars": 100000, "spending_slowgo_dollars": 70000}
+        assert spending_band_multiplier(70, inputs) == pytest.approx(0.7)
+        assert spending_band_multiplier(84, inputs) == pytest.approx(0.7)
+
+    def test_nogo_band_uses_nogo_dollars_as_a_fraction_of_base(self):
+        inputs = {
+            "retirement_income_today_dollars": 100000,
+            "spending_slowgo_dollars": 70000,
+            "spending_nogo_dollars": 50000,
+        }
+        assert spending_band_multiplier(85, inputs) == pytest.approx(0.5)
+        assert spending_band_multiplier(99, inputs) == pytest.approx(0.5)
+
+    def test_nogo_band_falls_back_to_slowgo_fraction_when_nogo_unset(self):
+        # Setting only slow-go should keep applying all the way out, not
+        # snap back to full go-go spending once age crosses slowgo_end_age.
+        inputs = {"retirement_income_today_dollars": 100000, "spending_slowgo_dollars": 70000}
+        assert spending_band_multiplier(90, inputs) == pytest.approx(0.7)
+
+    def test_nogo_band_falls_back_to_1_when_neither_slowgo_nor_nogo_set(self):
+        inputs = {"retirement_income_today_dollars": 100000}
+        assert spending_band_multiplier(90, inputs) == 1.0
+
+    def test_default_boundary_ages_69_vs_70_and_84_vs_85(self):
+        """The exact boundary a household hits if they leave Go-Go/
+        Slow-Go ends-at-age at their defaults (70/85) -- age 70 and 85
+        are themselves the FIRST year of the next band, not the last
+        year of the current one (2026-09-14 audit: UI wording was
+        fixed to match this, not the other way around)."""
+        inputs = {
+            "retirement_income_today_dollars": 100000,
+            "spending_slowgo_dollars": 70000,
+            "spending_nogo_dollars": 50000,
+        }
+        assert spending_band_multiplier(69, inputs) == 1.0
+        assert spending_band_multiplier(70, inputs) == pytest.approx(0.7)
+        assert spending_band_multiplier(84, inputs) == pytest.approx(0.7)
+        assert spending_band_multiplier(85, inputs) == pytest.approx(0.5)
+
+    def test_custom_band_boundary_ages_are_respected(self):
+        inputs = {
+            "retirement_income_today_dollars": 100000,
+            "spending_gogo_end_age": 60,
+            "spending_slowgo_end_age": 75,
+            "spending_slowgo_dollars": 80000,
+            "spending_nogo_dollars": 40000,
+        }
+        assert spending_band_multiplier(59, inputs) == 1.0
+        assert spending_band_multiplier(60, inputs) == pytest.approx(0.8)
+        assert spending_band_multiplier(74, inputs) == pytest.approx(0.8)
+        assert spending_band_multiplier(75, inputs) == pytest.approx(0.4)
+
+
+class TestSpendingBandInRunRetirementProjection:
+    """Integration: spending_band_multiplier wired into the single-age
+    yearly loop (section 85) -- income_need should step down at the
+    configured band boundary and stay flat within each band."""
+
+    def test_income_need_steps_down_at_the_configured_slowgo_age(self, sample_inputs, sample_accounts):
+        inputs = {
+            **sample_inputs,
+            "jason_age": 65, "inflation_rate": 0.0,  # freeze inflation so the drop is exact
+            "spending_gogo_end_age": 70, "spending_slowgo_end_age": 75,
+            "spending_slowgo_dollars": sample_inputs["retirement_income_today_dollars"] * 0.5,
+        }
+        result = run_retirement_projection(inputs, sample_accounts, ret_ages=[65])
+        scenario = next(s for s in result["scenarios"] if s["ss_timing"] == "early")
+        yearly = {y["jason_age"]: y["income_need"] for y in scenario["yearly_detail"]}
+        # Below age 70: full go-go income_need. At/after 70: healthcare is
+        # unscaled so income_need drops by less than half, but must drop.
+        assert yearly[69] > yearly[70]
+        assert yearly[70] == yearly[71]  # flat within the slow-go band
+
+    def test_unset_bands_are_byte_identical_to_flat_spending(self, sample_inputs, sample_accounts):
+        """Zero-regression guard: a household that hasn't touched the new
+        Settings fields sees the exact same yearly_detail as before."""
+        with_defaults = run_retirement_projection(sample_inputs, sample_accounts, ret_ages=[60])
+        explicit_flat = run_retirement_projection(
+            {**sample_inputs, "spending_slowgo_dollars": 0, "spending_nogo_dollars": 0},
+            sample_accounts, ret_ages=[60],
+        )
+        a = next(s for s in with_defaults["scenarios"] if s["ss_timing"] == "early")
+        b = next(s for s in explicit_flat["scenarios"] if s["ss_timing"] == "early")
+        assert a["yearly_detail"] == b["yearly_detail"]
 
 
 class TestRunRetirementProjection:
@@ -2189,3 +2303,109 @@ class TestRunInsuranceAnalysis:
 
         ins = run_insurance_analysis(configured, accounts, kids=kids)
         assert ins["jason"]["college_funding"] == 0
+
+
+class TestRandomizeAccumulationTrial:
+    """CALCULATION_CONTRACT.md section 87. Core zero-regression guarantee:
+    fed a FLAT list of the deterministic pre_ret rate, this must match
+    run_two_dimensional_retirement_projection's own pretax/roth/taxable/
+    hsa_at_phase2_start fields to within floating-point precision (the
+    only difference is closed-form (1+r)**n vs an iterative per-year
+    walk) -- proves the schedule-builder correctly reproduces every
+    stream's timing without reimplementing the FV formulas themselves."""
+
+    def _base_inputs(self, **overrides):
+        inputs = {
+            "jason_age": 50, "justin_age": 49, "inflation_rate": 0.03,
+            "expected_return_pre_retirement": 0.06, "expected_return_post_retirement": 0.05,
+            "retirement_income_today_dollars": 100000, "retirement_end_age": 95,
+            "pretax_401k_pct": 0.75,
+        }
+        inputs.update(overrides)
+        return inputs
+
+    def test_matches_deterministic_with_flat_returns_401k_rsu_bonus_hsa(self):
+        inputs = self._base_inputs(
+            w2_salary=200000, employee_401k_pct=0.06, employer_401k_pct=0.09,
+            justin_w2_salary=80000, justin_employee_401k_pct=0.06, justin_employer_401k_pct=0.03,
+            annual_bonus_pct=0.1, annual_rsu_value=20000, justin_annual_rsu_value=5000,
+            annual_hsa_contribution=5000,
+        )
+        accounts = [{"name": "401k", "account_type": "401k", "owner": "joint", "balance": 300000},
+                    {"name": "Brokerage", "account_type": "taxable", "owner": "joint", "balance": 100000}]
+        det = run_two_dimensional_retirement_projection(inputs, accounts, jason_ret_age=60, justin_ret_age=60)
+        n = 10  # phase2_years = 60 - 50
+        trial = randomize_accumulation_trial(inputs, accounts, jason_ret_age=60, justin_ret_age=60,
+                                              life_events=[], surplus_allocations=[], pre_ret_returns=[0.06] * n)
+        assert trial["pretax"] == pytest.approx(det["pretax_at_phase2_start"], rel=1e-9)
+        assert trial["roth"] == pytest.approx(det["roth_at_phase2_start"], rel=1e-9)
+        assert trial["taxable"] == pytest.approx(det["taxable_at_phase2_start"], rel=1e-9)
+        assert trial["hsa"] == pytest.approx(det["hsa_at_phase2_start"], rel=1e-9)
+
+    def test_matches_deterministic_with_asset_sales_and_life_events(self):
+        inputs = self._base_inputs(
+            asset1_sale_age=54, asset1_sale_net=175000, asset1_appreciation=0.03,
+            asset2_sale_age=56, asset2_sale_net=82500,
+        )
+        accounts = [{"name": "Brokerage", "account_type": "taxable", "owner": "joint", "balance": 0}]
+        life_events = [
+            {"event_year": CURRENT_YEAR + 2, "one_time_cash_delta": 20000, "monthly_cash_flow_delta": 0,
+             "duration_months": 0, "included_in_projection": True},
+            {"event_year": CURRENT_YEAR + 1, "one_time_cash_delta": 0, "monthly_cash_flow_delta": 500,
+             "duration_months": 24, "included_in_projection": True},
+            {"event_year": CURRENT_YEAR, "one_time_cash_delta": 5000, "monthly_cash_flow_delta": 0,
+             "duration_months": 0, "included_in_projection": True},
+        ]
+        det = run_two_dimensional_retirement_projection(inputs, accounts, jason_ret_age=60, justin_ret_age=60,
+                                                          life_events=life_events, surplus_allocations=[])
+        n = 10
+        trial = randomize_accumulation_trial(inputs, accounts, jason_ret_age=60, justin_ret_age=60,
+                                              life_events=life_events, surplus_allocations=[],
+                                              pre_ret_returns=[0.06] * n)
+        assert trial["taxable"] == pytest.approx(det["taxable_at_phase2_start"], rel=1e-9)
+
+    def test_matches_deterministic_with_unequal_retirement_ages(self):
+        """Jason retires first (55), Justin later (62) -- phase2_years is
+        the EARLIER age's horizon; exercises the dormant-years-equivalent
+        path (contribution stops but growth continues) for whichever
+        spouse's own years_to_retire exceeds phase2_years."""
+        inputs = self._base_inputs(
+            w2_salary=200000, employee_401k_pct=0.06, employer_401k_pct=0.09,
+            justin_w2_salary=80000, justin_employee_401k_pct=0.06, justin_employer_401k_pct=0.03,
+            _salary_growth_pct=0.03,
+        )
+        accounts = [{"name": "401k", "account_type": "401k", "owner": "joint", "balance": 300000}]
+        det = run_two_dimensional_retirement_projection(inputs, accounts, jason_ret_age=55, justin_ret_age=62)
+        n = det["phase2_start_age"] - inputs["jason_age"]
+        trial = randomize_accumulation_trial(inputs, accounts, jason_ret_age=55, justin_ret_age=62,
+                                              life_events=[], surplus_allocations=[], pre_ret_returns=[0.06] * n)
+        assert trial["pretax"] == pytest.approx(det["pretax_at_phase2_start"], rel=1e-9)
+        assert trial["roth"] == pytest.approx(det["roth_at_phase2_start"], rel=1e-9)
+
+    def test_surplus_allocations_are_a_documented_approximation_not_exact(self):
+        """Known, documented simplification (section 87): surplus
+        allocations walk as a flat annual amount rather than true monthly
+        compounding, so this is the one stream that does NOT match the
+        deterministic path exactly -- confirms it's close (same order of
+        magnitude) but deliberately not equal, so a future accidental
+        exact-match "fix" doesn't silently reintroduce true monthly
+        compounding without updating this test's expectation."""
+        inputs = self._base_inputs()
+        accounts = [{"name": "Brokerage", "account_type": "taxable", "owner": "joint", "balance": 0}]
+        surplus = [{"goal": "Retirement contributions", "monthly_amount": 500},
+                   {"goal": "Taxable investing", "monthly_amount": 300}]
+        det = run_two_dimensional_retirement_projection(inputs, accounts, jason_ret_age=60, justin_ret_age=60,
+                                                          life_events=[], surplus_allocations=surplus)
+        n = 10
+        trial = randomize_accumulation_trial(inputs, accounts, jason_ret_age=60, justin_ret_age=60,
+                                              life_events=[], surplus_allocations=surplus,
+                                              pre_ret_returns=[0.06] * n)
+        assert trial["taxable"] != det["taxable_at_phase2_start"]
+        assert trial["taxable"] == pytest.approx(det["taxable_at_phase2_start"], rel=0.05)
+
+    def test_wrong_length_returns_list_raises(self):
+        inputs = self._base_inputs()
+        accounts = [{"name": "Brokerage", "account_type": "taxable", "owner": "joint", "balance": 0}]
+        with pytest.raises(ValueError):
+            randomize_accumulation_trial(inputs, accounts, jason_ret_age=60, justin_ret_age=60,
+                                          life_events=[], surplus_allocations=[], pre_ret_returns=[0.06] * 3)

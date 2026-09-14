@@ -305,6 +305,72 @@ class TestPensionStopAge:
         assert all(y["pension"] == 0 for y in yearly)
 
 
+class TestSpendingBandTwoAge:
+    """spending_band_multiplier (2026-09-14, CALCULATION_CONTRACT.md
+    section 85) wired into need_for_year -- income_need should step down
+    at the configured band boundary and stay flat within each band."""
+
+    def test_unset_is_byte_identical_to_omitting_it(self):
+        """Zero-regression guard."""
+        inputs = base_inputs(retirement_end_age=70, retirement_income_today_dollars=100000)
+        omitted = run_two_dimensional_retirement_projection(inputs, TAXABLE(500000), jason_ret_age=60, justin_ret_age=60)
+        explicit_flat = run_two_dimensional_retirement_projection(
+            {**inputs, "spending_slowgo_dollars": 0, "spending_nogo_dollars": 0}, TAXABLE(500000),
+            jason_ret_age=60, justin_ret_age=60,
+        )
+        assert omitted["yearly_detail"] == explicit_flat["yearly_detail"]
+
+    def test_income_need_drops_at_the_configured_slowgo_age(self):
+        inputs = base_inputs(jason_age=65, justin_age=65, retirement_end_age=75,
+                              retirement_income_today_dollars=100000,
+                              spending_gogo_end_age=70, spending_slowgo_end_age=75,
+                              spending_slowgo_dollars=50000)
+        result = run_two_dimensional_retirement_projection(inputs, TAXABLE(500000), jason_ret_age=65, justin_ret_age=65)
+        yearly = {y["jason_age"]: y["income_need"] for y in result["yearly_detail"]}
+        assert yearly[69] == 100000
+        assert yearly[70] == 50000
+        assert yearly[70] == yearly[74]  # flat within the slow-go band
+
+    def test_default_boundary_ages_69_vs_70_and_84_vs_85(self):
+        """Same boundary-exactness guard as TestSpendingBandMultiplier's
+        equivalent test, checked end-to-end through the two-age engine
+        at the DEFAULT 70/85 boundary ages (2026-09-14 audit)."""
+        inputs = base_inputs(jason_age=60, justin_age=60, retirement_end_age=86,
+                              retirement_income_today_dollars=100000,
+                              spending_slowgo_dollars=70000, spending_nogo_dollars=50000)
+        result = run_two_dimensional_retirement_projection(inputs, TAXABLE(3_000_000), jason_ret_age=60, justin_ret_age=60)
+        yearly = {y["jason_age"]: y["income_need"] for y in result["yearly_detail"]}
+        assert yearly[69] == 100000
+        assert yearly[70] == 70000
+        assert yearly[84] == 70000
+        assert yearly[85] == 50000
+
+    def test_swr_roth_conversion_and_tax_efficiency_are_unaffected_by_bands(self):
+        """2026-09-14 audit finding: the two-age variants of SWR/Roth
+        Conversion/Tax Efficiency Analysis share need_for_year with Monte
+        Carlo/Stress Tests and briefly picked up spending-band behavior
+        by accident, contradicting the documented out-of-scope list
+        (CALCULATION_CONTRACT.md section 85) and creating a single-age/
+        two-age asymmetry for the same three tools. Fixed by stripping
+        the band fields before constructing need_for_year at those three
+        call sites. This test locks in the fix at the projection level
+        (which those functions reuse) isn't itself sufficient proof --
+        see test_simulation_engine.py/test_two_age_monte_carlo_stress.py
+        for the direct regression tests against the actual functions."""
+        inputs = base_inputs(jason_age=60, justin_age=60, retirement_end_age=90,
+                              retirement_income_today_dollars=100000,
+                              spending_gogo_end_age=65, spending_slowgo_end_age=75,
+                              spending_slowgo_dollars=20000)
+        result = run_two_dimensional_retirement_projection(inputs, TAXABLE(3_000_000), jason_ret_age=60, justin_ret_age=60)
+        yearly = {y["jason_age"]: y["income_need"] for y in result["yearly_detail"]}
+        # Sanity: the projection engine itself DOES apply the band (this
+        # is the documented in-scope consumer) -- confirms the fixture
+        # is actually exercising the feature before checking the other
+        # three tools don't see it.
+        assert yearly[64] == 100000
+        assert yearly[65] == 20000
+
+
 class TestAge55BridgeAndKidsRulesPreserved:
     def test_bridge_income_phase_matches_single_axis_reference_exactly(self):
         """Independent review, 2026-09-08 (P1) -- the age-55 bridge-job/

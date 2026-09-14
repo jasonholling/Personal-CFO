@@ -307,6 +307,25 @@ def init_db():
         # "proportional" draws taxable/pretax/Roth blended by balance share
         # every year instead, per the household's own explicit choice.
         ("withdrawal_strategy",        "TEXT DEFAULT 'taxable_first'"),
+        # Age-banded spending curve (2026-09-14, CALCULATION_CONTRACT.md
+        # section 86): retirement_income_today_dollars remains the "go-go"
+        # (baseline) spending figure unchanged. These four columns let a
+        # household taper spending down in later age bands instead of
+        # holding it flat for the whole retirement. slowgo/nogo dollars
+        # default to 0, meaning "same as the band before it" -- every
+        # existing household and test gets byte-identical output until
+        # these are explicitly set. See spending_band_multiplier() in
+        # projection_engine.py.
+        ("spending_gogo_end_age",      "INTEGER DEFAULT 70"),
+        ("spending_slowgo_end_age",    "INTEGER DEFAULT 85"),
+        ("spending_slowgo_dollars",    "REAL DEFAULT 0"),
+        ("spending_nogo_dollars",      "REAL DEFAULT 0"),
+        # Adaptive retirement timing in Monte Carlo (2026-09-14,
+        # CALCULATION_CONTRACT.md section 87): two-age Monte Carlo only.
+        # Default 0/off -- every existing household/test sees the exact
+        # unchanged behavior (single deterministic accumulation, no
+        # pre-retirement variance) until this is explicitly turned on.
+        ("randomize_accumulation",     "INTEGER DEFAULT 0"),
     ]
     for col, typedef in migrations:
         if col not in existing_cols:

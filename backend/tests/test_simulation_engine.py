@@ -288,6 +288,114 @@ class TestRunMonteCarlo:
         assert mc["median_final_balance"] > no_gap["median_final_balance"]
 
 
+class TestSpendingBandInMonteCarloAndStressTests:
+    """spending_band_multiplier (2026-09-14, CALCULATION_CONTRACT.md
+    section 85) wired into _run_single via the new `inputs` kwarg."""
+
+    def test_unset_bands_are_byte_identical_to_omitting_them(self, sample_inputs, sample_accounts, monkeypatch):
+        """Zero-regression guard for every existing household/test."""
+        import random as random_module
+        monkeypatch.setattr(random_module, "gauss", lambda mu, sigma: 0.0)
+        with_defaults = run_monte_carlo(sample_inputs, sample_accounts, ret_age=60, ss_timing="early")
+        explicit_flat = run_monte_carlo({**sample_inputs, "spending_slowgo_dollars": 0, "spending_nogo_dollars": 0},
+                                         sample_accounts, ret_age=60, ss_timing="early")
+        assert with_defaults["median_final_balance"] == explicit_flat["median_final_balance"]
+
+    def test_monte_carlo_matches_deterministic_engine_with_spending_bands(self, sample_inputs, monkeypatch):
+        """With zero-variance simulated returns, Monte Carlo's
+        median_final_balance must exactly match run_retirement_projection's
+        own figure for the same banded-spending inputs -- same idiom as
+        the SS-COLA/gap-income cross-checks above, confirming _run_single's
+        inline copy applies the multiplier identically to the shared
+        single-age loop."""
+        import random as random_module
+        monkeypatch.setattr(random_module, "gauss", lambda mu, sigma: 0.0)
+
+        inputs = {
+            **sample_inputs, "jason_age": 60, "justin_age": 60,
+            "retirement_income_today_dollars": 100000, "inflation_rate": 0.0,
+            "expected_return_pre_retirement": 0.0, "expected_return_post_retirement": 0.0,
+            "jason_social_security": 0, "jason_ss_delayed": 0, "justin_social_security": 0,
+            "healthcare_pre_medicare": 0, "healthcare_post_medicare": 0,
+            "pension_55": 0, "pension_60": 0, "pension_65": 0,
+            "w2_salary": 0, "annual_401k_contribution": 0, "annual_hsa_contribution": 0,
+            "retirement_end_age": 68,
+            "spending_gogo_end_age": 65, "spending_slowgo_end_age": 90,
+            "spending_slowgo_dollars": 50000,
+        }
+        accounts = [{"name": "Brokerage", "account_type": "taxable", "owner": "joint", "balance": 1_000_000}]
+        proj = run_retirement_projection(inputs, accounts, ret_ages=[60])
+        expected = next(x for x in proj["scenarios"] if x["label"] == "age_60_early")["yearly_detail"][-1]["portfolio_balance"]
+
+        mc = run_monte_carlo(inputs, accounts, ret_age=60, ss_timing="early")
+        assert mc["median_final_balance"] == pytest.approx(expected, abs=1)
+
+    def test_lower_nogo_spending_leaves_more_money_than_flat_spending(self, sample_inputs, sample_accounts, monkeypatch):
+        """Directional check: tapering spending down late in life must
+        leave a higher median ending balance than spending the flat go-go
+        figure for the whole retirement -- the whole point of the
+        feature."""
+        import random as random_module
+        monkeypatch.setattr(random_module, "gauss", lambda mu, sigma: 0.0)
+        inputs = {**sample_inputs, "jason_age": 60, "justin_age": 60, "retirement_end_age": 90}
+        flat   = run_monte_carlo(inputs, sample_accounts, ret_age=60, ss_timing="early")
+        tapered = run_monte_carlo(
+            {**inputs, "spending_gogo_end_age": 65, "spending_slowgo_end_age": 75, "spending_slowgo_dollars": 20000},
+            sample_accounts, ret_age=60, ss_timing="early",
+        )
+        assert tapered["median_final_balance"] > flat["median_final_balance"]
+
+    def test_stress_tests_also_respect_the_bands(self, sample_inputs, sample_accounts):
+        """Smoke test confirming run_stress_tests' base scenario (which
+        shares _run_single with Monte Carlo) also sees a higher final
+        balance when spending tapers down late in life."""
+        inputs = {**sample_inputs, "jason_age": 60, "justin_age": 60, "retirement_end_age": 90}
+        flat = run_stress_tests(inputs, sample_accounts, ret_age=60, ss_timing="early")
+        tapered = run_stress_tests(
+            {**inputs, "spending_gogo_end_age": 65, "spending_slowgo_end_age": 75, "spending_slowgo_dollars": 20000},
+            sample_accounts, ret_age=60, ss_timing="early",
+        )
+        assert tapered["scenarios"]["base"]["final_balance"] > flat["scenarios"]["base"]["final_balance"]
+
+
+class TestSpendingBandLeakAuditTwoAge:
+    """2026-09-14 audit finding: _household_spending_success_rate_two_age
+    (feeds SWR), _run_roth_conversion_analysis_two_age, and _run_tax_
+    efficiency_simulation_two_age all share need_for_year with Monte
+    Carlo/Stress Tests and briefly picked up spending-band behavior by
+    accident -- contradicting the documented out-of-scope list
+    (CALCULATION_CONTRACT.md section 85) and creating a single-age/two-
+    age asymmetry for the same three tools. Fixed by stripping the band
+    fields before constructing need_for_year at those three call sites;
+    these tests lock in that a household with slow-go/no-go dollars set
+    sees byte-identical output to one without, for all three tools, in
+    two-age mode specifically (single-age was never affected -- those
+    three tools have their own independent simplified formulas)."""
+
+    def _inputs(self, sample_inputs, banded):
+        base = {**sample_inputs, "jason_age": 60, "justin_age": 60,
+                "spending_gogo_end_age": 65, "spending_slowgo_end_age": 75}
+        if banded:
+            base["spending_slowgo_dollars"] = 20000
+            base["spending_nogo_dollars"] = 10000
+        return base
+
+    def test_swr_two_age_unaffected(self, sample_inputs, sample_accounts):
+        flat = run_swr_analysis(self._inputs(sample_inputs, False), sample_accounts, jason_ret_age=60, justin_ret_age=60)
+        banded = run_swr_analysis(self._inputs(sample_inputs, True), sample_accounts, jason_ret_age=60, justin_ret_age=60)
+        assert flat["safe_withdrawal_annual"] == banded["safe_withdrawal_annual"]
+
+    def test_roth_conversion_two_age_unaffected(self, sample_inputs, sample_accounts):
+        flat = run_roth_conversion_analysis(self._inputs(sample_inputs, False), sample_accounts, jason_ret_age=60, justin_ret_age=60)
+        banded = run_roth_conversion_analysis(self._inputs(sample_inputs, True), sample_accounts, jason_ret_age=60, justin_ret_age=60)
+        assert flat["schedule"] == banded["schedule"]
+
+    def test_tax_efficiency_two_age_unaffected(self, sample_inputs, sample_accounts):
+        flat = run_tax_efficiency_simulation(self._inputs(sample_inputs, False), sample_accounts, jason_ret_age=60, justin_ret_age=60)
+        banded = run_tax_efficiency_simulation(self._inputs(sample_inputs, True), sample_accounts, jason_ret_age=60, justin_ret_age=60)
+        assert flat["strategies"] == banded["strategies"]
+
+
 class TestRunStressTests:
     def test_returns_base_and_named_scenarios(self, sample_inputs, sample_accounts):
         result = run_stress_tests(sample_inputs, sample_accounts, ret_age=55, ss_timing="early")
