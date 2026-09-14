@@ -46,3 +46,15 @@ def test_briefing_surfaces_at_most_two_high_signal_portfolio_items():
     portfolio = [item for item in result["priorities"] if item["destination"] == "coach"]
     assert len(portfolio) == 2
     assert all("Emergency reserve" not in item["title"] for item in portfolio)
+
+
+def test_briefing_surfaces_due_annual_review_task():
+    result = build_cfo_briefing(
+        [{"account_type": "checking", "balance": 1000, "owner": "joint"}],
+        {"current_monthly_expenses": 1000, "retirement_income_today_dollars": 80000}, [],
+        [{"completed": False, "auto_key": "annual_review_2026"}],
+        cash_flow={"has_data": True, "status": "surplus", "monthly_surplus": 100},
+    )
+    review = [item for item in result["priorities"] if item["destination"] == "annualreview"]
+    assert len(review) == 1
+    assert review[0]["title"] == "Complete annual review checklist"

@@ -86,6 +86,10 @@ def build_cfo_briefing(
     elif not emergency.get("has_data"):
         add(5, "Set current monthly spending", "A current spending number lets the CFO briefing measure your emergency reserve and cash runway.", "settings")
 
+    annual_review_task = next((task for task in tasks if task.get("auto_key", "").startswith("annual_review_") and not task.get("completed")), None)
+    if annual_review_task:
+        add(5, "Complete annual review checklist", "Refresh the household plan, holdings, protection, and annual net-worth snapshot for this year.", "annualreview")
+
     high_rate_debt = [a for a in accounts if a.get("account_type") in DEBT_TYPES and a.get("balance", 0) > 0 and a.get("interest_rate", 0) >= 0.07]
     if high_rate_debt:
         balance = sum(a["balance"] for a in high_rate_debt)

@@ -3307,6 +3307,8 @@ def get_emergency_fund():
 def get_cfo_briefing():
     """A prioritized summary of the household plan and top portfolio issues."""
     conn = get_db()
+    from task_engine import ensure_annual_review_task
+    ensure_annual_review_task(conn)
     inputs_row = conn.execute("SELECT * FROM planning_inputs WHERE id=1").fetchone()
     accounts = [dict(r) for r in conn.execute("SELECT * FROM accounts").fetchall()]
     snapshots = [dict(r) for r in conn.execute(

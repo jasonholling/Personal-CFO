@@ -2,10 +2,30 @@
 Auto-generates tasks based on financial data and calendar rules.
 Each auto task has a unique auto_key so we never duplicate.
 """
-from datetime import datetime
+from datetime import date, datetime
 from typing import List, Dict
 
 CURRENT_YEAR = datetime.now().year
+ANNUAL_REVIEW_MONTH = 4
+ANNUAL_REVIEW_DAY = 1
+
+
+def ensure_annual_review_task(conn, today=None):
+    """Create the current year's annual-review task once it is due."""
+    today = today or date.today()
+    if (today.month, today.day) < (ANNUAL_REVIEW_MONTH, ANNUAL_REVIEW_DAY):
+        return False
+    auto_key = f"annual_review_{today.year}"
+    if conn.execute("SELECT id FROM tasks WHERE auto_key=?", (auto_key,)).fetchone():
+        return False
+    conn.execute(
+        "INSERT INTO tasks (section, title, description, task_type, recurrence, auto_key, due_year, due_date) VALUES (?,?,?,?,?,?,?,?)",
+        ("investments", "Complete annual review checklist",
+         "Refresh the household plan, holdings, protection, and annual net-worth snapshot.",
+         "annual", "annual", auto_key, today.year, f"{today.year}-{ANNUAL_REVIEW_MONTH:02d}-{ANNUAL_REVIEW_DAY:02d}"),
+    )
+    conn.commit()
+    return True
 
 
 def generate_tasks(accounts: List[Dict], inputs: Dict, projections: Dict, education: Dict) -> List[Dict]:
@@ -62,6 +82,11 @@ def generate_tasks(accounts: List[Dict], inputs: Dict, projections: Dict, educat
     task("financial_independence", "Update retirement projection inputs",
          "Update ages, SS estimates, salary, contribution rates in Planning Inputs.",
          "annual", "annual", f"projection_update_{CURRENT_YEAR}", CURRENT_YEAR)
+
+    if (date.today().month, date.today().day) >= (ANNUAL_REVIEW_MONTH, ANNUAL_REVIEW_DAY):
+        task("investments", "Complete annual review checklist",
+             "Refresh the household plan, holdings, protection, and annual net-worth snapshot.",
+             "annual", "annual", f"annual_review_{CURRENT_YEAR}", CURRENT_YEAR)
 
     # ── Tax operating calendar ───────────────────────────────────────────────
     # These are planning prompts, not tax advice or a filing calculation. They
@@ -143,6 +168,7 @@ def sync_auto_tasks(conn, accounts, inputs, projections, education):
     Upsert auto-generated tasks. Never overwrites completed status.
     Only inserts tasks that don't already exist (by auto_key).
     """
+    ensure_annual_review_task(conn)
     generated = generate_tasks(accounts, inputs, projections, education)
     inserted  = 0
     for t in generated:

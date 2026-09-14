@@ -1,5 +1,6 @@
 """Tests for task_engine.py — auto-generated task rules."""
-from task_engine import generate_tasks, sync_auto_tasks, CURRENT_YEAR
+from datetime import date
+from task_engine import generate_tasks, sync_auto_tasks, ensure_annual_review_task, CURRENT_YEAR
 import db as db_module
 
 
@@ -17,6 +18,25 @@ def test_includes_core_annual_tasks_and_current_tax_reviews(sample_inputs, sampl
     keys = {task["auto_key"] for task in annual}
     assert f"withholding_review_{CURRENT_YEAR}" in keys
     assert f"estimated_tax_check_{CURRENT_YEAR}" in keys
+
+
+def test_annual_review_task_is_due_after_april_first(sample_inputs, sample_accounts):
+    before = generate_tasks(sample_accounts, sample_inputs, {"scenarios": []}, {"goals": []})
+    assert not any(t["auto_key"] == f"annual_review_{CURRENT_YEAR}" for t in before) if date.today().month < 4 else True
+    after = generate_tasks(sample_accounts, sample_inputs, {"scenarios": []}, {"goals": []})
+    if (date.today().month, date.today().day) >= (4, 1):
+        assert any(t["auto_key"] == f"annual_review_{CURRENT_YEAR}" for t in after)
+
+
+def test_ensure_annual_review_task_is_insert_only_after_due(temp_db):
+    conn = db_module.get_db()
+    assert not ensure_annual_review_task(conn, date(CURRENT_YEAR, 3, 31))
+    assert ensure_annual_review_task(conn, date(CURRENT_YEAR, 4, 1))
+    assert not ensure_annual_review_task(conn, date(CURRENT_YEAR, 4, 2))
+    row = conn.execute("SELECT title, due_date FROM tasks WHERE auto_key=?", (f"annual_review_{CURRENT_YEAR}",)).fetchone()
+    conn.close()
+    assert row["title"] == "Complete annual review checklist"
+    assert row["due_date"] == f"{CURRENT_YEAR}-04-01"
 
 
 def test_education_gap_task_created_when_underfunded(sample_inputs, sample_accounts):
