@@ -188,6 +188,8 @@ export default function PortfolioCoach({ onNavigate }) {
   const [loadError, setLoadError] = useState(false)
   const [accounts, setAccounts] = useState([])
   const [reviewSummary, setReviewSummary] = useState(null)
+  const [annualReview, setAnnualReview] = useState(null)
+  const [showAnnualReview, setShowAnnualReview] = useState(false)
 
   const load = (pending = 0) => {
     setLoading(true)
@@ -197,11 +199,13 @@ export default function PortfolioCoach({ onNavigate }) {
       axios.get('/api/portfolio/allocation').catch(() => ({ data: { has_holdings: false } })),
       axios.get('/api/accounts').catch(() => ({ data: [] })),
       axios.get('/api/recommendations/review-summary').catch(() => ({ data: null })),
-    ]).then(([rec, alloc, accountResponse, summary]) => {
+      axios.get('/api/portfolio/annual-review').catch(() => ({ data: null })),
+    ]).then(([rec, alloc, accountResponse, summary, annual]) => {
       setData(rec.data)
       setAllocation(alloc.data)
       setAccounts(Array.isArray(accountResponse.data) ? accountResponse.data : [])
       setReviewSummary(summary.data)
+      setAnnualReview(annual.data)
     }).catch(() => setLoadError(true)).finally(() => setLoading(false))
   }
 
@@ -304,6 +308,50 @@ export default function PortfolioCoach({ onNavigate }) {
         <div style={{ display: 'flex', gap: 8 }}><button className="btn-secondary" onClick={() => window.print()}>Print annual review</button><button className="btn-secondary" onClick={() => onNavigate?.('portfoliosetup')}>Edit holdings & policy</button></div>
       </div>
       {reviewSummary && <div className="card" style={{ marginBottom: 20 }}><div className="label">Decision review</div><div style={{ display: 'flex', gap: 18, flexWrap: 'wrap', marginTop: 8, fontSize: 13 }}><span><strong>{reviewSummary.counts?.proposed || 0}</strong> open</span><span><strong>{reviewSummary.counts?.accepted || 0}</strong> accepted</span><span><strong>{reviewSummary.counts?.deferred || 0}</strong> deferred</span><span style={{ color: reviewSummary.reviews_due ? 'var(--amber)' : 'var(--green)' }}><strong>{reviewSummary.reviews_due || 0}</strong> reviews due</span>{reviewSummary.next_review_date && <span>Next scheduled review: <strong>{reviewSummary.next_review_date}</strong></span>}</div></div>}
+
+      {annualReview && (
+        <section className="card" style={{ marginBottom: 20 }} aria-label="Annual portfolio review">
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
+            <div className="label">Annual portfolio review — as of {annualReview.as_of}</div>
+            <button className="btn-secondary" onClick={() => setShowAnnualReview(v => !v)}>
+              {showAnnualReview ? 'Hide details' : 'Show details'}
+            </button>
+          </div>
+          <div style={{ display: 'flex', gap: 18, flexWrap: 'wrap', marginTop: 8, fontSize: 13 }}>
+            <span><strong>{annualReview.open_recommendations?.count || 0}</strong> open recommendations</span>
+            <span style={{ color: annualReview.deferred_reviews_due?.count ? 'var(--amber)' : 'var(--green)' }}><strong>{annualReview.deferred_reviews_due?.count || 0}</strong> deferred reviews due</span>
+            <span><strong>{annualReview.stale_holding_values?.length || 0}</strong> stale holding values</span>
+            <span><strong>{annualReview.unreconciled_accounts?.length || 0}</strong> unreconciled accounts</span>
+            <span><strong>{annualReview.allocation_drift?.length || 0}</strong> allocation drift items</span>
+            <span><strong>{annualReview.concentrated_positions?.length || 0}</strong> concentrated positions</span>
+            <span><strong>{annualReview.taxable_loss_candidates?.length || 0}</strong> taxable-loss candidates</span>
+          </div>
+          {showAnnualReview && (
+            <div style={{ marginTop: 14 }}>
+              {[
+                ['Deferred reviews due', annualReview.deferred_reviews_due?.items],
+                ['Stale holding values', annualReview.stale_holding_values],
+                ['Unreconciled accounts', annualReview.unreconciled_accounts],
+                ['Allocation drift', annualReview.allocation_drift],
+                ['Concentrated positions', annualReview.concentrated_positions],
+                ['Taxable-loss candidates', annualReview.taxable_loss_candidates],
+              ].map(([label, items]) => (
+                <div key={label} style={{ marginTop: 10 }}>
+                  <div style={{ fontSize: 12, fontWeight: 600 }}>{label} ({(items || []).length})</div>
+                  {(items || []).length === 0
+                    ? <div style={{ fontSize: 12, color: 'var(--muted)' }}>None.</div>
+                    : (items || []).map((item, i) => (
+                      <div key={item.id ?? i} style={{ fontSize: 12, color: 'var(--muted)', padding: '3px 0', borderTop: i ? '1px solid var(--border)' : 'none' }}>
+                        {item.title}
+                        {item.review_date ? ` · Review by ${item.review_date}` : ''}
+                      </div>
+                    ))}
+                </div>
+              ))}
+            </div>
+          )}
+        </section>
+      )}
 
       {loadError && <div className="card" role="alert">Could not refresh your portfolio. <button className="btn-secondary" onClick={() => load()}>Try again</button></div>}
       {requestError && <p role="alert">{requestError}</p>}
