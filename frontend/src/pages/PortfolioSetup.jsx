@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import axios from 'axios'
-import { isPrivacyMode, MASK_CURRENCY } from '../utils/privacy'
+import { Cell, Pie, PieChart } from 'recharts'
+import { isPrivacyMode, MASK_CURRENCY, MASK_PERCENT } from '../utils/privacy'
 import PolicyRestrictions from '../components/PolicyRestrictions'
 import './PortfolioSetup.css'
 
@@ -38,9 +39,53 @@ const POLICY_TARGET_GROUPS = [
 ]
 const POLICY_TARGET_LABELS = Object.fromEntries(POLICY_TARGET_FIELDS)
 
+// Household-level summary buckets (audit finding #7, 2026-09-14): the
+// donut/preset layer below operates on these 5 buckets, not the 10 raw
+// target_* fields -- "what's my stock/bond split" is the question a
+// household actually starts with, before the fine-tune detail below.
+const SUMMARY_BUCKETS = [
+  { key: 'stocks', label: 'Stocks', fields: ['target_us_large_cap_pct', 'target_us_mid_cap_pct', 'target_us_small_cap_pct', 'target_international_developed_pct', 'target_emerging_markets_pct'] },
+  { key: 'bonds', label: 'Bonds', fields: ['target_us_bonds_pct', 'target_international_bonds_pct'] },
+  { key: 'cash', label: 'Cash', fields: ['target_cash_pct'] },
+  { key: 'real_estate', label: 'Real estate', fields: ['target_real_estate_pct'] },
+  { key: 'alternatives', label: 'Alternatives', fields: ['target_alternatives_pct'] },
+]
+// Same palette Portfolio Coach's own allocation donut already uses
+// (AllocationComparisonChart, PortfolioCoach.jsx) -- one visual language
+// for "allocation by category" across both pages, in the SAME fixed
+// order every time (stocks/bonds/cash/real estate/alternatives), not
+// re-cycled per household.
+const SUMMARY_BUCKET_COLORS = ['#6ea8fe', '#56c7b5', '#f4b860', '#b894ee', '#f08080']
+
+// Three starting points (audit finding #7): a household lands on 10
+// individual percentage fields with no sense of "is this aggressive or
+// conservative" until they add it up themselves. Each preset sets a
+// top-level stock/bond/cash split, then divides stocks/bonds across
+// their own sub-categories using a fixed, disclosed ratio -- a
+// reasonable industry-rule-of-thumb starting point, not a
+// recommendation tuned to any specific household. Real estate/
+// alternatives default to 0; add them in the fine-tune detail below.
+// Every field is still editable immediately afterward -- applying a
+// preset is just a fast way to fill in the 10 fields, not a locked mode.
+const STOCK_SUB_SPLIT = { target_us_large_cap_pct: 0.55, target_us_mid_cap_pct: 0.15, target_us_small_cap_pct: 0.10, target_international_developed_pct: 0.15, target_emerging_markets_pct: 0.05 }
+const BOND_SUB_SPLIT = { target_us_bonds_pct: 0.80, target_international_bonds_pct: 0.20 }
+const PRESETS = [
+  { key: 'conservative', label: 'Conservative', stocks: 35, bonds: 60, cash: 5 },
+  { key: 'moderate', label: 'Moderate Growth', stocks: 65, bonds: 30, cash: 5 },
+  { key: 'growth', label: 'Growth', stocks: 85, bonds: 10, cash: 5 },
+]
+function presetToTargetFields(preset) {
+  const fields = { target_real_estate_pct: 0, target_alternatives_pct: 0, target_cash_pct: preset.cash }
+  for (const [field, share] of Object.entries(STOCK_SUB_SPLIT)) fields[field] = Math.round(preset.stocks * share * 10) / 10
+  for (const [field, share] of Object.entries(BOND_SUB_SPLIT)) fields[field] = Math.round(preset.bonds * share * 10) / 10
+  return fields
+}
+
 const fmt = n => isPrivacyMode() ? MASK_CURRENCY : (n == null ? '—' : new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 }).format(n))
+const pctFmt = n => isPrivacyMode() ? MASK_PERCENT : `${(Math.round(n * 10) / 10).toFixed(1)}%`
 
 const TABS = [
+  { id: 'overview', label: 'Overview' },
   { id: 'holdings', label: 'Holdings' },
   { id: 'policy', label: 'Investment Policy' },
   { id: 'options', label: 'Account Investment Options' },
@@ -87,6 +132,117 @@ function holdingFormFromOption(option) {
       ? exposures.map(exposure => ({ asset_class: exposure.asset_class, weight_pct: String(exposure.weight_pct) }))
       : EMPTY_HOLDING_FORM.exposures,
   }
+}
+
+const RESTRICTED_BY_DEFAULT_TYPES = ['traditional_401k', 'roth_401k', 'hsa', '529', 'trust']
+
+// Overview tab (audit finding #6, 2026-09-14): "the current three tabs
+// make the user decide where a fact belongs before they understand the
+// distinction." This is additive, not a replacement for Holdings/
+// Investment Policy/Account Investment Options -- those still own their
+// own entry forms, unchanged. This tab is a single per-account landing
+// page answering the 5 facts a household actually cares about (balance
+// & type, what it owns, what it allows, whether Coach includes it, and
+// a computed review status), each with a direct link to the tab that
+// actually edits that fact -- resolving "where does this belong" by
+// routing there, rather than asking the household to guess.
+function OverviewTab({ accounts, excludedAccounts, onNavigate }) {
+  const [groups, setGroups] = useState([])
+  const [optionsByAccount, setOptionsByAccount] = useState({})
+  const [loading, setLoading] = useState(true)
+
+  useEffect(() => {
+    Promise.all([
+      axios.get('/api/holdings/grouped').then(r => setGroups(r.data.groups)),
+      axios.get('/api/account-investment-options').then(r => {
+        setOptionsByAccount(r.data.reduce((byAccount, option) => {
+          ;(byAccount[option.account_id] ||= []).push(option)
+          return byAccount
+        }, {}))
+      }),
+    ]).finally(() => setLoading(false))
+  }, [])
+
+  if (loading) return <div className="loading">Loading account overview…</div>
+
+  const investable = accounts.filter(a => INVESTMENT_ACCOUNT_TYPES.has(a.account_type))
+  const groupByAccountId = Object.fromEntries(groups.map(g => [g.account_id, g]))
+
+  const rows = investable.map(account => {
+    const excluded = excludedAccounts.includes(account.id)
+    const group = groupByAccountId[account.id]
+    const holdingsCount = group?.holdings?.length || 0
+    const hasReconciliationWarning = !!group?.has_warning
+    const options = optionsByAccount[account.id] || []
+    const menuMode = account.investment_menu_mode || 'auto'
+    const effectiveRestricted = menuMode === 'restricted'
+      || (menuMode === 'auto' && RESTRICTED_BY_DEFAULT_TYPES.includes(account.portfolio_account_type))
+    const menuModeLabel = menuMode === 'restricted' ? 'Restricted menu' : menuMode === 'open' ? 'Open brokerage'
+      : effectiveRestricted ? 'Restricted menu (default for this account type)' : 'Open brokerage (default for this account type)'
+    // "Complete" is a household-facing signal, not a hard gate -- Coach
+    // still works with whatever's recorded. Flags exactly what's missing
+    // rather than a single opaque pass/fail.
+    const issues = []
+    if (excluded) issues.push({ text: 'Excluded from Coach', tab: 'policy' })
+    else {
+      if (holdingsCount === 0 && account.balance) issues.push({ text: 'No holdings recorded yet', tab: 'holdings' })
+      if (hasReconciliationWarning) issues.push({ text: 'Holdings total doesn’t match account balance', tab: 'holdings' })
+      if (effectiveRestricted && options.length === 0) issues.push({ text: 'Restricted menu with no eligible funds recorded', tab: 'options' })
+    }
+    return { account, excluded, holdingsCount, holdingsTotal: group?.holdings_total, hasReconciliationWarning, optionsCount: options.length, menuModeLabel, issues }
+  })
+
+  return (
+    <div>
+      <p className="setup-helper">
+        Every account Coach can invest for, at a glance: what it holds, what it's allowed to buy, whether Coach
+        includes it, and what still needs attention. Each fact links to the tab that edits it.
+      </p>
+      {!rows.length && <div className="card">No investable accounts yet. Add one on the Accounts page first.</div>}
+      <div style={{ display: 'grid', gap: 10 }}>
+        {rows.map(row => (
+          <div key={row.account.id} className="card overview-account-row">
+            <div className="overview-account-row-header">
+              <div>
+                <strong>{row.account.name}</strong>
+                <span style={{ color: 'var(--muted)', fontSize: 12, marginLeft: 8 }}>
+                  {accountTypeLabel(row.account.portfolio_account_type || row.account.account_type)} · {fmt(row.account.balance)}
+                </span>
+              </div>
+              {row.issues.length === 0
+                ? <span className="setup-badge" style={{ color: 'var(--green)', borderColor: 'var(--green)' }}>✓ Complete</span>
+                : <span className="setup-badge" style={{ color: 'var(--amber)', borderColor: 'var(--amber)' }}>{row.issues.length} to review</span>}
+            </div>
+            <div className="overview-account-facts">
+              <div>
+                <span className="label">What it owns</span>
+                <div>{row.holdingsCount} holding{row.holdingsCount === 1 ? '' : 's'}{row.holdingsTotal != null ? ` · ${fmt(row.holdingsTotal)} entered` : ''}</div>
+              </div>
+              <div>
+                <span className="label">What it allows</span>
+                <div>{row.menuModeLabel}{row.optionsCount > 0 ? ` · ${row.optionsCount} recorded` : ''}</div>
+              </div>
+              <div>
+                <span className="label">Coach inclusion</span>
+                <div>{row.excluded ? 'Excluded' : 'Included'}</div>
+              </div>
+            </div>
+            {row.issues.length > 0 && (
+              <ul className="overview-account-issues">
+                {row.issues.map((issue, i) => (
+                  <li key={i}>
+                    {issue.text} — <button className="btn-secondary" style={{ padding: '2px 8px', fontSize: 11 }} onClick={() => onNavigate(issue.tab)}>
+                      {issue.tab === 'holdings' ? 'Go to Holdings' : issue.tab === 'options' ? 'Go to Account Investment Options' : 'Go to Investment Policy'}
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        ))}
+      </div>
+    </div>
+  )
 }
 
 function HoldingsTab({ accounts, excludedAccounts, onEditPolicy }) {
@@ -482,6 +638,48 @@ function HoldingsTab({ accounts, excludedAccounts, onEditPolicy }) {
   )
 }
 
+// Household-level stock/bond/cash/real-estate/alternatives summary,
+// computed live from whatever the 10 detail fields currently hold --
+// audit finding #7: a household used to see nothing at-a-glance until
+// they added up the detail fields themselves. Placed ABOVE the detail
+// fields so it's the first thing a household sees, matching Portfolio
+// Coach's own current-vs-target donut visual language (same colors,
+// same ring style) for one consistent "allocation by category" idiom
+// across both pages.
+function PolicySummaryDonut({ policy }) {
+  const rows = SUMMARY_BUCKETS.map((bucket, i) => ({
+    ...bucket, color: SUMMARY_BUCKET_COLORS[i],
+    value: bucket.fields.reduce((sum, field) => sum + (parseFloat(policy[field]) || 0), 0),
+  })).filter(row => row.value > 0)
+
+  if (isPrivacyMode()) {
+    return <div className="setup-helper" style={{ margin: '4px 0 18px' }}>Allocation summary is hidden while privacy mode is on.</div>
+  }
+  if (!rows.length) {
+    return <div className="setup-helper" style={{ margin: '4px 0 18px' }}>Pick a starting point below, or fill in the detail fields directly, to see your stock/bond/cash summary here.</div>
+  }
+  return (
+    <div className="policy-summary" aria-label="Target allocation summary">
+      <div className="policy-summary-donut" aria-hidden="true">
+        <PieChart width={150} height={150}>
+          <Pie data={rows} dataKey="value" nameKey="label" cx="50%" cy="50%" innerRadius={44} outerRadius={68} paddingAngle={1} stroke="none">
+            {rows.map(row => <Cell key={row.key} fill={row.color} />)}
+          </Pie>
+        </PieChart>
+      </div>
+      <div className="policy-summary-legend">
+        {rows.map(row => (
+          <div className="policy-summary-legend-row" key={row.key}>
+            <span className="policy-summary-swatch" style={{ background: row.color }} aria-hidden="true" />
+            <span>{row.label}</span>
+            <strong>{pctFmt(row.value)}</strong>
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
 function PolicyTab({ accounts }) {
   const [policy, setPolicy] = useState(null)
   const [loading, setLoading] = useState(true)
@@ -534,7 +732,27 @@ function PolicyTab({ accounts }) {
   return (
     <div className="card" onChange={() => setSaved(false)}>
       <h2 style={{ fontSize: 18, margin: '0 0 6px' }}>Your target investment mix</h2>
-      <p className="setup-helper">Set percentages for the accounts included in Coach. Use the sections below for exclusions and account-specific rules.</p>
+      <p className="setup-helper">Pick a starting point, see your stock/bond/cash split at a glance, then fine-tune the detail below. Use the sections further down for exclusions and account-specific rules.</p>
+      <div className="policy-summary-row">
+        <div>
+          <div className="label" style={{ marginBottom: 8 }}>Quick start</div>
+          <div className="policy-preset-buttons">
+            {PRESETS.map(preset => (
+              <button key={preset.key} type="button" className="btn-secondary"
+                      onClick={() => setPolicy(p => ({ ...p, ...presetToTargetFields(preset) }))}>
+                {preset.label}
+                <span className="policy-preset-split">{preset.stocks}% stocks / {preset.bonds}% bonds / {preset.cash}% cash</span>
+              </button>
+            ))}
+          </div>
+          <p className="setup-helper" style={{ margin: '10px 0 0' }}>
+            Each preset fills in the detail fields below using a fixed, disclosed split within stocks and bonds —
+            not a recommendation tuned to your household. Everything stays editable immediately after.
+          </p>
+        </div>
+        <PolicySummaryDonut policy={policy} />
+      </div>
+      <h3 style={{ fontSize: 15, margin: '22px 0 4px' }}>Fine-tune your mix</h3>
       <div className="policy-target-groups">
         {POLICY_TARGET_GROUPS.map(group => {
           const subtotal = group.fields.reduce((sum, field) => sum + (parseFloat(policy[field]) || 0), 0)
@@ -830,7 +1048,7 @@ function OptionsTab({ accounts, excludedAccounts, onEditPolicy }) {
 }
 
 export default function PortfolioSetup() {
-  const [tab, setTab] = useState('holdings')
+  const [tab, setTab] = useState('overview')
   const [accounts, setAccounts] = useState([])
   const [excludedAccounts, setExcludedAccounts] = useState([])
   const [policyReady, setPolicyReady] = useState(false)
@@ -860,6 +1078,7 @@ export default function PortfolioSetup() {
       </div>
       {policyError && <p role="alert">Could not load account exclusions. Reload this page to retry.</p>}
       {!policyReady && !policyError && tab !== 'policy' && <p>Loading investment policy…</p>}
+      {tab === 'overview' && policyReady && <OverviewTab accounts={accounts} excludedAccounts={excludedAccounts} onNavigate={setTab} />}
       {tab === 'holdings' && policyReady && <HoldingsTab accounts={accounts} excludedAccounts={excludedAccounts} onEditPolicy={() => setTab('policy')} />}
       {tab === 'policy' && <PolicyTab accounts={accounts} />}
       {tab === 'options' && policyReady && <OptionsTab accounts={accounts} excludedAccounts={excludedAccounts} onEditPolicy={() => setTab('policy')} />}

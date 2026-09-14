@@ -19,6 +19,25 @@
 .portfolio-setup .policy-target-group { border: 1px solid var(--border); border-radius: 8px; padding: 12px; background: var(--bg3); }
 .portfolio-setup .policy-target-group-heading { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; font-size: 13px; }
 .portfolio-setup .policy-target-group-heading span { color: var(--muted); font-variant-numeric: tabular-nums; }
+.portfolio-setup .policy-summary-row { display: flex; gap: 28px; flex-wrap: wrap; align-items: flex-start; padding: 14px 16px; margin: 4px 0 4px; border: 1px solid var(--border); border-radius: 10px; background: var(--bg3); }
+.portfolio-setup .policy-summary-row > div:first-child { flex: 1 1 320px; min-width: 260px; }
+.portfolio-setup .policy-preset-buttons { display: flex; gap: 10px; flex-wrap: wrap; }
+.portfolio-setup .policy-preset-buttons > button { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; padding: 10px 14px; text-align: left; }
+.portfolio-setup .policy-preset-split { font-size: 11px; color: var(--muted); font-weight: 400; }
+.portfolio-setup .policy-summary { display: flex; align-items: center; gap: 16px; flex: 0 0 auto; }
+.portfolio-setup .policy-summary-donut { width: 150px; height: 150px; flex: 0 0 150px; }
+.portfolio-setup .policy-summary-legend { display: grid; gap: 4px; font-size: 12px; min-width: 150px; }
+.portfolio-setup .policy-summary-legend-row { display: grid; grid-template-columns: 12px 1fr auto; align-items: center; gap: 8px; color: var(--muted); }
+.portfolio-setup .policy-summary-legend-row strong { color: var(--text); font-variant-numeric: tabular-nums; }
+.portfolio-setup .policy-summary-swatch { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+.portfolio-setup .overview-account-row-header { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; }
+.portfolio-setup .overview-account-facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr)); gap: 10px; margin-top: 12px; font-size: 13px; }
+.portfolio-setup .overview-account-facts .label { font-size: 11px; color: var(--muted); display: block; margin-bottom: 2px; }
+.portfolio-setup .overview-account-issues { list-style: none; margin: 12px 0 0; padding: 10px 0 0; border-top: 1px solid var(--border); display: grid; gap: 8px; font-size: 13px; color: var(--amber); }
+.portfolio-setup .overview-account-issues li { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+@media (max-width: 640px) {
+  .portfolio-setup .policy-summary-row { flex-direction: column; }
+}
 .portfolio-setup .holding-actions { display: inline-block; position: relative; margin-left: 10px; }
 .portfolio-setup .holding-actions > summary { display: inline-block; padding: 2px 8px; border: 1px solid var(--border); border-radius: 5px; cursor: pointer; font-size: 11px; color: var(--text); }
 .portfolio-setup .holding-actions-menu { position: absolute; z-index: 4; right: 0; top: calc(100% + 4px); display: grid; gap: 5px; min-width: 175px; padding: 8px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg2); box-shadow: 0 8px 24px #0005; }

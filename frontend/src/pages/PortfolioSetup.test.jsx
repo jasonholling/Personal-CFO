@@ -13,6 +13,14 @@ const setInput = async (el, value) => act(async () => {
   Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(el, value)
   el.dispatchEvent(new Event('input', { bubbles: true }))
 })
+// Overview is now the default landing tab (audit finding #6, 2026-09-14)
+// -- tests exercising Holdings-tab behavior navigate there explicitly,
+// the same way tests already navigate to Investment Policy/Account
+// Investment Options explicitly.
+const goToHoldings = async () => {
+  await act(async () => [...container.querySelectorAll('button')].find(b => b.textContent === 'Holdings').click())
+  await flush()
+}
 
 beforeEach(() => {
   vi.clearAllMocks()
@@ -62,11 +70,49 @@ describe('PortfolioSetup workflows', () => {
     expect(container.textContent).toContain('International stocks')
     expect(container.textContent).toContain('Bonds and cash')
     expect(container.textContent).toContain('When enabled, Coach uses the target mix for your current age.')
+    // Audit finding #7 (2026-09-14): the summary donut above the detail
+    // fields must reflect this same policy -- stocks 40+10+10+20+5=85,
+    // bonds 10+0=10, cash 5.
+    expect(container.textContent).toContain('Stocks')
+    expect(container.textContent).toContain('85.0%')
+    expect(container.textContent).toContain('10.0%')
+    expect(container.textContent).toContain('5.0%')
+  })
+
+  it('applying a preset fills in the detail fields and the summary donut updates (audit finding #7, 2026-09-14)', async () => {
+    axios.get.mockImplementation(url => Promise.resolve({ data:
+      url === '/api/accounts' ? [] :
+      url === '/api/holdings/grouped' ? { groups: [] } :
+      url === '/api/account-investment-options' ? [] :
+      url === '/api/investment-policy' ? { has_policy: false } : []
+    }))
+    await act(async () => root.render(<PortfolioSetup />))
+    await flush()
+    await act(async () => [...container.querySelectorAll('button')].find(b => b.textContent.startsWith('Investment Policy')).click())
+    await flush()
+    // Before any preset, the donut has nothing to show yet.
+    expect(container.textContent).toContain('Pick a starting point below')
+    await act(async () => [...container.querySelectorAll('button')].find(b => b.textContent.startsWith('Growth')).click())
+    await flush()
+    // Growth: 85% stocks / 10% bonds / 5% cash, split within each per the
+    // disclosed fixed ratio (55/15/10/15/5 stocks, 80/20 bonds).
+    expect(container.querySelector('#target_us_large_cap_pct').value).toBe('46.8')
+    expect(container.querySelector('#target_us_mid_cap_pct').value).toBe('12.8')
+    expect(container.querySelector('#target_us_small_cap_pct').value).toBe('8.5')
+    expect(container.querySelector('#target_international_developed_pct').value).toBe('12.8')
+    expect(container.querySelector('#target_emerging_markets_pct').value).toBe('4.3')
+    expect(container.querySelector('#target_us_bonds_pct').value).toBe('8')
+    expect(container.querySelector('#target_international_bonds_pct').value).toBe('2')
+    expect(container.querySelector('#target_cash_pct').value).toBe('5')
+    // The donut is no longer showing the empty-state helper.
+    expect(container.textContent).not.toContain('Pick a starting point below')
+    expect(container.textContent).toContain('Stocks')
   })
 
   it('explains missing required fields instead of silently ignoring Add holding', async () => {
     await act(async () => root.render(<PortfolioSetup />))
     await flush()
+    await goToHoldings()
     await act(async () => [...container.querySelectorAll('button')].find(b => b.textContent === 'Add holding').click())
     expect(container.querySelector('[role="alert"]').textContent).toContain('Select an account')
     expect(axios.post).not.toHaveBeenCalled()
@@ -76,6 +122,7 @@ describe('PortfolioSetup workflows', () => {
     axios.post.mockResolvedValue({ data: { id: 5 } })
     await act(async () => root.render(<PortfolioSetup />))
     await flush()
+    await goToHoldings()
     await act(async () => {
       const account = container.querySelector('select')
       account.value = '1'
@@ -105,6 +152,7 @@ describe('PortfolioSetup workflows', () => {
     axios.post.mockResolvedValue({ data: { id: 5 } })
     await act(async () => root.render(<PortfolioSetup />))
     await flush()
+    await goToHoldings()
     await act(async () => {
       const account = container.querySelector('select')
       account.value = '1'
@@ -137,6 +185,7 @@ describe('PortfolioSetup workflows', () => {
     }))
     await act(async () => root.render(<PortfolioSetup />))
     await flush()
+    await goToHoldings()
     expect(container.textContent).toContain('Portfolio setup checklist')
     expect(container.textContent).toContain('Add its available investment options')
     const checklist = [...container.querySelectorAll('.card')].find(card => card.textContent.includes('Portfolio setup checklist'))
@@ -153,6 +202,7 @@ describe('PortfolioSetup workflows', () => {
     }))
     await act(async () => root.render(<PortfolioSetup />))
     await flush()
+    await goToHoldings()
     expect(container.textContent).toContain('Lookup: Built-in offline catalog (offline)')
   })
 
@@ -172,6 +222,7 @@ describe('PortfolioSetup workflows', () => {
     axios.patch.mockResolvedValue({ data: {} })
     await act(async () => root.render(<PortfolioSetup />))
     await flush()
+    await goToHoldings()
     expect(container.textContent).toContain('Holdings entered')
     expect(container.textContent).toContain('Difference')
     expect(container.textContent).toContain('Managed elsewhere — tracked, not traded')
@@ -192,6 +243,7 @@ describe('PortfolioSetup workflows', () => {
     axios.patch.mockResolvedValue({ data: {} })
     await act(async () => root.render(<PortfolioSetup />))
     await flush()
+    await goToHoldings()
     await act(async () => [...container.querySelectorAll('button')].find(b => b.textContent === 'Refresh value').click())
     await flush()
     const refreshForm = [...container.querySelectorAll('form')].find(form => form.textContent.includes('Save refreshed value'))
@@ -215,6 +267,7 @@ describe('PortfolioSetup workflows', () => {
     axios.patch.mockResolvedValue({ data: {} })
     await act(async () => root.render(<PortfolioSetup />))
     await flush()
+    await goToHoldings()
     await act(async () => [...container.querySelectorAll('button')].find(b => b.textContent === 'Check quote').click())
     await flush()
     expect(container.textContent).toContain('2 shares implies $551')
@@ -239,6 +292,7 @@ describe('PortfolioSetup workflows', () => {
     }))
     await act(async () => root.render(<PortfolioSetup />))
     await flush()
+    await goToHoldings()
     await act(async () => [...container.querySelectorAll('button')].find(b => b.textContent === 'Check quote').click())
     await flush()
     expect(container.textContent).toContain('rate-limited')
@@ -254,6 +308,7 @@ describe('PortfolioSetup workflows', () => {
     }))
     await act(async () => root.render(<PortfolioSetup />))
     await flush()
+    await goToHoldings()
     await act(async () => [...container.querySelectorAll('button')].find(b => b.textContent === 'Tax lots').click())
     await flush()
     expect(container.textContent).toContain('Tax lots for VTI')
@@ -264,6 +319,7 @@ describe('PortfolioSetup workflows', () => {
     axios.post.mockRejectedValue({ response: { data: { detail: 'Account unavailable' } } })
     await act(async () => root.render(<PortfolioSetup />))
     await flush()
+    await goToHoldings()
     await act(async () => {
       const account = container.querySelector('select')
       account.value = '1'
@@ -284,6 +340,7 @@ describe('PortfolioSetup workflows', () => {
     }))
     await act(async () => root.render(<PortfolioSetup />))
     await flush()
+    await goToHoldings()
     expect(container.textContent).not.toContain('Reserve fund')
     const toggle = [...container.querySelectorAll('label')].find(l => l.textContent.includes('Show excluded accounts')).querySelector('input')
     await act(async () => toggle.click())
@@ -392,6 +449,7 @@ describe('PortfolioSetup workflows', () => {
     axios.post.mockResolvedValue({ data: { security_id: 1 } })
     await act(async () => root.render(<PortfolioSetup />))
     await flush()
+    await goToHoldings()
     const ticker = container.querySelector('input[placeholder="Ticker (optional)"]')
     await setInput(ticker, 'BND')
     const lookup = [...container.querySelectorAll('button')].find(b => b.textContent === 'Look up ticker')
@@ -413,6 +471,7 @@ describe('PortfolioSetup workflows', () => {
     })
     await act(async () => root.render(<PortfolioSetup />))
     await flush()
+    await goToHoldings()
     const input = container.querySelector('input[aria-label="Holdings CSV"]')
     const file = new File(['account_id,security_name,market_value,asset_class\n1,Fund,100,us_bonds'], 'holdings.csv', { type: 'text/csv' })
     await act(async () => { Object.defineProperty(input, 'files', { value: [file] }); input.dispatchEvent(new Event('change', { bubbles: true })); await Promise.resolve() })
@@ -433,6 +492,7 @@ describe('PortfolioSetup workflows', () => {
     })
     await act(async () => root.render(<PortfolioSetup />))
     await flush()
+    await goToHoldings()
     const input = container.querySelector('input[aria-label="Holdings CSV"]')
     const file = new File(['account_id,ticker,security_name,shares,market_value\n1,VTI,VTI,10,1000'], 'holdings.csv', { type: 'text/csv' })
     await act(async () => { Object.defineProperty(input, 'files', { value: [file] }); input.dispatchEvent(new Event('change', { bubbles: true })); await Promise.resolve() })
@@ -477,5 +537,50 @@ describe('PortfolioSetup workflows', () => {
     await act(async () => checking.click())
     await act(async () => { [...container.querySelectorAll('button')].find(b => b.textContent === 'Save policy').click(); await Promise.resolve() })
     expect(axios.post).toHaveBeenCalledWith('/api/investment-policy', expect.objectContaining({ excluded_accounts: [2] }))
+  })
+
+  describe('Overview tab (audit finding #6, 2026-09-14)', () => {
+    it('is the default landing tab and flags a specific issue per account, with a link to fix it', async () => {
+      axios.get.mockImplementation(url => Promise.resolve({ data:
+        url === '/api/accounts' ? [
+          { id: 1, name: 'Brokerage', account_type: 'taxable', balance: 50000, investment_menu_mode: 'auto' },
+          { id: 2, name: '401k', account_type: '401k', portfolio_account_type: 'traditional_401k', balance: 100000, investment_menu_mode: 'auto' },
+        ] :
+        url === '/api/holdings/grouped' ? { groups: [
+          { account_id: 1, account_name: 'Brokerage', holdings: [{ id: 9, security_name: 'VTI', market_value: 50000, asset_class: 'us_large_cap' }], holdings_total: 50000, has_warning: false },
+          // No holdings entered for account 2, and no eligible funds recorded despite
+          // being restricted-by-default (401k) -- two distinct issues on one account.
+        ] } :
+        url === '/api/account-investment-options' ? [] :
+        url === '/api/investment-policy' ? { has_policy: false } : []
+      }))
+      await act(async () => root.render(<PortfolioSetup />))
+      await flush()
+      // Lands on Overview without clicking anything.
+      expect(container.textContent).toContain('Every account Coach can invest for, at a glance')
+      expect(container.textContent).toContain('Brokerage')
+      expect(container.textContent).toContain('✓ Complete')
+      expect(container.textContent).toContain('401k')
+      expect(container.textContent).toContain('No holdings recorded yet')
+      expect(container.textContent).toContain('Restricted menu with no eligible funds recorded')
+      const goToHoldingsLink = [...container.querySelectorAll('button')].find(b => b.textContent === 'Go to Holdings')
+      await act(async () => goToHoldingsLink.click())
+      await flush()
+      // Navigated to the real Holdings tab, not a copy.
+      expect(container.textContent).toContain('Add holding')
+    })
+
+    it('flags an excluded account distinctly from an incomplete one', async () => {
+      axios.get.mockImplementation(url => Promise.resolve({ data:
+        url === '/api/accounts' ? [{ id: 1, name: 'Reserve', account_type: 'taxable', balance: 10000 }] :
+        url === '/api/holdings/grouped' ? { groups: [] } :
+        url === '/api/account-investment-options' ? [] :
+        url === '/api/investment-policy' ? { has_policy: true, policy: { excluded_accounts: [1] } } : []
+      }))
+      await act(async () => root.render(<PortfolioSetup />))
+      await flush()
+      expect(container.textContent).toContain('Excluded from Coach')
+      expect(container.textContent).not.toContain('No holdings recorded yet')
+    })
   })
 })
