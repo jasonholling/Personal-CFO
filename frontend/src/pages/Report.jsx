@@ -105,9 +105,16 @@ export default function Report({ onNavigate }) {
       axios.get('/api/projections/education'),
       axios.get('/api/projections/kids'),
       axios.get('/api/projections/insurance'),
-    ]).then(([nw, ret, edu, kids, ins]) => axios.get('/api/portfolio/allocation').catch(() => ({ data: null })).then(allocation => {
+      // Estate Planning section used to be a hardcoded status/document
+      // list regardless of what was actually saved on the Estate page --
+      // same class of bug already fixed in the PDF report (report_
+      // generator.py's build_estate) and ProtectionScorecard.jsx, which
+      // both read real data (audit finding, 2026-09-14). estate-documents
+      // uses the same 5 document_type keys Estate.jsx saves under.
+      axios.get('/api/estate-documents').catch(() => ({ data: [] })),
+    ]).then(([nw, ret, edu, kids, ins, estateDocs]) => axios.get('/api/portfolio/allocation').catch(() => ({ data: null })).then(allocation => {
       const scenario = ret.data.scenarios?.find(s => s.label==='age_60_early')
-      setData({ nw:nw.data, ret:scenario, edu:edu.data.goals, kids:kids.data.kids, ins:ins.data, allocation:allocation.data })
+      setData({ nw:nw.data, ret:scenario, edu:edu.data.goals, kids:kids.data.kids, ins:ins.data, allocation:allocation.data, estateDocs:estateDocs.data })
       setLoading(false)
     })).catch(() => setLoading(false))
   }, [])
@@ -115,16 +122,36 @@ export default function Report({ onNavigate }) {
   if (loading) return <div className="loading">Generating report...</div>
   if (!data)   return <div className="loading">Error loading report</div>
 
-  const { nw, ret, edu, kids, ins, allocation } = data
+  const { nw, ret, edu, kids, ins, allocation, estateDocs } = data
   const jason_ins  = ins?.jason
   const justin_ins = ins?.justin
+
+  // Mirrors report_generator.py's ESTATE_DOCUMENT_TYPES/_estate_status/
+  // ESTATE_STATUS_LABELS exactly, so the on-screen report and the PDF
+  // report never silently disagree about the same underlying data.
+  const ESTATE_DOCS = [
+    ['trust', 'Joint Revocable Living Trust'],
+    ['wills', `Wills (${person1Name} & ${person2Name})`],
+    ['fpoa',  'Financial Power of Attorney'],
+    ['hcpoa', 'Health Care Power of Attorney'],
+  ]
+  const ESTATE_STATUS_LABELS = {
+    executed:'Executed', verify:'Verify', outdated:'Needs Update', pending:'Pending',
+    complete:'Executed', in_progress:'In Progress', not_started:'Not Started',
+  }
+  const estateByType = Object.fromEntries((estateDocs||[]).map(d => [d.document_type, d]))
+  const estateStatuses = ESTATE_DOCS.map(([key]) => estateByType[key]?.status).filter(Boolean)
+  const estateSectionStatus = estateStatuses.length === 0 ? 'ATTENTION'
+    : estateStatuses.some(s => s === 'outdated') ? 'NEEDS REVIEW'
+    : estateStatuses.every(s => s === 'executed' || s === 'complete') ? 'ON TRACK'
+    : 'ATTENTION'
 
   const sections = [
     { name:'Investments',            icon:'⊞', status: nw?.investment>0?'ON TRACK':'ATTENTION' },
     { name:'Financial Independence', icon:'◎', status: ret?.on_track?'ON TRACK':'NEEDS REVIEW' },
     { name:'Education',              icon:'◇', status: edu?.every(g=>g.funding_percent>=85)?'ON TRACK':'ATTENTION' },
     { name:'Risk Management',        icon:'⊕', status: (jason_ins?.on_track&&justin_ins?.on_track)?'ON TRACK':'ATTENTION' },
-    { name:'Estate Planning',        icon:'⊙', status: 'ATTENTION' },
+    { name:'Estate Planning',        icon:'⊙', status: estateSectionStatus },
   ]
 
   const retChart = ret?.yearly_detail?.filter((_,i)=>i%2===0).map(y=>({
@@ -425,9 +452,13 @@ export default function Report({ onNavigate }) {
         <div className="grid-2">
           <div className="card">
             <div className="label" style={{ marginBottom:12 }}>Documents</div>
-            {['Joint Revocable Living Trust',`Wills (${person1Name} & ${person2Name})`,'Financial POA','Health Care POA'].map(d=>(
-              <Row key={d} label={d} value="See Estate Planning" />
-            ))}
+            {ESTATE_DOCS.map(([key, label]) => {
+              const saved = estateByType[key]
+              const value = saved ? (ESTATE_STATUS_LABELS[saved.status] || 'See Estate Planning') : 'See Estate Planning'
+              const dateSuffix = saved?.reviewed_on ? ` · ${saved.reviewed_on}` : ''
+              return <Row key={key} label={label} value={`${value}${dateSuffix}`}
+                          color={saved?.status === 'outdated' ? 'var(--red)' : saved?.status === 'executed' || saved?.status === 'complete' ? 'var(--green)' : 'var(--text)'} />
+            })}
           </div>
           <div className="card">
             <div className="label" style={{ marginBottom:12 }}>Action Items</div>
