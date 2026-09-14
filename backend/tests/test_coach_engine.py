@@ -170,6 +170,16 @@ class TestAssetLocationRecommendations:
         assert "Work 401(k): Total Bond Index" in cards[0]["action_text"]
         assert cards[0]["affected_accounts"] == [1, 2]
 
+    def test_kid_owned_roth_ira_is_never_offered_as_an_asset_location_destination(self):
+        # audit finding, 2026-09-14, P1: a parent's taxable bond holding
+        # must never be steered into a child's own Roth IRA.
+        taxable = account(1, "taxable")
+        kid_roth = account(2, "roth_ira", owner="kid_1")
+        classified = classify_holdings([taxable, kid_roth], [
+            holding(1, 1, market_value=20000, asset_class="us_bonds"),
+        ])
+        assert asset_location_recommendations(classified, accounts=[taxable, kid_roth]) == []
+
     def test_no_tax_sheltered_account_means_no_unactionable_location_card(self):
         taxable = account(1, "taxable")
         classified = classify_holdings([taxable], [holding(1, 1, market_value=20000, asset_class="us_bonds")])

@@ -99,6 +99,18 @@ class TestHoldingsCrud:
         })
         assert r.status_code == 400
 
+    def test_update_and_delete_nonexistent_holding_return_404(self, client):
+        # Regression (follow-up audit, 2026-09-14): same missing-rowcount
+        # class of bug just fixed for accounts/kids, found again here --
+        # update_holding only ever checked the account_id FK, never
+        # whether holding_id itself existed.
+        acc = _create_account(client)
+        r = client.put("/api/holdings/999999", json={
+            "account_id": acc["id"], "security_name": "Ghost", "market_value": 0, "asset_class": "us_large_cap",
+        })
+        assert r.status_code == 404
+        assert client.delete("/api/holdings/999999").status_code == 404
+
     def test_rejects_negative_market_value(self, client):
         acc = _create_account(client)
         r = client.post("/api/holdings", json={

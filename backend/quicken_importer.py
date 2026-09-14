@@ -123,11 +123,16 @@ def parse_quicken_networth_csv(csv_content: str) -> List[Dict]:
         account_map = _account_map()
         mapped = account_map.get(name_lower)
         if not mapped:
-            # Try partial match
-            for key, val in account_map.items():
-                if key in name_lower or name_lower in key:
-                    mapped = val
-                    break
+            # Try partial match. Prefer the LONGEST matching key (most
+            # specific), not just the first hit in dict-iteration order --
+            # a mapping with both "ira" and "roth ira" keys previously
+            # could route a "Traditional IRA" row to whichever happened to
+            # iterate first, silently importing balance data into the
+            # wrong account (audit finding, 2026-09-14, P3).
+            candidates = [(key, val) for key, val in account_map.items()
+                          if key in name_lower or name_lower in key]
+            if candidates:
+                mapped = max(candidates, key=lambda kv: len(kv[0]))[1]
 
         if not mapped:
             continue  # Skip unmapped accounts

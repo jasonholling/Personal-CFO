@@ -916,15 +916,17 @@ def create_account(account: Account):
 @app.put("/api/accounts/{account_id}")
 def update_account(account_id: int, account: Account):
     conn = get_db()
-    conn.execute(
+    updated = conn.execute(
         "UPDATE accounts SET name=?, account_type=?, owner=?, institution=?, balance=?, notes=?, interest_rate=?, minimum_payment=?, term_months=?, stock_allocation_pct=?, expense_ratio=?, monthly_rental_income=?, monthly_rental_expenses=?, portfolio_account_type=?, investment_menu_mode=?, held_back_from_withdrawal=? WHERE id=?",
         (account.name, account.account_type, account.owner, account.institution, account.balance, account.notes,
          account.interest_rate, account.minimum_payment, account.term_months, account.stock_allocation_pct, account.expense_ratio,
          account.monthly_rental_income, account.monthly_rental_expenses, account.portfolio_account_type, account.investment_menu_mode,
          account.held_back_from_withdrawal, account_id)
-    )
+    ).rowcount
     conn.commit()
     conn.close()
+    if not updated:
+        raise HTTPException(status_code=404, detail="Account not found")
     return {**account.dict(), "id": account_id}
 
 @app.patch("/api/accounts/{account_id}/investment-menu-mode")
@@ -945,9 +947,11 @@ def update_account_investment_menu_mode(account_id: int, body: InvestmentMenuMod
 @app.delete("/api/accounts/{account_id}")
 def delete_account(account_id: int):
     conn = get_db()
-    conn.execute("DELETE FROM accounts WHERE id=?", (account_id,))
+    deleted = conn.execute("DELETE FROM accounts WHERE id=?", (account_id,)).rowcount
     conn.commit()
     conn.close()
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Account not found")
     return {"deleted": account_id}
 
 # ══════════════════════════════════════════════════════════════════════
@@ -1036,7 +1040,7 @@ def update_holding(holding_id: int, holding: Holding):
     if not acc:
         conn.close()
         raise HTTPException(status_code=400, detail=f"account_id {holding.account_id} does not exist")
-    conn.execute(
+    updated = conn.execute(
         "UPDATE holdings SET account_id=?, ticker=?, security_name=?, provider_identifier=?, exchange=?, security_type=?, "
         "shares=?, market_value=?, asset_class=?, exposures_json=?, expense_ratio=?, cost_basis=?, as_of_date=?, "
         "data_source=?, confidence=?, management_mode=?, notes=?, updated_at=datetime('now') WHERE id=?",
@@ -1044,9 +1048,11 @@ def update_holding(holding_id: int, holding: Holding):
          holding.security_type, holding.shares, holding.market_value, holding.asset_class, json.dumps(holding.exposures),
          holding.expense_ratio, holding.cost_basis, holding.as_of_date, holding.data_source, holding.confidence,
          holding.management_mode, holding.notes, holding_id)
-    )
+    ).rowcount
     conn.commit()
     conn.close()
+    if not updated:
+        raise HTTPException(status_code=404, detail="Holding not found")
     return {**holding.dict(), "id": holding_id}
 
 
@@ -1094,9 +1100,11 @@ def update_holding_valuation(holding_id: int, update: HoldingValuationUpdate):
 @app.delete("/api/holdings/{holding_id}")
 def delete_holding(holding_id: int):
     conn = get_db()
-    conn.execute("DELETE FROM holdings WHERE id=?", (holding_id,))
+    deleted = conn.execute("DELETE FROM holdings WHERE id=?", (holding_id,)).rowcount
     conn.commit()
     conn.close()
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Holding not found")
     return {"deleted": holding_id}
 
 @app.get("/api/holdings/{holding_id}/tax-lots")
@@ -1255,7 +1263,7 @@ def update_account_investment_option(option_id: int, option: AccountInvestmentOp
     if not acc:
         conn.close()
         raise HTTPException(status_code=400, detail=f"account_id {option.account_id} does not exist")
-    conn.execute(
+    updated = conn.execute(
         "UPDATE account_investment_options SET account_id=?, ticker=?, option_name=?, provider_identifier=?, "
         "security_type=?, asset_class=?, exposures_json=?, expense_ratio=?, currently_owned=?, "
         "available_for_new_contributions=?, available_for_exchange=?, minimum_investment=?, minimum_allocation_pct=?, "
@@ -1269,17 +1277,21 @@ def update_account_investment_option(option_id: int, option: AccountInvestmentOp
          None if option.employer_match_eligible is None else int(option.employer_match_eligible),
          option.trading_fee, option.redemption_restriction, option.settlement_restriction, option.data_source,
          option.as_of_date, option.confidence, option.notes, option_id)
-    )
+    ).rowcount
     conn.commit()
     conn.close()
+    if not updated:
+        raise HTTPException(status_code=404, detail="Account investment option not found")
     return {**option.dict(), "id": option_id}
 
 @app.delete("/api/account-investment-options/{option_id}")
 def delete_account_investment_option(option_id: int):
     conn = get_db()
-    conn.execute("DELETE FROM account_investment_options WHERE id=?", (option_id,))
+    deleted = conn.execute("DELETE FROM account_investment_options WHERE id=?", (option_id,)).rowcount
     conn.commit()
     conn.close()
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Account investment option not found")
     return {"deleted": option_id}
 
 @app.post("/api/account-investment-options/compare")
@@ -1859,7 +1871,14 @@ def portfolio_planning_comparison(req: PlanningComparisonRequest):
     def run_all(inputs, portfolio_std=None):
         retirement = run_retirement_projection(inputs, accounts, ret_ages=[ret_age], life_events=life_events, surplus_allocations=surplus_allocations)
         scenario = next(iter(retirement["scenarios"]), {})
-        monte_carlo = run_monte_carlo(inputs, accounts, ret_age, ss_timing,
+        # holdback applies to the Monte Carlo call only -- not the
+        # deterministic projection above, and not SWR below (SWR is a
+        # documented exception, same as Roth Conversion/Tax Efficiency/
+        # Survivor Scenario -- see Settings.jsx's own hint text). Currently
+        # unreachable from any frontend page (audit finding, 2026-09-14,
+        # P2), fixed alongside the other Monte Carlo call sites so it
+        # doesn't silently resurface if this endpoint gets wired to a page.
+        monte_carlo = run_monte_carlo(inputs, _apply_account_holdback(accounts, inputs), ret_age, ss_timing,
                                       life_events=life_events, surplus_allocations=surplus_allocations,
                                       portfolio_std=portfolio_std)
         swr = run_swr_analysis(inputs, accounts, ret_age=ret_age, ss_timing=ss_timing, life_events=life_events, surplus_allocations=surplus_allocations)
@@ -2040,7 +2059,13 @@ def _portfolio_goal_context(conn, accounts: List[Dict], policy: Optional[Dict]) 
                                                life_events=life_events, surplus_allocations=surplus)
         scenario = next((s for s in projection.get("scenarios", []) if s.get("retirement_age") == ret_age and s.get("ss_timing") in (ss_timing, "custom")),
                         next(iter(projection.get("scenarios", [])), {}))
-        monte_carlo = run_monte_carlo(inputs, accounts, ret_age=ret_age, ss_timing=ss_timing,
+        # holdback applies to the Monte Carlo call only, not the
+        # deterministic projection above -- same documented split as every
+        # other Monte Carlo call site (audit finding, 2026-09-14, P1): the
+        # Portfolio Coach/Annual Review success-rate card must agree with
+        # the Monte Carlo tab's own number for a hold-back household,
+        # instead of silently including the reserved account as spendable.
+        monte_carlo = run_monte_carlo(inputs, _apply_account_holdback(accounts, inputs), ret_age=ret_age, ss_timing=ss_timing,
                                       life_events=life_events, surplus_allocations=surplus)
         context.update({
             "retirement_age": ret_age,
@@ -2383,9 +2408,11 @@ def update_cash_flow_item(item_id: int, item: CashFlowItem):
 @app.delete("/api/cash-flow/{item_id}")
 def delete_cash_flow_item(item_id: int):
     conn = get_db()
-    conn.execute("DELETE FROM cash_flow_items WHERE id=?", (item_id,))
+    deleted = conn.execute("DELETE FROM cash_flow_items WHERE id=?", (item_id,)).rowcount
     conn.commit()
     conn.close()
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Cash-flow item not found")
     return {"deleted": item_id}
 
 @app.get("/api/surplus-allocations")
@@ -2482,6 +2509,21 @@ def get_saved_scenario(scenario_id: int):
     return {**dict(row), "summary":json.loads(row["summary_json"]),
             "assumptions": json.loads(row["assumptions_json"]) if row["assumptions_json"] else None,
             "is_legacy": bool(row["is_legacy"])}
+
+@app.delete("/api/saved-scenarios/{scenario_id}")
+def delete_saved_scenario(scenario_id: int):
+    """No cascade to revisions (rows with revision_of == scenario_id) --
+    same single-row-only convention as delete_kid/delete_account elsewhere
+    in this file; a revision left pointing at a deleted root just stops
+    resolving its lineage, it doesn't itself disappear. Added 2026-09-14
+    (the feature existed for save/list/recalculate but never delete)."""
+    conn = get_db()
+    deleted = conn.execute("DELETE FROM saved_scenarios WHERE id=?", (scenario_id,)).rowcount
+    conn.commit()
+    conn.close()
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Saved scenario not found")
+    return {"deleted": scenario_id}
 
 @app.post("/api/saved-scenarios")
 def save_scenario(body: ScenarioSave):
@@ -2813,7 +2855,11 @@ def create_life_event(event: LifeEvent):
 
 @app.delete("/api/life-events/{event_id}")
 def delete_life_event(event_id: int):
-    conn = get_db(); conn.execute("DELETE FROM life_events WHERE id=?", (event_id,)); conn.commit(); conn.close()
+    conn = get_db()
+    deleted = conn.execute("DELETE FROM life_events WHERE id=?", (event_id,)).rowcount
+    conn.commit(); conn.close()
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Life event not found")
     return {"deleted": event_id}
 
 @app.patch("/api/life-events/{event_id}/toggle")
@@ -3068,6 +3114,15 @@ def post_pension_lump_sum_impact(body: PensionLumpSumImpactRequest):
     from projection_engine import run_two_dimensional_retirement_projection, CURRENT_YEAR
     from simulation_engine import run_monte_carlo
 
+    # holdback_accounts feeds ONLY the two run_monte_carlo calls below,
+    # matching every other Monte Carlo call site (audit finding, 2026-09-14,
+    # P1) -- the two run_two_dimensional_retirement_projection calls
+    # deliberately keep the full, unfiltered accounts list, same as every
+    # other Retirement-Projection-family caller (Settings.jsx's own hint
+    # text: "Hold Back Reserved Accounts ... Monte Carlo and Stress Tests
+    # only; Retirement Projection ... still spend from reserved accounts").
+    holdback_accounts = _apply_account_holdback(accounts, inputs)
+
     estimate = estimate_pension_lump_sum(inputs, buyout_age=body.buyout_age, discount_rate=body.discount_rate)
     lump_sum_amount = estimate["estimated_lump_sum"]
 
@@ -3076,7 +3131,7 @@ def post_pension_lump_sum_impact(body: PensionLumpSumImpactRequest):
         inputs, accounts, jason_ret_age=body.jason_ret_age, justin_ret_age=body.justin_ret_age,
         ss_timing=body.ss_timing, life_events=life_events, surplus_allocations=surplus_allocations)
     baseline_mc = run_monte_carlo(
-        inputs, accounts, ss_timing=body.ss_timing, life_events=life_events, surplus_allocations=surplus_allocations,
+        inputs, holdback_accounts, ss_timing=body.ss_timing, life_events=life_events, surplus_allocations=surplus_allocations,
         jason_ret_age=body.jason_ret_age, justin_ret_age=body.justin_ret_age)
 
     # Buyout: pension stops at buyout_age (transient _pension_stop_age
@@ -3094,7 +3149,7 @@ def post_pension_lump_sum_impact(body: PensionLumpSumImpactRequest):
         buyout_inputs, accounts, jason_ret_age=body.jason_ret_age, justin_ret_age=body.justin_ret_age,
         ss_timing=body.ss_timing, life_events=buyout_life_events, surplus_allocations=surplus_allocations)
     buyout_mc = run_monte_carlo(
-        buyout_inputs, accounts, ss_timing=body.ss_timing, life_events=buyout_life_events,
+        buyout_inputs, holdback_accounts, ss_timing=body.ss_timing, life_events=buyout_life_events,
         surplus_allocations=surplus_allocations, jason_ret_age=body.jason_ret_age, justin_ret_age=body.justin_ret_age)
 
     def _summary(proj, mc):
@@ -3219,20 +3274,24 @@ def create_insurance_policy(policy: InsurancePolicy):
 @app.put("/api/insurance-policies/{policy_id}")
 def update_insurance_policy(policy_id: int, policy: InsurancePolicy):
     conn = get_db()
-    conn.execute(
+    updated = conn.execute(
         "UPDATE insurance_policies SET who=?, policy_type=?, benefit=?, premium=?, notes=?, sort_order=? WHERE id=?",
         (policy.who, policy.policy_type, policy.benefit, policy.premium, policy.notes, policy.sort_order, policy_id)
-    )
+    ).rowcount
     conn.commit()
     conn.close()
+    if not updated:
+        raise HTTPException(status_code=404, detail="Insurance policy not found")
     return {**policy.dict(), "id": policy_id}
 
 @app.delete("/api/insurance-policies/{policy_id}")
 def delete_insurance_policy(policy_id: int):
     conn = get_db()
-    conn.execute("DELETE FROM insurance_policies WHERE id=?", (policy_id,))
+    deleted = conn.execute("DELETE FROM insurance_policies WHERE id=?", (policy_id,)).rowcount
     conn.commit()
     conn.close()
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Insurance policy not found")
     return {"deleted": policy_id}
 
 # Property & Liability Policies (was hardcoded in Risk.jsx, now lives in cfo.db only)
@@ -3258,20 +3317,24 @@ def create_property_policy(policy: PropertyPolicy):
 @app.put("/api/property-policies/{policy_id}")
 def update_property_policy(policy_id: int, policy: PropertyPolicy):
     conn = get_db()
-    conn.execute(
+    updated = conn.execute(
         "UPDATE property_policies SET item=?, coverage=?, renewal=?, sort_order=? WHERE id=?",
         (policy.item, policy.coverage, policy.renewal, policy.sort_order, policy_id)
-    )
+    ).rowcount
     conn.commit()
     conn.close()
+    if not updated:
+        raise HTTPException(status_code=404, detail="Property policy not found")
     return {**policy.dict(), "id": policy_id}
 
 @app.delete("/api/property-policies/{policy_id}")
 def delete_property_policy(policy_id: int):
     conn = get_db()
-    conn.execute("DELETE FROM property_policies WHERE id=?", (policy_id,))
+    deleted = conn.execute("DELETE FROM property_policies WHERE id=?", (policy_id,)).rowcount
     conn.commit()
     conn.close()
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Property policy not found")
     return {"deleted": policy_id}
 
 # Kids (variable count, 0-5 — see the Kid model's own comment above)
@@ -3309,12 +3372,14 @@ def create_kid(kid: Kid):
 @app.put("/api/kids/{kid_id}")
 def update_kid(kid_id: int, kid: Kid):
     conn = get_db()
-    conn.execute(
+    updated = conn.execute(
         "UPDATE kids SET name=?, age=?, monthly_529=?, display_order=? WHERE id=?",
         (kid.name, kid.age, kid.monthly_529, kid.display_order, kid_id)
-    )
+    ).rowcount
     conn.commit()
     conn.close()
+    if not updated:
+        raise HTTPException(status_code=404, detail="Kid not found")
     return {**kid.dict(), "id": kid_id}
 
 @app.delete("/api/kids/{kid_id}")
@@ -3701,7 +3766,8 @@ def sync_tasks():
         projections = {}
         education   = {}
     conn = get_db()
-    inserted = sync_auto_tasks(conn, accounts, inputs, projections, education)
+    policy_row = conn.execute("SELECT * FROM investment_policies ORDER BY id DESC LIMIT 1").fetchone()
+    inserted = sync_auto_tasks(conn, accounts, inputs, projections, education, policy=dict(policy_row) if policy_row else None)
     conn.close()
     return {"inserted": inserted, "message": f"Synced — {inserted} new tasks added"}
 
@@ -3741,6 +3807,15 @@ def generate_annual_report():
     surplus_allocations = _get_relevant_surplus_allocations(conn)
     kids = _get_kids(conn)
     surplus_529 = _get_kids_surplus_529_monthly(conn, kids)
+    # Estate.jsx's real document_type keys (trust/wills/fpoa/hcpoa/freeze),
+    # not PlanOperatingSystem.jsx's disjoint set -- these are the ones
+    # report_generator.py's Estate Planning section displays. Fetched here
+    # (previously not at all) so the PDF can reflect real status/dates
+    # instead of a static "ATTENTION"/"See Estate Planning" placeholder
+    # regardless of what the household has actually recorded (audit
+    # finding, 2026-09-14, P3).
+    estate_documents = [dict(r) for r in conn.execute("SELECT * FROM estate_documents").fetchall()]
+    policy_row = conn.execute("SELECT * FROM investment_policies ORDER BY id DESC LIMIT 1").fetchone()
     conn.close()
 
     if not inputs_row:
@@ -3751,6 +3826,12 @@ def generate_annual_report():
                                    run_kids_projection, run_insurance_analysis)
     from report_generator import generate_annual_report
     from net_worth_engine import compute_net_worth
+    from holdings_engine import policy_coarse_summary
+    # Real configured allocation target, not the report's own hardcoded
+    # percentages (which disagreed with task_engine.py's separately
+    # hardcoded percentages, and with the household's actual saved policy --
+    # audit finding, 2026-09-14, P2).
+    policy_allocation_summary = policy_coarse_summary(dict(policy_row) if policy_row else None)
 
     # Build net worth summary — same shared bucketing as /api/net-worth and
     # /api/snapshot use, so the report's Net Worth Summary can't silently
@@ -3765,6 +3846,9 @@ def generate_annual_report():
         "education":  run_education_projection(inputs, accounts, surplus_529_monthly=surplus_529, kids=kids),
         "kids":       run_kids_projection(accounts, inputs, surplus_529_monthly=surplus_529, kids=kids),
         "insurance":  run_insurance_analysis(inputs, accounts, kids=kids),
+        "estate_documents": estate_documents,
+        "policy_allocation_summary": policy_allocation_summary,
+        "policy_risk_profile": (dict(policy_row).get("risk_profile") if policy_row else None),
         "names": {
             "person1": inputs.get("person1_name", "Person 1"),
             "person2": inputs.get("person2_name", "Person 2"),
@@ -4058,6 +4142,20 @@ def get_income_sources(ret_age: int = 60, ss_timing: str = "early", body: dict =
     # Fixed to match the label jason_ss_claim_age alone actually
     # produces.
     _proj_inputs = _apply_whatif_overrides(dict(inputs_row), body or {})
+    # This is Monte Carlo's own companion chart (see the module comment
+    # above), not the standalone Retirement Projection page -- it must
+    # honor the same "Hold Back Reserved Accounts" withdrawal strategy
+    # the actual Monte Carlo run next to it uses, even though
+    # run_retirement_projection() itself (the shared engine this also
+    # calls, used by the Retirement Projection page too) deliberately
+    # does NOT apply holdback on its own -- see Settings.jsx's own hint
+    # text: "Monte Carlo and Stress Tests only". Without this, a
+    # household using this setting to reserve a brokerage account as an
+    # emergency fund saw Monte Carlo's own headline numbers correctly
+    # exclude it while this chart kept showing draws from it anyway
+    # (reported 2026-09-14: "chart still says money... pull from
+    # brokerage... I kind of wanted to reserve that... for emergency").
+    accounts = _apply_account_holdback(accounts, _proj_inputs)
     _jason_ss_claim_age, _justin_ss_claim_age = _ss_claim_ages(_proj_inputs, jason_ss_claim_age, justin_ss_claim_age)
     result = run_retirement_projection(_proj_inputs, accounts, ret_ages=[ret_age], life_events=life_events, surplus_allocations=surplus_allocations,
                                         jason_ss_claim_age=_jason_ss_claim_age, justin_ss_claim_age=_justin_ss_claim_age)
@@ -4088,10 +4186,27 @@ def get_income_sources(ret_age: int = 60, ss_timing: str = "early", body: dict =
     # bucket (taxable/roth/hsa) is fully discretionary by construction,
     # so subtracting the RMD-only portion from the full gross draw can't
     # go below zero.
+    # Bucket breakdown (2026-09-14, at the user's request -- "trying to
+    # better visualize what bucket I'm pulling from"): withdrawal_pretax/
+    # _roth/_taxable/_hsa are already computed per year by yearly_detail
+    # (year_result.draws, annual_engine.simulate_withdrawal_year) but this
+    # endpoint used to collapse them all into one "discretionary_withdrawal"
+    # blob. Split out so the chart can show 401(k)/IRA, Roth, Brokerage,
+    # and HSA as their own stacked areas instead of one undifferentiated
+    # "Discretionary Withdrawal" band. Tax-treatment granularity only --
+    # "pretax" is 401(k) + Traditional IRA combined (both draw identically
+    # for this purpose), "roth" is Roth 401(k) + Roth IRA combined; the
+    # backend doesn't track a 401(k)-vs-IRA split within a tax treatment
+    # (see debt_engine.py-style bucket comments in annual_engine.py).
+    # discretionary_pretax subtracts out the RMD (a mandatory subset of
+    # withdrawal_pretax, per simulate_withdrawal_year's own draw order —
+    # see the discretionary_withdrawal comment above) so the two areas
+    # never double-count the same dollars.
     chart = []
     for y in scenario["yearly_detail"]:
         rmd = y.get("rmd", 0)
         total_draw = y["withdrawal"]
+        withdrawal_pretax = y.get("withdrawal_pretax", 0)
         chart.append({
             "age":          y["jason_age"],
             "pension":      y["pension"],
@@ -4100,7 +4215,11 @@ def get_income_sources(ret_age: int = 60, ss_timing: str = "early", body: dict =
             "portfolio_draw":  total_draw,
             "rmd":                    rmd,
             "rmd_reinvested":         y.get("rmd_reinvested", 0),
-            "withdrawal_pretax":      y.get("withdrawal_pretax", 0),
+            "withdrawal_pretax":      withdrawal_pretax,
+            "discretionary_pretax":   max(0, withdrawal_pretax - rmd),
+            "withdrawal_roth":        y.get("withdrawal_roth", 0),
+            "withdrawal_taxable":     y.get("withdrawal_taxable", 0),
+            "withdrawal_hsa":         y.get("withdrawal_hsa", 0),
             "discretionary_withdrawal": max(0, total_draw - rmd),
             "total_need":      y["income_need"],
         })
@@ -4208,6 +4327,12 @@ def get_sequence_risk(ret_age: int = 55, ss_timing: str = "early",
     if not inputs_row: return {"error": "No planning inputs found"}
     from simulation_engine import run_stress_tests
     _inputs = dict(inputs_row)
+    # Same holdback filter as every other run_stress_tests call site
+    # (get_stress_tests/post_stress_tests) -- currently unreachable from
+    # any frontend page (audit finding, 2026-09-14, P2), fixed so it can't
+    # silently disagree with the main Stress Tests tab if this endpoint is
+    # ever wired up.
+    accounts = _apply_account_holdback(accounts, _inputs)
     _jason_ss_claim_age, _justin_ss_claim_age = _ss_claim_ages(_inputs, jason_ss_claim_age, justin_ss_claim_age)
     result = run_stress_tests(_inputs, accounts, ret_age, ss_timing, life_events=life_events, surplus_allocations=surplus_allocations,
                                jason_ss_claim_age=_jason_ss_claim_age, justin_ss_claim_age=_justin_ss_claim_age)

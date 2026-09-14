@@ -181,6 +181,29 @@ class TestClassifyHoldings:
     def test_holding_with_no_matching_account_is_blocked(self):
         assert len(classify_holdings([], [holding(1, 999, market_value=100)])["blocked"]) == 1
 
+    def test_kid_owned_roth_ira_excluded_from_household_despite_not_being_a_child_specific_type(self):
+        # roth_ira/brokerage/etc. aren't in CHILD_SPECIFIC_TYPES (only 529/
+        # custodial are) -- a kid can still own one, and it must never land
+        # in `household` (audit finding, 2026-09-14, P1).
+        accs = self._accounts()
+        accs[0] = account(1, "taxable", owner="kid_1")
+        result = classify_holdings(accs, [holding(1, 1, market_value=5000)])
+        assert result["household"] == []
+        assert len(result["child_specific"]) == 1
+        assert result["child_specific"][0]["_account"]["owner"] == "kid_1"
+
+
+class TestPolicyCoarseSummary:
+    def test_rolls_up_fine_grained_targets_into_stock_bonds_cash(self):
+        from holdings_engine import policy_coarse_summary
+        summary = policy_coarse_summary(policy())
+        assert summary == {"stock_pct": 50, "bonds_pct": 30, "cash_pct": 20, "real_estate_pct": 0, "alternatives_pct": 0}
+
+    def test_none_when_no_policy_configured(self):
+        from holdings_engine import policy_coarse_summary
+        assert policy_coarse_summary(None) is None
+        assert policy_coarse_summary({}) is None
+
 
 class TestHoldingExposureWeights:
     def test_single_asset_class_is_100pct(self):

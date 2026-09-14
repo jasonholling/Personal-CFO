@@ -131,6 +131,24 @@ class TestParseQuickenNetworthCsv:
         accounts = parse_quicken_networth_csv(csv_content)
         assert len(accounts) == 1
 
+    def test_partial_match_prefers_the_most_specific_key_on_collision(self, monkeypatch, tmp_path):
+        # Regression (audit finding, 2026-09-14, P3): with both a short key
+        # ("ira") and a longer, more specific key ("rollover ira") in the
+        # map, a row matching both used to be routed by dict-iteration
+        # order alone -- whichever key happened to be inserted first won,
+        # even when it was the less specific one. The longest matching key
+        # must always win.
+        local_map = tmp_path / "account-map.json"
+        local_map.write_text(json.dumps({
+            "ira": ["ira", "jason"],
+            "rollover ira": ["traditional_ira", "jason"],
+        }))
+        monkeypatch.setattr(quicken_importer, "_LOCAL_MAP_PATH", str(local_map))
+        csv_content = 'Investment,Rollover IRA Extra,"1,000.00"\n'
+        accounts = parse_quicken_networth_csv("Header\n---\n" + csv_content)
+        assert len(accounts) == 1
+        assert accounts[0]["account_type"] == "traditional_ira"
+
     def test_partial_match_fallback_maps_unlisted_variant(self, monkeypatch, tmp_path):
         local_map = tmp_path / "account-map.json"; local_map.write_text(json.dumps({"checking account": ["checking", "joint"]}))
         monkeypatch.setattr(quicken_importer, "_LOCAL_MAP_PATH", str(local_map))

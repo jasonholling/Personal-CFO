@@ -5,6 +5,8 @@ cfo.db).
 """
 import json
 
+import pytest
+
 import auth
 from projection_engine import CURRENT_YEAR
 
@@ -57,6 +59,26 @@ class TestAccountsCrud:
         assert r.status_code == 200
         remaining = client.get("/api/accounts").json()
         assert not any(a["id"] == created["id"] for a in remaining)
+
+    def test_update_nonexistent_account_returns_404(self, client):
+        # Regression (audit finding, 2026-09-14, P3): this used to return
+        # 200 with the submitted payload even when no row matched, masking
+        # a stale/deleted id from the frontend as a silent no-op success.
+        r = client.put("/api/accounts/999999", json={
+            "name": "Ghost", "account_type": "checking", "owner": "joint",
+            "institution": "", "balance": 0, "notes": None,
+        })
+        assert r.status_code == 404
+
+    def test_delete_nonexistent_account_returns_404(self, client):
+        r = client.delete("/api/accounts/999999")
+        assert r.status_code == 404
+
+
+class TestKidsCrud:
+    def test_update_nonexistent_kid_returns_404(self, client):
+        r = client.put("/api/kids/999999", json={"name": "Ghost", "age": 5, "monthly_529": 0})
+        assert r.status_code == 404
 
     def test_investment_menu_mode_is_account_specific_and_preserves_financial_facts(self, client):
         created = client.post("/api/accounts", json={
@@ -181,6 +203,15 @@ class TestInsurancePoliciesCrud:
         listed_after = client.get("/api/insurance-policies").json()
         assert not any(p["id"] == created["id"] for p in listed_after)
 
+    def test_update_and_delete_nonexistent_policy_return_404(self, client):
+        # Regression (follow-up audit, 2026-09-14): same missing-rowcount
+        # class of bug just fixed for accounts/kids, found again here.
+        r = client.put("/api/insurance-policies/999999", json={
+            "who": "Ghost", "policy_type": "Life — Term", "benefit": "$0", "premium": "$0", "notes": "", "sort_order": 0,
+        })
+        assert r.status_code == 404
+        assert client.delete("/api/insurance-policies/999999").status_code == 404
+
 
 class TestPropertyPoliciesCrud:
     def test_create_list_update_delete(self, client):
@@ -196,6 +227,13 @@ class TestPropertyPoliciesCrud:
 
         r = client.delete(f"/api/property-policies/{created['id']}")
         assert r.status_code == 200
+
+    def test_update_and_delete_nonexistent_policy_return_404(self, client):
+        r = client.put("/api/property-policies/999999", json={
+            "item": "Ghost", "coverage": "$0", "renewal": "1/1", "sort_order": 0,
+        })
+        assert r.status_code == 404
+        assert client.delete("/api/property-policies/999999").status_code == 404
 
 
 class TestPlanningInputs:
@@ -265,6 +303,11 @@ class TestCashFlow:
         })
         assert updated.json()["amount"] == 8200
         assert client.delete(f"/api/cash-flow/{item['id']}").status_code == 200
+
+    def test_delete_nonexistent_cash_flow_item_returns_404(self, client):
+        # Regression (follow-up audit, 2026-09-14): update_cash_flow_item
+        # already re-fetched and 404'd; delete never checked rowcount.
+        assert client.delete("/api/cash-flow/999999").status_code == 404
 
     def test_cash_flow_shortfall_reaches_cfo_briefing(self, client):
         client.post("/api/cash-flow", json={"name":"Income", "cash_flow_type":"income", "amount":4000})
@@ -475,6 +518,47 @@ class TestAnnualReport:
         assert r.status_code == 200
         assert r.headers["content-type"] == "application/pdf"
         assert r.content[:4] == b"%PDF"
+
+    def test_report_reflects_saved_estate_document_status(self, client, sample_inputs, sample_accounts):
+        # Regression (audit finding, 2026-09-14, P3): the report's Estate
+        # Planning section used to always render a static 'ATTENTION' /
+        # 'See Estate Planning' placeholder regardless of what the
+        # household had actually saved on the Estate page. Saving a real
+        # estate_documents row (via Estate.jsx's own endpoint/key
+        # vocabulary) must at least flow through report generation without
+        # error, and _estate_status must actually read it.
+        from report_generator import _estate_status
+        _seed_planning_inputs(client, sample_inputs)
+        _seed_accounts(client, sample_accounts)
+        for doc_type in ("trust", "wills", "fpoa", "hcpoa"):
+            r = client.put(f"/api/estate-documents/{doc_type}", json={
+                "document_type": doc_type, "status": "executed", "reviewed_on": "2026-01-15",
+            })
+            assert r.status_code == 200
+        r = client.get("/api/report/annual")
+        assert r.status_code == 200
+        assert r.content[:4] == b"%PDF"
+        saved = client.get("/api/estate-documents").json()
+        assert _estate_status({"estate_documents": saved}) == "ON TRACK"
+        assert _estate_status({"estate_documents": []}) == "ATTENTION"
+
+    def test_report_estate_status_understands_the_widened_status_vocabulary(self, client):
+        # Regression (follow-up audit, 2026-09-14): save_estate_document
+        # (main.py) accepts "complete"/"in_progress"/"not_started" -- the
+        # vocabulary PlanOperatingSystem.jsx used to write to this same
+        # table -- but _estate_status only recognized Estate.jsx's own
+        # "executed"/"verify"/"outdated"/"pending", so a document marked
+        # "complete" was permanently shown as unreviewed. Any pre-existing
+        # row saved under that vocabulary must still be read correctly.
+        from report_generator import _estate_status, ESTATE_STATUS_LABELS
+        for doc_type in ("trust", "wills", "fpoa", "hcpoa"):
+            r = client.put(f"/api/estate-documents/{doc_type}", json={
+                "document_type": doc_type, "status": "complete",
+            })
+            assert r.status_code == 200
+        saved = client.get("/api/estate-documents").json()
+        assert _estate_status({"estate_documents": saved}) == "ON TRACK"
+        assert ESTATE_STATUS_LABELS["complete"] == "Executed"
 
 
 class TestSimulationEndpoints:
@@ -748,6 +832,33 @@ class TestSimulationEndpoints:
             assert y["discretionary_withdrawal"] >= 0
             assert y["discretionary_withdrawal"] + y["rmd"] == y["portfolio_draw"]
 
+    def test_income_sources_bucket_breakdown_reconciles_to_the_totals(self, client, sample_inputs, sample_accounts):
+        """Regression (2026-09-14, at the user's request -- "trying to
+        better visualize what bucket I'm pulling from"): discretionary_
+        pretax/withdrawal_roth/withdrawal_taxable/withdrawal_hsa are a
+        further split of discretionary_withdrawal (itself already
+        rmd-exclusive, see the sibling test above) -- they must sum back
+        to it exactly, every year, with no double-counting or dropped
+        dollars, and discretionary_pretax must never go negative even in
+        a heavy-RMD year."""
+        inputs = {**sample_inputs, "jason_age": 40}  # born 1986 => RMDs start at 75
+        self._seed(client, inputs, sample_accounts)
+        r = client.get("/api/retirement/income-sources?ret_age=60&ss_timing=early")
+        assert r.status_code == 200
+        chart = r.json()["chart"]
+        assert any(y["rmd"] > 0 for y in chart)  # must actually exercise an RMD year
+        for y in chart:
+            for key in ("discretionary_pretax", "withdrawal_roth", "withdrawal_taxable", "withdrawal_hsa"):
+                assert key in y
+            assert y["discretionary_pretax"] >= 0
+            # Each bucket is independently rounded at the source
+            # (yearly_detail), same as the sibling rmd/discretionary_
+            # withdrawal split above — allow the same +/-$1-ish
+            # rounding noise rather than requiring bit-exact equality.
+            bucket_sum = y["discretionary_pretax"] + y["withdrawal_roth"] + y["withdrawal_taxable"] + y["withdrawal_hsa"]
+            assert bucket_sum == pytest.approx(y["discretionary_withdrawal"], abs=2)
+            assert y["discretionary_pretax"] <= y["withdrawal_pretax"]
+
     def test_whatif(self, client, sample_inputs, sample_accounts):
         self._seed(client, sample_inputs, sample_accounts)
         r = client.post("/api/projections/whatif", json={"salary_growth_pct": 0.03})
@@ -843,6 +954,113 @@ class TestAccountHoldback:
         r = client.get("/api/simulation/monte-carlo?ret_age=60&ss_timing=early")
         assert r.status_code == 200
         assert "success_rate" in r.json()
+
+    def test_income_sources_chart_also_respects_the_flag(self, client, sample_inputs):
+        """Regression (reported 2026-09-14): the "Income Sources by Year"
+        chart on the Monte Carlo tab is Monte Carlo's own companion chart
+        (fetched by the same MonteCarloSection) but is built from
+        run_retirement_projection(), not run_monte_carlo() -- and used to
+        skip _apply_account_holdback() entirely, so a household using
+        Hold Back Reserved Accounts to wall off a brokerage account as an
+        emergency reserve still saw this chart show draws FROM that
+        account, contradicting the Monte Carlo success-rate/balance
+        figures right next to it that correctly excluded it. With the
+        held-back account genuinely gone from the plan, its balance
+        can't be drawn from at all -- taxable withdrawals across every
+        year of the chart must be $0."""
+        self._seed(client, sample_inputs, "hold_back_reserved")
+        r = client.get("/api/retirement/income-sources?ret_age=60&ss_timing=early")
+        assert r.status_code == 200
+        chart = r.json()["chart"]
+        assert chart  # must actually have produced a schedule
+        assert all(y["withdrawal_taxable"] == 0 for y in chart)
+
+    def test_sequence_risk_also_respects_the_flag(self, client, sample_inputs):
+        """Regression (2026-09-14, follow-up audit): get_sequence_risk
+        calls run_stress_tests directly and had never been wired to
+        _apply_account_holdback at all, unlike get_stress_tests/
+        post_stress_tests -- the flagged $300,000 account must be
+        genuinely absent here too, same proof as the sibling
+        stress-tests test above (a materially different, never-better
+        result vs. taxable_first with the identical accounts)."""
+        self._seed(client, sample_inputs, "taxable_first")
+        default_result = client.get("/api/simulation/sequence-risk?ret_age=60&ss_timing=early").json()
+
+        _seed_planning_inputs(client, {**sample_inputs, "withdrawal_strategy": "hold_back_reserved"})
+        holdback_result = client.get("/api/simulation/sequence-risk?ret_age=60&ss_timing=early").json()
+
+        assert holdback_result["base"]["final_balance"] != default_result["base"]["final_balance"]
+
+    def test_pension_lump_sum_impact_also_respects_the_flag(self, client, sample_inputs):
+        """Regression (2026-09-14, follow-up audit): post_pension_lump_sum_impact
+        calls run_monte_carlo twice (baseline/buyout) with the raw,
+        unfiltered accounts list -- the buyout tool's own success_rate/
+        median_final_balance must agree with what a plain Monte Carlo run
+        would show for a hold-back household, not silently include the
+        reserved account as spendable."""
+        self._seed(client, sample_inputs, "hold_back_reserved")
+        r = client.post("/api/retirement-tools/pension-lump-sum-impact", json={
+            "buyout_age": 58, "discount_rate": 0.06, "jason_ret_age": 60, "justin_ret_age": 60,
+        })
+        assert r.status_code == 200, r.text
+        with_flag = r.json()
+
+        client.delete(f"/api/accounts/{client.get('/api/accounts').json()[-1]['id']}")
+        r2 = client.post("/api/retirement-tools/pension-lump-sum-impact", json={
+            "buyout_age": 58, "discount_rate": 0.06, "jason_ret_age": 60, "justin_ret_age": 60,
+        })
+        without_reserved_account = r2.json()
+
+        # With the reserved account genuinely excluded, the plan is the
+        # same as if that account never existed at all.
+        assert with_flag["baseline"]["success_rate"] == without_reserved_account["baseline"]["success_rate"]
+        assert with_flag["baseline"]["median_final_balance"] == without_reserved_account["baseline"]["median_final_balance"]
+
+    def test_planning_comparison_also_respects_the_flag(self, client, sample_inputs):
+        """Regression (2026-09-14, follow-up audit): portfolio_planning_comparison's
+        run_all() helper calls run_monte_carlo with the raw accounts list --
+        currently unreachable from any frontend page, but must not silently
+        disagree with the real Monte Carlo tab if it's ever wired up."""
+        self._seed(client, sample_inputs, "hold_back_reserved")
+        r = client.post("/api/portfolio/planning-comparison", json={"ret_age": 60, "ss_timing": "early"})
+        assert r.status_code == 200, r.text
+
+        client.delete(f"/api/accounts/{client.get('/api/accounts').json()[-1]['id']}")
+        r2 = client.post("/api/portfolio/planning-comparison", json={"ret_age": 60, "ss_timing": "early"})
+        assert r.json()["baseline"]["monte_carlo_success_rate"] == r2.json()["baseline"]["monte_carlo_success_rate"]
+
+    def test_portfolio_goal_context_also_respects_the_flag(self, client, sample_inputs):
+        """Regression (2026-09-14, follow-up audit): _portfolio_goal_context
+        (feeds GET /api/recommendations and GET /api/portfolio/annual-review
+        internally -- not itself part of either response body) calls
+        run_monte_carlo with the raw accounts list -- the Portfolio Coach/
+        Annual Review success-rate card must agree with the Monte Carlo
+        tab's own number for a hold-back household. Exercised directly
+        since goal_context isn't exposed in the API response."""
+        import db as db_module
+        import main as main_module
+        self._seed(client, sample_inputs, "hold_back_reserved")
+        conn = db_module.get_db()
+        accounts = [dict(r) for r in conn.execute("SELECT * FROM accounts").fetchall()]
+        _, _, policy = main_module._load_portfolio_context(conn)
+        with_flag = main_module._portfolio_goal_context(conn, accounts, policy)
+        conn.close()
+
+        # Confirm the flag was actually exercised, not just a no-op.
+        assert with_flag.get("monte_carlo_success_rate") is not None
+
+        # With the reserved account excluded from the accounts list
+        # entirely (equivalent to it never having existed), the context
+        # must reproduce the exact same figures the holdback filter
+        # should have already produced above.
+        conn2 = db_module.get_db()
+        never_existed = [a for a in accounts if not a.get("held_back_from_withdrawal")]
+        _, _, policy2 = main_module._load_portfolio_context(conn2)
+        without_reserved_account = main_module._portfolio_goal_context(conn2, never_existed, policy2)
+        conn2.close()
+
+        assert with_flag["monte_carlo_success_rate"] == without_reserved_account["monte_carlo_success_rate"]
+        assert with_flag["median_depletion_age"] == without_reserved_account["median_depletion_age"]
 
 
 class TestLifeEventsAffectRealProjectionAndSimulation:
@@ -1730,6 +1948,12 @@ class TestCfoOperatingSystem:
         r = client.patch("/api/life-events/999999/toggle")
         assert r.status_code == 404
 
+    def test_delete_nonexistent_life_event_returns_404(self, client):
+        # Regression (follow-up audit, 2026-09-14): same missing-rowcount
+        # class of bug just fixed for accounts/kids, found again here --
+        # the sibling toggle route above already checked existence.
+        assert client.delete("/api/life-events/999999").status_code == 404
+
     def test_life_event_overlay_shows_toggled_off_events_too(self, client):
         """summarize_life_events() (GET /api/life-events) keeps showing every
         event regardless of included_in_projection, with the flag's current
@@ -1968,6 +2192,53 @@ class TestSavedScenariosSsTiming:
             "name": "Bad", "retirement_age": 60, "ss_timing": "yesterday",
         })
         assert r.status_code == 400
+
+
+class TestSavedScenariosDelete:
+    """The feature had save/list/recalculate but no delete at all until
+    now (2026-09-14, at the user's request -- "delete saved scenario
+    Retire at 57")."""
+
+    def test_delete_removes_the_scenario(self, client):
+        created = client.post("/api/saved-scenarios", json={"name": "To Delete", "retirement_age": 57}).json()
+        r = client.delete(f"/api/saved-scenarios/{created['id']}")
+        assert r.status_code == 200
+        assert r.json() == {"deleted": created["id"]}
+        remaining = client.get("/api/saved-scenarios").json()
+        assert not any(s["id"] == created["id"] for s in remaining)
+
+    def test_delete_nonexistent_scenario_returns_404(self, client):
+        r = client.delete("/api/saved-scenarios/999999")
+        assert r.status_code == 404
+
+    def test_delete_does_not_disturb_other_saved_scenarios(self, client):
+        keep = client.post("/api/saved-scenarios", json={"name": "Keep Me", "retirement_age": 60}).json()
+        gone = client.post("/api/saved-scenarios", json={"name": "Gone", "retirement_age": 65}).json()
+        client.delete(f"/api/saved-scenarios/{gone['id']}")
+        remaining = client.get("/api/saved-scenarios").json()
+        assert any(s["id"] == keep["id"] for s in remaining)
+        assert not any(s["id"] == gone["id"] for s in remaining)
+
+    def test_deleting_a_root_scenario_leaves_its_revision_orphaned_but_intact(self, client, sample_inputs, sample_accounts):
+        """Coverage gap closed (follow-up audit, 2026-09-14): delete_saved_scenario
+        deliberately doesn't cascade to rows whose revision_of points at
+        it (see that function's own docstring). Confirm that's actually
+        safe end-to-end: recalculating first, then deleting the root,
+        must leave the orphaned revision readable via GET (revision_of
+        simply keeps pointing at a now-nonexistent id) rather than
+        crashing or disappearing itself."""
+        _seed_planning_inputs(client, sample_inputs)
+        _seed_accounts(client, sample_accounts)
+        root = client.post("/api/saved-scenarios", json={"name": "Root Plan", "retirement_age": 60}).json()
+        revision = client.post(f"/api/saved-scenarios/{root['id']}/recalculate").json()
+        assert revision["revision_of"] == root["id"]
+
+        assert client.delete(f"/api/saved-scenarios/{root['id']}").status_code == 200
+
+        still_there = client.get(f"/api/saved-scenarios/{revision['id']}")
+        assert still_there.status_code == 200
+        assert still_there.json()["revision_of"] == root["id"]  # points at a now-gone id, and that's fine
+        assert client.get(f"/api/saved-scenarios/{root['id']}").status_code == 404
 
 
 class TestSavedScenariosMilestone1:

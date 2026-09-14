@@ -24,7 +24,7 @@ from holdings_engine import (
     evaluate_tax_lots, is_lot_loss_candidate, detect_wash_sale_conflicts,
     DEFAULT_TAX_LOT_LOSS_REVIEW_THRESHOLD_PCT,
     PRETAX_RMD_TYPES, ROTH_TYPES, HSA_TYPES, resolve_portfolio_account_type,
-    account_allows_asset_class,
+    account_allows_asset_class, is_kid_owner,
 )
 
 # ── Decision lifecycle ────────────────────────────────────────────────────
@@ -462,6 +462,7 @@ def asset_location_recommendations(classified: Dict, options_by_account: Optiona
     sheltered_accounts = [
         account for account in account_by_id.values()
         if resolve_portfolio_account_type(account) in tax_sheltered_types
+        and not is_kid_owner(account.get("owner"))
     ]
 
     cards = []

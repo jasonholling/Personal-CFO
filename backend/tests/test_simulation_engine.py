@@ -559,6 +559,17 @@ class TestRunRothConversionAnalysis:
         assert year1["tax_cost"] == pytest.approx(22000, abs=1)
         assert year1["taxable_after"] == pytest.approx(0, abs=1)
 
+    def test_roth_conversion_schedule_year_tracks_current_year_not_a_hardcoded_2026(self, sample_inputs, sample_accounts):
+        """Regression (audit finding, 2026-09-14, P2): the schedule's "year"
+        column was built from a literal `2026 + years_to_ret + yr` instead
+        of CURRENT_YEAR, so it would silently mislabel every row once the
+        real calendar moved past 2026 (age/balances in the same row stay
+        correct — only the year label goes stale)."""
+        result = run_roth_conversion_analysis(sample_inputs, sample_accounts, ret_age=60, ss_timing="early")
+        years_to_ret = 60 - sample_inputs["jason_age"]
+        assert result["schedule"][0]["year"] == CURRENT_YEAR + years_to_ret
+        assert result["schedule"][1]["year"] == CURRENT_YEAR + years_to_ret + 1
+
     def test_roth_conversion_never_goes_negative(self, sample_inputs, sample_accounts):
         """Regression (external audit 2026-09-07): the "shortfall spills
         into Roth" term (when pretax can't cover both its own spending

@@ -3239,7 +3239,7 @@ def run_roth_conversion_analysis(inputs: Dict, accounts: List[Dict], ret_age: in
 
         schedule.append({
             "age":                age,
-            "year":               2026 + years_to_ret + yr,
+            "year":               CURRENT_YEAR + years_to_ret + yr,
             "pretax_balance":     round(pretax),
             "roth_balance":       round(roth),
             "taxable_balance":    round(taxable),

@@ -72,6 +72,18 @@ class TestAccountInvestmentOptionsCrud:
         })
         assert r.status_code == 400
 
+    def test_update_and_delete_nonexistent_option_return_404(self, client):
+        # Regression (follow-up audit, 2026-09-14): same missing-rowcount
+        # class of bug just fixed for accounts/kids, found again here --
+        # update only ever checked the account_id FK, never whether
+        # option_id itself existed.
+        acc = _create_account(client)
+        r = client.put("/api/account-investment-options/999999", json={
+            "account_id": acc["id"], "option_name": "Ghost", "asset_class": "us_large_cap",
+        })
+        assert r.status_code == 404
+        assert client.delete("/api/account-investment-options/999999").status_code == 404
+
     def test_rejects_unknown_asset_class(self, client):
         acc = _create_account(client)
         r = client.post("/api/account-investment-options", json={

@@ -80,6 +80,22 @@ BLOCKED_TYPES         = {"other"}
 # (flagged for review, not excluded).
 HOUSEHOLD_ALLOCATION_TYPES = PORTFOLIO_ACCOUNT_TYPES - HSA_TYPES - CHILD_SPECIFIC_TYPES - LIQUIDITY_TYPES - BLOCKED_TYPES
 
+# A kid can own ANY portfolio_account_type (most commonly roth_ira or
+# custodial, but nothing stops a 529 or even a brokerage from being
+# titled to a kid) — CHILD_SPECIFIC_TYPES alone under-catches, since it
+# only covers the two types that are *inherently* child accounts. A
+# kid-owned roth_ira/brokerage/etc. must still never land in
+# `household` or be offered as an asset-location destination for a
+# parent's holding (audit finding, 2026-09-14, P1). Duplicated from
+# projection_engine.py/net_worth_engine.py/allocation_engine.py's
+# identical is_kid_owner rather than imported, matching this module's
+# existing "deliberately independent" convention (see module docstring).
+KID_OWNER_PREFIX = "kid_"
+
+
+def is_kid_owner(owner) -> bool:
+    return bool(owner) and owner.startswith(KID_OWNER_PREFIX)
+
 
 def is_allocation_blocked(portfolio_type: str) -> bool:
     """"other" or an unresolvable type blocks recommendations for that
@@ -194,9 +210,10 @@ def classify_holdings(accounts: List[Dict], holdings: List[Dict]) -> Dict:
     """Groups every holding by its parent account's resolved portfolio
     account type into the behavior buckets the brief defines. Returns
     holdings augmented with `_portfolio_account_type`/`_account` (new
-    dicts, originals untouched). Holdings inside 529/custodial accounts
-    retain their child owner (via `_account["owner"]`) and never land in
-    `household`."""
+    dicts, originals untouched). Holdings inside 529/custodial accounts,
+    or inside ANY account owned by a kid (roth_ira, brokerage, etc. —
+    see is_kid_owner), retain their child owner (via
+    `_account["owner"]`) and never land in `household`."""
     accounts_by_id = {a["id"]: a for a in accounts}
     household, hsa, child_specific, liquidity, blocked, review_required = [], [], [], [], [], []
     for h in holdings:
@@ -210,7 +227,7 @@ def classify_holdings(accounts: List[Dict], holdings: List[Dict]) -> Dict:
             blocked.append(enriched)
         elif ptype in HSA_TYPES:
             hsa.append(enriched)
-        elif ptype in CHILD_SPECIFIC_TYPES:
+        elif ptype in CHILD_SPECIFIC_TYPES or is_kid_owner(account.get("owner")):
             child_specific.append(enriched)
         elif ptype in LIQUIDITY_TYPES:
             liquidity.append(enriched)
@@ -331,6 +348,31 @@ def policy_targets_by_class(policy: Dict) -> Dict[str, float]:
     for field, asset_class in POLICY_TARGET_FIELD_TO_ASSET_CLASS.items():
         targets[asset_class] = policy.get(field, 0) or 0
     return targets
+
+
+# Coarse stock/bond/cash/real-estate/alternatives rollup of the 10
+# fine-grained per-asset-class policy targets above, for display contexts
+# (PDF report, task descriptions) that want one summary line rather than a
+# 10-row table. Not used anywhere allocation math actually happens -- those
+# paths use policy_targets_by_class/compare_to_target at full granularity.
+_STOCK_CLASSES = {"us_large_cap", "us_mid_cap", "us_small_cap", "international_developed", "emerging_markets"}
+_BOND_CLASSES = {"us_bonds", "international_bonds"}
+
+def policy_coarse_summary(policy: Optional[Dict]) -> Optional[Dict[str, float]]:
+    """Returns {"stock_pct", "bonds_pct", "cash_pct", "real_estate_pct",
+    "alternatives_pct"} rounded to whole percent, or None if no policy is
+    configured (callers should show a "no target set" state, never a
+    fabricated default)."""
+    if not policy:
+        return None
+    targets = policy_targets_by_class(policy)
+    return {
+        "stock_pct":        round(sum(targets[c] for c in _STOCK_CLASSES)),
+        "bonds_pct":        round(sum(targets[c] for c in _BOND_CLASSES)),
+        "cash_pct":         round(targets["cash"]),
+        "real_estate_pct":  round(targets["real_estate"]),
+        "alternatives_pct": round(targets["alternatives"]),
+    }
 
 
 def compare_to_target(current_allocation: Dict, policy: Dict) -> Dict:

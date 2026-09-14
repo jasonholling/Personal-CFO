@@ -145,7 +145,7 @@ def build_cover(story, data, styles):
         ('Financial Independence',  _fi_status(data)),
         ('Education',               _education_status(data)),
         ('Risk Management',         _risk_status(data)),
-        ('Estate Planning',         'ATTENTION'),
+        ('Estate Planning',         _estate_status(data)),
     ]
 
     tdata = [[Paragraph('Section', styles['table_hdr']), Paragraph('Status', styles['table_hdr'])]]
@@ -182,6 +182,47 @@ def _investments_status(data):
     nw = data.get('net_worth', {})
     return 'ON TRACK' if nw.get('investment', 0) > 0 else 'ATTENTION'
 
+# The 5 document_type keys Estate.jsx actually saves under (distinct from
+# PlanOperatingSystem.jsx's own disjoint key/status vocabulary for the same
+# table -- see main.py's fetch comment). Order matches the PDF row order.
+ESTATE_DOCUMENT_TYPES = [
+    ('trust', 'Joint Revocable Living Trust'),
+    ('wills', 'Wills'),  # label is name-specific; built with person names in build_estate
+    ('fpoa',  'Financial Power of Attorney'),
+    ('hcpoa', 'Health Care Power of Attorney'),
+]
+ESTATE_STATUS_LABELS = {
+    'executed': 'Executed', 'verify': 'Verify', 'outdated': 'Needs Update', 'pending': 'Pending',
+    # PlanOperatingSystem.jsx used to write its own disjoint status
+    # vocabulary to this same estate_documents table (main.py's
+    # save_estate_document still accepts it for any pre-existing row --
+    # see that endpoint's own docstring); that page no longer writes
+    # these (it now links out to Estate.jsx instead), but a household
+    # that saved a row under the old vocabulary before that fix still has
+    # it sitting in the table, and this report must not silently treat
+    # "complete" as unreviewed just because it isn't the word "executed"
+    # (follow-up audit finding, 2026-09-14).
+    'complete': 'Executed', 'in_progress': 'In Progress', 'not_started': 'Not Started',
+}
+# Treated as equivalent to Estate.jsx's own "executed" for the ON TRACK
+# roll-up below.
+_ESTATE_DONE_STATUSES = {'executed', 'complete'}
+
+def _estate_status(data):
+    """ON TRACK once every tracked document is executed; NEEDS REVIEW if any
+    is explicitly outdated; ATTENTION otherwise (unreviewed, pending, or
+    nothing recorded yet at all -- preserves the original always-ATTENTION
+    behavior for a household that hasn't touched the Estate Planning page)."""
+    by_type = {d.get('document_type'): d for d in data.get('estate_documents', [])}
+    statuses = [by_type[key]['status'] for key, _ in ESTATE_DOCUMENT_TYPES if key in by_type]
+    if not statuses:
+        return 'ATTENTION'
+    if any(s == 'outdated' for s in statuses):
+        return 'NEEDS REVIEW'
+    if all(s in _ESTATE_DONE_STATUSES for s in statuses):
+        return 'ON TRACK'
+    return 'ATTENTION'
+
 def _fi_status(data):
     scenarios = data.get('retirement', {}).get('scenarios', [])
     s = next((x for x in scenarios if x['label'] == 'age_60_early'), None)
@@ -208,8 +249,18 @@ def build_investments(story, data, styles):
     nw = data.get('net_worth', {})
     accounts = nw.get('accounts', [])
 
-    story.append(Paragraph('Target Asset Allocation: 85% Stock / 10% Fixed Income / 5% Real Estate', styles['body_bold']))
-    story.append(Paragraph('Risk Tolerance: Moderate to High', styles['body']))
+    summary = data.get('policy_allocation_summary')
+    if summary:
+        parts = [f"{summary['stock_pct']}% Stock", f"{summary['bonds_pct']}% Bonds", f"{summary['cash_pct']}% Cash",
+                  f"{summary['real_estate_pct']}% Real Estate", f"{summary['alternatives_pct']}% Alternatives"]
+        # Only show buckets the household actually targets a nonzero
+        # allocation to, so an empty policy doesn't render "0% Cash / 0%
+        # Real Estate / 0% Alternatives" noise.
+        shown = [p for p in parts if not p.startswith('0%')]
+        story.append(Paragraph(f"Target Asset Allocation: {' / '.join(shown)}", styles['body_bold']))
+    else:
+        story.append(Paragraph('Target Asset Allocation: No policy saved yet -- set one on the Portfolio Setup page.', styles['body_bold']))
+    story.append(Paragraph(f"Risk Tolerance: {data.get('policy_risk_profile') or 'Moderate to High'}", styles['body']))
     story.append(Spacer(1, 0.1*inch))
 
     # Net worth summary
@@ -535,7 +586,7 @@ def build_risk(story, data, styles):
 
 # ── Section 5: Estate Planning ────────────────────────────────────────────────
 def build_estate(story, data, styles):
-    story += section_header('ESTATE PLANNING', 'ATTENTION', styles)
+    story += section_header('ESTATE PLANNING', _estate_status(data), styles)
     names = data.get('names', {})
     p1, p2 = names.get('person1', 'Person 1'), names.get('person2', 'Person 2')
 
@@ -544,14 +595,16 @@ def build_estate(story, data, styles):
         ParagraphStyle('warn', fontName='Helvetica-Bold', fontSize=9, textColor=colors.HexColor('#B8760A'), spaceAfter=10)
     ))
 
-    docs = [
-        ['Document', 'Status', 'Date'],
-        ['Joint Revocable Living Trust', 'See Estate Planning', '—'],
-        [f'Wills ({p1} &amp; {p2})', 'See Estate Planning', '—'],
-        ['Financial Power of Attorney', 'See Estate Planning', '—'],
-        ['Health Care Power of Attorney', 'See Estate Planning', '—'],
-        ['Credit Freeze (all 3 bureaus)', 'Verify annually', '—'],
-    ]
+    by_type = {d.get('document_type'): d for d in data.get('estate_documents', [])}
+    labels = dict(ESTATE_DOCUMENT_TYPES)
+    labels['wills'] = f'Wills ({p1} &amp; {p2})'
+    docs = [['Document', 'Status', 'Date']]
+    for key, _ in ESTATE_DOCUMENT_TYPES:
+        saved = by_type.get(key)
+        status = ESTATE_STATUS_LABELS.get(saved['status'], 'See Estate Planning') if saved else 'See Estate Planning'
+        reviewed_on = (saved.get('reviewed_on') if saved else None) or '—'
+        docs.append([labels[key], status, reviewed_on])
+    docs.append(['Credit Freeze (all 3 bureaus)', 'Verify annually', '—'])
     dt = Table(docs, colWidths=[3*inch, 1.8*inch, 1.5*inch])
     dt.setStyle(TableStyle([
         ('BACKGROUND', (0,0), (-1,0), DARK_RED),

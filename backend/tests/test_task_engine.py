@@ -1,5 +1,6 @@
 """Tests for task_engine.py — auto-generated task rules."""
 from datetime import date
+import task_engine
 from task_engine import generate_tasks, sync_auto_tasks, ensure_annual_review_task, CURRENT_YEAR
 import db as db_module
 
@@ -20,6 +21,25 @@ def test_includes_core_annual_tasks_and_current_tax_reviews(sample_inputs, sampl
     assert f"estimated_tax_check_{CURRENT_YEAR}" in keys
 
 
+def test_generate_tasks_uses_the_live_year_not_an_import_time_snapshot(sample_inputs, sample_accounts, monkeypatch):
+    # audit finding, 2026-09-14, P2: this app is a long-lived process
+    # (start.sh) — generate_tasks must read the real current year on every
+    # call, not bake in whatever year it was when task_engine was imported,
+    # or annual tasks would stop rolling over after a Dec 31 -> Jan 1
+    # boundary until the backend is restarted.
+    class FrozenNextYearDate(date):
+        @classmethod
+        def today(cls):
+            return date(CURRENT_YEAR + 1, 5, 1)
+
+    monkeypatch.setattr(task_engine, "date", FrozenNextYearDate)
+    accounts, inputs, projections, education = _base_args(sample_inputs, sample_accounts)
+    tasks = generate_tasks(accounts, inputs, projections, education)
+    keys = {t["auto_key"] for t in tasks}
+    assert f"withholding_review_{CURRENT_YEAR + 1}" in keys
+    assert f"withholding_review_{CURRENT_YEAR}" not in keys
+
+
 def test_annual_review_task_is_due_after_april_first(sample_inputs, sample_accounts):
     before = generate_tasks(sample_accounts, sample_inputs, {"scenarios": []}, {"goals": []})
     assert not any(t["auto_key"] == f"annual_review_{CURRENT_YEAR}" for t in before) if date.today().month < 4 else True
@@ -37,6 +57,24 @@ def test_ensure_annual_review_task_is_insert_only_after_due(temp_db):
     conn.close()
     assert row["title"] == "Complete annual review checklist"
     assert row["due_date"] == f"{CURRENT_YEAR}-04-01"
+
+
+def test_allocation_review_task_uses_saved_policy_not_a_hardcoded_split(sample_inputs, sample_accounts):
+    # Regression (audit finding, 2026-09-14, P2): this description used to
+    # hardcode "80% stock / 15% fixed / 5% real estate", disagreeing with
+    # report_generator.py's own separately hardcoded "85%/10%/5%" and with
+    # whatever the household actually configured.
+    accounts, inputs, projections, education = _base_args(sample_inputs, sample_accounts)
+    policy = {"target_us_large_cap_pct": 60, "target_us_bonds_pct": 30, "target_cash_pct": 10}
+    tasks = generate_tasks(accounts, inputs, projections, education, policy=policy)
+    review = next(t for t in tasks if t["auto_key"] == f"allocation_review_{CURRENT_YEAR}")
+    assert "60% stock" in review["description"]
+    assert "30% bonds" in review["description"]
+
+    no_policy_tasks = generate_tasks(accounts, inputs, projections, education)
+    no_policy_review = next(t for t in no_policy_tasks if t["auto_key"] == f"allocation_review_{CURRENT_YEAR}")
+    assert "80%" not in no_policy_review["description"]
+    assert "Portfolio Setup" in no_policy_review["description"]
 
 
 def test_education_gap_task_created_when_underfunded(sample_inputs, sample_accounts):
