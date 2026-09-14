@@ -33,6 +33,8 @@ import LifeEvents from './pages/LifeEvents'
 import PlanOperatingSystem from './pages/PlanOperatingSystem'
 import PortfolioCoach from './pages/PortfolioCoach'
 import PortfolioSetup from './pages/PortfolioSetup'
+import Family from './pages/Family'
+import Protection from './pages/Protection'
 import { usePrivacyMode } from './hooks/usePrivacyMode'
 import './App.css'
 
@@ -52,7 +54,7 @@ const NAV = [
   { id:'dashboard',  label:'Dashboard',      icon:'◈' },
   { id:'annualplan', label:'Action Tracker', icon:'✓' },
   { id:'operating', label:'Review & Decision Rules', icon:'◉' },
-  { id:'coach',      label:'Portfolio Coach', icon:'◈' },
+  { id:'coach',      label:'Portfolio Coach', icon:'◆' },
 
   { group:'PLAN' },
   { id:'retirement', label:'Retirement Projection', icon:'◎' },
@@ -60,14 +62,18 @@ const NAV = [
   { id:'roth',       label:'Roth Conversion', icon:'⟳' },
   { id:'tax',        label:'Tax Planning',   icon:'⊛' },
   { id:'rettools',   label:'Retirement Tools', icon:'⊚' },
-  { id:'education',  label:'Education',      icon:'◇' },
-  { id:'kids',       label:'Kids',           icon:'◉' },
-  { id:'goals',      label:'Goals & Funding', icon:'◇' },
-  { id:'lifeevents', label:'Life-Event Planning', icon:'◇' },
-  { id:'estate',     label:'Estate Planning',icon:'⊙' },
-  { id:'insurance',  label:'Insurance',      icon:'⊕' },
-  { id:'risk',       label:'Risk Management',icon:'⊗' },
-  { id:'protection', label:'Protection Scorecard',icon:'✓' },
+  // Consolidated 2026-09-14 (audit finding #5, applied at the user's
+  // request): Education/Kids/Goals & Funding were 3 separate entries
+  // all about the kids' own money -- now one page, tabbed. See
+  // Family.jsx's own comment; the old ids still work for onNavigate(...)
+  // deep links, just not shown here.
+  { id:'family',     label:'Family & Education', icon:'◇' },
+  { id:'lifeevents', label:'Life-Event Planning', icon:'⟡' },
+  // Consolidated 2026-09-14: Estate/Insurance/Risk/Protection Scorecard
+  // were 4 separate entries all about "what happens if something goes
+  // wrong" -- now one page, tabbed (defaults to the Scorecard, the
+  // summary view). See Protection.jsx's own comment.
+  { id:'protectionhub', label:'Protection & Estate', icon:'⊙' },
   // 'allocation' (Concentration Risk) intentionally not in the nav —
   // with Asset Allocation/Rebalancing and Investment Fee Audit already
   // hidden as not worth showing without real per-account data, the one
@@ -81,14 +87,14 @@ const NAV = [
   { id:'networth',   label:'Net Worth',      icon:'◬' },
   { id:'debt',       label:'Debt Payoff',    icon:'⊝' },
   { id:'scenarios', label:'Saved Scenarios', icon:'◫' },
-  { id:'compare',    label:'Compare Scenarios', icon:'◫' },
+  { id:'compare',    label:'Compare Scenarios', icon:'⇄' },
 
   // Collapsed by default -- pure data-entry/maintenance, not a planning
   // or decision surface. See the group-header click handler below.
   { group:'SETUP & DATA', collapsible:true },
   { id:'settings',   label:'Household Settings',icon:'≡' },
   { id:'accounts',   label:'Accounts',       icon:'⊞' },
-  { id:'portfoliosetup', label:'Portfolio Setup', icon:'⊞' },
+  { id:'portfoliosetup', label:'Portfolio Setup', icon:'⊟' },
   { id:'backup', label:'Backup & Restore', icon:'⇩' },
 ]
 
@@ -169,6 +175,11 @@ export default function App() {
     risk:Risk, estate:Estate, settings:Settings, backup:BackupRestore,
     tax:TaxPlanning, report:Report, networth:NetWorth, roth:RothConversion, debt:Debt,
     rettools:RetirementTools, allocation:Allocation, annualplan:AnnualPlan, annualreview:AnnualReview, cashflow:CashFlow, goals:GoalsFunding, surplus:SurplusPlan, protection:ProtectionScorecard, coach:PortfolioCoach, portfoliosetup:PortfolioSetup,
+    // Tabbed hubs (2026-09-14) -- 'family'/'protectionhub' are the nav
+    // entries; the individual ids above (education/kids/goals/estate/
+    // insurance/risk/protection) are kept mapped too so existing
+    // onNavigate(...) deep links still land on the right content.
+    family:Family, protectionhub:Protection,
   }
   const Page = pages[page]
 

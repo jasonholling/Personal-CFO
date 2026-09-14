@@ -135,11 +135,27 @@ const TextInput = ({ value, onChange, style={} }) => (
   <input type="text" value={value ?? ''} onChange={e => onChange(e.target.value)} style={{ width:160, textAlign:'right', ...style }} />
 )
 
+// Tabbed 2026-09-14 (audit finding #1: 72 fields across 18 sections in one
+// continuous scroll was the single densest screen in the app). Same tab
+// pattern as RetirementProjection.jsx/Compare.jsx -- purely a display
+// grouping, not a data change: still one `form` object, one Save button,
+// every field's key/behavior identical to before. Grouped by when a
+// household actually touches these: day-to-day identity/income first,
+// then the assumptions behind projections, then family/protection, then
+// the stuff edited rarely (asset sales, healthcare cost assumptions).
+const SETTINGS_TABS = [
+  { id:'people',     label:'People & Income' },
+  { id:'planning',   label:'Spending & Goals' },
+  { id:'family',     label:'Family & Insurance' },
+  { id:'advanced',   label:'Advanced' },
+]
+
 export default function Settings() {
   const { privacyMode } = usePrivacyMode()
   const { kids } = useKids()
   const [form, setForm] = useState(null)
   const [saved, setSaved] = useState(false)
+  const [tab, setTab] = useState('people')
 
   useEffect(() => {
     axios.get('/api/planning-inputs').then(r => setForm(r.data))
@@ -188,6 +204,22 @@ export default function Settings() {
         </button>
       </div>
 
+      {/* Tab switcher */}
+      <div style={{ display:'flex', gap:4, marginBottom:24, borderBottom:'1px solid var(--border)', paddingBottom:0 }}>
+        {SETTINGS_TABS.map(t => (
+          <button key={t.id}
+            onClick={() => setTab(t.id)}
+            style={{
+              background:'none', border:'none', padding:'10px 20px', cursor:'pointer',
+              fontSize:13, fontWeight:600,
+              color: tab===t.id ? 'var(--accent)' : 'var(--text2)',
+              borderBottom: tab===t.id ? '2px solid var(--accent)' : '2px solid transparent',
+              marginBottom:-1, transition:'all 0.15s',
+            }}
+          >{t.label}</button>
+        ))}
+      </div>
+
       {privacyMode && (
         <div className="card" style={{ marginBottom:20, borderLeft:'3px solid var(--accent)', textAlign:'center', padding:'20px' }}>
           <div style={{ fontSize:22, marginBottom:8 }}>👁</div>
@@ -200,6 +232,7 @@ export default function Settings() {
       )}
 
       <div style={privacyMode ? { filter:'blur(6px)', pointerEvents:'none', userSelect:'none' } : undefined}>
+      {tab === 'people' && <>
       <Section title="Names">
         <Row label="Person 1 Name" hint="Shown throughout the app instead of a generic label"><TextInput value={form.person1_name} onChange={v => set('person1_name', v)} /></Row>
         <Row label="Person 2 Name"><TextInput value={form.person2_name} onChange={v => set('person2_name', v)} /></Row>
@@ -314,7 +347,9 @@ export default function Settings() {
           withdrawal-phase numbers.
         </div>
       </Section>
+      </>}
 
+      {tab === 'planning' && <>
       <Section title="Return & Inflation Assumptions">
         <Row label="Inflation Rate"><NumInput value={form.inflation_rate} onChange={v => set('inflation_rate', v)} pct suffix="%" /></Row>
         <Row label="Pre-Retirement Return" hint="Expected portfolio growth until retirement"><NumInput value={form.expected_return_pre_retirement} onChange={v => set('expected_return_pre_retirement', v)} pct suffix="%" /></Row>
@@ -367,7 +402,9 @@ export default function Settings() {
           </select>
         </Row>
       </Section>
+      </>}
 
+      {tab === 'family' && <>
       <Section title="Kids (0-5)" >
         <KidsSection />
         <Row label="Annual Tuition &amp; Fees" hint="Current cost — update each fall · inflates at 5%/yr in projections"><NumInput value={form.unl_annual_cost ?? 0} onChange={v => set('unl_annual_cost', v)} prefix="$" suffix="/yr" /></Row>
@@ -432,7 +469,9 @@ export default function Settings() {
         <Row label="Rental Property Insured Value"><NumInput value={form.rental_insured ?? 0} onChange={v => set('rental_insured', v)} prefix="$" /></Row>
         <Row label="Umbrella Policy"><NumInput value={form.umbrella ?? 0} onChange={v => set('umbrella', v)} prefix="$" /></Row>
       </Section>
+      </>}
 
+      {tab === 'advanced' && <>
       <Section title="Planned Asset Sales">
         <Row label="Asset 1 — Name" hint="e.g. a property or rental you plan to sell">
           <TextInput value={form.asset1_label} onChange={v => set('asset1_label', v)} />
@@ -458,6 +497,7 @@ export default function Settings() {
           ⚠ Pre-Medicare gap (age 60-65): est. ${((form.healthcare_pre_medicare ?? 0)*5).toLocaleString()} total over 5 years. Projection engine auto-calculates gap per scenario (10 yrs at 55, 5 yrs at 60, 0 yrs at 65).
         </div>
       </Section>
+      </>}
 
       </div>
 

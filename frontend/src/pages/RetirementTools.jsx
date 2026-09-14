@@ -11,8 +11,22 @@ const AMBER  = '#fbbf24'
 const RED    = '#f87171'
 const ACCENT = '#4f9cf9'
 
+// Tabbed 2026-09-14 (audit finding #3): 5 unrelated decisions/tools were
+// stacked on one flat, un-tabbed scroll -- the one page in the Retirement
+// nav group that Milestone 3's tab-consolidation pass (RetirementProjection/
+// Compare/StressTestWhatIf) had missed. Same tab pattern as those pages;
+// purely a display grouping, no calc/state change.
+const TOOLS_TABS = [
+  { id:'rmd',        label:'RMD Planning' },
+  { id:'pension',    label:'Pension' },
+  { id:'roth',       label:'Roth Strategy' },
+  { id:'charitable', label:'Charitable' },
+  { id:'hsa',        label:'HSA' },
+]
+
 export default function RetirementTools() {
   const { person1Name, person2Name } = usePersonNames()
+  const [tab, setTab] = useState('rmd')
   const [rmd, setRmd]           = useState(null)
   const [loading, setLoading]   = useState(true)
 
@@ -135,6 +149,23 @@ export default function RetirementTools() {
         <p className="section-sub">RMD planning, pension decisions, Roth strategy, charitable giving, and HSA optimization</p>
       </div>
 
+      {/* Tab switcher */}
+      <div style={{ display:'flex', gap:4, marginBottom:24, borderBottom:'1px solid var(--border)', paddingBottom:0 }}>
+        {TOOLS_TABS.map(t => (
+          <button key={t.id}
+            onClick={() => setTab(t.id)}
+            style={{
+              background:'none', border:'none', padding:'10px 20px', cursor:'pointer',
+              fontSize:13, fontWeight:600,
+              color: tab===t.id ? 'var(--accent)' : 'var(--text2)',
+              borderBottom: tab===t.id ? '2px solid var(--accent)' : '2px solid transparent',
+              marginBottom:-1, transition:'all 0.15s',
+            }}
+          >{t.label}</button>
+        ))}
+      </div>
+
+      {tab === 'rmd' && <>
       {/* RMD Planner */}
       <div className="card" style={{ marginBottom:24, borderTop:`3px solid ${ACCENT}` }}>
         <div className="label" style={{ marginBottom:16 }}>Required Minimum Distribution Planner</div>
@@ -203,7 +234,9 @@ export default function RetirementTools() {
           </>
         )}
       </div>
+      </>}
 
+      {tab === 'pension' && <>
       {/* Pension vs Lump Sum */}
       <div className="card" style={{ marginBottom:24 }}>
         <div className="label" style={{ marginBottom:16 }}>Pension vs. Lump Sum Decision</div>
@@ -343,7 +376,9 @@ export default function RetirementTools() {
           </div>
         )}
       </div>
+      </>}
 
+      {tab === 'roth' && <>
       {/* Backdoor Roth Eligibility */}
       <div className="card" style={{ marginBottom:24 }}>
         <div className="label" style={{ marginBottom:16 }}>Backdoor Roth Eligibility Checker</div>
@@ -392,7 +427,9 @@ export default function RetirementTools() {
           </div>
         )}
       </div>
+      </>}
 
+      {tab === 'charitable' && <>
       {/* Qualified Charitable Distribution Planner */}
       <div className="card" style={{ marginBottom:24 }}>
         <div className="label" style={{ marginBottom:16 }}>Qualified Charitable Distribution (QCD) Planner</div>
@@ -452,7 +489,9 @@ export default function RetirementTools() {
           </div>
         )}
       </div>
+      </>}
 
+      {tab === 'hsa' && <>
       {/* HSA Stealth-IRA Strategy */}
       <div className="card" style={{ marginBottom:24 }}>
         <div className="label" style={{ marginBottom:16 }}>HSA "Stealth IRA" Strategy</div>
@@ -492,6 +531,7 @@ export default function RetirementTools() {
           </div>
         )}
       </div>
+      </>}
     </div>
   )
 }
