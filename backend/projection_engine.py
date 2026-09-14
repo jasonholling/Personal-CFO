@@ -720,11 +720,19 @@ def run_retirement_projection(inputs: Dict, accounts: List[Dict], ret_ages: List
     reducing withdrawal-phase spending need) during years where Jason has
     already retired but Justin hasn't reached justin_ret_age yet — i.e. no
     "phased retirement, one spouse still working" bridge income for this
-    general case. bridge_income_55/bridge_years_55 already model a narrower
-    version of exactly that, but only for the ret_age==55 scenario column
-    specifically (a pre-existing, separately-scoped limitation, not
-    introduced here) — see CALCULATION_CONTRACT.md if that gap is worth
-    closing later."""
+    general case. bridge_income_55/bridge_years_55 (Jason's own bridge
+    job, covering the gap to Medicare) model a narrower version of
+    exactly that -- widened 2026-09-13 (CALCULATION_CONTRACT.md section
+    80) from its original ret_age==55-only scope to fire at ANY selected
+    ret_age below 65, for however many years actually separate that age
+    from Medicare eligibility (65 - effective_start_age, timeline-
+    corrected 2026-09-14 for an already-past ret_age selection) -- not
+    just the single ret_age==55 scenario column. kids_years_at_home_55
+    stays gated to exactly age 55 by deliberate, documented policy (a
+    genuinely different, narrower scope than the bridge-income widening),
+    not a leftover of the same limitation. See CALCULATION_CONTRACT.md if
+    the still-open "Justin phased retirement" gap above is worth closing
+    later."""
     salary_growth_pct = inputs.get("_salary_growth_pct", 0.0) if salary_growth_pct is None else salary_growth_pct
     jason_age  = inputs["jason_age"]
     justin_age = inputs["justin_age"]
@@ -754,8 +762,14 @@ def run_retirement_projection(inputs: Dict, accounts: List[Dict], ret_ages: List
     _, _, justin_ss_annual, justin_ss_age = resolve_ss_benefits(inputs, "early", None, justin_ss_claim_age)
 
     # ── Starting balances by bucket ───────────────────────────────────────────
-    # Get 401k total from accounts, apply split % from planning_inputs
-    total_401k = sum(a["balance"] for a in accounts if a["account_type"] == "401k")
+    # Get 401k total from accounts, apply split % from planning_inputs.
+    # Excludes kid-owned accounts (audit finding, 2026-09-14, P1) -- every
+    # other account_type pooled below already does (ira/roth_ira/taxable),
+    # this one didn't, contradicting the contract's "kid-owned accounts
+    # are excluded from every adult retirement bucket" rule (section 2.5).
+    # An unusual case (a custodial 401k is rare) but the contract is
+    # generic, not per-account-type.
+    total_401k = sum(a["balance"] for a in accounts if a["account_type"] == "401k" and not is_kid_owner(a["owner"]))
     pretax_pct = inputs.get("pretax_401k_pct", 0.75)
     roth_pct   = 1.0 - pretax_pct
     pretax_401k = total_401k * pretax_pct if total_401k > 0 else PRETAX_401K_BALANCE_DEFAULT
@@ -803,10 +817,11 @@ def run_retirement_projection(inputs: Dict, accounts: List[Dict], ret_ages: List
         a["balance"] for a in accounts
         if a["account_type"] == "taxable" and not is_kid_owner(a["owner"])
     )  # DAF excluded — charitable money, not investable
-    # HSA
+    # HSA (kid-owned excluded, audit finding, 2026-09-14, P1 -- same as
+    # total_401k above)
     hsa_start = sum(
         a["balance"] for a in accounts
-        if a["account_type"] == "hsa"
+        if a["account_type"] == "hsa" and not is_kid_owner(a["owner"])
     )
 
     scenarios = []
@@ -1097,7 +1112,17 @@ def run_retirement_projection(inputs: Dict, accounts: List[Dict], ret_ages: List
             # only ever set transiently by run_stress_tests's own
             # bridge_job_loss scenario, see simulation_engine.py) caps
             # this shorter, for "the bridge job ends early" specifically.
-            bridge_years = max(0, 65 - ret_age)
+            # Anchored to timeline.effective_start_age, not the raw
+            # selected ret_age (audit finding, 2026-09-14, P1): for a
+            # household already older than a stale/past ret_age
+            # selection (e.g. currently 65, ret_age 55 still selected),
+            # `65 - ret_age` computed a 10-year bridge starting from the
+            # household's REAL current age of 65 -- already Medicare-
+            # eligible -- instead of 0. Same past-ret_age correction
+            # every other timeline-dependent figure in this function
+            # already applies (asset sales, retire_years); reduces to
+            # the original formula whenever ret_age >= jason_age.
+            bridge_years = max(0, 65 - timeline.effective_start_age)
             if inputs.get("bridge_years_override") is not None:
                 bridge_years = min(bridge_years, inputs["bridge_years_override"])
             # No actual bridge job configured -- don't treat a household
@@ -1454,8 +1479,11 @@ def run_retirement_projection(inputs: Dict, accounts: List[Dict], ret_ages: List
                 "justin_ss_start_age":           justin_ss_age,
                 "healthcare_pre_annual":         inputs.get("healthcare_pre_medicare", 0),
                 "healthcare_post_annual":        inputs.get("healthcare_post_medicare", 0),
-                "healthcare_gap_years":          max(0, 65 - ret_age),
-                "healthcare_gap_total":          inputs.get("healthcare_pre_medicare", 0) * max(0, 65 - ret_age),
+                # Anchored to effective_start_age, same fix and reasoning
+                # as bridge_years above (audit finding, 2026-09-14, P1) --
+                # these are display fields for the same gap.
+                "healthcare_gap_years":          max(0, 65 - timeline.effective_start_age),
+                "healthcare_gap_total":          inputs.get("healthcare_pre_medicare", 0) * max(0, 65 - timeline.effective_start_age),
                 "total_capitalized_need":        round(total_cap_need),
                 "capitalized_income_sources":    round(total_cap_income),
                 "capitalized_needed_from_assets":round(cap_needed_from_assets),
@@ -1464,6 +1492,21 @@ def run_retirement_projection(inputs: Dict, accounts: List[Dict], ret_ages: List
                 "roth_at_retirement":            round(roth_at_ret),
                 "taxable_at_retirement":         round(taxable_at_ret),
                 "hsa_at_retirement":             round(hsa_at_ret),
+                # Full-precision counterparts (audit finding, 2026-09-14,
+                # P2): every single-axis Monte Carlo/SWR/Roth Conversion/
+                # Tax Efficiency consumer used to read the ROUNDED
+                # *_at_retirement fields above as its own simulation's
+                # opening balance -- a small, silent starting-balance
+                # discrepancy against this same scenario's own full-
+                # precision arithmetic (the two-age path's equivalent
+                # fields, pretax_at_phase2_start etc., were already
+                # unrounded -- see that fix's own $2-drift comment). The
+                # rounded fields above stay for display/API presentation;
+                # every internal consumer now reads these instead.
+                "pretax_at_retirement_exact":    pretax_at_ret,
+                "roth_at_retirement_exact":      roth_at_ret,
+                "taxable_at_retirement_exact":   taxable_at_ret,
+                "hsa_at_retirement_exact":       hsa_at_ret,
                 "current_investable_assets":     round(pretax_start + roth_start + taxable_start + hsa_start),
                 "projected_surplus":             round(surplus),
                 "any_year_underfunded":          any(y["unmet_need"] > 0 for y in yearly),
@@ -1542,12 +1585,17 @@ def two_age_spending_need_fn(inputs: Dict, income_today: float, inflation: float
     bridge_income        = inputs.get("bridge_income_55", 0)
     kids_years           = inputs.get("kids_years_at_home_55", 0)
     # Bridge duration (2026-09-13): computed to Medicare eligibility (65)
-    # from JASON's own retirement age, same widening as the single-age
-    # run_retirement_projection version of this branch (see its own
-    # comment) -- no longer the fixed bridge_years_55 input. bridge_years_
-    # override is the same transient, non-persisted cap run_stress_tests'
+    # from JASON's own EFFECTIVE start age, not the raw jason_ret_age
+    # (audit finding, 2026-09-14, P1 -- same past-ret_age gap as the
+    # single-age version just above: a stale/past jason_ret_age selection
+    # would otherwise compute a bridge duration starting from a
+    # fictional, younger age instead of the household's real current
+    # one, extending bridge treatment/zeroed healthcare years past the
+    # point Jason is already Medicare-eligible). Reduces to the original
+    # formula whenever jason_ret_age >= jason_age. bridge_years_override
+    # is the same transient, non-persisted cap run_stress_tests'
     # bridge_job_loss scenario uses to end the bridge early.
-    bridge_years = max(0, 65 - jason_ret_age)
+    bridge_years = max(0, 65 - jason_effective_start_age)
     if inputs.get("bridge_years_override") is not None:
         bridge_years = min(bridge_years, inputs["bridge_years_override"])
     # No actual bridge job configured -- don't treat a household retiring
@@ -1806,7 +1854,7 @@ def run_two_dimensional_retirement_projection(inputs: Dict, accounts: List[Dict]
         inputs, ss_timing, jason_ss_claim_age, justin_ss_claim_age)
 
     # ── Starting balances by bucket -- identical to run_retirement_projection ──
-    total_401k = sum(a["balance"] for a in accounts if a["account_type"] == "401k")
+    total_401k = sum(a["balance"] for a in accounts if a["account_type"] == "401k" and not is_kid_owner(a["owner"]))  # kid-owned excluded (audit finding, 2026-09-14, P1)
     pretax_pct = inputs.get("pretax_401k_pct", 0.75)
     roth_pct   = 1.0 - pretax_pct
     pretax_401k = total_401k * pretax_pct if total_401k > 0 else PRETAX_401K_BALANCE_DEFAULT
@@ -1833,7 +1881,7 @@ def run_two_dimensional_retirement_projection(inputs: Dict, accounts: List[Dict]
         a["balance"] for a in accounts if a["account_type"] == "roth_ira" and not is_kid_owner(a["owner"]))
     taxable_start = sum(
         a["balance"] for a in accounts if a["account_type"] == "taxable" and not is_kid_owner(a["owner"]))
-    hsa_start = sum(a["balance"] for a in accounts if a["account_type"] == "hsa")
+    hsa_start = sum(a["balance"] for a in accounts if a["account_type"] == "hsa" and not is_kid_owner(a["owner"]))  # kid-owned excluded (audit finding, 2026-09-14, P1)
 
     timeline = build_two_person_timeline(jason_age, justin_age, jason_ret_age, justin_ret_age,
                                           inputs.get("retirement_end_age"))
@@ -2139,7 +2187,7 @@ def randomize_accumulation_trial(inputs: Dict, accounts: List[Dict], jason_ret_a
     annual_hsa = inputs.get("annual_hsa_contribution", 0)
     annual_rsu = inputs.get("annual_rsu_value", 0)
 
-    total_401k = sum(a["balance"] for a in accounts if a["account_type"] == "401k")
+    total_401k = sum(a["balance"] for a in accounts if a["account_type"] == "401k" and not is_kid_owner(a["owner"]))  # kid-owned excluded (audit finding, 2026-09-14, P1)
     pretax_pct = inputs.get("pretax_401k_pct", 0.75)
     roth_pct   = 1.0 - pretax_pct
     pretax_401k = total_401k * pretax_pct if total_401k > 0 else PRETAX_401K_BALANCE_DEFAULT
@@ -2166,7 +2214,7 @@ def randomize_accumulation_trial(inputs: Dict, accounts: List[Dict], jason_ret_a
         a["balance"] for a in accounts if a["account_type"] == "roth_ira" and not is_kid_owner(a["owner"]))
     taxable_start = sum(
         a["balance"] for a in accounts if a["account_type"] == "taxable" and not is_kid_owner(a["owner"]))
-    hsa_start = sum(a["balance"] for a in accounts if a["account_type"] == "hsa")
+    hsa_start = sum(a["balance"] for a in accounts if a["account_type"] == "hsa" and not is_kid_owner(a["owner"]))  # kid-owned excluded (audit finding, 2026-09-14, P1)
 
     timeline = build_two_person_timeline(jason_age, justin_age, jason_ret_age, justin_ret_age,
                                           inputs.get("retirement_end_age"))
@@ -2443,12 +2491,14 @@ def owner_split_starting_balances_two_age(inputs: Dict, accounts: List[Dict], ja
         ira_owner       = sum(a["balance"] for a in owned if a["account_type"] == "ira")
         roth_ira_owner  = sum(a["balance"] for a in owned if a["account_type"] == "roth_ira")
         taxable_owner   = sum(a["balance"] for a in owned if a["account_type"] == "taxable")
-        # hsa_start's own pooled formula never filters by owner at all
-        # (not even kids' accounts) -- matched here via the SAME [a for a
-        # in accounts ...] scan per owner bucket, not the `owned`
-        # kids-excluded list above, to reconcile exactly.
+        # hsa_start's own pooled formula now excludes kid-owned accounts too
+        # (audit finding, 2026-09-14, P1) -- matched here via the SAME
+        # [a for a in accounts ...] scan per owner bucket (not the `owned`
+        # list above, which is also owner-filtered by _owner_bucket_for_account
+        # and would double-apply that filter), so this reconciles exactly
+        # with the corrected hsa_start.
         hsa_owner = sum(a["balance"] for a in accounts if a["account_type"] == "hsa"
-                         and _owner_bucket_for_account(a) == owner)
+                         and not is_kid_owner(a.get("owner")) and _owner_bucket_for_account(a) == owner)
 
         pretax_start_owner  = pretax_401k_owner + ira_owner
         roth_start_owner    = roth_401k_owner + roth_ira_owner

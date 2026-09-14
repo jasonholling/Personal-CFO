@@ -184,9 +184,16 @@ class TestRealPostDeathRmdOnSurvivorsOwnAge:
         last_row = r["schedule"][-1]
         assert last_row["age"] == 76  # sampled every other year; 76 is the last <= 78
         assert last_row["required_minimum_distribution"] > 0
-        # RMD is reinvested (swept to savings), not spent -- the TOTAL
-        # balance is unaffected even though the RMD amount is nonzero.
-        assert last_row["ending_balance"] == 1000000
+        # RMD is reinvested (swept to savings), not spent -- but IS taxed
+        # at the pretax marginal rate before the after-tax proceeds are
+        # swept (audit fix, 2026-09-14, P1: this used no_tax_model(),
+        # letting the RMD escape taxation entirely and leaving the total
+        # balance exactly unchanged, which this test used to assert as
+        # correct). The total now shrinks by the cumulative tax paid on
+        # the two forced RMDs at ages 75 and 76 -- still well above 99%
+        # of the original balance since $0 spending need means nothing
+        # else is drawn.
+        assert 900_000 < last_row["ending_balance"] < 1_000_000
 
 
 class TestGapIncomeGeneralizesToWhicheverSpouseIsLaterRetiree:

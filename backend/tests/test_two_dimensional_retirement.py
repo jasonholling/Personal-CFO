@@ -554,3 +554,22 @@ class TestExpandedSimultaneousRetirementParity:
                                                 salary_growth_pct=0.05)
         ref_scenario = next(s for s in reference["scenarios"] if s["label"] == "age_60_early")
         assert result["portfolio_at_phase2_start"] == ref_scenario["portfolio_at_retirement"]
+
+
+class TestKidOwned401kAndHsaExcluded:
+    """Audit finding, 2026-09-14, P1: the two-age starting-balance pooling
+    (mirrors run_retirement_projection's own formulas almost verbatim)
+    had the identical 401k/HSA gap -- ira/roth_ira/taxable filtered
+    is_kid_owner, 401k/hsa didn't. Simultaneous retirement at jason_age
+    (0 accumulation years) isolates the starting pool from any
+    contribution-phase arithmetic: portfolio_balance at yr=0 IS the
+    starting pool, spending net of $0 income need."""
+
+    def test_kid_owned_401k_and_hsa_do_not_enter_the_household_pool(self):
+        inputs = base_inputs(jason_age=60, justin_age=60, retirement_income_today_dollars=0, retirement_end_age=61)
+        accounts = [
+            {"name": "Kid 401k", "account_type": "401k", "owner": "kid_1", "balance": 500000},
+            {"name": "Kid HSA",  "account_type": "hsa",  "owner": "kid_1", "balance": 250000},
+        ]
+        result = run_two_dimensional_retirement_projection(inputs, accounts, jason_ret_age=60, justin_ret_age=60)
+        assert result["yearly_detail"][0]["portfolio_balance"] == 0

@@ -8526,3 +8526,92 @@ reported 1,866 passed, 1 skipped, and 95.07% coverage; frontend tests/build
 were green in the same review cycle. The contract cleanup in this section
 makes the historical branch notes and the current conventions distinguishable;
 it does not promote branch-only features into `main`.
+
+## 90. Independent audit, 2026-09-14 (post-merge, on `main`) — 4 P1s and 2 P2s, fixed
+
+A full front-to-back walk of the calc engine against this contract's own
+conventions, run as a wealth-manager/auditor-style review after section 89's
+cleanup. Six real findings, all fixed and covered by new regression tests
+(backend full suite: 1890+ passed, 1 skipped, 95%+ coverage maintained).
+
+**P1 — Single-axis Survivor dropped post-death life events/asset sales and
+never modeled RMDs.** `run_survivor_scenario`'s single-axis loop collapsed
+the whole post-payout portfolio into one flat untaxed "taxable" bucket
+(`life_event_cash=0.0`, `rmd_amount=0.0`, `no_tax_model()` hardcoded) — no
+pretax sub-balance existed to compute an RMD against, and any future life
+event/asset sale dated after death simply vanished, contradicting section
+2.6's "a future event is applied exactly once" rule. Fixed: reads
+`death_row`'s own pretax/roth/taxable/hsa split (already computed by
+`run_retirement_projection`, previously discarded), builds post-death events
+the same way `_run_survivor_scenario_two_age` already did, and computes a
+real per-year RMD against the survivor's own age/rmd_start_age.
+
+**P1 — Both Survivor paths taxed nothing, not even the mandatory RMD.**
+Both `run_survivor_scenario` and `_run_survivor_scenario_two_age` used
+`no_tax_model()` for every withdrawal, including the RMD itself — the
+two-age path's own docstring's "stays as unmodeled as single-axis's
+documented limitation" note was about the MFJ-vs-single bracket TABLE, not
+about skipping taxation outright. Fixed: both now price every pretax
+withdrawal (RMD included) via `_pretax_marginal_tax_rate` +
+`marginal_bracket_tax_model`, the same MFJ-bracket-table simplification
+(still not modeling the MFJ->single jump, which remains a documented,
+narrower gap) every other consumer in this file already uses.
+
+**P1 — Bridge income/healthcare-gap duration anchored to the raw selected
+ret_age, not the household's real effective start age.** `bridge_years =
+max(0, 65 - ret_age)` (and the `two_age_spending_need_fn`/`_run_single`
+equivalents, plus the `healthcare_gap_years`/`healthcare_gap_total` display
+fields) used the raw selected age instead of `timeline.effective_start_age`
+— for an already-past ret_age selection (e.g. currently 65, ret_age 55 still
+selected), this computed a 10-year bridge starting from the household's REAL
+current age of 65, already Medicare-eligible. Fixed at all 4 sites
+(`run_retirement_projection`, `two_age_spending_need_fn`, `_run_single`, and
+the two display fields) to anchor on `effective_start_age` — reduces to the
+original formula whenever `ret_age >= jason_age`.
+
+**P1 — 401(k)/HSA pooling still leaked kid-owned balances into adult
+buckets.** ira/roth_ira/taxable already filtered `is_kid_owner`; the 401k
+and HSA pooling formulas didn't, at all 5 sites (`run_retirement_projection`,
+`run_two_dimensional_retirement_projection`, `randomize_accumulation_trial`,
+plus the owner-split path's `hsa_owner`, which had deliberately mirrored the
+bug "to reconcile exactly" with the buggy `hsa_start`). Fixed everywhere,
+including re-aligning the owner-split mirror to the corrected formula.
+
+**P1 — A delayed adaptive-timing Monte Carlo trial reused the ORIGINAL
+(undelayed) event classification.** `run_monte_carlo`'s two-age
+`randomize_accumulation`-enabled loop computed `post_life_events` once,
+before the trial loop, against the original retirement year — a delayed
+trial's own accumulation walk correctly re-derives its timeline (and
+therefore correctly re-classifies a life event dated between the original
+and delayed retirement as pre-retirement), but the stale `post_life_events`
+list was still passed to `_run_single_two_age` unchanged. For a RECURRING
+(indefinite-duration) event dated in that gap, this double-counted it: once
+inside the delayed accumulation, and again every year of withdrawal (a
+one-time event in the same gap turned out to be harmlessly inert instead —
+its exact-year match never lands inside the delayed loop's later calendar
+range — verified by hand-reverting the fix and confirming a one-time-event
+test passed identically either way, then switching to a recurring event to
+actually discriminate). Fixed: `trial_post_life_events` is rebuilt from
+`trial_timeline` inside the `if delay_years:` branch.
+
+**P2 — Single-axis consumers read the ROUNDED starting-balance fields.**
+`pretax_at_retirement`/`roth_at_retirement`/`taxable_at_retirement`/
+`hsa_at_retirement` are rounded for display; every single-axis Monte
+Carlo/SWR/Roth Conversion/Tax Efficiency consumer read those rounded fields
+directly as its own opening balance — a small, silent starting-balance drift
+against this same scenario's own full-precision arithmetic (the two-age
+path's equivalent fields were already unrounded, per section 22's own
+$2-drift fix). Fixed: added `*_exact` unrounded counterparts; every internal
+consumer now reads those instead, while the rounded fields stay for
+display/API presentation.
+
+**P2 (docs-only) — `run_retirement_projection`'s own docstring still said
+bridge income only applied at `ret_age==55`.** Stale since the 2026-09-13
+widening (section 80) — updated to describe the current any-pre-65-age
+scope and the timeline-anchor fix above, and to distinguish it explicitly
+from `kids_years_at_home_55`'s deliberately-narrower, still-age-55-only
+scope, so a future agent reading the docstring doesn't "correct" the code
+back to the old behavior.
+
+Branch: none — applied directly to `main` per this session's own workflow
+(commit, verify full suite, merge/push immediately after each fix group).

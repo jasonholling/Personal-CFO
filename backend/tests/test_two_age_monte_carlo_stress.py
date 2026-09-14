@@ -31,8 +31,11 @@ import random as random_module
 
 import pytest
 
-from projection_engine import run_two_dimensional_retirement_projection
-from simulation_engine import run_monte_carlo, run_stress_tests
+from projection_engine import (run_two_dimensional_retirement_projection, randomize_accumulation_trial,
+                                pension_for_age, resolve_ss_benefits, CURRENT_YEAR,
+                                _split_life_events, _post_retirement_asset_sale_events)
+from timeline_engine import build_two_person_timeline
+from simulation_engine import run_monte_carlo, run_stress_tests, _run_single_two_age
 
 TAXABLE = lambda balance: [{"name": "Brokerage", "account_type": "taxable", "owner": "joint", "balance": balance}]
 
@@ -605,3 +608,81 @@ class TestAdaptiveRetirementTiming:
         assert len(result["chart"]) > 0
         first_age = result["chart"][0]["age"]
         assert first_age == result["phase2_start_age"]
+
+    def test_recurring_life_event_in_the_delay_gap_is_not_double_counted(self, monkeypatch):
+        """Audit finding, 2026-09-14, P1: a delayed trial's post_life_events
+        used to stay split against the ORIGINAL (undelayed) retirement
+        year. For a RECURRING (duration_months=0, i.e. runs indefinitely)
+        life event dated between the original and delayed retirement
+        age, that stale classification double-counted it: correctly
+        folded into the delayed accumulation walk (randomize_accumulation_
+        trial treats it as pre-retirement under the DELAYED timeline it's
+        actually given, contributing every year through delayed
+        retirement), AND still fired every year of withdrawal too, since
+        _post_retirement_year_effects' monthly component only requires
+        calendar_year >= event_year -- unlike a one-time delta, it has no
+        exact-year match that would naturally stop it from firing once
+        the delayed withdrawal loop's calendar years start after it.
+
+        monkeypatch forces random.gauss to a fixed value regardless of
+        (mu, sigma) -- every trial becomes bit-identical and always
+        delays, making the whole 1000-trial Monte Carlo run exactly
+        reproduce a single hand-assembled reference trial, built the same
+        way the FIXED code assembles one. -10%/yr (not a more extreme
+        rate) and a short 62-age horizon are deliberate: severe enough to
+        force every trial's ratio under the 2-year delay threshold, mild
+        enough that the double-counted $2,000/mo doesn't get lost in
+        decay, which is exactly what let an earlier, harsher-parameter
+        version of this test pass identically whether or not the bug was
+        present -- verified against a hand-reverted copy of the fix
+        during authoring, not assumed."""
+        def _bad_gauss(mu, sigma):
+            return -0.10  # forces delay_years=2 every trial, without decaying everything to ~0
+
+        monkeypatch.setattr(random_module, "gauss", _bad_gauss)
+
+        jason_age = justin_age = 50
+        original_ret_age = 58
+        delay_years = 2
+        delayed_ret_age = original_ret_age + delay_years
+        event_age = 59  # strictly between original (58) and delayed (60)
+        event = {"event_year": CURRENT_YEAR + (event_age - jason_age), "one_time_cash_delta": 0,
+                 "monthly_cash_flow_delta": 2000, "duration_months": 0}
+
+        inputs = base_inputs(jason_age=jason_age, justin_age=justin_age, retirement_end_age=62,
+                              w2_salary=200000, employee_401k_pct=0.06, employer_401k_pct=0.09,
+                              retirement_income_today_dollars=0)
+        accounts = [{"name": "401k", "account_type": "401k", "owner": "joint", "balance": 300000}]
+
+        result = run_monte_carlo(inputs, accounts, jason_ret_age=original_ret_age, justin_ret_age=original_ret_age,
+                                  randomize_accumulation=True, life_events=[event])
+        assert result["delayed_trials_pct"] == 100.0  # sanity: every trial actually delayed
+
+        # Hand-assemble exactly what ONE correctly-fixed delayed trial
+        # computes: accumulation walked to the DELAYED ages (the event
+        # lands inside it, since it's pre-retirement under this later
+        # timeline), and post_life_events built against that SAME delayed
+        # timeline -- which must NOT include this event a second time.
+        pre_ret_returns = [-0.10] * (delayed_ret_age - jason_age)
+        accum = randomize_accumulation_trial(inputs, accounts, delayed_ret_age, delayed_ret_age,
+                                              [event], None, pre_ret_returns)
+        delayed_timeline = build_two_person_timeline(jason_age, justin_age, delayed_ret_age, delayed_ret_age,
+                                                      inputs.get("retirement_end_age"))
+        _, post_events = _split_life_events([event], delayed_timeline.retirement_year)
+        post_events = post_events + _post_retirement_asset_sale_events(
+            inputs, jason_age, jason_age + delayed_timeline.phase2_start_years)
+        assert post_events == []  # the event must NOT still be classified post-retirement
+
+        pension_annual = pension_for_age(inputs, delayed_ret_age)
+        jason_ss_annual, jason_ss_age, justin_ss_annual, justin_ss_age = resolve_ss_benefits(
+            inputs, "early", None, None)
+        returns = [-0.10] * delayed_timeline.retire_yrs
+        survived, balances, *_ = _run_single_two_age(
+            accum["pretax"], accum["roth"], accum["taxable"], accum["hsa"],
+            delayed_timeline, inputs, pension_annual, jason_ss_annual, jason_ss_age,
+            inputs["retirement_income_today_dollars"], inputs["inflation_rate"],
+            inputs["expected_return_post_retirement"], returns,
+            post_life_events=post_events, justin_ss_annual=justin_ss_annual, justin_ss_age=justin_ss_age,
+            state_tax_rate=inputs.get("state_income_tax_rate", 0),
+        )
+        assert result["median_final_balance"] == round(balances[-1])

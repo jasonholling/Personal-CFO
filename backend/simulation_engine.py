@@ -369,7 +369,15 @@ def _run_single(
             # bridge_years_override is a transient, non-persisted cap
             # run_stress_tests' bridge_job_loss scenario sets to end the
             # bridge early.
-            bridge_years = max(0, 65 - ret_age)
+            # Anchored to withdrawal_start_age (timeline.effective_start_age),
+            # not the raw selected ret_age (audit finding, 2026-09-14, P1,
+            # mirrors run_retirement_projection's own identical fix) -- a
+            # stale/past ret_age selection would otherwise extend
+            # bridge-active treatment (zeroed healthcare, bridge income)
+            # past the household's real current age, into years they're
+            # already Medicare-eligible. Reduces to the original formula
+            # whenever ret_age >= jason_age.
+            bridge_years = max(0, 65 - withdrawal_start_age)
             if phase_inputs.get("bridge_years_override") is not None:
                 bridge_years = min(bridge_years, phase_inputs["bridge_years_override"])
             # kids-at-home stays gated to exactly age 55 (unchanged) --
@@ -1221,10 +1229,16 @@ def run_swr_analysis(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_t
                                            jason_ss_claim_age=jason_ss_claim_age, justin_ss_claim_age=justin_ss_claim_age)
     _ss_label = "custom" if jason_ss_claim_age is not None else ss_timing
     _scenario = next((s for s in _proj["scenarios"] if s["label"] == f"age_{ret_age}_{_ss_label}"), None)
-    pretax_at_ret  = _scenario["pretax_at_retirement"]
-    roth_at_ret    = _scenario["roth_at_retirement"]
-    taxable_at_ret = _scenario["taxable_at_retirement"]
-    hsa_at_ret     = _scenario["hsa_at_retirement"]
+    # _exact fields (audit finding, 2026-09-14, P2): this used to read the
+    # ROUNDED *_at_retirement fields as its own opening balance -- a
+    # small, silent starting-balance drift against this same scenario's
+    # own full-precision arithmetic, unlike the two-age path's equivalent
+    # (pretax_at_phase2_start etc.), which was already unrounded. The
+    # rounded fields still exist for display/API presentation.
+    pretax_at_ret  = _scenario["pretax_at_retirement_exact"]
+    roth_at_ret    = _scenario["roth_at_retirement_exact"]
+    taxable_at_ret = _scenario["taxable_at_retirement_exact"]
+    hsa_at_ret     = _scenario["hsa_at_retirement_exact"]
     portfolio = pretax_at_ret + roth_at_ret + taxable_at_ret + hsa_at_ret
 
     # timeline_engine.build_timeline: the single shared source of
@@ -1536,6 +1550,7 @@ def _run_monte_carlo_two_age(inputs: Dict, accounts: List[Dict], jason_ret_age: 
         trial_pretax, trial_roth, trial_taxable, trial_hsa = pretax_at_start, roth_at_start, taxable_at_start, hsa_at_start
         trial_timeline = timeline
         trial_pension_annual = pension_annual
+        trial_post_life_events = post_life_events
         chart_pad_value = None
         delay_years = 0
 
@@ -1572,6 +1587,22 @@ def _run_monte_carlo_two_age(inputs: Dict, accounts: List[Dict], jason_ret_age: 
                     jason_age, justin_age, jason_ret_age + delay_years, justin_ret_age + delay_years,
                     inputs.get("retirement_end_age"))
                 trial_pension_annual = pension_for_age(inputs, jason_ret_age + delay_years)
+                # Event reclassification (audit finding, 2026-09-14, P1):
+                # post_life_events above was split against the ORIGINAL,
+                # undelayed retirement_year/phase2_start_age -- reusing it
+                # for a delayed trial double-counts an asset sale dated
+                # between the original and delayed retirement (it's
+                # already inside delayed_accum's own extended accumulation
+                # window above AND still classified "post" here), and lets
+                # a life event that now falls inside the delayed
+                # accumulation period still fire again during withdrawal.
+                # Rebuilt against THIS trial's own delayed timeline, same
+                # as every other consumer's own post_life_events call.
+                trial_retirement_year_for_events = trial_timeline.retirement_year
+                trial_phase2_start_age = jason_age + trial_timeline.phase2_start_years
+                _, trial_post_life_events = _split_life_events(life_events, trial_retirement_year_for_events)
+                trial_post_life_events = trial_post_life_events + _post_retirement_asset_sale_events(
+                    inputs, jason_age, trial_phase2_start_age)
                 # Percentile chart's `ages` array is anchored to the
                 # ORIGINAL (undelayed) phase2_start_age -- pad this
                 # trial's balances with its own pre-delay portfolio total
@@ -1593,7 +1624,7 @@ def _run_monte_carlo_two_age(inputs: Dict, accounts: List[Dict], jason_ret_age: 
             trial_timeline, inputs,
             trial_pension_annual, jason_ss_annual, jason_ss_age,
             income_today, inflation, post_ret, returns,
-            post_life_events=post_life_events,
+            post_life_events=trial_post_life_events,
             justin_ss_annual=justin_ss_annual,
             justin_ss_age=justin_ss_age,
             state_tax_rate=inputs.get("state_income_tax_rate", 0),
@@ -1777,10 +1808,10 @@ def run_monte_carlo(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_ti
                                        jason_ss_claim_age=jason_ss_claim_age, justin_ss_claim_age=justin_ss_claim_age)
     _ss_label = "custom" if jason_ss_claim_age is not None else ss_timing
     _scenario = next((s for s in _proj["scenarios"] if s["label"] == f"age_{ret_age}_{_ss_label}"), None)
-    pretax_at_ret  = _scenario["pretax_at_retirement"]
-    roth_at_ret    = _scenario["roth_at_retirement"]
-    taxable_at_ret = _scenario["taxable_at_retirement"]
-    hsa_at_ret     = _scenario["hsa_at_retirement"]
+    pretax_at_ret  = _scenario["pretax_at_retirement_exact"]
+    roth_at_ret    = _scenario["roth_at_retirement_exact"]
+    taxable_at_ret = _scenario["taxable_at_retirement_exact"]
+    hsa_at_ret     = _scenario["hsa_at_retirement_exact"]
 
     # timeline_engine.build_timeline: same shared source _run_single uses
     # internally — end_age/retire_yrs/the chart's own age labels must
@@ -2219,10 +2250,10 @@ def run_stress_tests(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_t
                                        jason_ss_claim_age=jason_ss_claim_age, justin_ss_claim_age=justin_ss_claim_age)
     _ss_label = "custom" if jason_ss_claim_age is not None else ss_timing
     _scenario = next(s for s in _proj["scenarios"] if s["label"] == f"age_{ret_age}_{_ss_label}")
-    pretax_at_ret  = _scenario["pretax_at_retirement"]
-    roth_at_ret    = _scenario["roth_at_retirement"]
-    taxable_at_ret = _scenario["taxable_at_retirement"]
-    hsa_at_ret     = _scenario["hsa_at_retirement"]
+    pretax_at_ret  = _scenario["pretax_at_retirement_exact"]
+    roth_at_ret    = _scenario["roth_at_retirement_exact"]
+    taxable_at_ret = _scenario["taxable_at_retirement_exact"]
+    hsa_at_ret     = _scenario["hsa_at_retirement_exact"]
 
     # timeline_engine.build_timeline: same shared source run_monte_carlo
     # uses — end_age/retire_yrs and every chart/depletion-age label below
@@ -2340,10 +2371,10 @@ def run_stress_tests(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_t
             _proj2 = run_retirement_projection(sim_inputs, accounts, ret_ages=[ret_age], life_events=life_events,
                                                 surplus_allocations=surplus_allocations)
             _s2 = next(s for s in _proj2["scenarios"] if s["label"] == f"age_{ret_age}_{ss_timing}")
-            sim_pretax  = _s2["pretax_at_retirement"]
-            sim_roth    = _s2["roth_at_retirement"]
-            sim_taxable = _s2["taxable_at_retirement"]
-            sim_hsa     = _s2["hsa_at_retirement"]
+            sim_pretax  = _s2["pretax_at_retirement_exact"]
+            sim_roth    = _s2["roth_at_retirement_exact"]
+            sim_taxable = _s2["taxable_at_retirement_exact"]
+            sim_hsa     = _s2["hsa_at_retirement_exact"]
         else:
             sim_pretax, sim_roth, sim_taxable, sim_hsa = pretax_at_ret, roth_at_ret, taxable_at_ret, hsa_at_ret
 
@@ -3011,9 +3042,9 @@ def run_roth_conversion_analysis(inputs: Dict, accounts: List[Dict], ret_age: in
     _s = next(s for s in _proj["scenarios"] if s["label"] == f"age_{ret_age}_{_ss_label}")
 
     years_to_ret   = max(0, ret_age - jason_age)
-    pretax_at_ret  = _s["pretax_at_retirement"]
-    roth_at_ret    = _s["roth_at_retirement"]
-    taxable_at_ret = _s["taxable_at_retirement"]
+    pretax_at_ret  = _s["pretax_at_retirement_exact"]
+    roth_at_ret    = _s["roth_at_retirement_exact"]
+    taxable_at_ret = _s["taxable_at_retirement_exact"]
 
     # Second-earner gap income (2026-09-08, CALCULATION_CONTRACT.md
     # section 13, backlog item 1) — see run_monte_carlo's identical
@@ -3776,10 +3807,10 @@ def run_tax_efficiency_simulation(inputs: Dict, accounts: List[Dict], ret_age: i
                                        jason_ss_claim_age=jason_ss_claim_age, justin_ss_claim_age=justin_ss_claim_age)
     _ss_label = "custom" if jason_ss_claim_age is not None else ss_timing
     _s = next(s for s in _proj["scenarios"] if s["label"] == f"age_{ret_age}_{_ss_label}")
-    pretax_start  = _s["pretax_at_retirement"]
-    roth_start    = _s["roth_at_retirement"]
-    taxable_start = _s["taxable_at_retirement"]
-    hsa_start     = _s["hsa_at_retirement"]
+    pretax_start  = _s["pretax_at_retirement_exact"]
+    roth_start    = _s["roth_at_retirement_exact"]
+    taxable_start = _s["taxable_at_retirement_exact"]
+    hsa_start     = _s["hsa_at_retirement_exact"]
 
     # timeline_engine.build_timeline: same shared source every other
     # withdrawal-phase consumer in this file uses — a household selecting
@@ -4227,11 +4258,17 @@ def _run_survivor_scenario_two_age(inputs: Dict, accounts: List[Dict], jason_ret
     walk, and _rmd is computed against it using the SURVIVOR's own age
     (not Jason's, unlike every other two-age consumer's still-out-of-
     scope aggregate/Jason-anchored RMD) -- a real, forced draw each year
-    once the survivor reaches their own rmd_start_age. Tax modeling on
-    ongoing withdrawals otherwise stays exactly as unmodeled as
-    single-axis Survivor's own documented limitation (no MFJ->single
-    bracket jump) -- this milestone adds real RMD mechanics on top of
-    that same simplification, it does not remove it.
+    once the survivor reaches their own rmd_start_age. The RMD amount and
+    every ongoing pretax withdrawal ARE taxed (audit fix, 2026-09-14, P1
+    -- this used to pair real RMD mechanics with no_tax_model(), taxing
+    neither the RMD nor anything else, which was never the intent of
+    this milestone's own "stays as unmodeled as single-axis's documented
+    limitation" note below -- that note was always about the MFJ->single
+    bracket TABLE, not about skipping taxation outright). Priced via
+    _pretax_marginal_tax_rate, the same MFJ-bracket-table simplification
+    single-axis Survivor documents (no MFJ->single bracket jump) -- this
+    milestone adds real RMD mechanics AND real taxation on top of that
+    same simplification, it does not remove either.
 
     Pension commencement before Jason's own retirement (section 37.5,
     decided by Jason 2026-09-08: Option A) -- if Jason is the deceased
@@ -4295,6 +4332,7 @@ def _run_survivor_scenario_two_age(inputs: Dict, accounts: List[Dict], jason_ret
     inflation  = inputs["inflation_rate"]
     age_gap    = jason_age - justin_age
     _salary_growth_pct = inputs.get("_salary_growth_pct", 0.0)
+    state_tax_rate = inputs.get("state_income_tax_rate", 0) or 0
 
     # timeline built once, up front -- used for the pension-gate age
     # (jason_effective_start_age), post-death life events, gap income
@@ -4524,6 +4562,20 @@ def _run_survivor_scenario_two_age(inputs: Dict, accounts: List[Dict], jason_ret
 
         survivor_age_this_year = age if survivor_owner == "jason" else age - age_gap
         rmd = _rmd(pretax_bal, survivor_age_this_year, survivor_rmd_start_age)
+        # RMD/pretax taxation (audit finding, 2026-09-14, P1): this used
+        # no_tax_model() -- the RMD amount was computed correctly (section
+        # 37.4) but never actually taxed, nor was any further pretax draw,
+        # contradicting the contract's "RMD tax is always at the pretax
+        # marginal rate" rule (section 2.5) and this function's own
+        # docstring, which only ever meant to leave the MFJ->single
+        # bracket-table jump unmodeled -- not skip taxation entirely.
+        # Priced the same way every other consumer in this file prices a
+        # survivor-year pretax dollar: current MFJ bracket table (still the
+        # documented simplification) plus state rate, against guaranteed
+        # income + this year's RMD. survivor_ss_this_year is passed as the
+        # single "jss" arg (a survivor only ever has ONE active SS
+        # benefit, already deduplicated via max() above), uss=0.
+        pretax_tax_rate = _pretax_marginal_tax_rate(year_pen, survivor_ss_this_year, 0.0, rmd, state_tax_rate)
 
         draw = max(0, need - guaranteed - event_cash)
         net_needs.append(need - guaranteed - event_cash)
@@ -4537,7 +4589,7 @@ def _run_survivor_scenario_two_age(inputs: Dict, accounts: List[Dict], jason_ret
             guaranteed_income=guaranteed,
             life_event_cash=event_cash,
             rmd_amount=rmd,
-            tax_model=no_tax_model(),
+            tax_model=marginal_bracket_tax_model(pretax_rate=pretax_tax_rate, taxable_rate=0.0),
             growth_rate=post_ret,
             order=("taxable", "pretax"),
         )
@@ -4674,12 +4726,22 @@ def run_survivor_scenario(inputs: Dict, accounts: List[Dict], ret_age: int = 60,
     survivor_need_factor to reflect one person's living costs instead of
     two (0.75 is a common financial-planning rule of thumb; adjustable).
 
-    Does NOT fully model the MFJ->Single tax-bracket change on ongoing
-    withdrawals — that's a real additional drag this doesn't capture,
-    flagged in the recommendation rather than silently baked in as a
-    precise number, since integrating it would mean re-deriving the whole
-    withdrawal-order/tax engine rather than reusing the baseline
-    projection the way everything else here does.
+    RMD and pretax withdrawals ARE taxed (audit fix, 2026-09-14, P1 —
+    previously no_tax_model() left every survivor-year withdrawal
+    completely untaxed, including the mandatory RMD itself, contradicting
+    the contract's "RMD tax is always at the pretax marginal rate" rule).
+    Priced the same way every other consumer in this file prices a
+    pretax dollar: the current MFJ bracket table plus the household's
+    state rate (_pretax_marginal_tax_rate). Does NOT fully model the
+    MFJ->Single tax-bracket change on ongoing withdrawals — i.e. still
+    uses the MFJ table rather than switching to single-filer brackets —
+    that's a real additional drag this doesn't capture, flagged in the
+    recommendation rather than silently baked in as a precise number,
+    since integrating it would mean re-deriving the whole withdrawal-
+    order/tax engine rather than reusing the baseline projection the way
+    everything else here does. Post-death life events/asset sales ARE
+    now applied (same fix pass) — see _split_life_events/
+    _post_retirement_asset_sale_events below.
 
     life_events/surplus_allocations: threaded through to
     run_retirement_projection below for the pre-death baseline portfolio
@@ -4741,6 +4803,7 @@ def run_survivor_scenario(inputs: Dict, accounts: List[Dict], ret_age: int = 60,
     post_ret   = inputs["expected_return_post_retirement"]
     inflation  = inputs["inflation_rate"]
     age_gap    = jason_age - justin_age  # positive: jason is older
+    state_tax_rate = inputs.get("state_income_tax_rate", 0) or 0
 
     # Second-earner gap income (2026-09-08 second follow-up,
     # CALCULATION_CONTRACT.md section 14 → 15): only meaningful if Justin
@@ -4839,6 +4902,30 @@ def run_survivor_scenario(inputs: Dict, accounts: List[Dict], ret_age: int = 60,
 
     portfolio_at_death   = death_row["portfolio_balance"]
     starting_balance     = portfolio_at_death + payout
+    # Bucket split at death (audit finding, 2026-09-14, P1): this used to
+    # collapse the whole portfolio into one untaxed "taxable" bucket,
+    # which is what made no_tax_model()/rmd_amount=0.0 below look
+    # consistent -- there was no pretax bucket to compute an RMD against
+    # in the first place. death_row already carries the real pretax/roth/
+    # taxable/hsa split (run_retirement_projection's own yearly_detail
+    # fields) -- read it directly instead of discarding it. The insurance
+    # payout lands in taxable, same as every other one-time cash injection
+    # in this codebase (life events, asset sales).
+    starting_pretax  = death_row["pretax_balance"]
+    starting_roth    = death_row["roth_balance"]
+    starting_taxable = death_row["taxable_balance"] + payout
+    starting_hsa     = death_row["hsa_balance"]
+    survivor_rmd_start_age = rmd_start_age(inputs["justin_age"] if deceased == "jason" else inputs["jason_age"])
+    # Post-death life events/asset sales (audit finding, 2026-09-14, P1):
+    # this loop never applied either -- a future event dated after death
+    # simply vanished for a household modeling this scenario, contradicting
+    # the contract's "a future event must be applied exactly once, ...
+    # regardless of which consumer is asking" rule (section 2.6). Built
+    # the identical way every other post-death consumer in this file
+    # builds its own post_events (compare _run_survivor_scenario_two_age
+    # just above).
+    _, post_events = _split_life_events(life_events or [], timeline.retirement_year)
+    post_events = post_events + _post_retirement_asset_sale_events(inputs, jason_age, timeline.effective_start_age)
     # Independent review, 2026-09-08, ninth follow-up, finding 3 (P1),
     # part 2: survivor_ss_annual used to be a single flat figure (the
     # higher of the two spouses' RESOLVED benefits) applied from the
@@ -4875,7 +4962,10 @@ def run_survivor_scenario(inputs: Dict, accounts: List[Dict], ret_age: int = 60,
     # silently discarded wage surpluses (backlog P1, CALCULATION_CONTRACT.md
     # section 18).
     net_needs = []
-    bal = starting_balance
+    pretax_bal  = max(0.0, starting_pretax)
+    roth_bal    = max(0.0, starting_roth)
+    taxable_bal = max(0.0, starting_taxable)
+    hsa_bal     = max(0.0, starting_hsa)
     depleted_age = None
     # The baseline's death_row["portfolio_balance"] is an END-OF-YEAR
     # figure — it already reflects a full year of BOTH spouses' spending
@@ -4925,41 +5015,56 @@ def run_survivor_scenario(inputs: Dict, accounts: List[Dict], ret_age: int = 60,
             if deceased != "justin" else 0.0
         )
         need -= gap_income_this_year
-        draw       = max(0, need - guaranteed)
-        net_needs.append(need - guaranteed)  # unfloored -- see net_needs' own comment above
+
+        # Post-death life events/asset sales (audit finding, 2026-09-14,
+        # P1) -- same treatment as every other post-death consumer:
+        # one-time cash joins guaranteed income/gap income as an offset,
+        # the monthly delta adjusts need directly.
+        calendar_year = death_row["year"] + (i + 1)
+        event_cash, event_monthly = _post_retirement_year_effects(post_events, calendar_year)
+        need -= event_monthly
+
+        survivor_age_this_year = age if deceased == "justin" else age - age_gap
+        rmd = _rmd(pretax_bal, survivor_age_this_year, survivor_rmd_start_age)
+        # RMD/pretax taxation (audit finding, 2026-09-14, P1): matches
+        # _run_survivor_scenario_two_age's own fix just above -- same
+        # MFJ-bracket-table simplification (this function's docstring's
+        # own documented limitation), not zero taxation.
+        pretax_tax_rate = _pretax_marginal_tax_rate(pension_annual, survivor_ss_this_year, 0.0, rmd, state_tax_rate)
+
+        draw       = max(0, need - guaranteed - event_cash)
+        net_needs.append(need - guaranteed - event_cash)  # unfloored -- see net_needs' own comment above
+        total_bal = pretax_bal + roth_bal + taxable_bal + hsa_bal
         # Catch the edge case where the portfolio is already at (or below)
         # zero going into this year and there's still a real gap to cover —
         # without this check, a starting_balance of 0 never triggers the
-        # bal_after<=0-and-bal>0 transition below, so an already-depleted
-        # plan would be silently reported as "survives".
-        if depleted_age is None and bal <= 0 and draw > 0:
+        # bal_after<=0-and-total_bal>0 transition below, so an already-
+        # depleted plan would be silently reported as "survives".
+        if depleted_age is None and total_bal <= 0 and draw > 0:
             depleted_age = age
         # Migrated onto the shared withdrawal engine (backend/annual_engine.py,
-        # calculation-engine consolidation Phase 4): a single untaxed
-        # "taxable" bucket holding the whole post-payout portfolio, no RMD,
-        # no_tax_model() (this function has never modeled the MFJ->single
-        # tax-bracket jump — see the recommendation text below). One real
-        # behavior change inherited from the shared engine, not previously
-        # possible in the hand-rolled version: a year where guaranteed
-        # income (pension+SS) exceeds survivor need now sweeps the surplus
-        # into the portfolio as savings, same as every other migrated
-        # consumer, instead of silently discarding it. Verified via golden
-        # diff against the pre-migration implementation across 8 synthetic
-        # scenarios (tools/capture_survivor_golden.py) — none of them
-        # happen to exercise a surplus year, so none of the golden numbers
-        # moved; a real household whose guaranteed income outgrows a
-        # reduced survivor need late in retirement will now see a higher
-        # ending balance than before.
+        # calculation-engine consolidation Phase 4). A year where
+        # guaranteed income (pension+SS) exceeds survivor need sweeps the
+        # surplus into the portfolio as savings, same as every other
+        # migrated consumer, instead of silently discarding it. Verified
+        # via golden diff against the pre-migration implementation across
+        # 8 synthetic scenarios (tools/capture_survivor_golden.py) — none
+        # of them happen to exercise a surplus year, so none of the golden
+        # numbers moved; a real household whose guaranteed income outgrows
+        # a reduced survivor need late in retirement will now see a
+        # higher ending balance than before.
         result = simulate_withdrawal_year(
-            opening=AccountState(taxable=max(0.0, bal)),
+            opening=AccountState(pretax=pretax_bal, roth=roth_bal, taxable=taxable_bal, hsa=hsa_bal),
             spending_need=need,
             guaranteed_income=guaranteed,
-            life_event_cash=0.0,
-            rmd_amount=0.0,
-            tax_model=no_tax_model(),
+            life_event_cash=event_cash,
+            rmd_amount=rmd,
+            tax_model=marginal_bracket_tax_model(pretax_rate=pretax_tax_rate, taxable_rate=0.0),
             growth_rate=post_ret,
-            order=("taxable",),
+            order=DEFAULT_ORDER,
         )
+        pretax_bal, roth_bal, taxable_bal, hsa_bal = (
+            result.closing.pretax, result.closing.roth, result.closing.taxable, result.closing.hsa)
         bal_after = result.closing.total()
         # Second-earner gap income visibility (backlog P1,
         # CALCULATION_CONTRACT.md section 16): this loop already has a
@@ -4967,11 +5072,11 @@ def run_survivor_scenario(inputs: Dict, accounts: List[Dict], ret_age: int = 60,
         # as run_retirement_projection's own yearly_detail — 0 whenever
         # deceased == "justin" (see gap_income_this_year's own gating
         # above), not just omitted.
-        schedule.append({"age": age, "starting_balance": round(bal), "draw": round(draw),
+        schedule.append({"age": age, "starting_balance": round(total_bal), "draw": round(draw),
+                          "required_minimum_distribution": round(rmd),
                           "ending_balance": round(bal_after), "justin_gap_income": round(gap_income_this_year)})
-        if bal_after <= 0 and depleted_age is None and bal > 0:
+        if bal_after <= 0 and depleted_age is None and total_bal > 0:
             depleted_age = age
-        bal = bal_after
 
     survives = depleted_age is None
 

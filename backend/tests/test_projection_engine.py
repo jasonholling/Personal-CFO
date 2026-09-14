@@ -319,6 +319,22 @@ class TestRunRetirementProjection:
         scenario = result["scenarios"][0]
         assert scenario["current_investable_assets"] == 0
 
+    def test_kid_owned_401k_and_hsa_excluded_from_investable_assets(self, sample_inputs):
+        """Audit finding, 2026-09-14, P1: ira/roth_ira/taxable all filtered
+        is_kid_owner already, but the 401k/HSA pooling formulas didn't --
+        a kid-owned 401k or custodial HSA (unusual, but not disallowed by
+        the account model) silently leaked into the adult household's own
+        retirement buckets, contradicting the contract's "kid-owned
+        accounts are excluded from every adult retirement bucket" rule
+        (section 2.5)."""
+        accounts = [
+            {"id": 1, "name": "Kid 401k", "account_type": "401k", "owner": "kid_1", "balance": 500000, "institution": "", "notes": ""},
+            {"id": 2, "name": "Kid HSA",  "account_type": "hsa",  "owner": "kid_1", "balance": 250000, "institution": "", "notes": ""},
+        ]
+        result = run_retirement_projection(sample_inputs, accounts, ret_ages=[55])
+        scenario = result["scenarios"][0]
+        assert scenario["current_investable_assets"] == 0
+
     def test_bridge_job_phasing_only_applies_at_55(self, sample_inputs, sample_accounts):
         """Regression test for the bug where age-55's bridge-job/kids-at-home
         phasing was silently skipped by a duplicate implementation."""
@@ -2409,3 +2425,72 @@ class TestRandomizeAccumulationTrial:
         with pytest.raises(ValueError):
             randomize_accumulation_trial(inputs, accounts, jason_ret_age=60, justin_ret_age=60,
                                           life_events=[], surplus_allocations=[], pre_ret_returns=[0.06] * 3)
+
+
+class TestSingleAxisStartingBalancesRetainFullPrecision:
+    """Audit finding, 2026-09-14, P2 -- the single-axis counterpart to
+    TestStartingBalancesRetainFullPrecision (test_two_age_monte_carlo_
+    stress.py). pretax_at_retirement/roth_at_retirement/
+    taxable_at_retirement/hsa_at_retirement are rounded for display, and
+    every single-axis Monte Carlo/SWR/Roth Conversion/Tax Efficiency
+    consumer used to read those rounded fields directly as its own
+    opening balance -- a small, silent starting-balance drift against
+    this same scenario's own full-precision arithmetic (the two-age
+    path's equivalent fields were already unrounded). Fixed by adding
+    unrounded *_exact fields alongside the rounded display fields; every
+    internal consumer now reads the _exact ones."""
+
+    def test_exact_fields_are_not_rounded(self, sample_accounts):
+        """A 401k balance split at a percentage that doesn't land on a
+        whole dollar proves the fix directly: pretax_at_retirement_exact
+        must keep its fractional cents; the display field stays rounded."""
+        inputs = {**_single_axis_base_inputs(), "pretax_401k_pct": 0.75}
+        accounts = [{"id": 1, "name": "401k", "account_type": "401k", "owner": "joint", "balance": 100001,
+                     "institution": "", "notes": ""}]
+        result = run_retirement_projection(inputs, accounts, ret_ages=[61])
+        scenario = next(s for s in result["scenarios"] if s["label"] == "age_61_early")
+        assert scenario["pretax_at_retirement_exact"] == 75000.75
+        assert scenario["pretax_at_retirement"] == 75001  # display field still rounds
+
+    def test_monte_carlo_starts_from_the_exact_figure_not_the_rounded_one(self, monkeypatch):
+        """Parity test: random.gauss monkeypatched to its own mean (a
+        deterministic 10%/yr, not the more common 0%-returns convention
+        other tests use, which would erase this entirely) -- 5 years of
+        compounding turns pretax_at_retirement_exact (100001.5) and the
+        rounded display field (100002) into two DIFFERENT final rounded
+        answers (161053 vs 161054, hand-verified with a script before
+        writing this assertion), so this only passes if Monte Carlo
+        actually started from the exact figure, not by coincidence the
+        way a $0-growth/$0-spend version of this test would."""
+        import random as random_module
+        from simulation_engine import run_monte_carlo
+        monkeypatch.setattr(random_module, "gauss", lambda mu, sigma: mu)
+
+        inputs = {**_single_axis_base_inputs(), "pretax_401k_pct": 1.0, "retirement_income_today_dollars": 0,
+                  "expected_return_post_retirement": 0.10, "retirement_end_age": 66}
+        accounts = [{"id": 1, "name": "401k", "account_type": "401k", "owner": "joint", "balance": 100001.5,
+                     "institution": "", "notes": ""}]
+        proj = run_retirement_projection(inputs, accounts, ret_ages=[61])
+        scenario = next(s for s in proj["scenarios"] if s["label"] == "age_61_early")
+        assert scenario["pretax_at_retirement_exact"] == 100001.5
+        assert scenario["pretax_at_retirement"] == 100002  # display field rounds
+
+        result = run_monte_carlo(inputs, accounts, ret_age=61)
+        assert result["median_final_balance"] == 161053  # from the exact figure, not 161054
+
+
+def _single_axis_base_inputs():
+    return {
+        "jason_age": 55, "justin_age": 55,
+        "retirement_income_today_dollars": 80000,
+        "inflation_rate": 0.0,
+        "expected_return_pre_retirement": 0.0,
+        "expected_return_post_retirement": 0.0,
+        "jason_social_security": 0, "jason_ss_delayed": 0, "justin_social_security": 0,
+        "jason_ss_age": 62, "justin_ss_age": 67,
+        "annual_401k_contribution": 0, "annual_roth_contribution": 0, "annual_hsa_contribution": 0,
+        "annual_rsu_value": 0, "annual_bonus_pct": 0, "mortgage_balance": 0,
+        "retirement_end_age": 70,
+        "w2_salary": 0, "employee_401k_pct": 0, "employer_401k_pct": 0,
+        "justin_w2_salary": 0, "justin_ret_age": 0,
+    }

@@ -1089,6 +1089,58 @@ class TestWithdrawalWaterfallReconciliationFixes:
         assert ss_cut["final_balance"] == pytest.approx(result_precut["scenarios"]["base"]["final_balance"], rel=0.01)
 
 
+class TestSingleAxisSurvivorRmdAndLifeEvents:
+    """Independent audit, 2026-09-14, 2 confirmed P1s on the single-axis
+    Survivor path (run_survivor_scenario without jason_ret_age/
+    justin_ret_age set): (1) the whole post-payout portfolio was one flat
+    untaxed "taxable" bucket -- no pretax sub-balance, so no RMD was ever
+    computed or forced, contradicting the contract's "RMDs are mandatory"
+    rule; (2) post-death life events/asset sales were never applied at
+    all (life_event_cash=0.0 hardcoded), contradicting the contract's "a
+    future event is applied exactly once, regardless of which consumer is
+    asking" rule (section 2.6). Both fixed by reading death_row's own
+    pretax/roth/taxable/hsa split (already computed by
+    run_retirement_projection, previously discarded) and building
+    post_events the same way _run_survivor_scenario_two_age already did."""
+
+    def test_rmd_is_forced_and_taxed_once_survivor_reaches_rmd_age(self, sample_inputs, sample_accounts):
+        """sample_accounts' 401k (pretax_401k_pct=0.75) and IRA give a
+        real pretax sub-balance at death. Jason (50) dies at his own
+        selected ret_age (65); Justin (48, the survivor) reaches his own
+        RMD start age well before the default 99-year horizon. Before
+        the fix, required_minimum_distribution was hardcoded to 0.0 for
+        EVERY row regardless of balance or age -- this asserts a real,
+        nonzero forced distribution shows up once the survivor is old
+        enough, the single-axis counterpart to
+        TestRealPostDeathRmdOnSurvivorsOwnAge (two-age) above."""
+        result = run_survivor_scenario(sample_inputs, sample_accounts, ret_age=65, deceased="jason", death_age=65)
+        assert result["survives"] is True
+        rmd_rows = [row for row in result["schedule"] if row["required_minimum_distribution"] > 0]
+        assert len(rmd_rows) > 0
+        assert rmd_rows[0]["age"] >= 70  # sanity: RMDs never start absurdly early
+
+    def test_post_death_life_event_changes_the_schedule(self, sample_inputs, sample_accounts):
+        """A one-time cash event dated a few years after death used to be
+        silently dropped entirely (life_event_cash=0.0 hardcoded) --
+        confirms it now shows up as extra portfolio balance from the
+        year it lands onward."""
+        death_jason_age = 65
+        event_year = CURRENT_YEAR + (death_jason_age - sample_inputs["jason_age"]) + 3
+        events = [{"event_year": event_year, "one_time_cash_delta": 20000,
+                   "monthly_cash_flow_delta": 0, "duration_months": 0}]
+        baseline  = run_survivor_scenario(sample_inputs, sample_accounts, ret_age=65, deceased="jason", death_age=65)
+        with_event = run_survivor_scenario(sample_inputs, sample_accounts, ret_age=65, deceased="jason",
+                                            death_age=65, life_events=events)
+        b_row = next(row for row in baseline["schedule"]  if row["age"] == death_jason_age + 3)
+        w_row = next(row for row in with_event["schedule"] if row["age"] == death_jason_age + 3)
+        assert w_row["ending_balance"] > b_row["ending_balance"]
+        # Every row before the event year is untouched -- the event
+        # doesn't leak backward in time.
+        b_before = next(row for row in baseline["schedule"] if row["age"] == death_jason_age + 1)
+        w_before = next(row for row in with_event["schedule"] if row["age"] == death_jason_age + 1)
+        assert w_before["ending_balance"] == b_before["ending_balance"]
+
+
 class TestRunSurvivorScenario:
     def test_additional_insurance_needed_reflects_gap_income(self, sample_accounts):
         """Backlog P1 (CALCULATION_CONTRACT.md section 17), independent
