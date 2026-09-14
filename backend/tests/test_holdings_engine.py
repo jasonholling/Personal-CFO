@@ -998,6 +998,25 @@ class TestAccountInvestmentOptionEligibility:
         ], {"us_large_cap": 50, "us_bonds": 50})
         assert result["allocation_constraints_feasible"] is False
 
+    def test_option_mix_redistributes_excess_across_multiple_options(self):
+        """Three options where clipping the first option to its cap leaves
+        a shortfall that must be shared across the other two headroom
+        options -- exercises the bounds solver's iterative redistribution,
+        not just a single two-option clip."""
+        result = propose_account_option_mix([
+            option(1, 1, option_name="Stock", asset_class="us_large_cap", maximum_allocation_pct=50),
+            option(2, 1, option_name="Bond", asset_class="us_bonds"),
+            option(3, 1, option_name="Intl", asset_class="international_developed"),
+        ], {"us_large_cap": 80, "us_bonds": 10, "international_developed": 10})
+        assert result["allocation_constraints_feasible"] is True
+        by_name = {row["option_name"]: row["pct"] for row in result["mix"]}
+        assert by_name["Stock"] == 50.0
+        assert round(by_name["Bond"] + by_name["Intl"], 2) == 50.0
+        # The uncapped options split the 30-point shortfall proportionally
+        # to their own headroom (both unbounded here, so evenly).
+        assert by_name["Bond"] == by_name["Intl"]
+
+
     def test_reference_case_8_same_fund_available_in_one_account_not_another(self):
         """A fund recorded as available in account 1 does not become
         available in account 2 just because it exists somewhere."""
