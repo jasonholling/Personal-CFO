@@ -1,3 +1,6 @@
+// Not a routed page -- rendered as a tab inside StressTestWhatIf.jsx (nav:
+// "Monte Carlo / Stress Tests / SWR"), alongside Simulation.jsx's
+// MonteCarloSection/StressTestSection. See that file's route table.
 import { useState, useEffect, useCallback, useRef } from 'react'
 import axios from 'axios'
 import { useScenario } from '../hooks/useScenario'

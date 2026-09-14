@@ -132,6 +132,40 @@ function SurvivorScenarioSection({ retAge, jasonSsClaimAge, justinSsClaimAge, se
         captured here.
       </div>
 
+      {/* Primary scenario inputs first, Custom SS Claim Age (secondary,
+          usually-collapsed) below -- same ordering as Monte Carlo/
+          Historical Stress's controls (main choice first, refinement
+          after), swapped 2026-09-14 at the user's request. Kept
+          full-width/stacked rather than side by side like those two tabs
+          -- the "Who Dies First" card's own grid-3 needs more width than
+          a half-width column gives it, and this page already fit on one
+          screen without the scroll problem those two tabs had. */}
+      <div className="card" style={{ marginBottom:24 }}>
+        <div className="grid-3" style={{ marginBottom:12 }}>
+          <div>
+            <div className="label" style={{ marginBottom:8 }}>Who Dies First?</div>
+            <div style={{ display:'flex', gap:6 }}>
+              <button className={deceased==='jason' ? 'btn-primary' : 'btn-secondary'} onClick={() => setDeceased('jason')}>{person1Name}</button>
+              <button className={deceased==='justin' ? 'btn-primary' : 'btn-secondary'} onClick={() => setDeceased('justin')}>{person2Name}</button>
+            </div>
+          </div>
+          <div>
+            <div className="label" style={{ marginBottom:8 }}>At Age</div>
+            <input type="number" value={deathAge} onChange={e => { setDeathAgeTouched(true); setDeathAge(parseInt(e.target.value) || 0) }} />
+          </div>
+          <div>
+            <div className="label" style={{ marginBottom:8 }}>Survivor's Living Cost (% of couple's target)</div>
+            <input type="number" value={needFactor} onChange={e => setNeedFactor(parseInt(e.target.value) || 0)} />
+          </div>
+        </div>
+        <button className="btn-primary" onClick={run} disabled={loading}>{loading ? 'Calculating…' : 'Run Scenario'}</button>
+        {!result && clearReason && (
+          <div style={{ fontSize:12, color:'var(--text3)', marginTop:12 }}>
+            Cleared the previous result — {clearReason}. Run again to see the updated numbers.
+          </div>
+        )}
+      </div>
+
       {/* Milestone 3 (progressive disclosure, 2026-09-09): collapsed by
           default -- see Retirement.jsx's identical comment. */}
       <details className="card" style={{ marginBottom:24 }} open={jasonSsClaimAge != null || justinSsClaimAge != null}>
@@ -162,32 +196,6 @@ function SurvivorScenarioSection({ retAge, jasonSsClaimAge, justinSsClaimAge, se
           />
         </div>
       </details>
-
-      <div className="card" style={{ marginBottom:24 }}>
-        <div className="grid-3" style={{ marginBottom:12 }}>
-          <div>
-            <div className="label" style={{ marginBottom:8 }}>Who Dies First?</div>
-            <div style={{ display:'flex', gap:6 }}>
-              <button className={deceased==='jason' ? 'btn-primary' : 'btn-secondary'} onClick={() => setDeceased('jason')}>{person1Name}</button>
-              <button className={deceased==='justin' ? 'btn-primary' : 'btn-secondary'} onClick={() => setDeceased('justin')}>{person2Name}</button>
-            </div>
-          </div>
-          <div>
-            <div className="label" style={{ marginBottom:8 }}>At Age</div>
-            <input type="number" value={deathAge} onChange={e => { setDeathAgeTouched(true); setDeathAge(parseInt(e.target.value) || 0) }} />
-          </div>
-          <div>
-            <div className="label" style={{ marginBottom:8 }}>Survivor's Living Cost (% of couple's target)</div>
-            <input type="number" value={needFactor} onChange={e => setNeedFactor(parseInt(e.target.value) || 0)} />
-          </div>
-        </div>
-        <button className="btn-primary" onClick={run} disabled={loading}>{loading ? 'Calculating…' : 'Run Scenario'}</button>
-        {!result && clearReason && (
-          <div style={{ fontSize:12, color:'var(--text3)', marginTop:12 }}>
-            Cleared the previous result — {clearReason}. Run again to see the updated numbers.
-          </div>
-        )}
-      </div>
 
       {result?.has_data && (
         <>
@@ -404,6 +412,15 @@ export default function StressTestWhatIf({ onNavigate }) {
         </div>
       )}
 
+      {/* Retirement age/SS timing (left) and Custom SS Claim Age (right)
+          side by side instead of stacked full-width (2026-09-14, at the
+          user's request -- "custom SS on one line and then the
+          retirement age on another" was pushing the Run button off
+          screen without scrolling). Purely a layout change: every
+          conditional below is unchanged, just wrapped in a 2-column grid. */}
+      {(tab === 'monte_carlo' || tab === 'stress') && (
+      <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:24, alignItems:'start', marginBottom:20 }}>
+      <div>
       {/* What-If Builder has its own full 55-67 retirement-age slider, and
           Survivor Scenario has its own controls, so the coarse retAge/
           ssTiming selector below is only shown for Monte Carlo/Historical
@@ -513,7 +530,9 @@ export default function StressTestWhatIf({ onNavigate }) {
           ℹ {overrideNote}
         </div>
       )}
+      </div>
 
+      <div>
       {/* Custom claim age (2026-09-09, CALCULATION_CONTRACT.md section
           54): shared jasonSsClaimAge/justinSsClaimAge scenario state,
           same in single-axis and two-age mode -- resolve_ss_claim_ages
@@ -578,6 +597,9 @@ export default function StressTestWhatIf({ onNavigate }) {
             />
           </div>
         </details>
+      )}
+      </div>
+      </div>
       )}
 
       <div hidden={tab !== 'whatif'}>

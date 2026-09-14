@@ -1,3 +1,7 @@
+// Not a routed page -- MonteCarloSection/StressTestSection are imported
+// and rendered as tabs inside StressTestWhatIf.jsx (nav: "Monte Carlo /
+// Stress Tests / SWR"). See that file's own pointer comment / App.jsx's
+// route table for the actual navigation entry.
 import { useState, useEffect, useRef } from 'react'
 import axios from 'axios'
 import {
@@ -203,15 +207,31 @@ const CustomTooltip = ({ active, payload, label, person1Name }) => {
   )
 }
 
+// Colors for the Income Sources by Year chart's account-bucket areas,
+// shared between the Area fills below and this tooltip so the two never
+// drift apart. Guaranteed income (pension/SS/bridge) keeps its existing
+// colors; the account buckets below (2026-09-14, at the user's request
+// -- "trying to better visualize what bucket I'm pulling from") replace
+// the old single undifferentiated "Discretionary Withdrawal" band.
+const INCOME_SOURCE_COLORS = {
+  pension: NAVY, social_security: '#2E7D8C', bridge_income: '#34d399',
+  withdrawal_taxable: '#f4b860', withdrawal_roth: '#b894ee',
+  discretionary_pretax: '#f97316', rmd: '#c2410c', withdrawal_hsa: '#64748b',
+}
+
 // Custom tooltip for the Income Sources by Year chart (as opposed to
 // CustomTooltip's generic per-series rendering above) — reads the raw
-// data row directly rather than only the two rendered Area series
-// (rmd/discretionary_withdrawal), so it can also surface rmd_reinvested
-// and withdrawal_pretax, which aren't chart series themselves. Auditor
-// review (2026-09-10): a large forced RMD year and a large genuinely-
-// discretionary withdrawal year looked visually identical in the old
-// single "Portfolio Draw" band — this makes the split, and the amount
-// of the RMD that's immediately reinvested rather than spent, explicit.
+// data row directly rather than only the rendered Area series, so it can
+// also surface rmd_reinvested, which isn't a chart series itself.
+// Auditor review (2026-09-10): a large forced RMD year and a large
+// genuinely-discretionary withdrawal year looked visually identical in
+// the old single "Portfolio Draw" band — this makes the split, and the
+// amount of the RMD that's immediately reinvested rather than spent,
+// explicit. Further split 2026-09-14 into which ACCOUNT the withdrawal
+// actually came from (401k/IRA, Roth, Brokerage, HSA), not just
+// forced-vs-discretionary — same underlying yearly_detail draws, just a
+// finer breakdown than the one "Discretionary Withdrawal" line used to
+// show.
 const IncomeSourcesTooltip = ({ active, payload, label, person1Name }) => {
   if (!active || !payload?.length) return null
   const row = payload[0]?.payload
@@ -219,19 +239,28 @@ const IncomeSourcesTooltip = ({ active, payload, label, person1Name }) => {
   return (
     <div style={{ background:'var(--bg3)', border:'1px solid var(--border2)', borderRadius:8, padding:'10px 14px', fontSize:11 }}>
       <div style={{ fontWeight:600, marginBottom:6 }}>{person1Name} Age {label}</div>
-      {row.pension > 0 && <div style={{ color:NAVY, marginBottom:2 }}>Pension: {fmtK(row.pension)}</div>}
-      {row.social_security > 0 && <div style={{ color:'#2E7D8C', marginBottom:2 }}>Social Security: {fmtK(row.social_security)}</div>}
-      {row.bridge_income > 0 && <div style={{ color:'#34d399', marginBottom:2 }}>Bridge Job: {fmtK(row.bridge_income)}</div>}
-      {row.discretionary_withdrawal > 0 && (
-        <div style={{ color:'#f97316', marginBottom:2 }}>Discretionary withdrawal: {fmtK(row.discretionary_withdrawal)}</div>
+      {row.pension > 0 && <div style={{ color:INCOME_SOURCE_COLORS.pension, marginBottom:2 }}>Pension: {fmtK(row.pension)}</div>}
+      {row.social_security > 0 && <div style={{ color:INCOME_SOURCE_COLORS.social_security, marginBottom:2 }}>Social Security: {fmtK(row.social_security)}</div>}
+      {row.bridge_income > 0 && <div style={{ color:INCOME_SOURCE_COLORS.bridge_income, marginBottom:2 }}>Bridge Job: {fmtK(row.bridge_income)}</div>}
+      {row.withdrawal_taxable > 0 && (
+        <div style={{ color:INCOME_SOURCE_COLORS.withdrawal_taxable, marginBottom:2 }}>Brokerage (taxable): {fmtK(row.withdrawal_taxable)}</div>
+      )}
+      {row.withdrawal_roth > 0 && (
+        <div style={{ color:INCOME_SOURCE_COLORS.withdrawal_roth, marginBottom:2 }}>Roth 401(k)/IRA: {fmtK(row.withdrawal_roth)}</div>
+      )}
+      {row.discretionary_pretax > 0 && (
+        <div style={{ color:INCOME_SOURCE_COLORS.discretionary_pretax, marginBottom:2 }}>401(k)/Traditional IRA (discretionary): {fmtK(row.discretionary_pretax)}</div>
       )}
       {row.rmd > 0 && (
-        <div style={{ color:'#c2410c', marginBottom:2 }}>RMD (gross, forced by law): {fmtK(row.rmd)}</div>
+        <div style={{ color:INCOME_SOURCE_COLORS.rmd, marginBottom:2 }}>RMD (401(k)/IRA, forced by law): {fmtK(row.rmd)}</div>
       )}
       {row.rmd_reinvested > 0 && (
         <div style={{ color:'var(--text3)', marginBottom:2, paddingLeft:10 }}>
           ↳ of which reinvested, not spent: {fmtK(row.rmd_reinvested)}
         </div>
+      )}
+      {row.withdrawal_hsa > 0 && (
+        <div style={{ color:INCOME_SOURCE_COLORS.withdrawal_hsa, marginBottom:2 }}>HSA: {fmtK(row.withdrawal_hsa)}</div>
       )}
       <div style={{ borderTop:'1px solid var(--border2)', marginTop:6, paddingTop:6, fontWeight:600 }}>
         Total gross cash flow this year: {fmtK(row.pension + row.social_security + row.bridge_income + row.portfolio_draw)}
@@ -576,11 +605,12 @@ export function MonteCarloSection({ retAge, ssTiming, overrides, jasonRetAge, ju
         <div className="card" style={{ marginTop:24 }}>
           <div className="label" style={{ marginBottom:4 }}>Income Sources by Year — Gross Cash Flows</div>
           <div style={{ fontSize:12, color:'var(--text2)', marginBottom:16 }}>
-            What covers your spending each year — pension, SS, bridge job, and portfolio withdrawal.
-            Figures are GROSS cash flows, not net spending: once RMDs start (age 73 or 75, by birth
-            year), the amount shown includes the full forced distribution even in years most of it
-            is immediately reinvested rather than spent — see "RMD (forced)" vs. "Discretionary
-            withdrawal" below and the reinvested amount in each year's tooltip.
+            What covers your spending each year, broken out by account — pension, Social Security, bridge
+            job, brokerage, Roth, 401(k)/Traditional IRA, and RMDs. Figures are GROSS cash flows, not net
+            spending: once RMDs start (age 73 or 75, by birth year), the amount shown includes the full
+            forced distribution even in years most of it is immediately reinvested rather than spent — see
+            "RMD (Forced)" vs. "401(k)/IRA (Discretionary)" below and the reinvested amount in each year's
+            tooltip.
           </div>
           <ResponsiveContainer width="100%" height={280}>
             <AreaChart data={incSrc.chart} margin={{ top:0, right:0, bottom:0, left:10 }}>
@@ -588,11 +618,14 @@ export function MonteCarloSection({ retAge, ssTiming, overrides, jasonRetAge, ju
               <YAxis tickFormatter={fmtK} tick={{ fill:'var(--text3)', fontSize:11 }} axisLine={false} tickLine={false} width={60} />
               <Tooltip content={<IncomeSourcesTooltip person1Name={person1Name} />} />
               <Legend wrapperStyle={{ fontSize:11, paddingTop:8 }} />
-              <Area type="monotone" dataKey="pension"         stackId="1" name="Pension"        stroke={NAVY} fill={NAVY} fillOpacity={0.8} />
-              <Area type="monotone" dataKey="social_security" stackId="1" name="Social Security" stroke="#2E7D8C" fill="#2E7D8C" fillOpacity={0.8} />
-              <Area type="monotone" dataKey="bridge_income"   stackId="1" name="Bridge Job"     stroke="#34d399" fill="#34d399" fillOpacity={0.8} />
-              <Area type="monotone" dataKey="discretionary_withdrawal" stackId="1" name="Discretionary Withdrawal" stroke="#f97316" fill="#f97316" fillOpacity={0.8} />
-              <Area type="monotone" dataKey="rmd"              stackId="1" name="RMD (Forced)"   stroke="#c2410c" fill="#c2410c" fillOpacity={0.8} />
+              <Area type="monotone" dataKey="pension"         stackId="1" name="Pension"        stroke={INCOME_SOURCE_COLORS.pension} fill={INCOME_SOURCE_COLORS.pension} fillOpacity={0.8} />
+              <Area type="monotone" dataKey="social_security" stackId="1" name="Social Security" stroke={INCOME_SOURCE_COLORS.social_security} fill={INCOME_SOURCE_COLORS.social_security} fillOpacity={0.8} />
+              <Area type="monotone" dataKey="bridge_income"   stackId="1" name="Bridge Job"     stroke={INCOME_SOURCE_COLORS.bridge_income} fill={INCOME_SOURCE_COLORS.bridge_income} fillOpacity={0.8} />
+              <Area type="monotone" dataKey="withdrawal_taxable"    stackId="1" name="Brokerage"              stroke={INCOME_SOURCE_COLORS.withdrawal_taxable} fill={INCOME_SOURCE_COLORS.withdrawal_taxable} fillOpacity={0.8} />
+              <Area type="monotone" dataKey="withdrawal_roth"       stackId="1" name="Roth 401(k)/IRA"        stroke={INCOME_SOURCE_COLORS.withdrawal_roth} fill={INCOME_SOURCE_COLORS.withdrawal_roth} fillOpacity={0.8} />
+              <Area type="monotone" dataKey="discretionary_pretax"  stackId="1" name="401(k)/IRA (Discretionary)" stroke={INCOME_SOURCE_COLORS.discretionary_pretax} fill={INCOME_SOURCE_COLORS.discretionary_pretax} fillOpacity={0.8} />
+              <Area type="monotone" dataKey="rmd"                   stackId="1" name="RMD (Forced)"           stroke={INCOME_SOURCE_COLORS.rmd} fill={INCOME_SOURCE_COLORS.rmd} fillOpacity={0.8} />
+              <Area type="monotone" dataKey="withdrawal_hsa"        stackId="1" name="HSA"                    stroke={INCOME_SOURCE_COLORS.withdrawal_hsa} fill={INCOME_SOURCE_COLORS.withdrawal_hsa} fillOpacity={0.8} />
             </AreaChart>
           </ResponsiveContainer>
         </div>
