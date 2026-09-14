@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import axios from 'axios'
+import { Cell, Pie, PieChart } from 'recharts'
+import { isPrivacyMode, MASK_PERCENT } from '../utils/privacy'
 
 const SECTION_LABELS = {
   financial_independence: 'Retirement & Tax',
@@ -10,15 +12,44 @@ const SECTION_LABELS = {
 }
 
 const SECTION_ORDER = ['financial_independence', 'investments', 'education', 'risk', 'estate']
+const ALLOCATION_COLORS = ['#6ea8fe', '#56c7b5', '#f4b860', '#b894ee', '#f08080', '#79b8ff', '#c5d86d', '#f4a261', '#9aa7bd', '#d986ba']
+
+function InvestmentPosture({ allocation, onNavigate }) {
+  if (!allocation || allocation.has_holdings === false) {
+    return <section className="card" style={{ marginBottom: 24 }}><div className="label">HOUSEHOLD INVESTMENT POSTURE</div><div style={{ marginTop: 8, color: 'var(--text2)', fontSize: 13 }}>Enter included holdings and a policy target to review current allocation against the household plan.</div><button className="btn-secondary" onClick={() => onNavigate('coach')} style={{ marginTop: 12 }}>Open Portfolio Coach →</button></section>
+  }
+  if (!allocation.has_policy || !allocation.comparison) {
+    return <section className="card" style={{ marginBottom: 24 }}><div className="label">HOUSEHOLD INVESTMENT POSTURE</div><div style={{ marginTop: 8, color: 'var(--text2)', fontSize: 13 }}>Save a household policy target to compare your current allocation with the plan.</div><button className="btn-secondary" onClick={() => onNavigate('coach')} style={{ marginTop: 12 }}>Set policy in Portfolio Coach →</button></section>
+  }
+  const rows = Object.entries(allocation.comparison.by_class || [])
+    .filter(([, value]) => Number(value.current_pct) || Number(value.target_pct))
+    .map(([assetClass, value], index) => ({ assetClass, ...value, color: ALLOCATION_COLORS[index % ALLOCATION_COLORS.length] }))
+  const gaps = [...rows].sort((a, b) => Math.abs(Number(b.deviation_pct) || 0) - Math.abs(Number(a.deviation_pct) || 0)).slice(0, 3)
+  const displayPct = value => isPrivacyMode() ? MASK_PERCENT : `${Number(value || 0).toFixed(1)}%`
+  const donut = key => rows.filter(row => Number(row[key]) > 0).map(row => ({ name: row.assetClass, value: Number(row[key]), color: row.color }))
+  return <section className="card" style={{ marginBottom: 24 }}>
+    <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'flex-start', flexWrap: 'wrap' }}>
+      <div><div className="label">HOUSEHOLD INVESTMENT POSTURE</div><div style={{ marginTop: 5, fontSize: 16, fontWeight: 650 }}>Current allocation vs. policy target</div><div style={{ color: 'var(--text2)', fontSize: 12, marginTop: 4 }}>Included accounts and entered holdings · allocation, not performance</div></div>
+      <button className="btn-secondary" onClick={() => onNavigate('coach')}>Review in Portfolio Coach →</button>
+    </div>
+    <div style={{ display: 'flex', alignItems: 'center', gap: 18, flexWrap: 'wrap', marginTop: 12 }}>
+      <div style={{ display: 'flex', gap: 4 }}>
+        {[['Current', 'current_pct'], ['Policy target', 'target_pct']].map(([label, key]) => <div key={key} style={{ textAlign: 'center' }}><PieChart width={142} height={142}><Pie data={donut(key)} dataKey="value" innerRadius={38} outerRadius={58} paddingAngle={1} stroke="none">{donut(key).map(row => <Cell key={row.name} fill={row.color} />)}</Pie><text x="71" y="68" textAnchor="middle" fill="var(--text)" fontSize="12">{label === 'Current' ? 'Now' : 'Target'}</text></PieChart><div style={{ color: 'var(--text2)', fontSize: 11 }}>{label}</div></div>)}
+      </div>
+      <div style={{ flex: 1, minWidth: 220 }}><div style={{ fontSize: 12, color: 'var(--text2)', marginBottom: 6 }}>Largest differences</div>{gaps.map(row => <div key={row.assetClass} style={{ display: 'flex', gap: 8, alignItems: 'center', borderTop: '1px solid var(--border)', padding: '7px 0', fontSize: 12 }}><span style={{ width: 8, height: 8, borderRadius: 4, background: row.color }} /><span style={{ flex: 1, textTransform: 'capitalize' }}>{row.assetClass.replace(/_/g, ' ')}</span><span>{displayPct(row.current_pct)} → {displayPct(row.target_pct)}</span><strong style={{ color: row.within_drift_band ? 'var(--green)' : 'var(--amber)' }}>{Number(row.deviation_pct) > 0 ? '+' : ''}{displayPct(row.deviation_pct)}</strong></div>)}</div>
+    </div>
+  </section>
+}
 
 export default function AnnualPlan({ onNavigate }) {
   const [tasks, setTasks] = useState([])
   const [loading, setLoading] = useState(true)
   const [syncing, setSyncing] = useState(false)
   const [showComplete, setShowComplete] = useState(false)
+  const [allocation, setAllocation] = useState(null)
 
-  const load = () => axios.get('/api/tasks')
-    .then(r => setTasks(r.data))
+  const load = () => Promise.all([axios.get('/api/tasks'), axios.get('/api/portfolio/allocation')])
+    .then(([tasksResponse, allocationResponse]) => { setTasks(tasksResponse.data); setAllocation(allocationResponse.data) })
     .finally(() => setLoading(false))
 
   useEffect(() => { load() }, [])
@@ -59,6 +90,8 @@ export default function AnnualPlan({ onNavigate }) {
         <div className="card"><div className="label">Calculation follow-ups</div><div className="number-lg" style={{ marginTop:8 }}>{tasks.filter(task => task.task_type === 'calculated' && !task.completed).length}</div></div>
         <button className="card" onClick={() => onNavigate('dashboard')} style={{ cursor:'pointer', textAlign:'left' }}><div className="label">CFO briefing</div><div style={{ marginTop:10, color:'var(--accent)', fontSize:13, fontWeight:600 }}>View priorities →</div></button>
       </div>
+
+      <InvestmentPosture allocation={allocation} onNavigate={onNavigate} />
 
       {loading ? <div className="loading">Loading annual plan...</div> : grouped.length === 0 ? (
         <div className="card" style={{ textAlign:'center', padding:'44px 24px' }}>
