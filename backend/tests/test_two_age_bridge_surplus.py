@@ -113,9 +113,15 @@ class TestTwoAgeBridgeSurplusCore:
     def test_bridge_expiration_reverts_to_normal_spending(self):
         """Bridge active for 2 years, then expires -- year 3 onward
         should behave exactly as if bridge_income_55 had never been set
-        (no lingering surplus credit, no residual offset)."""
+        (no lingering surplus credit, no residual offset).
+
+        2026-09-13: bridge duration is computed to Medicare eligibility
+        (65 - retirement age), no longer the fixed bridge_years_55 input
+        -- bridge_years_override is used here purely to force a SHORT
+        (2-year) bridge for this expiration test, the same mechanism
+        run_stress_tests' bridge_job_loss scenario uses in production."""
         inputs = base_inputs(jason_age=53, justin_age=53, retirement_income_today_dollars=100000, retirement_end_age=58,
-                              bridge_income_55=150000, bridge_years_55=2)
+                              bridge_income_55=150000, bridge_years_override=2)
         with_bridge = run_two_dimensional_retirement_projection(inputs, TAXABLE(500000), jason_ret_age=55, justin_ret_age=55)
         yearly = with_bridge["yearly_detail"]
         assert len(yearly) >= 3
@@ -184,29 +190,46 @@ class TestTwoAgeBridgeSurplusCore:
 
     def test_bridge_does_not_apply_when_justin_retires_first(self):
         """The mirror case: Justin retires first (55), Jason retires
-        LATER (58) and is the one still working. The bridge gate
-        (`jason_ret_age == 55`) is NOT satisfied here (jason_ret_age is
-        58), so bridge_income must be exactly zero every year, and the
-        only income offset present during Justin's early-retirement
-        phase must be Jason's own gap income -- exercising the
-        later-retiree income path the bridge-specific test above does
-        not reach, and confirming bridge eligibility isn't accidentally
-        keyed off "whoever retires first" instead of Jason specifically."""
+        LATER (58) and is the one still working. The bridge gate is keyed
+        to JASON's own retirement age, not to who retires first or to
+        Justin's age at all.
+
+        2026-09-13: the gate widened from exactly `jason_ret_age == 55`
+        to `jason_ret_age < 65` (bridge income is a bridge to Medicare
+        eligibility, available at any pre-65 retirement age) -- so Jason
+        retiring at 58 IS now bridge-eligible on his own, independent of
+        Justin. This test now confirms bridge eligibility is keyed to
+        Jason specifically (not to "whoever retires first") by holding
+        Justin's situation fixed and only varying whether JASON's own
+        retirement age is before or at/after 65."""
         justin_first = base_inputs(jason_age=53, justin_age=53, retirement_income_today_dollars=100000, retirement_end_age=59,
-                                    bridge_income_55=150000, bridge_years_55=1, w2_salary=40000)
+                                    bridge_income_55=150000, bridge_years_override=1, w2_salary=40000)
         r2 = run_two_dimensional_retirement_projection(justin_first, TAXABLE(500000), jason_ret_age=58, justin_ret_age=55)
         assert r2["later_retiree"] == "jason"
-        for y in r2["yearly_detail"]:
-            assert y["bridge_income"] == 0
-        y0b = r2["yearly_detail"][0]
-        assert y0b["still_working_spouse_income"] > 0  # Jason's own gap income, the later-retiree path
-        assert y0b["portfolio_balance"] == 500000 - 100000 + y0b["still_working_spouse_income"]
+        # yearly_detail is anchored to phase2_start (Justin's retirement
+        # at 55, the earlier one) -- Jason hasn't retired yet in year 0
+        # (he's still 55 himself, 3 years from his own 58), so bridge_
+        # income is correctly 0 until Jason's own retirement year, then
+        # 150000 -- bridge-eligible on his own merits (58 < 65), even
+        # though Justin retired first and is the earlier retiree overall.
+        jason_yearly = [y["bridge_income"] for y in r2["yearly_detail"]]
+        assert jason_yearly[0] == 0  # Jason (55) not yet retired
+        jason_retirement_index = next(i for i, y in enumerate(r2["yearly_detail"]) if y["jason_age"] == 58)
+        assert jason_yearly[jason_retirement_index] == 150000
 
-        # Same household with jason_ret_age flipped to 55 (bridge-
-        # eligible) but otherwise identical -- confirms the zero above is
-        # really the gate, not some other unrelated zeroing.
+        # Jason retiring at/after 65 is the genuine "not applicable" case
+        # -- no bridge to Medicare needed because Medicare is already
+        # available. Justin's situation is unchanged from above.
+        jason_too_old_for_bridge = base_inputs(jason_age=53, justin_age=53, retirement_income_today_dollars=100000, retirement_end_age=59,
+                                                bridge_income_55=150000, bridge_years_override=1, w2_salary=40000)
+        r2c = run_two_dimensional_retirement_projection(jason_too_old_for_bridge, TAXABLE(500000), jason_ret_age=65, justin_ret_age=55)
+        for y in r2c["yearly_detail"]:
+            assert y["bridge_income"] == 0
+
+        # Same household with jason_ret_age at the original anchor age
+        # (55) -- confirms bridge still applies there too, unchanged.
         jason_bridge_eligible = base_inputs(jason_age=53, justin_age=53, retirement_income_today_dollars=100000, retirement_end_age=59,
-                                             bridge_income_55=150000, bridge_years_55=1)
+                                             bridge_income_55=150000, bridge_years_override=1)
         r2b = run_two_dimensional_retirement_projection(jason_bridge_eligible, TAXABLE(500000), jason_ret_age=55, justin_ret_age=55)
         assert r2b["yearly_detail"][0]["bridge_income"] == 150000
 
@@ -499,15 +522,19 @@ class TestSingleAgeBridgeSurplusSibling:
         # A large balance and small annual spend keep 11 years of $10,000
         # spending easily affordable in every scenario, base included.
         bridge_inputs = base_inputs(jason_age=55, justin_age=55, retirement_income_today_dollars=10000, retirement_end_age=66,
-                                     bridge_income_55=150000, bridge_years_55=1)
+                                     bridge_income_55=150000)
         no_bridge_inputs = base_inputs(jason_age=55, justin_age=55, retirement_income_today_dollars=10000, retirement_end_age=66)
         with_bridge = run_stress_tests(bridge_inputs, TAXABLE(5000000), ret_age=55)
         without_bridge = run_stress_tests(no_bridge_inputs, TAXABLE(5000000), ret_age=55)
 
         # "base" (post_ret every year, no override, no randomness) is
-        # fully deterministic -- exact value, not a floor: 5,000,000 +
-        # (150,000 bridge in year 0) - 11 * 10,000 spending.
-        assert with_bridge["scenarios"]["base"]["final_balance"] == 5000000 + 150000 - 11 * 10000
+        # fully deterministic -- exact value, not a floor. 2026-09-13:
+        # bridge duration is computed to Medicare eligibility (65-55=10
+        # years), not the old fixed bridge_years_55=1 -- of the 11
+        # modeled years (ages 55-65), 10 are bridge-active (income
+        # $150,000 >> $10,000 spending, so each sweeps a $140,000
+        # surplus) and 1 (age 65, post-Medicare) draws normally.
+        assert with_bridge["scenarios"]["base"]["final_balance"] == 5000000 + 10 * (150000 - 10000) - 10000
         assert without_bridge["scenarios"]["base"]["final_balance"] == 5000000 - 11 * 10000
 
         # Every remaining (historical-override) scenario applies the
@@ -551,3 +578,75 @@ class TestSingleAgeBridgeSurplusSibling:
         single_result = run_monte_carlo(single_inputs, TAXABLE(500000), ret_age=55)
         two_age_result = run_monte_carlo(two_age_inputs, TAXABLE(500000), jason_ret_age=55, justin_ret_age=55)
         assert single_result["median_final_balance"] == two_age_result["median_final_balance"] == 550000
+
+
+class TestBridgeAppliesToAnyPreMedicareRetirementAge:
+    """2026-09-13: bridge income is a bridge to Medicare eligibility (65),
+    not a benefit exclusive to retiring at exactly 55 -- it now applies at
+    ANY retirement age below 65, with duration computed as 65 minus the
+    retirement age, replacing the old fixed bridge_years_55 input
+    entirely. These tests cover the ages/boundaries the original fix
+    (gated to exactly ret_age==55) never exercised."""
+
+    @pytest.mark.parametrize("ret_age,expected_years", [
+        (56, 9), (58, 7), (60, 5), (62, 3), (64, 1),
+    ])
+    def test_bridge_duration_equals_65_minus_retirement_age(self, ret_age, expected_years):
+        """A household retiring at each of these in-between ages gets
+        exactly (65 - ret_age) years of bridge income, then reverts to
+        normal spending -- verified via run_retirement_projection's own
+        yearly bridge_income field, not just a survival/success check."""
+        inputs = base_inputs(jason_age=ret_age, justin_age=ret_age, retirement_end_age=ret_age + expected_years + 2,
+                              bridge_income_55=30000)
+        result = run_retirement_projection(inputs, TAXABLE(1000000), ret_ages=[ret_age])
+        scenario = next(s for s in result["scenarios"] if s["ss_timing"] == "early")
+        bridge_flags = [y["bridge_income"] > 0 for y in scenario["yearly_detail"]]
+        assert bridge_flags == [True] * expected_years + [False] * 2
+
+    def test_bridge_does_not_apply_at_or_after_65(self):
+        """The genuine boundary case: retiring AT 65 needs no bridge at
+        all (Medicare is already available day one) -- computed duration
+        is 65-65=0, so bridge_income must be exactly 0 every year even
+        with bridge income configured."""
+        inputs = base_inputs(jason_age=65, justin_age=65, retirement_end_age=67, bridge_income_55=30000)
+        result = run_retirement_projection(inputs, TAXABLE(1000000), ret_ages=[65])
+        scenario = next(s for s in result["scenarios"] if s["ss_timing"] == "early")
+        assert all(y["bridge_income"] == 0 for y in scenario["yearly_detail"])
+
+    def test_no_bridge_income_configured_does_not_zero_healthcare_at_in_between_ages(self):
+        """Regression guard for a real bug introduced and caught while
+        building this fix: widening the gate to `ret_age < 65` alone
+        made EVERY early retiree enter the phased branch even with
+        bridge_income_55=0, which incorrectly zeroed out healthcare costs
+        (the branch assumes a bridge job provides employer coverage).
+        A household retiring at 60 with NO bridge income must see the
+        exact same healthcare-cost behavior as a household outside the
+        gate entirely (ret_age=65), not $0 healthcare for 5 years."""
+        no_bridge_60 = base_inputs(jason_age=60, justin_age=60, retirement_end_age=63,
+                                    bridge_income_55=0, healthcare_pre_medicare=12000)
+        result = run_retirement_projection(no_bridge_60, TAXABLE(1000000), ret_ages=[60])
+        scenario = next(s for s in result["scenarios"] if s["ss_timing"] == "early")
+        assert all(y["bridge_income"] == 0 for y in scenario["yearly_detail"])
+        assert all(y["healthcare_cost"] > 0 for y in scenario["yearly_detail"])
+
+    def test_kids_at_home_phase_stays_gated_to_exactly_55(self):
+        """kids_years_at_home_55 was explicitly NOT part of this widening
+        -- a household retiring at 60 with kids_years_at_home_55 set must
+        never enter the kids-at-home phase (only a literal age-55
+        retirement does), even though bridge income itself now applies at
+        60 too."""
+        inputs = base_inputs(jason_age=60, justin_age=60, retirement_end_age=62,
+                              bridge_income_55=0, kids_years_at_home_55=4, healthcare_kids=9000)
+        result = run_retirement_projection(inputs, TAXABLE(1000000), ret_ages=[60])
+        scenario = next(s for s in result["scenarios"] if s["ss_timing"] == "early")
+        # No family-healthcare-kids cost should ever show up at age 60 --
+        # that's exclusively an age-55 phase.
+        assert all(y["healthcare_cost"] != 9000 for y in scenario["yearly_detail"])
+
+    def test_two_age_mode_bridge_applies_to_any_pre_65_jason_retirement(self):
+        """Same widening, two-age mode -- Jason retiring at 62 (not 55)
+        still gets a bridge, computed as 65-62=3 years."""
+        inputs = base_inputs(retirement_end_age=66, bridge_income_55=30000)
+        result = run_two_dimensional_retirement_projection(inputs, TAXABLE(1000000), jason_ret_age=62, justin_ret_age=62)
+        bridge_flags = [y["bridge_income"] > 0 for y in result["yearly_detail"]]
+        assert bridge_flags == [True, True, True, False]

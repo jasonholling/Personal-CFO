@@ -171,6 +171,14 @@ def init_db():
         # say a particular HSA, 529, or trust is open-universe, or that a
         # brokerage is restricted to a recorded menu.
         ("investment_menu_mode", "TEXT DEFAULT 'auto'"),
+        # Withdrawal-pool exclusion (2026-09-14, CALCULATION_CONTRACT.md
+        # section 84): a specific account marked as an emergency reserve
+        # -- excluded entirely from the accounts list before Retirement
+        # Projection/Monte Carlo/Stress Tests compute starting bucket
+        # balances, when withdrawal_strategy == 'hold_back_reserved'.
+        # Default 0 (every existing account, every other strategy) is a
+        # complete no-op.
+        ("held_back_from_withdrawal", "INTEGER DEFAULT 0"),
     ]
     for col, typedef in accounts_migrations:
         if col not in accounts_cols:
@@ -291,6 +299,33 @@ def init_db():
         ("disability_funded_by",       "TEXT DEFAULT 'Employer group policy'"),
         ("disability_to_age",          "INTEGER DEFAULT 65"),
         ("ltc_premium_annual",         "REAL DEFAULT 369"),
+        # Withdrawal-phase bucket order (2026-09-13, CALCULATION_CONTRACT.md
+        # section 81): "taxable_first" is the existing DEFAULT_ORDER
+        # behavior every consumer always had (drain taxable, then pretax,
+        # then HSA, then Roth) -- the default here keeps every existing
+        # household's numbers unchanged until they opt in.
+        # "proportional" draws taxable/pretax/Roth blended by balance share
+        # every year instead, per the household's own explicit choice.
+        ("withdrawal_strategy",        "TEXT DEFAULT 'taxable_first'"),
+        # Age-banded spending curve (2026-09-14, CALCULATION_CONTRACT.md
+        # section 86): retirement_income_today_dollars remains the "go-go"
+        # (baseline) spending figure unchanged. These four columns let a
+        # household taper spending down in later age bands instead of
+        # holding it flat for the whole retirement. slowgo/nogo dollars
+        # default to 0, meaning "same as the band before it" -- every
+        # existing household and test gets byte-identical output until
+        # these are explicitly set. See spending_band_multiplier() in
+        # projection_engine.py.
+        ("spending_gogo_end_age",      "INTEGER DEFAULT 70"),
+        ("spending_slowgo_end_age",    "INTEGER DEFAULT 85"),
+        ("spending_slowgo_dollars",    "REAL DEFAULT 0"),
+        ("spending_nogo_dollars",      "REAL DEFAULT 0"),
+        # Adaptive retirement timing in Monte Carlo (2026-09-14,
+        # CALCULATION_CONTRACT.md section 87): two-age Monte Carlo only.
+        # Default 0/off -- every existing household/test sees the exact
+        # unchanged behavior (single deterministic accumulation, no
+        # pre-retirement variance) until this is explicitly turned on.
+        ("randomize_accumulation",     "INTEGER DEFAULT 0"),
     ]
     for col, typedef in migrations:
         if col not in existing_cols:

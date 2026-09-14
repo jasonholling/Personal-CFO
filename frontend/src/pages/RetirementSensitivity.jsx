@@ -30,7 +30,10 @@ const getStoplight = (s, swrCushion) => {
   // Use SWR cushion if available (matches Side by Side page), else fall back to surplus %
   const cushionPct = swrCushion !== undefined ? swrCushion : (s.cap_need > 0 ? ((s.surplus / s.cap_need) * 100) : 0)
   if (cushionPct >= 20)  return { color: GREEN, label: 'Comfortable', icon: 'OK' }
-  if (cushionPct >= 0)   return { color: AMBER, label: s.ret_age === 55 ? 'Viable' : 'Tight', icon: '!' }
+  // 2026-09-13: bridge income (the thing that makes a marginal cushion
+  // "Viable" rather than merely "Tight") now applies at any pre-65
+  // retirement age, not just exactly 55 -- widened to match.
+  if (cushionPct >= 0)   return { color: AMBER, label: s.ret_age < 65 ? 'Viable' : 'Tight', icon: '!' }
   return { color: RED, label: 'Fails', icon: 'X' }
 }
 

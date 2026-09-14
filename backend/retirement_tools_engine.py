@@ -8,7 +8,7 @@ this session (that duplication is exactly what caused bugs before).
 """
 from typing import Dict, List, Optional
 
-from projection_engine import _fv, _pv_annuity, _rmd, rmd_start_age, run_retirement_projection, is_kid_owner
+from projection_engine import _fv, _pv_annuity, _rmd, rmd_start_age, run_retirement_projection, is_kid_owner, pension_for_age
 
 # 2026 MFJ ordinary brackets (IRS Rev. Proc. 2025-32) — keep in sync with
 # frontend/src/pages/TaxPlanning.jsx's ORDINARY_2026. Two copies (one Python,
@@ -218,6 +218,35 @@ def _implied_discount_rate(annual_pension: float, years_receiving: int, lump_sum
         else:
             hi = mid
     return (lo + hi) / 2
+
+
+def estimate_pension_lump_sum(inputs: Dict, buyout_age: int = 58, discount_rate: float = 0.06) -> Dict:
+    """Estimates what a lump-sum buyout of the HOUSEHOLD'S OWN modeled
+    pension (pension_55/60/65, interpolated via projection_engine.
+    pension_for_age) might be worth -- NOT a real employer-quoted figure;
+    this household hasn't received one. Reuses the exact same actuarial
+    PV math pension_vs_lump_sum below already uses (_pv_annuity), just
+    computing the annuity value directly instead of comparing it against
+    a manually-entered offer.
+
+    life_expectancy_age assumed = inputs["retirement_end_age"] (default
+    99) -- the household's own modeled planning horizon, the same
+    longevity convention used everywhere else in this app (there's no
+    separate mortality table anywhere in this codebase; adding one here
+    specifically would be inconsistent with how every other tool treats
+    "how long do we plan for"). CALCULATION_CONTRACT.md section 83."""
+    annual_pension = pension_for_age(inputs, buyout_age)
+    life_expectancy_age = inputs.get("retirement_end_age") or 99
+    years_receiving = max(0, life_expectancy_age - buyout_age)
+    estimated_lump_sum = round(_pv_annuity(annual_pension, discount_rate, years_receiving))
+    return {
+        "buyout_age": buyout_age,
+        "annual_pension_at_buyout_age": round(annual_pension),
+        "discount_rate_pct": round(discount_rate * 100, 2),
+        "life_expectancy_age_assumed": life_expectancy_age,
+        "years_receiving_assumed": years_receiving,
+        "estimated_lump_sum": estimated_lump_sum,
+    }
 
 
 def pension_vs_lump_sum(monthly_pension: float, lump_sum: float, current_age: int,

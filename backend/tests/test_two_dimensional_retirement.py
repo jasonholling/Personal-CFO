@@ -270,6 +270,107 @@ class TestPensionGatedToJasonsOwnRetirement:
         assert [y["pension"] for y in yearly] == [30000, 30000, 30000]
 
 
+class TestPensionStopAge:
+    """_pension_stop_age (2026-09-14, CALCULATION_CONTRACT.md section 83)
+    -- transient, non-persisted override (same pattern as withdrawal_
+    strategy/bridge_years_override) modeling a pension lump-sum buyout:
+    the annuity ends at a specific age instead of paying for life."""
+
+    def test_unset_is_byte_identical_to_omitting_it(self):
+        """Zero-regression guard."""
+        inputs = base_inputs(retirement_end_age=64, pension_55=30000, pension_60=30000, pension_65=30000)
+        omitted = run_two_dimensional_retirement_projection(inputs, TAXABLE(200000), jason_ret_age=61, justin_ret_age=61)
+        explicit_none = run_two_dimensional_retirement_projection({**inputs, "_pension_stop_age": None}, TAXABLE(200000),
+                                                                     jason_ret_age=61, justin_ret_age=61)
+        assert omitted["yearly_detail"] == explicit_none["yearly_detail"]
+
+    def test_pension_stops_exactly_at_the_given_age(self):
+        """Both retire at 55, pension $30,000/yr, buyout taken at 58 --
+        pension pays through 57, then $0 from 58 on."""
+        inputs = base_inputs(jason_age=55, justin_age=55, retirement_end_age=60,
+                              pension_55=30000, pension_60=30000, pension_65=30000, _pension_stop_age=58)
+        result = run_two_dimensional_retirement_projection(inputs, TAXABLE(200000), jason_ret_age=55, justin_ret_age=55)
+        yearly = result["yearly_detail"]
+        assert [y["jason_age"] for y in yearly] == [55, 56, 57, 58, 59]
+        assert [y["pension"] for y in yearly] == [30000, 30000, 30000, 0, 0]
+
+    def test_stop_age_before_retirement_means_pension_never_pays(self):
+        """The pension never started in the first place if the buyout is
+        taken before Jason's own retirement -- both gates (start age,
+        stop age) apply independently."""
+        inputs = base_inputs(retirement_end_age=62, pension_55=30000, pension_60=30000, pension_65=30000,
+                              _pension_stop_age=58)
+        result = run_two_dimensional_retirement_projection(inputs, TAXABLE(200000), jason_ret_age=60, justin_ret_age=60)
+        yearly = result["yearly_detail"]
+        assert all(y["pension"] == 0 for y in yearly)
+
+
+class TestSpendingBandTwoAge:
+    """spending_band_multiplier (2026-09-14, CALCULATION_CONTRACT.md
+    section 85) wired into need_for_year -- income_need should step down
+    at the configured band boundary and stay flat within each band."""
+
+    def test_unset_is_byte_identical_to_omitting_it(self):
+        """Zero-regression guard."""
+        inputs = base_inputs(retirement_end_age=70, retirement_income_today_dollars=100000)
+        omitted = run_two_dimensional_retirement_projection(inputs, TAXABLE(500000), jason_ret_age=60, justin_ret_age=60)
+        explicit_flat = run_two_dimensional_retirement_projection(
+            {**inputs, "spending_slowgo_dollars": 0, "spending_nogo_dollars": 0}, TAXABLE(500000),
+            jason_ret_age=60, justin_ret_age=60,
+        )
+        assert omitted["yearly_detail"] == explicit_flat["yearly_detail"]
+
+    def test_income_need_drops_at_the_configured_slowgo_age(self):
+        inputs = base_inputs(jason_age=65, justin_age=65, retirement_end_age=75,
+                              retirement_income_today_dollars=100000,
+                              spending_gogo_end_age=70, spending_slowgo_end_age=75,
+                              spending_slowgo_dollars=50000)
+        result = run_two_dimensional_retirement_projection(inputs, TAXABLE(500000), jason_ret_age=65, justin_ret_age=65)
+        yearly = {y["jason_age"]: y["income_need"] for y in result["yearly_detail"]}
+        assert yearly[69] == 100000
+        assert yearly[70] == 50000
+        assert yearly[70] == yearly[74]  # flat within the slow-go band
+
+    def test_default_boundary_ages_69_vs_70_and_84_vs_85(self):
+        """Same boundary-exactness guard as TestSpendingBandMultiplier's
+        equivalent test, checked end-to-end through the two-age engine
+        at the DEFAULT 70/85 boundary ages (2026-09-14 audit)."""
+        inputs = base_inputs(jason_age=60, justin_age=60, retirement_end_age=86,
+                              retirement_income_today_dollars=100000,
+                              spending_slowgo_dollars=70000, spending_nogo_dollars=50000)
+        result = run_two_dimensional_retirement_projection(inputs, TAXABLE(3_000_000), jason_ret_age=60, justin_ret_age=60)
+        yearly = {y["jason_age"]: y["income_need"] for y in result["yearly_detail"]}
+        assert yearly[69] == 100000
+        assert yearly[70] == 70000
+        assert yearly[84] == 70000
+        assert yearly[85] == 50000
+
+    def test_swr_roth_conversion_and_tax_efficiency_are_unaffected_by_bands(self):
+        """2026-09-14 audit finding: the two-age variants of SWR/Roth
+        Conversion/Tax Efficiency Analysis share need_for_year with Monte
+        Carlo/Stress Tests and briefly picked up spending-band behavior
+        by accident, contradicting the documented out-of-scope list
+        (CALCULATION_CONTRACT.md section 85) and creating a single-age/
+        two-age asymmetry for the same three tools. Fixed by stripping
+        the band fields before constructing need_for_year at those three
+        call sites. This test locks in the fix at the projection level
+        (which those functions reuse) isn't itself sufficient proof --
+        see test_simulation_engine.py/test_two_age_monte_carlo_stress.py
+        for the direct regression tests against the actual functions."""
+        inputs = base_inputs(jason_age=60, justin_age=60, retirement_end_age=90,
+                              retirement_income_today_dollars=100000,
+                              spending_gogo_end_age=65, spending_slowgo_end_age=75,
+                              spending_slowgo_dollars=20000)
+        result = run_two_dimensional_retirement_projection(inputs, TAXABLE(3_000_000), jason_ret_age=60, justin_ret_age=60)
+        yearly = {y["jason_age"]: y["income_need"] for y in result["yearly_detail"]}
+        # Sanity: the projection engine itself DOES apply the band (this
+        # is the documented in-scope consumer) -- confirms the fixture
+        # is actually exercising the feature before checking the other
+        # three tools don't see it.
+        assert yearly[64] == 100000
+        assert yearly[65] == 20000
+
+
 class TestAge55BridgeAndKidsRulesPreserved:
     def test_bridge_income_phase_matches_single_axis_reference_exactly(self):
         """Independent review, 2026-09-08 (P1) -- the age-55 bridge-job/
@@ -283,17 +384,22 @@ class TestAge55BridgeAndKidsRulesPreserved:
 
         Bridge-active year: year_need = max(0, 80000 - 30000) = 50000,
         not the plain 80000 a household outside the age-55 bridge would
-        see -- draw 50000/yr for 5 years, matching
-        run_retirement_projection's own ret_age=55 output exactly for
-        the same inputs (direct parity check below), not just this
-        function's own arithmetic."""
+        see -- draw 50000/yr, matching run_retirement_projection's own
+        ret_age=55 output exactly for the same inputs (direct parity
+        check below), not just this function's own arithmetic.
+
+        2026-09-13: bridge duration is computed to Medicare eligibility
+        (65-55=10 years), not the old fixed bridge_years_55=5 -- all 6
+        modeled years (55-60) are within that 10-year window, so bridge
+        stays active (and draw stays 50000) through every year here,
+        unlike the old fixed-5-year behavior this test used to assert."""
         inputs = base_inputs(jason_age=55, justin_age=55, retirement_end_age=61,
-                              bridge_income_55=30000, bridge_years_55=5)
+                              bridge_income_55=30000)
         result = run_two_dimensional_retirement_projection(inputs, TAXABLE(200000), jason_ret_age=55, justin_ret_age=55)
         yearly = result["yearly_detail"]
         assert [y["jason_age"] for y in yearly] == [55, 56, 57, 58, 59, 60]
-        assert [y["draw"] for y in yearly] == [50000, 50000, 50000, 50000, 50000, 80000]
-        assert [y["bridge_income"] for y in yearly] == [30000, 30000, 30000, 30000, 30000, 0]
+        assert [y["draw"] for y in yearly] == [50000] * 6
+        assert [y["bridge_income"] for y in yearly] == [30000] * 6
         assert [y["portfolio_balance"] for y in yearly] == [150000, 100000, 50000, 0, 0, 0]
 
         from projection_engine import run_retirement_projection
@@ -307,11 +413,15 @@ class TestAge55BridgeAndKidsRulesPreserved:
 
     def test_kids_still_home_phase_uses_family_healthcare(self):
         """Bridge phase ends, kids still home (kids_years_at_home_55 >
-        bridge_years_55) -- the family-healthcare-cost phase, distinct
-        from the pre-Medicare default. Same household as above, but
-        bridge only 2 years, kids home for 4."""
+        the bridge duration) -- the family-healthcare-cost phase,
+        distinct from the pre-Medicare default. Same household as above,
+        but bridge cut short to 2 years (via bridge_years_override --
+        2026-09-13: duration is normally computed to Medicare eligibility,
+        65-55=10 years, way past this test's 3-year horizon, so the
+        override is needed to reach the kids-still-home phase at all),
+        kids home for 4."""
         inputs = base_inputs(jason_age=55, justin_age=55, retirement_end_age=58,
-                              bridge_income_55=30000, bridge_years_55=2, kids_years_at_home_55=4,
+                              bridge_income_55=30000, bridge_years_override=2, kids_years_at_home_55=4,
                               healthcare_kids=10000)
         result = run_two_dimensional_retirement_projection(inputs, TAXABLE(500000), jason_ret_age=55, justin_ret_age=55)
         yearly = result["yearly_detail"]

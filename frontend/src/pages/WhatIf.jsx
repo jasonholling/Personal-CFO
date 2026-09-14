@@ -264,7 +264,7 @@ export default function WhatIf({ onNavigate, onAssumptionsChange, onSettingsLoad
               onChange={setIncome}
               delta={getSurplusDelta(`age_${retAge}_early`)} />
 
-            <SliderRow label="Bridge Job Income" hint="age 55-60 only"
+            <SliderRow label="Bridge Job Income" hint="retirement age until Medicare (65)"
               value={bridgeIncome} min={0} max={100000} step={5000}
               format={v => v === 0 ? 'None' : `$${(v/1000).toFixed(0)}k/yr`}
               onChange={setBridgeIncome} />

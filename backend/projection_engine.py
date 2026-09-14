@@ -1085,8 +1085,27 @@ def run_retirement_projection(inputs: Dict, accounts: List[Dict], ret_ages: List
             healthcare_kids      = inputs.get("healthcare_kids", 0)
             kids_annual_cost     = inputs.get("kids_annual_cost", 0)
             bridge_income        = inputs.get("bridge_income_55", 0)
-            bridge_years         = inputs.get("bridge_years_55", 0)
             kids_years           = inputs.get("kids_years_at_home_55", 0)
+            # Bridge duration (2026-09-13): no longer the fixed
+            # bridge_years_55 input -- bridge income is a bridge to
+            # Medicare eligibility (65), so it now runs for however many
+            # years separate the SELECTED retirement age from 65,
+            # whatever that age is (previously this whole feature was
+            # gated to exactly ret_age==55, a single anchor age, with a
+            # fixed 5-year duration that didn't even reach 65 from 55).
+            # bridge_years_override (not a persisted planning input --
+            # only ever set transiently by run_stress_tests's own
+            # bridge_job_loss scenario, see simulation_engine.py) caps
+            # this shorter, for "the bridge job ends early" specifically.
+            bridge_years = max(0, 65 - ret_age)
+            if inputs.get("bridge_years_override") is not None:
+                bridge_years = min(bridge_years, inputs["bridge_years_override"])
+            # No actual bridge job configured -- don't treat a household
+            # retiring before 65 as bridge-active just because the
+            # computed duration is nonzero (that would wrongly zero out
+            # healthcare for years 55-64 for anyone without a bridge job).
+            if bridge_income <= 0:
+                bridge_years = 0
 
             # Convert today's-dollar expenses and bridge income once;
             # both annual rows and headline funding use these cash flows.
@@ -1136,8 +1155,17 @@ def run_retirement_projection(inputs: Dict, accounts: List[Dict], ret_ages: List
 
                 # Income need this year (includes healthcare, phased for age 55)
                 bridge_this_year = 0
-                if ret_age == 55:
-                    kids_still_home = yr < kids_years
+                # Age-banded spending curve (2026-09-14, section 86): scales
+                # only the base spending term below, not healthcare/kids/
+                # bridge -- 1.0 (no change) unless slow-go/no-go dollars are
+                # set in Settings.
+                _spend_mult = spending_band_multiplier(age, inputs)
+                if ret_age < 65:
+                    # kids-at-home is intentionally still gated to exactly
+                    # age 55 (2026-09-13) -- only the bridge-income half of
+                    # this branch was asked to widen to any pre-65
+                    # retirement age; kids-at-home policy is unchanged.
+                    kids_still_home = ret_age == 55 and yr < kids_years
                     bridge_active   = yr < bridge_years
                     if bridge_active:
                         # Phase 1: bridge job covers healthcare, net of bridge income
@@ -1170,25 +1198,25 @@ def run_retirement_projection(inputs: Dict, accounts: List[Dict], ret_ages: List
                         # exceeding spending exactly like it already
                         # handles any other guaranteed-income overshoot --
                         # not a new, bridge-specific rule.
-                        gross_target = income_at_ret * ((1 + inflation) ** yr) + kids_cost
+                        gross_target = income_at_ret * ((1 + inflation) ** yr) * _spend_mult + kids_cost
                         year_need = gross_target
                     elif kids_still_home and age < 65:
                         # Phase 2: retired, kids home, family healthcare
                         healthcare_this_year = healthcare_kids_at_ret
                         kids_cost = kids_annual_cost_at_ret * ((1 + inflation) ** yr)
-                        year_need = income_at_ret * ((1 + inflation) ** yr) + kids_cost + healthcare_kids_at_ret * ((1 + inflation) ** yr)
+                        year_need = income_at_ret * ((1 + inflation) ** yr) * _spend_mult + kids_cost + healthcare_kids_at_ret * ((1 + inflation) ** yr)
                     elif age < 65:
                         # Phase 3: empty nest, pre-Medicare
                         healthcare_this_year = healthcare_pre_at_ret
-                        year_need = income_at_ret * ((1 + inflation) ** yr) + healthcare_pre_at_ret * ((1 + inflation) ** yr)
+                        year_need = income_at_ret * ((1 + inflation) ** yr) * _spend_mult + healthcare_pre_at_ret * ((1 + inflation) ** yr)
                     else:
                         # Phase 4: Medicare
                         healthcare_this_year = healthcare_post_at_ret
-                        year_need = income_at_ret * ((1 + inflation) ** yr) + healthcare_post_at_ret * ((1 + inflation) ** yr)
+                        year_need = income_at_ret * ((1 + inflation) ** yr) * _spend_mult + healthcare_post_at_ret * ((1 + inflation) ** yr)
                     healthcare_inflated = healthcare_this_year * ((1 + inflation) ** yr)
                 else:
                     healthcare_inflated  = income.healthcare
-                    year_need = income_at_ret * ((1 + inflation) ** yr) + healthcare_inflated
+                    year_need = income_at_ret * ((1 + inflation) ** yr) * _spend_mult + healthcare_inflated
 
                 # Milestone 2 reconciliation follow-up (2026-09-10): the
                 # household's actual spending target for the year, before
@@ -1232,7 +1260,12 @@ def run_retirement_projection(inputs: Dict, accounts: List[Dict], ret_ages: List
                 # surplus-sweep logic see and save any bridge income left
                 # over after spending is covered, instead of silently
                 # discarding it.
-                year_pen = pension_annual
+                # pension_stop_age (2026-09-14, section 83): optional
+                # lump-sum-buyout override -- ends the annuity at a
+                # specific age instead of paying for life. None (default,
+                # every existing caller) leaves this untouched.
+                _pension_stop_age = inputs.get("_pension_stop_age")
+                year_pen = 0.0 if (_pension_stop_age is not None and age >= _pension_stop_age) else pension_annual
                 year_jss = income.jason_ss
                 year_uss = income.justin_ss
                 fixed_income = year_pen + year_jss + year_uss + bridge_this_year
@@ -1271,6 +1304,7 @@ def run_retirement_projection(inputs: Dict, accounts: List[Dict], ret_ages: List
                     tax_model=marginal_bracket_tax_model(pretax_rate=pretax_tax_rate, taxable_rate=0.0),
                     growth_rate=post_ret,
                     order=DEFAULT_ORDER,
+                    proportional=inputs.get("withdrawal_strategy") == "proportional",
                 )
 
                 withdrawal_taxable = year_result.draws.get("taxable", 0.0)
@@ -1343,7 +1377,7 @@ def run_retirement_projection(inputs: Dict, accounts: List[Dict], ret_ages: List
                     "healthcare_cost":   round(healthcare_inflated),
                     "pension":          round(year_pen),
                     "social_security":  round(year_jss + year_uss),
-                    "bridge_income":    round(bridge_income_at_ret * ((1+inflation)**yr)) if ret_age == 55 and yr < bridge_years else 0,
+                    "bridge_income":    round(bridge_income_at_ret * ((1+inflation)**yr)) if ret_age < 65 and yr < bridge_years else 0,
                     # Backlog item 5 (CALCULATION_CONTRACT.md section 13):
                     # exposed as its own line so a lower income_need during
                     # the gap years is explained, not just implied.
@@ -1506,8 +1540,22 @@ def two_age_spending_need_fn(inputs: Dict, income_today: float, inflation: float
     healthcare_kids      = inputs.get("healthcare_kids", 0)
     kids_annual_cost     = inputs.get("kids_annual_cost", 0)
     bridge_income        = inputs.get("bridge_income_55", 0)
-    bridge_years         = inputs.get("bridge_years_55", 0)
     kids_years           = inputs.get("kids_years_at_home_55", 0)
+    # Bridge duration (2026-09-13): computed to Medicare eligibility (65)
+    # from JASON's own retirement age, same widening as the single-age
+    # run_retirement_projection version of this branch (see its own
+    # comment) -- no longer the fixed bridge_years_55 input. bridge_years_
+    # override is the same transient, non-persisted cap run_stress_tests'
+    # bridge_job_loss scenario uses to end the bridge early.
+    bridge_years = max(0, 65 - jason_ret_age)
+    if inputs.get("bridge_years_override") is not None:
+        bridge_years = min(bridge_years, inputs["bridge_years_override"])
+    # No actual bridge job configured -- don't treat a household retiring
+    # before 65 as bridge-active just because the computed duration is
+    # nonzero (that would wrongly zero out healthcare for anyone without
+    # a bridge job).
+    if bridge_income <= 0:
+        bridge_years = 0
 
     # Every dollar figure's pre-loop compounding anchors to phase2_start
     # -- the TRUE pre-loop boundary -- never to jason_effective_start_age,
@@ -1553,9 +1601,15 @@ def two_age_spending_need_fn(inputs: Dict, income_today: float, inflation: float
 
     def need_for_year(age, yr):
         cum = cum_inflation[yr]
-        if jason_ret_age == 55 and age >= jason_effective_start_age:
+        # Age-banded spending curve (2026-09-14, section 86): see the
+        # single-age loop's identical comment -- scales only the base
+        # spending term, not healthcare/kids/bridge.
+        _spend_mult = spending_band_multiplier(age, inputs)
+        if jason_ret_age < 65 and age >= jason_effective_start_age:
             jason_yr = age - jason_effective_start_age  # duration counter only -- see docstring above
-            kids_still_home = jason_yr < kids_years
+            # kids-at-home stays gated to exactly age 55 (2026-09-13) --
+            # only bridge income widened to any pre-65 retirement age.
+            kids_still_home = jason_ret_age == 55 and jason_yr < kids_years
             bridge_active   = jason_yr < bridge_years
             if bridge_active:
                 healthcare_this_year = 0
@@ -1575,36 +1629,87 @@ def two_age_spending_need_fn(inputs: Dict, income_today: float, inflation: float
                 # caller discarding the returned value instead of adding
                 # it to their own guaranteed_income. See each caller's
                 # own comment for how it's now wired in.
-                year_need = income_at_start * cum + kids_cost
+                year_need = income_at_start * cum * _spend_mult + kids_cost
                 bridge_income_this_year = bridge
             elif kids_still_home and age < 65:
                 healthcare_this_year = healthcare_kids_at_start
                 kids_cost = kids_annual_cost_at_start * cum
-                year_need = income_at_start * cum + kids_cost + healthcare_kids_at_start * cum
+                year_need = income_at_start * cum * _spend_mult + kids_cost + healthcare_kids_at_start * cum
                 bridge_income_this_year = 0.0
             elif age < 65:
                 healthcare_this_year = healthcare_pre_at_start
-                year_need = income_at_start * cum + healthcare_pre_at_start * cum
+                year_need = income_at_start * cum * _spend_mult + healthcare_pre_at_start * cum
                 bridge_income_this_year = 0.0
             else:
                 healthcare_this_year = healthcare_post_at_start
-                year_need = income_at_start * cum + healthcare_post_at_start * cum
+                year_need = income_at_start * cum * _spend_mult + healthcare_post_at_start * cum
                 bridge_income_this_year = 0.0
             healthcare_inflated = healthcare_this_year * cum
         else:
             healthcare_inflated = healthcare_for_age(age, healthcare_pre_at_start, healthcare_post_at_start) * cum
-            year_need = income_at_start * cum + healthcare_inflated
+            year_need = income_at_start * cum * _spend_mult + healthcare_inflated
             bridge_income_this_year = 0.0
         return year_need, healthcare_inflated, bridge_income_this_year
 
     return need_for_year
 
 
-def two_age_pension_for_year(pension_annual: float, age: int, jason_effective_start_age: int) -> float:
+def spending_band_multiplier(age: int, inputs: Dict) -> float:
+    """Go-go/slow-go/no-go multiplier on the base today's-dollars
+    spending target (CALCULATION_CONTRACT.md section 86), applied at
+    every base-income term in the single- and two-age spending-need
+    computations (run_retirement_projection, two_age_spending_need_fn/
+    need_for_year, _run_single). Returns 1.0 (no change) unless the
+    household has set spending_slowgo_dollars/spending_nogo_dollars in
+    Settings -- every existing household/test gets byte-identical
+    output until those are explicitly configured.
+
+    Bands are keyed to the household's own age, same convention as the
+    existing bridge/kids/Medicare phase gates just above this function:
+    - age < spending_gogo_end_age (default 70): full "go-go" spending,
+      i.e. retirement_income_today_dollars itself -- multiplier 1.0.
+    - spending_gogo_end_age <= age < spending_slowgo_end_age (default
+      85): "slow-go" -- multiplier is spending_slowgo_dollars expressed
+      as a fraction of the go-go figure, or 1.0 (flat) if unset.
+    - age >= spending_slowgo_end_age: "no-go" -- spending_nogo_dollars
+      as a fraction of go-go, falling back to the slow-go fraction (or
+      1.0) if no-go itself is unset -- so setting only slow-go still
+      applies from spending_slowgo_end_age all the way out, rather than
+      snapping back to full go-go spending in the no-go years.
+
+    Only the base spending term is scaled -- healthcare, kids costs, and
+    bridge income are fixed/near-fixed costs, not discretionary lifestyle
+    spending, and are deliberately left untouched by every call site."""
+    base = inputs.get("retirement_income_today_dollars", 0) or 0
+    if base <= 0:
+        return 1.0
+    gogo_end   = inputs.get("spending_gogo_end_age", 70)
+    slowgo_end = inputs.get("spending_slowgo_end_age", 85)
+    slowgo     = inputs.get("spending_slowgo_dollars") or 0
+    nogo       = inputs.get("spending_nogo_dollars") or 0
+    if age < gogo_end:
+        return 1.0
+    if age < slowgo_end:
+        return (slowgo / base) if slowgo else 1.0
+    if nogo:
+        return nogo / base
+    return (slowgo / base) if slowgo else 1.0
+
+
+def two_age_pension_for_year(pension_annual: float, age: int, jason_effective_start_age: int,
+                              pension_stop_age: int = None) -> float:
     """Jason's own pension starts only once he's actually retired --
     shared by run_two_dimensional_retirement_projection and its Monte
     Carlo/Stress Tests counterparts so this one-line gate isn't a second
-    independent copy (CALCULATION_CONTRACT.md section 20)."""
+    independent copy (CALCULATION_CONTRACT.md section 20).
+
+    pension_stop_age (2026-09-14, CALCULATION_CONTRACT.md section 83):
+    optional -- models a pension lump-sum buyout ending the annuity at a
+    specific age (instead of paying for life, the default/None
+    behavior). None at every one of this function's other call sites,
+    unaffected."""
+    if pension_stop_age is not None and age >= pension_stop_age:
+        return 0.0
     return pension_annual if age >= jason_effective_start_age else 0.0
 
 
@@ -1866,7 +1971,8 @@ def run_two_dimensional_retirement_projection(inputs: Dict, accounts: List[Dict]
         # here instead since that builder is coupled to Timeline's
         # single-axis fields (effective_start_age/claim_year_index), not
         # TwoPersonTimeline's.
-        year_pen = two_age_pension_for_year(pension_annual, age, jason_effective_start_age)
+        year_pen = two_age_pension_for_year(pension_annual, age, jason_effective_start_age,
+                                             pension_stop_age=inputs.get("_pension_stop_age"))
         year_jss = jason_ss_annual * ((1 + inflation) ** max(0, age - jason_ss_age)) if age >= jason_ss_age else 0.0
         year_uss = (justin_ss_annual * ((1 + inflation) ** max(0, justin_age_this_year - justin_ss_age))
                     if justin_age_this_year >= justin_ss_age else 0.0)
@@ -1893,6 +1999,7 @@ def run_two_dimensional_retirement_projection(inputs: Dict, accounts: List[Dict]
             tax_model=marginal_bracket_tax_model(pretax_rate=pretax_tax_rate, taxable_rate=0.0),
             growth_rate=post_ret,
             order=DEFAULT_ORDER,
+            proportional=inputs.get("withdrawal_strategy") == "proportional",
         )
 
         withdrawal_taxable = year_result.draws.get("taxable", 0.0)
@@ -1965,6 +2072,225 @@ def run_two_dimensional_retirement_projection(inputs: Dict, accounts: List[Dict]
         "yearly_detail": yearly,
         "second_earner_net_of_tax_factor": SECOND_EARNER_NET_OF_TAX_FACTOR,
         "account_ownership_limitation": ACCOUNT_OWNERSHIP_LIMITATION_NOTE,
+    }
+
+
+def _linear_contribution_schedule(annual_amount: float, years_active: int, total_years: int,
+                                   salary_growth_pct: float = 0.0, start_year_index: int = 0) -> List[float]:
+    """Per-year nominal contribution amounts for a stream active for
+    `years_active` years starting at `start_year_index`, optionally
+    growing at `salary_growth_pct` -- the year-by-year-walk equivalent of
+    _contrib_fv/_contrib_fv_flat's two-stage "contribute then grow
+    dormant" pattern (CALCULATION_CONTRACT.md section 87). The dormant
+    stage needs no special handling here: contribution is $0 once
+    years_active elapses, but the caller's own compounding loop keeps
+    applying that year's return regardless, which is exactly what
+    _contrib_fv's separate `_fv(fv_at_stop, pre_ret, dormant_years)` step
+    achieves via closed-form math -- one unified loop replaces the
+    two-stage formula."""
+    schedule = [0.0] * total_years
+    if annual_amount <= 0 or years_active <= 0:
+        return schedule
+    for k in range(start_year_index, min(start_year_index + years_active, total_years)):
+        if k < 0:
+            continue
+        growth_yrs = k - start_year_index
+        schedule[k] = annual_amount * ((1 + salary_growth_pct) ** growth_yrs) if salary_growth_pct else annual_amount
+    return schedule
+
+
+def _add_schedule(target: List[float], addend: List[float]) -> None:
+    for i, v in enumerate(addend):
+        target[i] += v
+
+
+def randomize_accumulation_trial(inputs: Dict, accounts: List[Dict], jason_ret_age: int, justin_ret_age: int,
+                                  life_events: List[Dict], surplus_allocations: List[Dict],
+                                  pre_ret_returns: List[float]) -> Dict[str, float]:
+    """One Monte Carlo trial's own randomized pre-retirement accumulation
+    (CALCULATION_CONTRACT.md section 87) -- mirrors run_two_dimensional_
+    retirement_projection's accumulation section (":1845-1931" as of
+    2026-09-14) stream-for-stream, but walks each stream's per-year
+    nominal contribution schedule forward with pre_ret_returns[k] instead
+    of compounding a flat pre_ret once via _fv/_fv_annuity/_fv_growing_
+    annuity/_fv_annuity_monthly. A deliberately SEPARATE function, not a
+    refactor of the deterministic one: those closed-form helpers only
+    support a single flat rate, and replacing them with an iterative loop
+    risks floating-point drift against existing hand-calculated `==`
+    tests. Here, the actual dollar CONTRIBUTED each year doesn't need
+    randomizing (it's a deterministic function of salary/inputs) -- only
+    the RETURN compounding the growing balance does, so this only needs
+    to reproduce each stream's contribution schedule, not its FV formula.
+
+    len(pre_ret_returns) must equal this trial's own accumulation horizon
+    (phase2_years for the ret ages given). Returns {"pretax", "roth",
+    "taxable", "hsa"} at full precision, matching pretax_at_phase2_start's
+    own convention (unrounded -- see the ~$2 drift comment on that field).
+
+    Known simplification vs. the deterministic path: surplus_allocations
+    are walked as a flat annual (monthly*12) contribution rather than
+    true monthly compounding (_fv_annuity_monthly) -- acceptable given
+    this is a secondary, usually-small income stream, and documented
+    rather than silent."""
+    jason_age  = inputs["jason_age"]
+    justin_age = inputs["justin_age"]
+    pre_ret    = inputs["expected_return_pre_retirement"]  # only used for asset-appreciation pre-sale math below
+    salary_growth_pct = inputs.get("_salary_growth_pct", 0.0)
+    annual_hsa = inputs.get("annual_hsa_contribution", 0)
+    annual_rsu = inputs.get("annual_rsu_value", 0)
+
+    total_401k = sum(a["balance"] for a in accounts if a["account_type"] == "401k")
+    pretax_pct = inputs.get("pretax_401k_pct", 0.75)
+    roth_pct   = 1.0 - pretax_pct
+    pretax_401k = total_401k * pretax_pct if total_401k > 0 else PRETAX_401K_BALANCE_DEFAULT
+    roth_401k   = total_401k * roth_pct   if total_401k > 0 else ROTH_401K_BALANCE_DEFAULT
+
+    salary      = inputs.get("w2_salary", 0)
+    emp_pct     = inputs.get("employee_401k_pct", 0.06)
+    er_pct      = inputs.get("employer_401k_pct", 0.09)
+    annual_401k_roth   = inputs.get("annual_401k_roth_employee",  salary * emp_pct)
+    annual_401k_pretax = inputs.get("annual_401k_pretax_employer", salary * er_pct)
+    annual_bonus = salary * inputs.get("annual_bonus_pct", 0)
+
+    justin_salary  = inputs.get("justin_w2_salary", 0)
+    justin_emp_pct = inputs.get("justin_employee_401k_pct", 0.06)
+    justin_er_pct  = inputs.get("justin_employer_401k_pct", 0.03)
+    justin_annual_401k_roth   = justin_salary * justin_emp_pct
+    justin_annual_401k_pretax = justin_salary * justin_er_pct
+    justin_annual_bonus = justin_salary * inputs.get("justin_annual_bonus_pct", 0)
+    justin_annual_rsu   = inputs.get("justin_annual_rsu_value", 0)
+
+    pretax_start = pretax_401k + sum(
+        a["balance"] for a in accounts if a["account_type"] == "ira" and not is_kid_owner(a["owner"]))
+    roth_start = roth_401k + sum(
+        a["balance"] for a in accounts if a["account_type"] == "roth_ira" and not is_kid_owner(a["owner"]))
+    taxable_start = sum(
+        a["balance"] for a in accounts if a["account_type"] == "taxable" and not is_kid_owner(a["owner"]))
+    hsa_start = sum(a["balance"] for a in accounts if a["account_type"] == "hsa")
+
+    timeline = build_two_person_timeline(jason_age, justin_age, jason_ret_age, justin_ret_age,
+                                          inputs.get("retirement_end_age"))
+    phase2_years = timeline.phase2_start_years
+    phase2_start_age = jason_age + phase2_years
+    n = phase2_years
+    if len(pre_ret_returns) != n:
+        raise ValueError(f"pre_ret_returns must have length {n} (phase2_years), got {len(pre_ret_returns)}")
+
+    jason_contrib_years  = min(timeline.jason_years_to_retire, phase2_years)
+    justin_contrib_years = min(timeline.justin_years_to_retire, phase2_years)
+
+    # Two schedule conventions, matched to the deterministic path's own
+    # two conventions: *_sched (this comment's "end-of-year") holds
+    # recurring/annuity-style streams (401k, RSU, bonus, HSA, recurring
+    # life events, surplus) -- added to the running balance AFTER that
+    # year's return is applied, matching the ordinary-annuity convention
+    # _fv_annuity/_fv_growing_annuity/_fv_annuity_monthly all use (no
+    # growth in the contribution's own year). *_lump (a separate,
+    # "beginning-of-year" schedule) holds one-time amounts (life events'
+    # one_time delta, asset-sale proceeds) -- added BEFORE that year's
+    # return, matching `amount * ((1+pre_ret)**(retirement_year -
+    # event_year))`'s convention of growth for every year from the event
+    # year itself through retirement. Conflating the two (an earlier cut
+    # of this function added one-time lumps into *_sched) undercounted
+    # one-time events by exactly one year of growth -- caught via a
+    # $190,000/$89,639 asset-sale parity check against the deterministic
+    # path during implementation.
+    pretax_sched  = [0.0] * n
+    roth_sched    = [0.0] * n
+    taxable_sched = [0.0] * n
+    hsa_sched     = [0.0] * n
+    taxable_lump  = [0.0] * n
+
+    _add_schedule(pretax_sched, _linear_contribution_schedule(annual_401k_pretax, jason_contrib_years, n, salary_growth_pct))
+    _add_schedule(pretax_sched, _linear_contribution_schedule(justin_annual_401k_pretax, justin_contrib_years, n, salary_growth_pct))
+    _add_schedule(roth_sched, _linear_contribution_schedule(annual_401k_roth, jason_contrib_years, n, salary_growth_pct))
+    _add_schedule(roth_sched, _linear_contribution_schedule(justin_annual_401k_roth, justin_contrib_years, n, salary_growth_pct))
+    _add_schedule(hsa_sched, _linear_contribution_schedule(annual_hsa, n, n))  # active the full horizon, unconditionally
+
+    # RSU/bonus -- net of the SECOND_EARNER_NET_OF_TAX_FACTOR haircut, same
+    # as the deterministic path. Jason's RSU is flat-dollar (never grows
+    # with salary_growth_pct); Justin's RSU and both bonuses do grow --
+    # the same pre-existing asymmetry _contrib_fv_flat's own docstring
+    # documents, preserved here rather than resolved.
+    _add_schedule(taxable_sched, _linear_contribution_schedule(
+        annual_rsu * SECOND_EARNER_NET_OF_TAX_FACTOR, jason_contrib_years, n))
+    _add_schedule(taxable_sched, _linear_contribution_schedule(
+        justin_annual_rsu * SECOND_EARNER_NET_OF_TAX_FACTOR, justin_contrib_years, n, salary_growth_pct))
+    _add_schedule(taxable_sched, _linear_contribution_schedule(
+        annual_bonus * SECOND_EARNER_NET_OF_TAX_FACTOR, jason_contrib_years, n, salary_growth_pct))
+    _add_schedule(taxable_sched, _linear_contribution_schedule(
+        justin_annual_bonus * SECOND_EARNER_NET_OF_TAX_FACTOR, justin_contrib_years, n, salary_growth_pct))
+
+    # Asset sales -- one-time spike in taxable at the sale year, pre-
+    # appreciated at the asset's OWN rate (a real-estate/business market,
+    # not the portfolio's simulated return) up to that year, same as the
+    # deterministic path's asset1_proceeds/asset2 treatment.
+    asset1_sale_age = inputs.get("asset1_sale_age", 0)
+    asset1_sale_net = inputs.get("asset1_sale_net", 0)
+    asset1_app      = inputs.get("asset1_appreciation", 0.03)
+    if asset1_sale_age and asset1_sale_age <= phase2_start_age:
+        # int(): asset1_sale_age/jason_age may be stored as floats (e.g.
+        # 56.0) -- this becomes a list index below, unlike the
+        # deterministic path's identical line, which only ever uses it as
+        # an exponent (floats fine there).
+        yrs_asset1 = int(max(0, asset1_sale_age - jason_age))
+        if yrs_asset1 < n:
+            taxable_lump[yrs_asset1] += asset1_sale_net * ((1 + asset1_app) ** yrs_asset1)
+    asset2_sale_age = inputs.get("asset2_sale_age", 0)
+    asset2_sale_net = inputs.get("asset2_sale_net", 0)
+    if asset2_sale_age and asset2_sale_age <= phase2_start_age:
+        yrs_asset2 = int(max(0, asset2_sale_age - jason_age))
+        if yrs_asset2 < n:
+            taxable_lump[yrs_asset2] += asset2_sale_net
+
+    # Pre-retirement life events -- one-time deltas land as a one-time
+    # spike in their own event_year; recurring monthly deltas contribute
+    # every year of their active window (through retirement, or their own
+    # duration if shorter). Same window logic as _pre_retirement_taxable_
+    # add, re-expressed as a schedule instead of a summed FV.
+    retirement_year_for_events = timeline.retirement_year
+    pre_life_events, _post_life_events = _split_life_events(life_events, retirement_year_for_events)
+    for ev in pre_life_events:
+        ev_year_index = ev["event_year"] - CURRENT_YEAR
+        if ev.get("one_time") and 0 <= ev_year_index < n:
+            taxable_lump[ev_year_index] += ev["one_time"]
+        if ev.get("monthly"):
+            annual_delta = ev["monthly"] * 12
+            contrib_end_year = (retirement_year_for_events if ev["duration_months"] == 0
+                                 else min(retirement_year_for_events, ev["event_year"] + ev["duration_months"] / 12))
+            contrib_years = int(max(0, contrib_end_year - ev["event_year"]))
+            _add_schedule(taxable_sched, _linear_contribution_schedule(
+                annual_delta, contrib_years, n, start_year_index=ev_year_index))
+
+    # Surplus allocations -- approximated as a flat annual (monthly*12)
+    # contribution for the whole horizon rather than true monthly
+    # compounding (_fv_annuity_monthly), a documented simplification for
+    # this randomized path only (section 87).
+    for row in (surplus_allocations or []):
+        monthly = float(row.get("monthly_amount") or 0)
+        if monthly <= 0:
+            continue
+        goal = row.get("goal")
+        annual = monthly * 12
+        if goal == SURPLUS_GOAL_RETIREMENT_CONTRIB:
+            _add_schedule(pretax_sched, _linear_contribution_schedule(annual * pretax_pct, n, n))
+            _add_schedule(roth_sched, _linear_contribution_schedule(annual * roth_pct, n, n))
+        elif goal == SURPLUS_GOAL_TAXABLE_INVESTING:
+            _add_schedule(taxable_sched, _linear_contribution_schedule(annual, n, n))
+
+    def _walk(start_balance: float, schedule: List[float], lump: List[float] = None) -> float:
+        balance = start_balance
+        for k in range(n):
+            if lump:
+                balance += lump[k]
+            balance = balance * (1 + pre_ret_returns[k]) + schedule[k]
+        return balance
+
+    return {
+        "pretax":  _walk(pretax_start, pretax_sched),
+        "roth":    _walk(roth_start, roth_sched),
+        "taxable": _walk(taxable_start, taxable_sched, taxable_lump),
+        "hsa":     _walk(hsa_start, hsa_sched),
     }
 
 
@@ -2360,7 +2686,7 @@ def run_owner_split_two_dimensional_projection(inputs: Dict, accounts: List[Dict
         # joins pension/SS here (pooled call) and, below, "jason"'s own
         # owner_cash bucket specifically -- bridge_income_55 only ever
         # applies during JASON's own bridge-job phase (need_for_year's
-        # own `jason_ret_age == 55` gate), so it's unambiguously his
+        # own `jason_ret_age < 65` gate, 2026-09-13), so it's unambiguously his
         # individual income, same reasoning as pension_annual/jason_ss
         # already being attributed to "jason" a few lines below. Was
         # previously discarded entirely (captured as `_bridge_income`,

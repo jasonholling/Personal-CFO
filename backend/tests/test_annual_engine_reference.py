@@ -225,6 +225,136 @@ def test_withdrawal_order_policy_changes_which_bucket_is_drawn():
     assert roth_first.reconcile() is None
 
 
+# ── Proportional withdrawal (2026-09-13, CALCULATION_CONTRACT.md 81) ────────
+
+def test_proportional_splits_by_balance_share_no_tax():
+    """Untaxed, no exhaustion: taxable=300, pretax=500, roth=200 (total
+    1,000), need=100 -- each bucket draws exactly its balance share of the
+    need: taxable 30, pretax 50, roth 20."""
+    opening = AccountState(pretax=500, roth=200, taxable=300, hsa=0)
+    result = simulate_withdrawal_year(
+        opening, spending_need=100, guaranteed_income=0,
+        life_event_cash=0, rmd_amount=0, tax_model=no_tax_model(),
+        growth_rate=0.0, proportional=True,
+    )
+    assert result.draws == {"taxable": pytest.approx(30), "pretax": pytest.approx(50), "roth": pytest.approx(20)}
+    assert result.unmet_need == 0
+    assert result.reconcile() is None
+
+
+def test_proportional_reproportions_when_a_bucket_is_exhausted():
+    """A bucket too small to cover its own proportional share gets fully
+    drained instead, and the shortfall is picked up by the remaining
+    buckets on a second pass -- not left as unmet need while the other
+    buckets still have room. pretax is taxed at an extreme 90% here
+    purely to force it into the small-share/exhausted case with a modest
+    total need (its GROSS target for a $2.08 net share is ~$20.79, more
+    than its own $20 balance, even though pretax's raw balance share of
+    the $210 need would only be ~$2.08 -- tiny compared to taxable/roth's
+    $1,000 balances each).
+
+    Hand-calculated: pass 1 total=$2,020, shares are taxable $103.96,
+    pretax $2.08 (gross target ~$20.79 > its $20 balance -> exhausted,
+    drawn to $20 gross / $2 net), roth $103.96. Shortfall from pretax
+    ($2.08 - $2 = $0.08) re-proportioned 50/50 across taxable/roth (still
+    equal balances) in pass 2 -- $0.04 more from each. Final: taxable
+    $104.00, pretax $20.00 (fully drained), roth $104.00."""
+    opening = AccountState(pretax=20, roth=1000, taxable=1000, hsa=0)
+    tax_model = lambda bucket, gross: gross * 0.9 if bucket == "pretax" else 0.0
+    result = simulate_withdrawal_year(
+        opening, spending_need=210, guaranteed_income=0,
+        life_event_cash=0, rmd_amount=0, tax_model=tax_model,
+        growth_rate=0.0, proportional=True,
+    )
+    assert result.draws["pretax"] == pytest.approx(20)  # fully drained
+    assert result.draws["taxable"] == pytest.approx(104)
+    assert result.draws["roth"] == pytest.approx(104)
+    assert result.closing.pretax == pytest.approx(0)
+    assert result.unmet_need == 0
+    assert result.reconcile() is None
+
+
+def test_proportional_degenerates_to_single_bucket_when_only_one_has_balance():
+    """Only taxable has a nonzero balance -- proportional must behave
+    identically to any sequential order in this case (100% of the draw
+    has nowhere else to come from)."""
+    opening = AccountState(pretax=0, roth=0, taxable=1000, hsa=0)
+    result = simulate_withdrawal_year(
+        opening, spending_need=300, guaranteed_income=0,
+        life_event_cash=0, rmd_amount=0, tax_model=no_tax_model(),
+        growth_rate=0.0, proportional=True,
+    )
+    assert result.draws == {"taxable": pytest.approx(300)}
+    assert result.reconcile() is None
+
+
+def test_proportional_reports_unmet_need_not_a_fabricated_draw():
+    """Need exceeds total balance across all three buckets -- every
+    bucket drains fully, remaining is reported as unmet_need, never
+    silently invented or dropped."""
+    opening = AccountState(pretax=50, roth=50, taxable=50, hsa=0)
+    result = simulate_withdrawal_year(
+        opening, spending_need=1000, guaranteed_income=0,
+        life_event_cash=0, rmd_amount=0, tax_model=no_tax_model(),
+        growth_rate=0.0, proportional=True,
+    )
+    assert result.closing.pretax == result.closing.roth == result.closing.taxable == 0
+    assert result.unmet_need == pytest.approx(850)
+    assert result.reconcile() is None
+
+
+def test_proportional_after_rmd_only_splits_the_remaining_need():
+    """RMD math is untouched by proportional -- it still drains pretax
+    first, unconditionally, before the proportional split ever runs.
+    pretax=1,000, RMD=900 (taxed 20%, after-tax $720), need=300 -- RMD
+    alone covers the full need with a $420 surplus swept to taxable.
+    The proportional pool never activates (remaining is already 0), so
+    only the mandatory RMD draw shows up in `draws`."""
+    opening = AccountState(pretax=1000, roth=500, taxable=500, hsa=0)
+    tax_model = lambda bucket, gross: gross * 0.2 if bucket == "pretax" else 0.0
+    result = simulate_withdrawal_year(
+        opening, spending_need=300, guaranteed_income=0,
+        life_event_cash=0, rmd_amount=900, tax_model=tax_model,
+        growth_rate=0.0, proportional=True,
+    )
+    assert result.draws == {"pretax": pytest.approx(900)}
+    assert result.closing.pretax == pytest.approx(100)
+    assert result.closing.taxable == pytest.approx(920)  # 500 + $420 RMD surplus
+    assert result.reconcile() is None
+
+
+def test_proportional_falls_back_to_hsa_after_the_trio_is_exhausted():
+    """HSA is deliberately outside the proportional pool (reserved for
+    medical costs) -- but once taxable/pretax/roth are all fully drained,
+    it's still the last-resort fallback, same as DEFAULT_ORDER's own HSA
+    step. taxable/pretax/roth total $150 (fully consumed), need is $500,
+    HSA covers the $350 shortfall."""
+    opening = AccountState(pretax=50, roth=50, taxable=50, hsa=1000)
+    result = simulate_withdrawal_year(
+        opening, spending_need=500, guaranteed_income=0,
+        life_event_cash=0, rmd_amount=0, tax_model=no_tax_model(),
+        growth_rate=0.0, proportional=True,
+    )
+    assert result.closing.pretax == result.closing.roth == result.closing.taxable == 0
+    assert result.draws["hsa"] == pytest.approx(350)
+    assert result.closing.hsa == pytest.approx(650)
+    assert result.unmet_need == 0
+    assert result.reconcile() is None
+
+
+def test_proportional_false_is_byte_identical_to_omitting_it():
+    """Zero-regression guard: proportional=False (the default) must
+    produce the exact same result as never passing the parameter at
+    all -- this flag is purely additive."""
+    opening = AccountState(pretax=500, roth=200, taxable=300, hsa=100)
+    kwargs = dict(spending_need=250, guaranteed_income=0, life_event_cash=0,
+                  rmd_amount=0, tax_model=no_tax_model(), growth_rate=0.0)
+    default = simulate_withdrawal_year(opening, **kwargs)
+    explicit_false = simulate_withdrawal_year(opening, proportional=False, **kwargs)
+    assert default.draws == explicit_false.draws == {"taxable": pytest.approx(250)}
+    assert default.reconcile() is None and explicit_false.reconcile() is None
+
+
 def test_flat_rate_tax_model_differs_from_marginal_by_construction():
     """The two tax philosophies documented in CALCULATION_CONTRACT.md 3.1
     give different results on an identical pretax draw by design — this

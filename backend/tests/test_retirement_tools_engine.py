@@ -6,6 +6,7 @@ from retirement_tools_engine import (
     marginal_rate,
     run_rmd_planning,
     pension_vs_lump_sum,
+    estimate_pension_lump_sum,
     backdoor_roth_eligibility,
     qcd_planner,
     hsa_stealth_ira_strategy,
@@ -173,6 +174,61 @@ class TestPensionVsLumpSum:
         assert "hard to beat" not in result["recommendation"]
         assert "lump sum" in result["recommendation"].lower()
         assert "clear choice" in result["recommendation"]
+
+
+class TestEstimatePensionLumpSum:
+    """estimate_pension_lump_sum (2026-09-14, CALCULATION_CONTRACT.md
+    section 83) -- estimates a buyout figure from the household's OWN
+    modeled pension_55/60/65, reusing _pv_annuity directly (same formula
+    pension_vs_lump_sum above already uses)."""
+
+    def _inputs(self, **overrides):
+        base = {"pension_55": 20000, "pension_60": 30000, "pension_65": 40000, "retirement_end_age": 90}
+        base.update(overrides)
+        return base
+
+    def test_interpolates_pension_at_buyout_age_from_the_55_60_anchors(self):
+        """pension_for_age's own contract: age 58 is 3/5 of the way from
+        55 to 60 -- 20000 + (30000-20000)*3/5 = 26000."""
+        result = estimate_pension_lump_sum(self._inputs(), buyout_age=58)
+        assert result["annual_pension_at_buyout_age"] == 26000
+
+    def test_exact_pv_matches_hand_calculation(self):
+        """0% discount rate collapses PV to a flat sum (_pv_annuity's own
+        documented shortcut): pension=$26,000/yr, life_expectancy=90,
+        buyout_age=58 -> 32 years receiving -> 26000*32 = $832,000."""
+        result = estimate_pension_lump_sum(self._inputs(), buyout_age=58, discount_rate=0.0)
+        assert result["years_receiving_assumed"] == 32
+        assert result["estimated_lump_sum"] == 832000
+
+    def test_higher_discount_rate_produces_a_smaller_estimate(self):
+        """A higher discount rate should discount future payments more
+        aggressively -- monotonic relationship, same as
+        _implied_discount_rate's own "PV is monotonic in rate" premise."""
+        low_rate = estimate_pension_lump_sum(self._inputs(), buyout_age=58, discount_rate=0.03)
+        high_rate = estimate_pension_lump_sum(self._inputs(), buyout_age=58, discount_rate=0.08)
+        assert high_rate["estimated_lump_sum"] < low_rate["estimated_lump_sum"]
+
+    def test_uses_the_households_own_retirement_end_age_as_life_expectancy(self):
+        """No separate mortality table anywhere in this app -- the
+        household's own modeled planning horizon is reused, consistent
+        with every other longevity assumption in this codebase."""
+        result = estimate_pension_lump_sum(self._inputs(retirement_end_age=95), buyout_age=58)
+        assert result["life_expectancy_age_assumed"] == 95
+        assert result["years_receiving_assumed"] == 37
+
+    def test_missing_retirement_end_age_falls_back_to_99(self):
+        inputs = self._inputs()
+        del inputs["retirement_end_age"]
+        result = estimate_pension_lump_sum(inputs, buyout_age=58)
+        assert result["life_expectancy_age_assumed"] == 99
+
+    def test_buyout_age_at_or_past_life_expectancy_yields_zero(self):
+        """Boundary: no years left to receive the pension -> $0 estimate,
+        not a negative or NaN figure."""
+        result = estimate_pension_lump_sum(self._inputs(retirement_end_age=58), buyout_age=58)
+        assert result["years_receiving_assumed"] == 0
+        assert result["estimated_lump_sum"] == 0
 
 
 class TestBackdoorRothEligibility:

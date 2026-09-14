@@ -327,6 +327,20 @@ export default function Settings() {
         <Row label="Planning Horizon" hint="Age through which retirement income is projected; this is an assumption, not a longevity prediction"><NumInput value={form.retirement_end_age ?? 99} onChange={v => set('retirement_end_age', Math.min(110, Math.max(70, Math.round(v))))} suffix="age" /></Row>
       </Section>
 
+      <Section title="Spending Curve (Go-Go / Slow-Go / No-Go)">
+        <div style={{ fontSize:11, color:'var(--text3)', marginBottom:12 }}>
+          Retirement spending rarely stays flat — most households spend more in the
+          active early years and taper off later. Your Annual Income Goal above is
+          the "go-go" figure; set Slow-Go/No-Go below to taper it down at the ages
+          you choose. Leave either $0 to keep spending flat like today. This only
+          scales discretionary spending, not healthcare, kids costs, or bridge income.
+        </div>
+        <Row label="Slow-Go starts at age" hint="Full Annual Income Goal applies before this age; Slow-Go spending applies from this age on"><NumInput value={form.spending_gogo_end_age ?? 70} onChange={v => set('spending_gogo_end_age', Math.round(v))} suffix="age" /></Row>
+        <Row label="No-Go starts at age" hint="Slow-Go spending applies before this age; No-Go spending applies from this age on"><NumInput value={form.spending_slowgo_end_age ?? 85} onChange={v => set('spending_slowgo_end_age', Math.round(v))} suffix="age" /></Row>
+        <Row label="Slow-Go spending" hint="/yr, today's $ — $0 = same as Annual Income Goal"><NumInput value={form.spending_slowgo_dollars ?? 0} onChange={v => set('spending_slowgo_dollars', v)} prefix="$" /></Row>
+        <Row label="No-Go spending" hint="/yr, today's $ — $0 = same as Slow-Go"><NumInput value={form.spending_nogo_dollars ?? 0} onChange={v => set('spending_nogo_dollars', v)} prefix="$" /></Row>
+      </Section>
+
       <Section title="Current Spending">
         <Row label="Current Monthly Expenses" hint="Actual current spending — used for the Emergency Fund check, separate from your retirement income goal above"><NumInput value={form.current_monthly_expenses ?? 0} onChange={v => set('current_monthly_expenses', v)} prefix="$" suffix="/mo" /></Row>
       </Section>
@@ -339,6 +353,19 @@ export default function Settings() {
           <span style={{ fontSize:13, fontWeight:600, color:'var(--accent)' }}>{(roth_pct*100).toFixed(1)}%</span>
         </Row>
         <Row label="Annual HSA Contribution" hint="Household/family HSA, not split per person"><NumInput value={form.annual_hsa_contribution} onChange={v => set('annual_hsa_contribution', v)} prefix="$" /></Row>
+        <Row label="Withdrawal Order in Retirement" hint="Taxable-first defers tax the longest (usually the better lifetime outcome); Proportional draws all three buckets blended by balance every year, starting the moment you retire; Hold Back Reserved Accounts spends pension/SS/401k/Roth/IRA only, leaving any account you've flagged as 'held back' (on the Accounts page) untouched as an emergency reserve">
+          <select value={form.withdrawal_strategy ?? 'taxable_first'} onChange={e => set('withdrawal_strategy', e.target.value)} style={{ fontSize:13 }}>
+            <option value="taxable_first">Taxable-first (tax-deferred growth)</option>
+            <option value="proportional">Proportional (blend all buckets)</option>
+            <option value="hold_back_reserved">Hold Back Reserved Accounts</option>
+          </select>
+        </Row>
+        <Row label="Market-Aware Retirement Timing" hint="Two-age Monte Carlo only. Off = every simulated scenario retires exactly on schedule regardless of what markets did beforehand (today's behavior). On = a scenario whose own simulated pre-retirement returns come in well below expectations delays retirement 1-2 years instead of retiring into a bad market -- lowers the reported success rate (a previously-unmodeled risk becomes visible) but reflects real behavior more honestly">
+          <select value={form.randomize_accumulation ? 'on' : 'off'} onChange={e => set('randomize_accumulation', e.target.value === 'on')} style={{ fontSize:13 }}>
+            <option value="off">Off (retire on schedule regardless of markets)</option>
+            <option value="on">On (delay 1-2yrs if early markets are bad)</option>
+          </select>
+        </Row>
       </Section>
 
       <Section title="Kids (0-5)" >
@@ -361,6 +388,17 @@ export default function Settings() {
         <Row label="Pension at Age 55" hint="Monthly × 12"><NumInput value={form.pension_55 ?? 0} onChange={v => set('pension_55', v)} prefix="$" suffix="/yr" /></Row>
         <Row label="Pension at Age 60" hint="Monthly × 12"><NumInput value={form.pension_60 ?? 0} onChange={v => set('pension_60', v)} prefix="$" suffix="/yr" /></Row>
         <Row label="Pension at Age 65" hint="Monthly × 12"><NumInput value={form.pension_65 ?? 0} onChange={v => set('pension_65', v)} prefix="$" suffix="/yr" /></Row>
+      </Section>
+
+      <Section title="Bridge Income (to Medicare)">
+        <div style={{ fontSize:11, color:'var(--text3)', marginBottom:12 }}>
+          Income from a part-time/consulting "bridge job" after retiring early — covers the
+          gap until Medicare eligibility at 65. Applies automatically for however many years
+          separate {p1}'s retirement age from 65 (e.g. retiring at 60 gets 5 years of bridge
+          income, retiring at 55 gets 10) — no separate duration field needed. Set to $0 if
+          you don't plan to work after retiring.
+        </div>
+        <Row label="Bridge job income" hint="Until age 65"><NumInput value={form.bridge_income_55 ?? 0} onChange={v => set('bridge_income_55', v)} prefix="$" suffix="/yr" /></Row>
       </Section>
 
       <Section title={`${p1} — Life Insurance`}>

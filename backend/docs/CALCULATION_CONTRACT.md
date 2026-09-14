@@ -7882,3 +7882,573 @@ class, is not presented as a destination. The same pure
 `account_allows_asset_class()` policy check is used by contribution routing,
 rebalance routing, and location review so an account cannot appear permissible
 in one Coach workflow and forbidden in another.
+
+## 80. Bridge income widened from exactly age 55 to any pre-Medicare retirement age (2026-09-13)
+
+User-reported (via conversation, not an independent review): bridge income
+("a bridge job's income covering the gap until Medicare eligibility") was
+gated everywhere — `run_retirement_projection`, `two_age_spending_need_fn`
+(shared by all 7 two-age consumers per section 74's own inventory), and
+`_run_single` (single-age Monte Carlo/Stress Tests) — to fire ONLY at
+`ret_age == 55` / `jason_ret_age == 55` exactly, for a fixed
+`bridge_years_55` duration (5, in the household's own data — which doesn't
+even reach 65 from 55). Retiring at 56, 58, 60, or any other pre-65 age
+silently got zero bridge income, contradicting the feature's own stated
+purpose: a bridge to Medicare, not a benefit exclusive to one anchor age.
+
+**Fix.** Every one of those gates widened from `== 55` to `< 65`. Duration
+is no longer the fixed `bridge_years_55` input — it's computed as
+`max(0, 65 - retirement_age)` at each of the three computation sites
+(`run_retirement_projection`, `two_age_spending_need_fn`,
+`_run_single`), so retiring at 60 gets a 5-year bridge, at 55 a 10-year
+bridge, at 65+ none. `bridge_years_55` itself is no longer read for
+duration anywhere (the column still exists in the DB — never dropped,
+per this repo's additive-migration convention — but nothing consults it).
+
+**`bridge_years_override`** (transient, never persisted) replaces the old
+`sim_inputs["bridge_years_55"] = min(override, inputs.get("bridge_years_55", 0))`
+pattern the `bridge_job_loss` stress scenario used to shorten the bridge
+to simulate the job ending early. It's read directly off the `inputs`/
+`phase_inputs` dict at each computation site and caps the computed
+duration (`min(computed, override)`), never extends it. `run_stress_tests`
+(both single- and two-age copies) sets it instead of the old key; the
+"not applicable" description gate for `bridge_job_loss` changed from
+checking `bridge_years_55 <= 0` (now meaningless) to `bridge_income_55 <=
+0` (no bridge job at all) or `ret_age >= 65` (no bridge period regardless
+of income).
+
+**A real bug found and fixed during this change, not shipped separately**:
+the first cut of the widened gate (`if phase_inputs and ret_age < 65:` /
+`if ret_age < 65:` / `if jason_ret_age < 65 and ...`) entered the phased
+branch for EVERY pre-65 retiree, even with `bridge_income_55` left at its
+$0 default — and the phased branch's bridge-active sub-case unconditionally
+zeros out healthcare (`hc_this_year = 0` / `healthcare_this_year = 0`,
+assuming a bridge job's employer coverage). A household retiring at, say,
+60 with no bridge job configured at all would have seen 5 years of $0
+healthcare cost it never actually has. Caught by `test_projection_engine.py`'s
+own pre-existing `test_healthcare_inflation_timing_matches_between_summary_
+and_yearly` test (ret_age=60, no bridge configured) going from a passing
+to a failing assertion, plus 3 SWR tests in `test_two_age_swr.py` retiring
+at 61. Fixed by adding `if bridge_income <= 0: bridge_years = 0` right
+after each site's duration computation — a household with no real bridge
+income never enters the bridge-active sub-branch, regardless of the
+computed duration being nonzero. Full backend suite (1805 tests) reconfirmed
+green after this fix; it was NOT caught by any bridge-specific test in
+`test_two_age_bridge_surplus.py`, since every one of those explicitly sets
+`bridge_income_55` to a nonzero value — the gap was specifically a
+zero-bridge household at an in-between retirement age, a combination
+nothing had exercised before. A new class,
+`TestBridgeAppliesToAnyPreMedicareRetirementAge`, covers this explicitly
+(`test_no_bridge_income_configured_does_not_zero_healthcare_at_in_between_ages`)
+alongside parametrized duration checks for ages 56/58/60/62/64, the
+ret_age==65 boundary (0-year bridge), two-age mode at a non-55 Jason
+retirement age, and a guard confirming kids-at-home (deliberately NOT
+widened — see below) stays gated to exactly 55.
+
+**`kids_years_at_home_55` was intentionally left untouched** — only the
+bridge-income half of each shared branch was asked to widen. Each site's
+`kids_still_home` calculation now reads `ret_age == 55 and yr < kids_years`
+(previously just `yr < kids_years`, since the enclosing `if` used to
+guarantee `ret_age == 55` on its own) so a household retiring at, say, 60
+with `kids_years_at_home_55` set never enters the kids-at-home phase — the
+bridge widening doesn't accidentally widen this separate, deliberately
+age-55-specific policy too.
+
+**Frontend**: Settings gained a new "Bridge Income (to Medicare)" section
+with a `bridge_income_55` input — previously there was NO way to set this
+value through the UI at all (only directly in the DB, or ephemerally via
+WhatIf's non-persisting "Bridge Job Income" slider); no duration field is
+needed anymore since it's computed. `WhatIf.jsx`'s slider hint, `Simulation.jsx`'s
+phased-plan explainer (now shown for any `retAge < 65`, with the kids-at-home
+row conditionally shown only at exactly 55), `SideBySide.jsx`'s "Bridge Job
+Required" comparison row (55/60 both now show the bridge; only 65 shows
+"None needed"), and `RetirementSensitivity.jsx`'s "Viable"-vs-"Tight"
+stoplight heuristic (was `ret_age === 55`, now `ret_age < 65`) were all
+updated to match — each of these previously hardcoded "55" or "55-60" in
+a way that either described stale behavior or actively contradicted the
+widened calculation.
+
+**Verified**: full backend suite 1805 passed (95%+ coverage maintained),
+sensitive-data check clean. `bridge_years_55` remains a valid DB column
+and `InvestmentPolicy`/`PlanningInputs` field (never dropped) but is now
+vestigial for duration purposes — a household that previously relied on
+it being LESS than `65 - ret_age` (i.e. actually wanted a shorter bridge
+than "all the way to Medicare") will now see a LONGER bridge than before;
+this is the intended behavior change, not a regression, per the explicit
+product decision this section implements.
+
+Branch: `codex/portfolio-coach-finish` (continued in this session).
+
+## 81. Proportional/blended withdrawal strategy (2026-09-13)
+
+User-reported: the withdrawal engine (`annual_engine.simulate_withdrawal_year`)
+always drains buckets in a strict, fully-sequential order —
+`DEFAULT_ORDER = ("taxable", "pretax", "hsa", "roth")` — fully exhausting one
+bucket before touching the next, in every one of its 11 call sites (Retirement
+Projection, Monte Carlo, Stress Tests, Roth Conversion, Survivor Scenario).
+For a household whose 401k dwarfs taxable+Roth combined, this means the 401k
+sits completely untouched for years while a much smaller taxable account
+drains first — a deliberate, common tax-deferral default (letting tax-
+deferred/tax-free buckets keep compounding), not a bug, but not what this
+household wanted modeled. SWR (`_swr_year_step`) and Tax Efficiency
+(`_ordered_draw`/`_optimal_draw`) are documented performance exceptions that
+bypass `simulate_withdrawal_year` entirely (migrating them measured >2x
+slower) — untouched by this change.
+
+**Scope**: `simulate_withdrawal_year` itself, plus the 4 functions a
+household actually watches to decide when to retire —
+`run_retirement_projection`, `run_two_dimensional_retirement_projection`,
+`_run_single` (Monte Carlo + Stress Tests, single-age), `_run_single_two_age`
+(Monte Carlo + Stress Tests, two-age). **Explicitly out of scope, a named
+gap, not silently skipped**: `run_owner_split_two_dimensional_projection`,
+both Roth Conversion variants, both Survivor Scenario variants, SWR, and Tax
+Efficiency's existing 3-way comparison.
+
+**The algorithm**: a new `proportional: bool = False` parameter on
+`simulate_withdrawal_year`. `False` (the default) is byte-for-byte identical
+to every existing call — confirmed by a zero-regression test suite
+(`test_proportional_withdrawal.py::TestZeroRegressionGuard`) and by the
+$1-probe/gross-up helper logic (`_draw`/`_net_to_gross`) being extracted
+into two small shared closures the pre-existing `order` loop now calls too,
+rather than duplicated.
+
+`True` runs a water-filling split over `("taxable", "pretax", "roth")` only
+— **HSA is deliberately excluded from the proportional pool**, drawn last as
+a final fallback exactly like `DEFAULT_ORDER` already treats it, since it's
+reserved for medical costs rather than blended discretionary spending. Each
+pass computes every still-active bucket's target NET draw as `remaining *
+(bucket_balance / pool_total)` — frozen against the SAME starting `remaining`
+for every bucket in that pass, not a value earlier buckets in iteration order
+have already shrunk (an early draft of this bug: computing shares against a
+live-mutating `remaining` silently under-allocated to whichever bucket the
+`("taxable","pretax","roth")` dict-iteration order visited last). A bucket
+whose target exceeds its own balance is drawn to zero and dropped from the
+pool; the shortfall it couldn't cover is re-proportioned across whatever
+remains on the next pass. RMD math is completely untouched — it still
+mandatorily drains `pretax` first, unconditionally, exactly as before; the
+proportional split only ever sees `remaining` (spending need still unfunded
+after RMD's after-tax proceeds were already credited).
+
+**A real non-termination bug found and fixed during this change**: the
+first cut used a strict `while remaining > 0 and pool:` loop condition. When
+no bucket in a pass is exhausted, the sum of that pass's shares equals
+`remaining` exactly in EXACT arithmetic — but in floating point, repeated
+division/multiplication left a residual that shrank geometrically (observed:
+~1e-16 of the previous value per pass, e.g. `1.65e-158` → `1.26e-175` →
+`2.54e-191`) without ever landing on precisely `0.0`, and since `pool` never
+shrinks in this case (no bucket gets exhausted), the loop spun indefinitely
+— reproduced concretely in a real Monte Carlo run (`random.gauss`-driven
+per-year returns hit this path; the deterministic Stress Tests "base"
+scenario and every hand-picked round-number reference test did not, which is
+why it wasn't caught until Monte Carlo was tested specifically). Fixed with
+a cent-scale epsilon (`remaining > 0.01`) and a hard 10-pass cap as a
+defense-in-depth backstop (3 buckets can never legitimately need more than 3
+passes to resolve a real, non-degenerate need) — both terminate the hang
+immediately with zero effect on every hand-calculated reference value, since
+those all converge within pass 1 or 2 regardless.
+
+**Wiring**: a new persisted planning-input column, `withdrawal_strategy`
+(`'taxable_first'` default / `'proportional'`), migrated additively in
+`db.py` (never overwrites an existing household's behavior — every existing
+row defaults to `'taxable_first'`, the prior sole behavior). Read via
+`inputs.get("withdrawal_strategy") == "proportional"` at each of the 4
+in-scope call sites (3 of `_run_single`'s 3 callers — `run_monte_carlo`,
+and both `run_stress_tests` call sites — thread it as an explicit parameter,
+since `_run_single` itself doesn't take the `inputs` dict directly; `_run_
+single_two_age` reads it straight off `inputs`, already a parameter). New
+Settings control: "Withdrawal Order in Retirement" (Taxable-first / Propor-
+tional), in the "Household 401k Balance Split & HSA" section.
+
+**Verified**: new `tests/test_proportional_withdrawal.py` (9 tests) —
+zero-regression guard across all 4 in-scope functions, confirms proportional
+actually draws pretax in year one (where taxable-first draws $0), a real
+Monte Carlo/Stress Tests numeric-effect check (proving it's genuinely wired
+into the 1000-trial loop, not silently ignored), and a reconciliation check
+spying on real `simulate_withdrawal_year` calls. Plus 7 new hand-calculated
+reference tests in `test_annual_engine_reference.py` (even 3-way split,
+exhaustion/reproportioning across passes, single-bucket degenerate case,
+fully-unmet case, RMD interaction, byte-identical `proportional=False`
+guard). Full backend suite reconfirmed green after the epsilon/pass-cap fix.
+
+Branch: `codex/portfolio-coach-finish` (continued in this session).
+
+## 82. Custom annual Roth conversion amount (2026-09-13)
+
+User-requested follow-up to section 81's withdrawal-strategy discussion:
+wanting to model pulling a specific amount (e.g. $100,000/yr) from the 401k
+into Roth every year, on top of pension/SS/bridge income, rather than the
+Roth Conversion tool's only existing behavior — auto-computing an amount to
+fill the 22% bracket each year. The custom-amount exploration was first done
+as a one-off hand-rolled approximation script (re-anchoring a projection at
+a later age with adjusted starting balances) to give a quick directional
+answer; this section is the real, fully-tested implementation replacing
+that approximation.
+
+**Fix**: a new `custom_annual_conversion: float = None` parameter on both
+`run_roth_conversion_analysis` (single-age) and
+`_run_roth_conversion_analysis_two_age`. `None` (the default) is a complete
+no-op — confirmed byte-identical to omitting the parameter entirely
+(`TestCustomAnnualConversion::test_none_is_a_complete_no_op[_single_age]`).
+When set, it replaces `room_in_22` as the conversion target in exactly one
+line per function:
+```python
+conversion_target = room_in_22 if custom_annual_conversion is None else custom_annual_conversion
+optimal_conversion = min(conversion_target, base_result.closing.pretax, max_conversion_affordable)
+```
+Both existing affordability guards — capped at what's actually left in
+pretax after the year's own spending draw and growth, and capped at what
+the conversion's own tax bill can actually afford from taxable (the
+incremental-bracket-math fix from the auto-target's own history) — apply
+unchanged to a custom target exactly as they always did to the auto one.
+A custom amount can never over-convert past what's there or leave its own
+tax bill unfunded, same guarantee as before. `room_in_22_bracket` is still
+computed and reported in the schedule either way (useful context even when
+it isn't the active target).
+
+Two-age mode is where a household's real bridge/pension/SS income already
+gets folded in correctly (via the shared `two_age_spending_need_fn` section
+80/81 already fixed) — single-age mode explicitly does not model the bridge
+phase at all (a pre-existing, documented scope limit, unchanged here).
+
+**Wiring**: `/api/simulation/roth-conversion` (GET/POST) gained a
+`custom_annual_conversion` parameter, read from the POST body same as every
+other override on this endpoint. `RothConversion.jsx` gained an "Annual
+Conversion Amount" card — Auto (fill 22% bracket) / Custom, with a dollar
+input shown only in Custom mode — applying to both single- and two-age UI
+modes.
+
+**Verified**: 6 new tests in `test_two_age_roth_conversion.py`
+(`TestCustomAnnualConversion`) — custom overrides the bracket-fill target
+with an exact value, still capped by available pretax balance, still capped
+by tax affordability (reusing the exact free-zone/state-tax edge case
+`TestAffordabilityCapIncludesUnusedDeductionRoom` above already covers),
+zero-regression `None` no-op guard for both two-age and single-age, and a
+single-age-mode application check. Sanity-checked against the real
+household's data: a $100,000/yr custom target (vs. the auto target's
+~$205,567/yr for the same household) produces a smaller but still
+meaningful RMD reduction ($267,509 → $165,358 at first RMD, vs. auto's
+$267,509 → $83,008) — directionally consistent with a smaller annual
+conversion leaving more in pretax than the more aggressive bracket-fill
+default, as expected.
+
+Branch: `codex/portfolio-coach-finish` (continued in this session).
+
+## 83. Pension lump-sum buyout: estimate + full plan impact (2026-09-14)
+
+User-requested: the household's employer reportedly offers a one-time
+pension lump-sum buyout around age 58, instead of the lifetime joint-and-
+survivor annuity currently modeled (`pension_55`/`pension_60`/`pension_65`).
+No real quoted figure exists yet, so the tool estimates one (actuarial
+present value of the household's own modeled pension) and runs the buyout
+through the real Retirement Projection/Monte Carlo engine — not just a
+standalone PV comparison.
+
+**Reused, not reinvented**: `pension_for_age(inputs, age)`
+(`projection_engine.py`) already interpolates the correct annuity amount
+at any age between the 55/60/65 anchors; `_pv_annuity` (already used by
+`retirement_tools_engine.pension_vs_lump_sum`, a pre-existing standalone
+PV calculator that takes manually-typed numbers) computes the estimate;
+`life_events`' existing one-time-cash-delta mechanism injects the lump
+sum at the right calendar year with zero new code.
+
+**New engine code**: `pension_annual` is computed once per scenario and
+applied as a flat constant every year once retired —
+`two_age_pension_for_year` had an on/off start gate but no "stops at age
+X" concept. Added an optional `pension_stop_age: int = None` parameter
+(zero-blast-radius change: this function has 11 call sites across
+`projection_engine.py`/`simulation_engine.py` — Roth Conversion x2, Tax
+Efficiency, Survivor Scenario x2, owner-split — all 9 unrelated ones are
+completely unaffected by adding an optional trailing parameter with a
+backward-compatible default; only the 2 call sites this feature actually
+needs — `run_two_dimensional_retirement_projection` and
+`_run_single_two_age`, shared by two-age Monte Carlo/Stress Tests — pass
+it explicitly, read from a transient `inputs.get("_pension_stop_age")`
+override, same non-persisted-override pattern as `withdrawal_strategy`/
+`bridge_years_override` earlier this session). Single-age
+`run_retirement_projection`'s flat `year_pen = pension_annual` line got
+the analogous inline guard.
+
+**`estimate_pension_lump_sum(inputs, buyout_age=58, discount_rate=0.06)`**
+(`retirement_tools_engine.py`): `pension_for_age(inputs, buyout_age)` for
+the annuity amount, `inputs.get("retirement_end_age") or 99` as the
+assumed payout horizon (the household's own modeled planning horizon —
+consistent with every other longevity assumption in this app; there is no
+separate mortality table anywhere in this codebase, and adding one just
+for this tool would be inconsistent with that).
+
+**New endpoint** `POST /api/retirement-tools/pension-lump-sum-impact`:
+computes the estimate, then runs `run_two_dimensional_retirement_projection`
++ `run_monte_carlo` (two-age) twice — baseline (pension continues
+unmodified) vs. buyout (`_pension_stop_age` set, lump sum injected as a
+one-time life event dated to the buyout year) — returning success rate,
+median final balance, first RMD amount, and end-of-plan balance for both,
+for the frontend to diff. New card on `RetirementTools.jsx`: "Pension
+Buyout: Full Plan Impact" — distinct from the pre-existing standalone
+"Pension vs. Lump Sum Decision" calculator above it (manually-typed
+numbers, no projection-engine interaction) — additive, not a replacement.
+
+**Verified**: real household data — pension interpolates correctly at a
+between-anchor age (58 → $34,018/yr from the 55/60 anchors), buyout
+scenario's yearly detail shows pension dropping to exactly $0 starting at
+the buyout age while the baseline continues paying it every year after.
+11 new tests: `TestEstimatePensionLumpSum` (6, hand-calculated PV/
+interpolation/boundary cases) and `TestPensionStopAge` (3, zero-regression
+guard + exact stop-age behavior + stop-before-retirement edge case) in
+`retirement_tools_engine`/`test_two_dimensional_retirement.py`
+respectively. Full backend suite green.
+
+Branch: `codex/bridge-and-withdrawal-strategy` (continued in this
+session).
+
+## 84. Hold Back Reserved Accounts — a third withdrawal strategy (2026-09-14)
+
+User-requested, alongside section 83: a withdrawal strategy that spends
+pension/SS/401k/Roth/IRA only, leaving one specific named account (their
+Schwab taxable brokerage) untouched as an emergency reserve — confirmed
+explicitly (not the entire taxable asset class, since other taxable
+accounts like the Conagra Equity Plan should stay in the normal pool).
+
+**Turned out to need zero engine code.** `simulate_withdrawal_year` and
+every consumer built on it sum `accounts` into pretax/roth/taxable/hsa
+buckets purely from whatever list they're handed — there's no per-account
+identity retained past that summation point. So excluding one specific
+account from the withdrawal pool doesn't need new bucket-splitting logic
+(unlike section 81's proportional strategy, which needed a real algorithm
+change) — it only needs the account removed from the `accounts` list
+*before* it reaches the engine at all, the same way `_pension_stop_age`
+(section 83) works via a pre-computed override rather than new per-year
+logic.
+
+**New per-account flag**: `accounts.held_back_from_withdrawal` (boolean,
+default `False`). New `Account` Pydantic model field (`main.py`), added to
+both the `INSERT`/`UPDATE` column lists (this model doesn't use `extra:
+allow` + a dynamic column whitelist the way `PlanningInputs` does — every
+field needs to be threaded through explicitly). New checkbox on
+`Accounts.jsx`'s edit form ("Hold back as emergency reserve"), shown
+alongside the existing investment-only fields (stock allocation %, expense
+ratio).
+
+**New `_apply_account_holdback(accounts, inputs)` helper** (`main.py`):
+a no-op returning the accounts list unchanged unless
+`inputs["withdrawal_strategy"] == "hold_back_reserved"`, in which case it
+filters out every flagged account. Wired into the same 4 call sites
+section 81's `withdrawal_strategy` reached — `get_monte_carlo`,
+`post_monte_carlo`, `get_stress_tests`, `post_stress_tests` — right after
+`accounts` is loaded and `inputs` (with any What-If overrides already
+applied) is available. `/api/projections/retirement` (the 55-67 age-sweep
+endpoint used by SideBySide.jsx/WhatIf.jsx/saved-scenario round-tripping)
+is deliberately NOT wired — its response gets echoed back verbatim into a
+saved scenario's own record (`resolved_assumptions`), and filtering
+`accounts` there would mean a saved scenario silently stops representing
+the household's real, complete account list. A named gap, not silently
+skipped.
+
+**Third Settings option**: "Hold Back Reserved Accounts", alongside
+Taxable-first and Proportional.
+
+**Verified**: `TestAccountHoldback` (`test_main.py`, 3 tests) — the flag
+is a byte-identical no-op under `taxable_first` (same accounts, flag set
+vs. unset), `hold_back_reserved` produces a materially different
+deterministic Stress Tests "base" result when a $300,000 account is
+excluded, and Monte Carlo also respects the flag (smoke test). Full
+backend suite green.
+
+Branch: `codex/bridge-and-withdrawal-strategy` (continued in this
+session).
+
+## 85. Age-banded spending curve — go-go / slow-go / no-go (2026-09-14)
+
+User-requested after looking at the real household's numbers: a flat
+`retirement_income_today_dollars` for the entire 42-year retirement
+(55/58→100) forces an all-or-nothing tradeoff between spending more now
+and success rate, because a flat increase gets tested against every
+remaining year of every simulated path, not just the "enjoy it" years.
+Verified against the real household: $125K/yr → 83.6% success, $14.4M
+median ending balance; $150K/yr (flat) → 65.1% success. The fix isn't a
+bigger flat number — it's letting spending taper by age like an actual
+retirement does.
+
+**`spending_band_multiplier(age, inputs)`** (`projection_engine.py`): a
+pure function returning a multiplier (1.0 = no change) on the base
+today's-dollars spending target for a given age, keyed to three new
+optional `planning_inputs` columns — `spending_gogo_end_age` (default
+70), `spending_slowgo_end_age` (default 85), `spending_slowgo_dollars`
+and `spending_nogo_dollars` (both default 0, meaning "same as the band
+before it"). `retirement_income_today_dollars` itself is unchanged — it
+remains the go-go (baseline) figure. Every household/test that hasn't
+touched the new fields gets byte-identical output, same convention as
+`pension_stop_age` (section 83).
+
+Only the base income term is scaled — healthcare, kids costs, and bridge
+income are fixed/near-fixed costs, not discretionary lifestyle spending,
+and are deliberately excluded at every call site.
+
+**Applied at**: `run_retirement_projection`'s single-age inline loop,
+`two_age_spending_need_fn`/`need_for_year` (the shared two-age factory,
+used by `run_two_dimensional_retirement_projection` and every two-age
+Monte Carlo/Stress Tests trial), and `_run_single`'s single-age inline
+loop (Monte Carlo/Stress Tests) — one multiplier computed per iteration
+from `age`/`inputs`, multiplied into the base spending term in all 4 age-
+phase branches (bridge/kids/pre-65/post-65) each of these functions
+already has.
+
+**Explicitly out of scope**: SWR Analysis, Roth Conversion Analysis, Tax
+Efficiency Analysis, Survivor Scenario, Insurance Analysis, Contribution
+Sensitivity — each already has its own simplified spending formula (no
+bridge/kids phase split either), a pre-existing gap unrelated to this
+feature. Same scoping call as section 83's "9 unrelated call sites
+unaffected."
+
+**Follow-up audit (2026-09-14), a real leak caught and closed**: the
+two-age variants of SWR Analysis (`_household_spending_success_rate_
+two_age`), Roth Conversion Analysis (`_run_roth_conversion_analysis_
+two_age`), and Tax Efficiency Analysis (`_run_tax_efficiency_simulation_
+two_age`) all call the SAME shared `two_age_spending_need_fn`/
+`need_for_year` factory Monte Carlo/Stress Tests use — unlike their
+single-age counterparts, which have their own independent simplified
+formulas. Because the multiplier was added inside that shared factory,
+these three two-age functions silently picked up spending-band behavior
+the very first time this feature shipped, contradicting the "out of
+scope" line above and creating a single-age/two-age asymmetry for the
+same three tools. Fixed by stripping `spending_slowgo_dollars`/
+`spending_nogo_dollars` from the `inputs` dict at those three call sites
+only, before constructing `need_for_year` — `spending_band_multiplier`
+sees a base with no slow-go/no-go figures and returns 1.0 unconditionally,
+restoring the exact originally-documented "out of scope" behavior for
+both age modes of all four named tools. Survivor Scenario (both age
+modes) was independently confirmed never to call `two_age_spending_need_
+fn`/`need_for_year` at all — no leak there. The one call site that
+SHOULD carry the multiplier (`_run_single_two_age`, line 560) is
+untouched, still passing the real `inputs`.
+
+**Verified**: `spending_band_multiplier` reference tests (band
+boundaries, zero-regression default, slowgo-only vs. both set, plus
+explicit age-69/70 and age-84/85 boundary assertions at the DEFAULT
+70/85 ages); integration tests confirming `run_retirement_projection`/
+`run_two_dimensional_retirement_projection` yearly_detail spending steps
+down at the configured ages; Monte Carlo/Stress Tests zero-regression
+guard plus a directional test showing a lower no-go figure reduces
+late-life RMD relative to an equal-total-spend flat baseline; a
+regression test confirming SWR/Roth Conversion/Tax Efficiency (two-age)
+are unaffected by slow-go/no-go dollars, closing the leak above. Full
+backend suite green.
+
+Branch: `codex/bridge-and-withdrawal-strategy` (continued in this
+session).
+
+## 87. Adaptive retirement timing in Monte Carlo (two-age) (2026-09-14)
+
+User's own framing: "if we are hitting the worst market conditions, I
+am not going to retire, I would wait." Investigated and confirmed: the
+pre-retirement accumulation phase was 100% deterministic in every
+consumer -- `run_monte_carlo`/`run_stress_tests` each call
+`run_retirement_projection`/`run_two_dimensional_retirement_projection`
+ONCE, outside the N=1000 trial loop, so every trial started withdrawal
+from the identical fixed balance regardless of what markets did leading
+up to retirement. `random.gauss` was called only for withdrawal-phase
+years. This makes a household's blind on-schedule retirement a robot's
+behavior, not a person's -- someone facing a crash right before their
+planned date would realistically delay, not walk into it.
+
+**`randomize_accumulation_trial(inputs, accounts, jason_ret_age,
+justin_ret_age, life_events, surplus_allocations, pre_ret_returns)`**
+(`projection_engine.py`): a deliberately SEPARATE function from
+`run_two_dimensional_retirement_projection`, not a refactor of it --
+that function's closed-form helpers (`_fv`/`_fv_annuity`/`_fv_growing_
+annuity`/`_fv_annuity_monthly`) only support a single flat rate;
+replacing them with an iterative per-year loop risked floating-point
+drift against existing hand-calculated `==` tests. Key insight: the
+contribution AMOUNT entering each bucket each year doesn't need
+randomizing (it's a deterministic function of salary/inputs) -- only
+the RETURN compounding the growing balance does. So this derives each
+stream's per-year nominal contribution into a schedule (via
+`_linear_contribution_schedule`), then walks it forward with
+`pre_ret_returns[k]`. Two schedule conventions, matched exactly to the
+deterministic path's own two conventions: annuity-style streams (401k,
+RSU, bonus, HSA, recurring life events, surplus) are added AFTER that
+year's return (ordinary-annuity convention, no growth in their own
+year); one-time lump sums (life events' one_time delta, asset-sale
+proceeds) are added BEFORE that year's return (full growth including
+their own year) -- conflating the two during implementation undercounted
+one-time events by exactly one year of growth, caught via a parity
+check against the deterministic function using real $190,000/$89,639
+asset-sale figures (a genuine bug, not just float noise: off by
+~$1,804 on a small test case, traced to the wrong schedule).
+
+**Verified exact parity** (to floating-point precision) against
+`run_two_dimensional_retirement_projection` for every stream EXCEPT
+surplus allocations, fed a flat list of the deterministic `pre_ret`
+rate: 401k (both spouses, growing/flat), RSU (Jason flat-dollar/Justin
+growing -- the pre-existing asymmetry preserved, not resolved), bonus,
+HSA, asset sales (both, with asset1's own pre-sale appreciation), life
+events (one-time and recurring), and unequal-retirement-age dormant-
+years handling. **Documented, deliberate approximation**: surplus
+allocations walk as a flat annual (monthly×12) contribution rather than
+true monthly compounding (`_fv_annuity_monthly`) -- a secondary, usually
+small stream; verified close (~5% relative) but not exact, with a test
+that would fail loudly if a future change accidentally made it exact
+without updating the expectation (a sign true monthly compounding had
+been silently reintroduced without re-verifying the simplification is
+still intended).
+
+**Delay rule** (`simulation_engine.py`, `_run_monte_carlo_two_age`, new
+`randomize_accumulation: bool = False` param, threaded from
+`run_monte_carlo`): per trial, when opted in, randomizes that trial's
+own `phase2_years`-long pre-retirement return sequence, compares the
+resulting portfolio against the shared deterministic baseline via
+`ratio = trial_portfolio / deterministic_portfolio`, and delays both
+spouses' retirement together (a joint decision, not modeled per-spouse
+independently) by 2 years if `ratio < ACCUMULATION_SHORTFALL_DELAY_
+THRESHOLD_2YR` (0.60) or 1 year if `< ..._1YR` (0.75) -- named
+constants, not buried magic numbers. A delayed trial extends its own
+already-drawn return sequence (not re-sampled from scratch) by the
+delay years, re-derives its `TwoPersonTimeline` via `build_two_person_
+timeline` with shifted ages (bridge/spending-band/Medicare gating all
+fall out of this automatically, since those are pure functions of age),
+and recomputes `pension_for_age` for the shifted age. One check, no
+iterative re-check -- bounded compute, avoids infinite deferral chains.
+
+**Percentile-chart alignment**: the chart's `ages` array is anchored to
+the ORIGINAL (undelayed) `phase2_start_age`. A delayed trial's balances
+array is padded at the front with `delay_years` copies of its own pre-
+delay portfolio total (held flat -- a simplification, not tracking the
+exact intra-delay growth path) so every trial's array stays the same
+length and age-indexed the same way, rather than reading as a false $0
+dip during years that trial simply hadn't retired yet. Verified this
+padding produces exactly `retire_yrs`-length arrays for the typical
+case (`end_age` fixed, `retire_yrs` shrinks by exactly `delay_years`);
+a documented edge case exists when a household's own `retirement_end_
+age` sits within `delay_years` of their planned retirement (the
+`max(phase2_start_age+1, ...)` floor in `build_two_person_timeline`
+can then keep `end_age` from shrinking as expected) -- success_rate/
+median_final_balance are unaffected either way; only chart display
+could be marginally short in this rare boundary case, gracefully
+handled by the existing `if yr < len(b) else 0` fallback.
+
+**Zero regression**: `randomize_accumulation=False` (every existing
+caller, including Stress Tests and every other Monte Carlo consumer)
+is byte-identical to omitting the param -- the single deterministic
+accumulation call and shared starting balance are completely
+unaffected. Backed by `db.py`'s new `randomize_accumulation` column
+(INTEGER DEFAULT 0) and a Settings toggle ("Market-Aware Retirement
+Timing", two-age Monte Carlo only, off by default).
+
+**Scope**: two-age Monte Carlo only (where this household actually
+lives). Explicitly NOT built for: single-age Monte Carlo, Stress Tests
+(its fixed deterministic override-scenario model doesn't naturally fit
+per-trial accumulation variance), SWR/Roth Conversion/Tax Efficiency/
+Survivor Scenario. A deliberate, documented follow-up scope, not an
+oversight -- same scoping-call pattern as prior sections.
+
+**Verified**: `TestRandomizeAccumulationTrial` (5 tests, hand-calculated
+parity against the deterministic function across every stream);
+`TestAdaptiveRetirementTiming` (7 tests: zero-regression guard, result
+always carries the new fields, monkeypatched always-catastrophic
+returns → 100% of trials delay 2yrs, monkeypatched always-excellent
+returns → 0% delay, directional guard that randomizing can only lower
+or match success rate for identical inputs, zero-phase2-years is a
+no-op, delayed trials' balances arrays stay correctly aligned/lengthed
+for the percentile chart). Full backend suite green.
+
+Branch: `codex/bridge-and-withdrawal-strategy` (continued in this
+session).

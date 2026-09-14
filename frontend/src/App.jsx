@@ -121,6 +121,30 @@ export default function App() {
       .catch(() => setAuthState({ auth_enabled: false, authenticated: true, webauthn_registered: false }))
   }, [])
 
+  // Session-expiry detection (2026-09-14): authState is only checked once
+  // on mount -- if the session expires later (backend restart, timeout),
+  // the app kept rendering as if still unlocked, and any subsequent API
+  // call (e.g. Monte Carlo) surfaced the backend's 401 as that page's own
+  // generic error ("Simulation failed") instead of routing back to the
+  // Lock screen. A global response interceptor flips authState back to
+  // unauthenticated on ANY 401 from ANY page, so the app falls back to
+  // Lock ("Unlock the app to continue") instead of a misleading
+  // calculation-failure message. Guarded on authState already being
+  // authenticated=true so this doesn't fire for Lock's own failed-
+  // unlock-attempt 401 (wrong passphrase) while already on the Lock screen.
+  useEffect(() => {
+    const id = axios.interceptors.response.use(
+      response => response,
+      error => {
+        if (error?.response?.status === 401 && authState?.authenticated) {
+          setAuthState(s => ({ ...s, authenticated: false }))
+        }
+        return Promise.reject(error)
+      }
+    )
+    return () => axios.interceptors.response.eject(id)
+  }, [authState])
+
   // First-run guidance: auto-show once the app is actually usable (past
   // auth) if the household has zero accounts and hasn't dismissed it
   // before. Also reachable anytime via the sidebar's "Getting Started" link.

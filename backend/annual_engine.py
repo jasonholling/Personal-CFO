@@ -260,6 +260,7 @@ def simulate_withdrawal_year(
     tax_model: Callable[[str, float], float],
     growth_rate: float,
     order: tuple = DEFAULT_ORDER,
+    proportional: bool = False,
 ) -> AnnualResult:
     """One year of the withdrawal-phase waterfall.
 
@@ -325,34 +326,107 @@ def simulate_withdrawal_year(
             remaining = 0.0
 
     balances = {"pretax": pretax, "roth": roth, "taxable": taxable, "hsa": hsa}
-    for bucket in order:
-        if remaining <= 0:
-            break
+
+    def _draw(bucket: str, gross: float) -> tuple:
+        """(draw, tax, net) for withdrawing up to `gross` from `bucket`,
+        capped at its balance. Shared by both the sequential-order loop
+        below and the proportional water-fill, so a taxed draw's grossing-
+        up/tax-probe logic never diverges between the two policies."""
         bal = balances[bucket]
-        if bal <= 0:
-            continue
-        # Probe the tax model at a nominal $1 to see if this bucket is
-        # taxed at all — avoids requiring callers to also declare "which
-        # buckets are taxed", keeping the tax_model callable the single
-        # source of truth. Both models provided here are linear in gross,
-        # so a $1 probe gives the exact marginal rate.
-        probe = tax_model(bucket, 1.0)
-        if probe > 0:
-            tax_rate = probe
-            gross = remaining / (1 - tax_rate) if tax_rate < 1 else remaining
-            draw = min(gross, bal)
-            tax = tax_model(bucket, draw)
-            net = draw - tax
-        else:
-            draw = min(remaining, bal)
-            tax = 0.0
-            net = draw
-        balances[bucket] = bal - draw
-        draws[bucket] = draws.get(bucket, 0.0) + draw
-        if tax > 0:
-            taxes[bucket] = taxes.get(bucket, 0.0) + tax
-        spending_funded += net
-        remaining -= net
+        draw = min(gross, bal)
+        tax = tax_model(bucket, draw)
+        return draw, tax, draw - tax
+
+    def _net_to_gross(bucket: str, net_target: float) -> float:
+        """Gross amount that nets to `net_target` after tax_model(bucket, .)
+        — same $1-probe technique the order loop already used."""
+        rate = tax_model(bucket, 1.0)
+        return net_target / (1 - rate) if 0 < rate < 1 else net_target
+
+    if proportional and remaining > 0:
+        # Water-fill taxable/pretax/roth by CURRENT balance share (2026-09-13
+        # CALCULATION_CONTRACT.md section 81) -- unlike the sequential `order`
+        # loop, no bucket is fully drained before another is touched. Each
+        # pass targets a NET amount from every bucket still in the pool,
+        # proportional to its balance; a bucket whose target exceeds its own
+        # balance is drawn to zero and dropped from the pool, and whatever
+        # shortfall it left is re-proportioned across the remaining buckets
+        # on the next pass. Converges in at most 3 passes (one bucket either
+        # fully resolves its share or gets exhausted and removed each pass).
+        # HSA is deliberately NOT part of the pool -- see below, drawn last
+        # exactly like the sequential order's own HSA step.
+        pool = {b: balances[b] for b in ("taxable", "pretax", "roth") if balances[b] > 0}
+        # Reproduced (2026-09-13): a strict `remaining > 0` loop condition
+        # can spin for dozens of passes when no bucket is ever exhausted --
+        # each pass's rounding error shrinks `remaining` geometrically
+        # (observed: ~1e-16 of the previous value per pass) without ever
+        # landing on EXACTLY 0.0 in floating point. A cent-scale epsilon
+        # and a hard pass cap (never legitimately needed -- 3 buckets means
+        # at most 3 passes resolve a real, non-degenerate need) both
+        # terminate this immediately with no effect on any real result.
+        _EPSILON = 0.01
+        _MAX_PASSES = 10
+        _passes = 0
+        while remaining > _EPSILON and pool and _passes < _MAX_PASSES:
+            _passes += 1
+            total = sum(pool.values())
+            need_this_pass = remaining  # frozen for the whole pass -- every
+            # bucket's share is computed against the SAME starting need, not
+            # a value some earlier bucket in this pass has already shrunk
+            # (which would silently under-allocate to later buckets in
+            # iteration order instead of a true simultaneous split).
+            exhausted = []
+            for bucket in list(pool.keys()):
+                bal = pool[bucket]
+                share = need_this_pass * (bal / total)
+                gross_target = _net_to_gross(bucket, share)
+                if gross_target >= bal:
+                    # Can't fully cover its proportional share -- take
+                    # everything this bucket has and drop it from the pool;
+                    # the shortfall gets re-proportioned across whatever's
+                    # left in the NEXT pass (bucket stays out, others stay in
+                    # -- see the loop-level comment above).
+                    draw, tax, net = _draw(bucket, bal)
+                    exhausted.append(bucket)
+                else:
+                    draw, tax, net = _draw(bucket, gross_target)
+                    pool[bucket] = bal - draw  # still in the pool, participates in the next pass too if one happens
+                balances[bucket] -= draw
+                draws[bucket] = draws.get(bucket, 0.0) + draw
+                if tax > 0:
+                    taxes[bucket] = taxes.get(bucket, 0.0) + tax
+                spending_funded += net
+                remaining -= net
+            for bucket in exhausted:
+                del pool[bucket]
+        if remaining > 0 and balances["hsa"] > 0:
+            draw, tax, net = _draw("hsa", _net_to_gross("hsa", remaining))
+            balances["hsa"] -= draw
+            draws["hsa"] = draws.get("hsa", 0.0) + draw
+            if tax > 0:
+                taxes["hsa"] = taxes.get("hsa", 0.0) + tax
+            spending_funded += net
+            remaining -= net
+    else:
+        for bucket in order:
+            if remaining <= 0:
+                break
+            bal = balances[bucket]
+            if bal <= 0:
+                continue
+            # Probe the tax model at a nominal $1 to see if this bucket is
+            # taxed at all — avoids requiring callers to also declare "which
+            # buckets are taxed", keeping the tax_model callable the single
+            # source of truth. Both models provided here are linear in gross,
+            # so a $1 probe gives the exact marginal rate.
+            gross = _net_to_gross(bucket, remaining)
+            draw, tax, net = _draw(bucket, gross)
+            balances[bucket] = bal - draw
+            draws[bucket] = draws.get(bucket, 0.0) + draw
+            if tax > 0:
+                taxes[bucket] = taxes.get(bucket, 0.0) + tax
+            spending_funded += net
+            remaining -= net
 
     unmet_need = max(0.0, remaining)
 
