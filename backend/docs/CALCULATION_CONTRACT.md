@@ -1,11 +1,32 @@
 # Personal CFO — Calculation Contract
 
-Baseline commit: `ec61309e6749d74ee31a02070aa46fd238a8ffd5` (origin/main).
-Branch: `codex/consolidate-calculation-engine`.
+## Document status
+
+This is the calculation contract and audit history for Personal CFO. The
+**current authoritative implementation is the checked-out `main` branch**;
+branch names and commit references in the dated sections below are historical
+provenance, not claims that every branch-only change is deployed.
+
+The original consolidation baseline was `ec61309e6749d74ee31a02070aa46fd238a8ffd5`
+(on `codex/consolidate-calculation-engine`). The current repository status and
+merge state are maintained by Git; when this document is updated, record the
+current `main` commit in the release/verification note at the end rather than
+rewriting the historical audit entries.
 
 This document maps where the app's calculation engines duplicate financial
 mechanics, and states the conventions a shared engine must follow so that
 identical assumptions produce identical results everywhere.
+
+### Current reading rules
+
+- Sections dated with a feature branch preserve the review trail. Treat a
+  feature as part of the deployed contract only when its verification note
+  says it is on `main` (or it has subsequently been merged into `main`).
+- Later corrective sections amend earlier sections. If wording conflicts,
+  the latest corrective section and the implementation/tests it cites win;
+  the earlier text remains as historical context.
+- The numbered headings are unique. New amendments continue the sequence; do
+  not reuse an old section number.
 
 ## 1. Where mechanics are duplicated today
 
@@ -15,7 +36,8 @@ and/or spending simulation:
 
 | # | Function | File | What it duplicates |
 |---|---|---|---|
-| 1 | `run_retirement_projection` (withdrawal-phase loop, line ~580) | projection_engine.py | The reference implementation: 4-bucket waterfall (taxable→pretax(grossed)→HSA→Roth), RMDs, marginal-rate tax, life events, asset sales, healthcare phasing, age-55 bridge/kids phasing, unmet-need tracking. |
+| 1 | `run_retirement_projection` (withdrawal-phase loop, line ~580) | projection_engine.py | The reference implementation: 4-bucket waterfall (taxable→pretax(grossed)→HSA→Roth), RMDs, marginal-rate tax, life events, asset sales, healthcare phasing, pre-Medicare bridge-income and age-55 kids-at-home
+   phasing, unmet-need tracking. |
 | 2 | `_run_single` | simulation_engine.py | Near-identical bucket waterfall to #1, re-implemented separately. Shared by Monte Carlo and Stress Tests. Already uses the module-level `_pretax_marginal_tax_rate`/`_grossed_up_draw` helpers (added in the 2026-09-07 audit-fix pass) but the loop structure itself is a separate copy of #1's, not shared code. |
 | 3 | `run_swr_analysis` → `success_at_withdrawal` (nested) | simulation_engine.py | A third independent copy of the same 4-bucket waterfall, used inside a binary search. Also uses `_pretax_marginal_tax_rate`/`_grossed_up_draw`, but the loop body itself is a third hand-written copy. |
 | 4 | `run_tax_efficiency_simulation` → `run_strategy` (nested) | simulation_engine.py | A fourth copy, but deliberately implements **three different withdrawal-order policies** (taxable_first / roth_first / optimal-fill-22%-bracket) rather than the one true policy #1–#3 share. Uses **flat** tax rates (`TAX_PRETAX = 0.22`, `TAX_TAXABLE = 0.15`) instead of the real marginal-bracket lookup #1–#3 use — stated as a deliberate simplification in its own docstring ("Simplified tax: flat 22% on pretax withdrawals... 15% on taxable gains"). |
@@ -124,8 +146,9 @@ Carlo/Stress/SWR previously treated every withdrawal as tax-free).
   approach, not a `rate ** years` shortcut, whenever the rate can vary
   across the horizon (stress scenarios, and potentially per-year Monte
   Carlo inflation multipliers in the future).
-- Pension is **frozen — no COLA**, everywhere. Social Security **does**
-  get COLA, from each person's own claim year forward (not from
+- Pension has **no inflation COLA**. Its start/eligibility timing may still
+  be re-evaluated by a scenario such as Survivor; “frozen” means the annual
+  amount does not inflate after it starts. Social Security **does** get COLA, from each person's own claim year forward (not from
   retirement start — a person who claims later starts their own
   inflation clock later). `run_survivor_scenario`'s COLA bug (applying
   COLA to the combined pension+SS total) was a violation of this,
@@ -134,9 +157,11 @@ Carlo/Stress/SWR previously treated every withdrawal as tax-free).
 ### 2.5 Account ownership and tax treatment
 - Buckets, by account_type: **pretax** (`401k` × `pretax_401k_pct` + `ira`),
   **roth** (`roth_ira` + `401k` × `(1 − pretax_401k_pct)`), **taxable**
-  (`taxable`), **hsa** (`hsa`). Kid-owned accounts (`owner` in
-  `{"abby","cooper"}`) are excluded from every adult retirement bucket —
-  `net_worth_engine.KIDS_OWNERS` is the canonical set.
+  (`taxable`), **hsa** (`hsa`). Accounts owned by a child are excluded from
+  every adult retirement bucket. The child-owner set is dynamic (currently
+  `kid_1` through `kid_5`, with legacy-name migration support); callers must
+  use the canonical `net_worth_engine.KIDS_OWNERS`/child-owner helper rather
+  than hard-code Abby or Cooper.
 - **Tax treatment by bucket**: pretax withdrawals are ordinary income
   (marginal-bracket rate, or the flat 22% simplification where explicitly
   chosen); Roth withdrawals are tax-free; HSA withdrawals are treated as
@@ -206,14 +231,15 @@ behavior baked into one policy:
    the LTCG threshold — both already coexist by design (`run_tax_efficiency_simulation`'s
    three strategies use different capital-gains treatment from each
    other on purpose).
-4. **Bridge-job/kids-at-home phasing** (age-55 branch in
-   `run_retirement_projection`/`_run_single`): a real, deliberate scope
-   limit — this multi-phase income/healthcare model only exists for the
-   age-55 scenario. `run_roth_conversion_analysis` and
-   `run_tax_efficiency_simulation` do not attempt it (documented as a
-   known simplification in their own docstrings pre-dating this task).
-   The shared engine should make bridge-phase an optional input, not
-   assume every consumer wants it.
+4. **Bridge-job and kids-at-home phasing**: configured bridge income is
+   modeled during the relevant pre-Medicare bridge period for the later
+   retiree, including non-55 retirement selections where that income is
+   configured. The kids-at-home spending/healthcare branch remains an
+   age-55-specific policy. Roth Conversion and Tax Efficiency retain their
+   documented simplified spending models and do not inherit these phases
+   unless their own scope section explicitly says otherwise. The shared
+   engine must keep bridge income and kids-at-home policy as separate,
+   inspectable inputs.
 5. **SWR's "safe withdrawal amount" is a single undifferentiated dollar
    figure**, not decomposed into income+healthcare like every other
    engine's `year_need`. This is intentional — SWR answers "how much can I
@@ -6117,7 +6143,7 @@ frontend" this component exists to avoid) or cross-checking against a
 real backend-computed reference case rather than a hand-built fixture.
 Listed as unbuilt, not silently claimed complete.
 
-## 71. Real annual reconciliation against actual backend output, and a double-counting fix (2026-09-10, brought in from `codex/milestone-2-explainability`)
+## 71A. Real annual reconciliation against actual backend output, and a double-counting fix (2026-09-10, brought in from `codex/milestone-2-explainability`)
 
 Independent review: the "not yet a full annual reconciliation" gap left
 open at the end of section 69 needed closing before either milestone
@@ -7883,7 +7909,7 @@ class, is not presented as a destination. The same pure
 rebalance routing, and location review so an account cannot appear permissible
 in one Coach workflow and forbidden in another.
 
-## 80. Bridge income widened from exactly age 55 to any pre-Medicare retirement age (2026-09-13)
+## 82. Bridge income widened from exactly age 55 to any pre-Medicare retirement age (2026-09-13)
 
 User-reported (via conversation, not an independent review): bridge income
 ("a bridge job's income covering the gap until Medicare eligibility") was
@@ -7979,7 +8005,7 @@ product decision this section implements.
 
 Branch: `codex/portfolio-coach-finish` (continued in this session).
 
-## 81. Proportional/blended withdrawal strategy (2026-09-13)
+## 83. Proportional/blended withdrawal strategy (2026-09-13)
 
 User-reported: the withdrawal engine (`annual_engine.simulate_withdrawal_year`)
 always drains buckets in a strict, fully-sequential order —
@@ -8072,7 +8098,7 @@ guard). Full backend suite reconfirmed green after the epsilon/pass-cap fix.
 
 Branch: `codex/portfolio-coach-finish` (continued in this session).
 
-## 82. Custom annual Roth conversion amount (2026-09-13)
+## 84. Custom annual Roth conversion amount (2026-09-13)
 
 User-requested follow-up to section 81's withdrawal-strategy discussion:
 wanting to model pulling a specific amount (e.g. $100,000/yr) from the 401k
@@ -8133,7 +8159,7 @@ default, as expected.
 
 Branch: `codex/portfolio-coach-finish` (continued in this session).
 
-## 83. Pension lump-sum buyout: estimate + full plan impact (2026-09-14)
+## 85. Pension lump-sum buyout: estimate + full plan impact (2026-09-14)
 
 User-requested: the household's employer reportedly offers a one-time
 pension lump-sum buyout around age 58, instead of the lifetime joint-and-
@@ -8200,7 +8226,7 @@ respectively. Full backend suite green.
 Branch: `codex/bridge-and-withdrawal-strategy` (continued in this
 session).
 
-## 84. Hold Back Reserved Accounts — a third withdrawal strategy (2026-09-14)
+## 86. Hold Back Reserved Accounts — a third withdrawal strategy (2026-09-14)
 
 User-requested, alongside section 83: a withdrawal strategy that spends
 pension/SS/401k/Roth/IRA only, leaving one specific named account (their
@@ -8256,7 +8282,7 @@ backend suite green.
 Branch: `codex/bridge-and-withdrawal-strategy` (continued in this
 session).
 
-## 85. Age-banded spending curve — go-go / slow-go / no-go (2026-09-14)
+## 87. Age-banded spending curve — go-go / slow-go / no-go (2026-09-14)
 
 User-requested after looking at the real household's numbers: a flat
 `retirement_income_today_dollars` for the entire 42-year retirement
@@ -8336,7 +8362,7 @@ backend suite green.
 Branch: `codex/bridge-and-withdrawal-strategy` (continued in this
 session).
 
-## 87. Adaptive retirement timing in Monte Carlo (two-age) (2026-09-14)
+## 88. Adaptive retirement timing in Monte Carlo (two-age) (2026-09-14)
 
 User's own framing: "if we are hitting the worst market conditions, I
 am not going to retire, I would wait." Investigated and confirmed: the
@@ -8452,3 +8478,51 @@ for the percentile chart). Full backend suite green.
 
 Branch: `codex/bridge-and-withdrawal-strategy` (continued in this
 session).
+
+## 89. Current authoritative conventions and release checklist
+
+This section is the concise source-of-truth index for maintainers. The full
+dated sections above remain the audit trail; this index resolves the areas
+where later features amended earlier assumptions.
+
+- **Timeline and ages:** rows represent the age during that year and end-of-year
+  balances. Retirement timing, Social Security claim age, Medicare/healthcare
+  gates, and life-event dates must come from the shared timeline/helpers.
+- **Cash-flow order:** determine dated spending and guaranteed income; apply
+  life-event cash; take mandatory RMDs; fund remaining need through the
+  configured withdrawal order; record unmet need; then apply growth. Surplus
+  cash is swept through the consumer's existing surplus channel.
+- **Bridge versus kids:** configured bridge income applies during the
+  pre-Medicare bridge period for the relevant later-retiree path. The
+  kids-at-home/age-55 spending and healthcare rules remain a separate
+  age-55 policy. Do not describe them as one universal age-55 branch.
+- **Pension:** no inflation COLA is applied. Scenario-specific eligibility or
+  start/stop timing may be recalculated (especially Survivor); this does not
+  mean the annual pension amount receives COLA.
+- **Social Security:** benefit amount, claim age, and COLA use the shared
+  resolver. A spouse's claim-age setting must not overwrite the other
+  spouse's setting.
+- **Ownership:** adult buckets exclude dynamic child owners through the
+  canonical helper. Owner-split and Survivor calculations must reconcile to
+  the pooled household total before applying their policy-specific ownership
+  transitions.
+- **Scope exceptions:** SWR, Roth Conversion, Tax Efficiency, and Survivor
+  have documented policy/performance differences. A shared helper may feed
+  them only where the cited section and parity tests say so; do not infer
+  complete engine unification from a shared input factory.
+- **Spending bands and adaptive timing:** these are opt-in settings with
+  explicit scope notes. Boundary ages, validation, and whether a consumer
+  receives the setting must be covered by tests and stated in its section.
+- **History versus deployment:** a branch-only section is a proposal or
+  implementation record until merged. Before release, update the section's
+  status and run the full backend/frontend verification suites.
+
+Release verification (update on each merge): record the `main` commit, full
+backend/frontend test counts, coverage, and any intentionally deferred
+features here.
+
+Audit completed 2026-09-14 against `main` at `3e9dd1c`: backend full suite
+reported 1,866 passed, 1 skipped, and 95.07% coverage; frontend tests/build
+were green in the same review cycle. The contract cleanup in this section
+makes the historical branch notes and the current conventions distinguishable;
+it does not promote branch-only features into `main`.
