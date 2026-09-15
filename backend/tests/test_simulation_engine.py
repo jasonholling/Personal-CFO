@@ -358,6 +358,88 @@ class TestSpendingBandInMonteCarloAndStressTests:
         assert tapered["scenarios"]["base"]["final_balance"] > flat["scenarios"]["base"]["final_balance"]
 
 
+class TestGuardrailsInMonteCarloAndStressTests:
+    """Dynamic spending guardrails (2026-09-14, Guyton-Klinger style,
+    CALCULATION_CONTRACT.md section 91), opt-in via guardrails_enabled,
+    wired into _run_single via the same `inputs` kwarg
+    spending_band_multiplier itself uses -- see _apply_guardrails in
+    simulation_engine.py."""
+
+    def test_disabled_by_default_is_byte_identical(self, sample_inputs, sample_accounts, monkeypatch):
+        """Zero-regression guard for every existing household/test."""
+        import random as random_module
+        monkeypatch.setattr(random_module, "gauss", lambda mu, sigma: 0.0)
+        without = run_monte_carlo(sample_inputs, sample_accounts, ret_age=60, ss_timing="early")
+        explicit_off = run_monte_carlo({**sample_inputs, "guardrails_enabled": 0}, sample_accounts, ret_age=60, ss_timing="early")
+        assert without["median_final_balance"] == explicit_off["median_final_balance"]
+
+    def test_a_sustained_downturn_triggers_a_spending_cut_that_preserves_more_money(self, sample_inputs, sample_accounts, monkeypatch):
+        """Directional check: a persistently bad market pushes the
+        withdrawal rate above the initial band every year, so guardrails
+        should keep cutting spending -- ending with a higher median
+        balance than a household that keeps spending the fixed,
+        inflation-only amount regardless of how the portfolio is doing."""
+        import random as random_module
+        monkeypatch.setattr(random_module, "gauss", lambda mu, sigma: -0.08)
+        inputs = {**sample_inputs, "jason_age": 60, "justin_age": 60, "retirement_end_age": 85,
+                  "expected_return_post_retirement": -0.08}
+        fixed = run_monte_carlo(inputs, sample_accounts, ret_age=60, ss_timing="early")
+        guarded = run_monte_carlo(
+            {**inputs, "guardrails_enabled": 1, "guardrails_band_pct": 10, "guardrails_adjustment_pct": 10},
+            sample_accounts, ret_age=60, ss_timing="early",
+        )
+        assert guarded["median_final_balance"] > fixed["median_final_balance"]
+
+    def test_a_sustained_upturn_triggers_a_spending_raise_that_leaves_less_money(self, sample_inputs, sample_accounts, monkeypatch):
+        """Mirror-image directional check: a persistently strong market
+        should let guardrails raise spending, leaving LESS money behind
+        than a household that never adjusts upward even as its portfolio
+        pulls ahead of plan -- proving the raise half of the band isn't
+        just a cut-only rule in disguise."""
+        import random as random_module
+        monkeypatch.setattr(random_module, "gauss", lambda mu, sigma: 0.15)
+        inputs = {**sample_inputs, "jason_age": 60, "justin_age": 60, "retirement_end_age": 85,
+                  "expected_return_post_retirement": 0.15}
+        fixed = run_monte_carlo(inputs, sample_accounts, ret_age=60, ss_timing="early")
+        guarded = run_monte_carlo(
+            {**inputs, "guardrails_enabled": 1, "guardrails_band_pct": 10, "guardrails_adjustment_pct": 10},
+            sample_accounts, ret_age=60, ss_timing="early",
+        )
+        assert guarded["median_final_balance"] < fixed["median_final_balance"]
+
+    def test_stress_tests_also_respect_guardrails(self, sample_inputs, sample_accounts):
+        """Smoke test confirming run_stress_tests' base scenario (which
+        shares _run_single with Monte Carlo) also cuts spending -- and so
+        preserves more money -- under a sustained downturn."""
+        inputs = {**sample_inputs, "jason_age": 60, "justin_age": 60, "retirement_end_age": 85,
+                  "expected_return_post_retirement": -0.08}
+        fixed = run_stress_tests(inputs, sample_accounts, ret_age=60, ss_timing="early")
+        guarded = run_stress_tests(
+            {**inputs, "guardrails_enabled": 1, "guardrails_band_pct": 10, "guardrails_adjustment_pct": 10},
+            sample_accounts, ret_age=60, ss_timing="early",
+        )
+        assert guarded["scenarios"]["base"]["final_balance"] > fixed["scenarios"]["base"]["final_balance"]
+
+    def test_only_base_spending_is_scaled_never_healthcare(self, sample_inputs, sample_accounts, monkeypatch):
+        """Same guarantee spending_band_multiplier documents for itself:
+        guardrails must never touch healthcare/kids/bridge costs, only
+        the discretionary base-spending term. Proven the same way -- a
+        household with $0 base spending target has nothing for
+        guardrails to scale, so a cut-triggering downturn must leave its
+        final balance completely unaffected by guardrails."""
+        import random as random_module
+        monkeypatch.setattr(random_module, "gauss", lambda mu, sigma: -0.08)
+        inputs = {**sample_inputs, "jason_age": 60, "justin_age": 60, "retirement_end_age": 85,
+                  "expected_return_post_retirement": -0.08, "retirement_income_today_dollars": 0,
+                  "healthcare_post_medicare": 20000, "healthcare_pre_medicare": 20000}
+        fixed = run_monte_carlo(inputs, sample_accounts, ret_age=60, ss_timing="early")
+        guarded = run_monte_carlo(
+            {**inputs, "guardrails_enabled": 1, "guardrails_band_pct": 10, "guardrails_adjustment_pct": 10},
+            sample_accounts, ret_age=60, ss_timing="early",
+        )
+        assert guarded["median_final_balance"] == fixed["median_final_balance"]
+
+
 class TestSpendingBandLeakAuditTwoAge:
     """2026-09-14 audit finding: _household_spending_success_rate_two_age
     (feeds SWR), _run_roth_conversion_analysis_two_age, and _run_tax_

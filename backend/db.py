@@ -339,6 +339,22 @@ def init_db():
         # unchanged behavior (single deterministic accumulation, no
         # pre-retirement variance) until this is explicitly turned on.
         ("randomize_accumulation",     "INTEGER DEFAULT 0"),
+        # Dynamic spending guardrails (2026-09-14, Guyton-Klinger style):
+        # opt-in, default off -- every existing household/test sees the
+        # exact unchanged fixed (inflation-adjusted only) spending path
+        # until this is explicitly turned on. When enabled,
+        # simulation_engine._run_single measures each year's withdrawal
+        # rate (planned base spend / current portfolio balance) against
+        # the FIRST retirement year's own rate: more than
+        # guardrails_band_pct above it permanently cuts future spending
+        # by guardrails_adjustment_pct (compounding with any earlier
+        # cuts/raises); that much below it permanently raises spending
+        # by the same amount. Only the discretionary base-spending term
+        # is scaled, never healthcare/kids/bridge income -- same
+        # precedent as spending_band_multiplier just above.
+        ("guardrails_enabled",         "INTEGER DEFAULT 0"),
+        ("guardrails_band_pct",        "REAL DEFAULT 20"),
+        ("guardrails_adjustment_pct",  "REAL DEFAULT 10"),
     ]
     for col, typedef in migrations:
         if col not in existing_cols:

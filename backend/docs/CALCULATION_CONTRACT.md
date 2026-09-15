@@ -8615,3 +8615,77 @@ back to the old behavior.
 
 Branch: none — applied directly to `main` per this session's own workflow
 (commit, verify full suite, merge/push immediately after each fix group).
+
+## 91. Dynamic spending guardrails — Guyton-Klinger style (2026-09-14)
+
+User-requested (brainstorm session, "let's build the dynamic guardrails
+withdrawal strategy"): every existing withdrawal path spends a fixed,
+inflation-only amount every year regardless of how the portfolio is
+actually doing — section 87's age-banded curve tapers spending by AGE,
+but nothing adjusts spending in response to PERFORMANCE, which is how
+real retirees using a guardrails strategy actually behave (cut after a
+bad stretch, relax after a good one, instead of a rigid number).
+
+**Three new optional `planning_inputs` columns**: `guardrails_enabled`
+(default 0/off), `guardrails_band_pct` (default 20 — how far the
+withdrawal rate may drift from its starting value before an adjustment
+fires), `guardrails_adjustment_pct` (default 10 — the cut/raise size
+each time a guardrail is hit). Every household/test that hasn't touched
+these gets byte-identical output, same convention as section 87's own
+spending-band columns.
+
+**`_apply_guardrails(spend_mult, current_balance)`** (nested inside
+`_run_single`, `simulation_engine.py`): measures this year's planned
+withdrawal rate (base spend ÷ `current_balance`, the OPENING portfolio
+balance for the year) against the FIRST retirement year's own rate
+(captured once, at `yr==0`). More than `guardrails_band_pct` above it
+permanently cuts future spending by `guardrails_adjustment_pct`
+(compounding with any earlier cuts/raises via a running
+`_guardrail_mult`, not re-derived fresh each year); that much below it
+permanently raises spending the same way. A real guardrail decision
+sticks going forward — it isn't re-evaluated against a moving target
+next year, only checked again against the same original baseline rate.
+
+Only the discretionary base-spending term is scaled — healthcare, kids
+costs, and bridge income are fixed/near-fixed costs, not lifestyle
+spending, and are deliberately excluded, same "only the base term"
+convention section 87 already established for
+`spending_band_multiplier`. `_apply_guardrails` layers directly on top
+of that multiplier (`spending_band_multiplier(...) * guardrail_mult`),
+so a household using both features gets them combined rather than one
+silently overriding the other.
+
+**Applied at**: `_run_single`'s single-age inline loop only (both
+age-phase branches: bridge/kids/pre-65/post-65, and the plain post-65
+path) — Monte Carlo and Stress Tests, single-axis mode.
+
+**Explicitly out of scope (documented, not a silent gap)**: two-age
+Monte Carlo/Stress Tests (`_run_single_two_age`/`two_age_spending_
+need_fn`/`need_for_year`) — that shared factory is a different code
+shape (a `need_for_year(yr)` closure returning a value per year, not a
+single flat loop with mutable per-run state readily available), and
+extending guardrails there would need its own stateful-multiplier
+design rather than a drop-in reuse of `_apply_guardrails`. Left for a
+follow-up if the household actually uses two-age mode with guardrails.
+Also out of scope, same reasoning as section 87: SWR Analysis, Roth
+Conversion Analysis, Tax Efficiency Analysis, Survivor Scenario,
+Insurance Analysis, Contribution Sensitivity — none of these run a
+Monte-Carlo-style year-by-year trial loop with a portfolio balance to
+measure a withdrawal rate against in the first place.
+
+**Verified**: zero-regression guard (guardrails unset/explicitly off is
+byte-identical to today's fixed-spending path); a directional test
+proving a sustained downturn triggers a cut and preserves more money
+than fixed spending; a mirror-image test proving a sustained upturn
+triggers a raise and leaves less money than fixed spending (closing off
+the possibility this is a cut-only rule in disguise); a stress-test
+smoke test confirming `run_stress_tests`' base scenario (shares
+`_run_single` with Monte Carlo) sees the same cut behavior; a
+zero-effect test with the base spending target set to $0 confirming
+guardrails never touches healthcare even under a guardrail-triggering
+downturn; a `planning_inputs` round-trip test (defaults, then explicit
+save) via the real API. Full backend suite green (1962+ passed, 95%+
+coverage maintained).
+
+Branch: none yet — implemented directly, to be shipped via this
+session's own branch → commit → merge → push workflow.
