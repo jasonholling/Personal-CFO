@@ -256,6 +256,21 @@ class TestPlanningInputs:
         _seed_planning_inputs(client, {**sample_inputs, "justin_ss_benefit_type": "worker"})
         assert client.get("/api/planning-inputs").json()["justin_ss_benefit_type"] == "worker"
 
+    def test_guardrails_settings_default_off_and_round_trip(self, client, sample_inputs):
+        # Regression (2026-09-14, dynamic spending guardrails): a fresh
+        # install must default to disabled with the documented band/
+        # adjustment defaults, and every field must actually persist.
+        defaults = client.get("/api/planning-inputs").json()
+        assert not defaults["guardrails_enabled"]
+        assert defaults["guardrails_band_pct"] == 20
+        assert defaults["guardrails_adjustment_pct"] == 10
+        _seed_planning_inputs(client, {**sample_inputs, "guardrails_enabled": 1,
+                                        "guardrails_band_pct": 15, "guardrails_adjustment_pct": 12})
+        saved = client.get("/api/planning-inputs").json()
+        assert saved["guardrails_enabled"]
+        assert saved["guardrails_band_pct"] == 15
+        assert saved["guardrails_adjustment_pct"] == 12
+
 
 class TestNetWorth:
     def test_empty_accounts_gives_zero_net_worth(self, client):

@@ -391,6 +391,30 @@ export default function Settings() {
         <Row label="No-Go spending" hint="/yr, today's $ — $0 = same as Slow-Go"><NumInput value={form.spending_nogo_dollars ?? 0} onChange={v => set('spending_nogo_dollars', v)} prefix="$" /></Row>
       </Section>
 
+      <Section title="Dynamic Spending Guardrails">
+        <div style={{ fontSize:11, color:'var(--text3)', marginBottom:12 }}>
+          Guyton-Klinger style guardrails, for Monte Carlo and Stress Tests only. Instead of
+          spending the same inflation-adjusted amount every year no matter what the market does,
+          each year's withdrawal rate (planned spending ÷ current portfolio balance) is compared
+          against your first retirement year's own rate — stray too far above it and future
+          spending is permanently cut; too far below and it's permanently raised. Off by default;
+          only the discretionary base spending above is affected, never healthcare, kids costs, or
+          bridge income.
+        </div>
+        <Row label="Guardrails" hint="Off = the fixed, inflation-only spending path everywhere else in the app already uses">
+          <select value={form.guardrails_enabled ? 'on' : 'off'} onChange={e => set('guardrails_enabled', e.target.value === 'on')} style={{ fontSize:13 }}>
+            <option value="off">Off (fixed spending)</option>
+            <option value="on">On (dynamic guardrails)</option>
+          </select>
+        </Row>
+        <Row label="Guardrail Band" hint="How far the withdrawal rate can drift from your first retirement year's rate before spending adjusts">
+          <NumInput value={form.guardrails_band_pct ?? 20} onChange={v => set('guardrails_band_pct', Math.max(1, v))} suffix="%" />
+        </Row>
+        <Row label="Spending Adjustment" hint="How much spending is cut or raised each time a guardrail is hit">
+          <NumInput value={form.guardrails_adjustment_pct ?? 10} onChange={v => set('guardrails_adjustment_pct', Math.max(1, v))} suffix="%" />
+        </Row>
+      </Section>
+
       <Section title="Current Spending">
         <Row label="Current Monthly Expenses" hint="Actual current spending — used for the Emergency Fund check, separate from your retirement income goal above"><NumInput value={form.current_monthly_expenses ?? 0} onChange={v => set('current_monthly_expenses', v)} prefix="$" suffix="/mo" /></Row>
       </Section>

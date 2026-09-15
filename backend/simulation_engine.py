@@ -265,8 +265,10 @@ def _run_single(
     feature sees no change.
 
     inputs (2026-09-14, CALCULATION_CONTRACT.md section 86): the raw
-    household inputs dict, used only for spending_band_multiplier's
-    go-go/slow-go/no-go lookup. Optional/None-default like every field
+    household inputs dict, used for spending_band_multiplier's
+    go-go/slow-go/no-go lookup AND (section 91) guardrails_enabled/
+    guardrails_band_pct/guardrails_adjustment_pct -- see
+    _apply_guardrails below. Optional/None-default like every field
     above -- an empty dict makes the multiplier a no-op (1.0) for every
     existing caller/test that doesn't pass it.
     """
@@ -319,6 +321,41 @@ def _run_single(
     # and for ordinary Monte Carlo, so this is a zero-behavior-change fix
     # for the overwhelming majority of runs.
     cum_inflation = build_cumulative_inflation(inflation, retire_yrs, inflation_mults)
+
+    # Dynamic spending guardrails (2026-09-14, Guyton-Klinger style,
+    # opt-in via guardrails_enabled -- see db.py's migration comment).
+    # _guardrail_mult starts at 1.0 (no-op) and is updated permanently
+    # (compounding with any earlier cuts/raises) whenever a year's
+    # withdrawal rate strays outside the band around the FIRST
+    # retirement year's own rate -- a real retiree's guardrail decision
+    # sticks going forward, it isn't re-evaluated fresh every year
+    # against a moving target. Disabled (the default), this returns
+    # spend_mult completely unchanged for every existing caller/test.
+    _guardrails_enabled = bool((inputs or {}).get("guardrails_enabled"))
+    _guardrails_band_pct = (inputs or {}).get("guardrails_band_pct") or 20
+    _guardrails_adjustment_pct = (inputs or {}).get("guardrails_adjustment_pct") or 10
+    _guardrail_mult = 1.0
+    _guardrail_initial_wr = None
+
+    def _apply_guardrails(spend_mult, current_balance):
+        """Scales ONLY the discretionary base-spending multiplier --
+        never healthcare/kids/bridge income -- same "only the base
+        term" convention as spending_band_multiplier just above.
+        current_balance is this year's OPENING portfolio balance
+        (last year's closing balance), before this year's withdrawal."""
+        nonlocal _guardrail_mult, _guardrail_initial_wr
+        if not _guardrails_enabled:
+            return spend_mult
+        projected = income_at_ret * cum_inf * spend_mult * _guardrail_mult
+        if _guardrail_initial_wr is None:
+            _guardrail_initial_wr = (projected / current_balance) if current_balance > 0 else 0
+        elif current_balance > 0 and _guardrail_initial_wr > 0:
+            current_wr = projected / current_balance
+            if current_wr > _guardrail_initial_wr * (1 + _guardrails_band_pct / 100):
+                _guardrail_mult *= (1 - _guardrails_adjustment_pct / 100)
+            elif current_wr < _guardrail_initial_wr * (1 - _guardrails_band_pct / 100):
+                _guardrail_mult *= (1 + _guardrails_adjustment_pct / 100)
+        return spend_mult * _guardrail_mult
 
     for yr in range(retire_yrs):
         age      = timeline.age(yr)
@@ -400,7 +437,8 @@ def _run_single(
                 bridge_years = 0
             # Age-banded spending curve (2026-09-14, section 86): scales
             # only the base income term below, not healthcare/kids/bridge.
-            _spend_mult = spending_band_multiplier(age, inputs or {})
+            # Guardrails (opt-in) layer on top of that same base term.
+            _spend_mult = _apply_guardrails(spending_band_multiplier(age, inputs or {}), pretax + roth + taxable + hsa)
             if yr < bridge_years:
                 hc_this_year = 0
                 # Single-age bridge-surplus fix (2026-09-10, sibling to
@@ -428,7 +466,7 @@ def _run_single(
                 year_need = income_at_ret*cum_inf*_spend_mult + healthcare_post*cum_inf
                 bridge_this_year = 0.0
         else:
-            _spend_mult = spending_band_multiplier(age, inputs or {})
+            _spend_mult = _apply_guardrails(spending_band_multiplier(age, inputs or {}), pretax + roth + taxable + hsa)
             year_need = income_at_ret * cum_inf * _spend_mult + income.healthcare
             bridge_this_year = 0.0
 
