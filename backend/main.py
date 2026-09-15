@@ -1364,10 +1364,20 @@ def _finalize_holdings_import_preview(preview: Dict, existing: List[Dict], defau
     "unclassified", a real, already-supported ASSET_CLASSES value the
     household can reclassify later, same as any other unclassified
     holding). None (the CSV preview's own behavior, unchanged) still
-    requires the file to supply it."""
+    requires the file to supply it.
+
+    A "CASH" row (2026-09-14, Schwab CSV import bug -- a household's
+    pre-existing manually-entered cash holding was labeled with no
+    ticker and a different name than the importer's own "CASH"/"Cash &
+    Cash Investments" convention, so ticker/name matching missed it and
+    a second cash holding got created every re-import, silently doubling
+    the account's counted cash) also matches an existing holding by
+    asset_class=="cash" in the same account, regardless of its ticker or
+    label -- a taxable/brokerage account has exactly one cash sweep
+    position, however differently each source happens to name it."""
     from security_provider import peek_cached_quote
     for row in preview["rows"]:
-        match = next((h for h in existing if h["account_id"] == row.get("account_id") and ((row.get("ticker") and h.get("ticker") and row["ticker"].upper() == h["ticker"].upper()) or row.get("security_name", "").lower() == h.get("security_name", "").lower())), None)
+        match = next((h for h in existing if h["account_id"] == row.get("account_id") and ((row.get("ticker") and h.get("ticker") and row["ticker"].upper() == h["ticker"].upper()) or row.get("security_name", "").lower() == h.get("security_name", "").lower() or ((row.get("ticker") or "").upper() == "CASH" and h.get("asset_class") == "cash"))), None)
         row["import_action"] = "update" if match else "create"
         if match:
             row["matching_holding_id"] = match["id"]
@@ -1429,7 +1439,7 @@ async def preview_holdings_import(file: UploadFile = File(...)):
     conn = get_db()
     valid_account_ids = {r[0] for r in conn.execute("SELECT id FROM accounts").fetchall()}
     existing = [dict(r) for r in conn.execute(
-        "SELECT id, account_id, ticker, security_name, market_value, shares, provider_identifier FROM holdings"
+        "SELECT id, account_id, ticker, security_name, market_value, shares, provider_identifier, asset_class FROM holdings"
     ).fetchall()]
     conn.close()
     from holdings_engine import parse_holdings_csv
@@ -1466,7 +1476,7 @@ async def preview_qfx_import(file: UploadFile = File(...), account_id: int = For
         conn.close()
         raise HTTPException(status_code=404, detail=f"account_id {account_id} does not exist")
     existing = [dict(r) for r in conn.execute(
-        "SELECT id, account_id, ticker, security_name, market_value, shares, provider_identifier FROM holdings"
+        "SELECT id, account_id, ticker, security_name, market_value, shares, provider_identifier, asset_class FROM holdings"
     ).fetchall()]
     conn.close()
     from qfx_importer import parse_qfx_positions
@@ -1490,6 +1500,69 @@ async def preview_qfx_import(file: UploadFile = File(...), account_id: int = For
     preview["account_balance"] = parsed["account_balance"]
     preview["as_of_date"] = parsed["as_of_date"]
     preview["account_id_in_file"] = parsed["account_id_in_file"]
+    return preview
+
+
+@app.post("/api/holdings/import/schwab-csv/preview")
+async def preview_schwab_csv_import(file: UploadFile = File(...), account_id: int = Form(...)):
+    """Schwab "Positions" CSV export import (2026-09-14) -- the same
+    one-file-keeps-holdings-and-balance-in-sync idea as the QFX
+    importer above, for the brokerage accounts (Abby's Roth, Cooper's
+    Roth, Cooper's custodial, Abby's custodial, the Creative Planning
+    account) that hand this app a downloaded Positions report instead
+    of a QFX statement. Every row is assigned to the account_id the
+    household picked -- the file's own account_label is custodian text,
+    not this app's account id, so it's surfaced for a sanity check only,
+    never auto-matched. Same match/finalize logic and same
+    new-row-defaults-to-"unclassified" convention as the QFX path,
+    except the file's own "Cash & Cash Investments" row is unambiguous
+    -- it always gets asset_class="cash" on a create, since (unlike a
+    security) there's no real uncertainty about what asset class idle
+    cash is."""
+    content = await file.read()
+    try:
+        text = content.decode("utf-8-sig")
+    except Exception:
+        text = content.decode("latin-1")
+    conn = get_db()
+    valid_account_ids = {r[0] for r in conn.execute("SELECT id FROM accounts").fetchall()}
+    if account_id not in valid_account_ids:
+        conn.close()
+        raise HTTPException(status_code=404, detail=f"account_id {account_id} does not exist")
+    existing = [dict(r) for r in conn.execute(
+        "SELECT id, account_id, ticker, security_name, market_value, shares, provider_identifier, asset_class FROM holdings"
+    ).fetchall()]
+    conn.close()
+    from schwab_csv_importer import parse_schwab_positions_csv
+    parsed = parse_schwab_positions_csv(text)
+    rows = []
+    for i, pos in enumerate(parsed["positions"]):
+        rows.append({
+            "row": i + 1,
+            "account_id": account_id,
+            "ticker": pos["ticker"],
+            "security_name": pos["security_name"],
+            "shares": pos["shares"],
+            "market_value": pos["market_value"],
+            "cost_basis": pos["cost_basis"],
+            "value_date": pos["as_of_date"],
+            "asset_class": None,
+            "valid": True,
+            "errors": [],
+        })
+    preview = {"rows": rows, "errors": [{"row": None, "message": e} for e in parsed["errors"]]}
+    preview = _finalize_holdings_import_preview(preview, existing, default_new_asset_class="unclassified")
+    # Cash is unambiguous (unlike a security, there's no real uncertainty
+    # about its asset class) -- but only override the generic
+    # "unclassified" default on a brand-new row; an update row's
+    # asset_class must stay None so an existing classification (however
+    # the household set it) is never overwritten.
+    for row in preview["rows"]:
+        if row["ticker"] == "CASH" and row["import_action"] == "create":
+            row["asset_class"] = "cash"
+    preview["account_balance"] = parsed["account_balance"]
+    preview["as_of_date"] = parsed["as_of_date"]
+    preview["account_label"] = parsed["account_label"]
     return preview
 
 
@@ -1524,9 +1597,16 @@ def commit_holdings_import(rows: List[HoldingImportRow]):
         if row.asset_class is not None and row.asset_class not in ASSET_CLASSES:
             skipped.append({"security_name": row.security_name, "reason": f"asset_class '{row.asset_class}' is not one of {sorted(ASSET_CLASSES)}"})
             continue
+        # A "CASH" row also matches an existing cash-classified holding
+        # regardless of its own ticker/label (see
+        # _finalize_holdings_import_preview's identical fallback) -- a
+        # commit call re-derives its own match independently of whatever
+        # the preview step found, so this must stay in sync with that
+        # logic or a preview-confirmed "update" can still insert a
+        # second, duplicate cash holding at commit time.
         existing = conn.execute(
-            "SELECT * FROM holdings WHERE account_id=? AND ((? IS NOT NULL AND upper(ticker)=upper(?)) OR lower(security_name)=lower(?)) LIMIT 1",
-            (row.account_id, row.ticker, row.ticker, row.security_name),
+            "SELECT * FROM holdings WHERE account_id=? AND ((? IS NOT NULL AND upper(ticker)=upper(?)) OR lower(security_name)=lower(?) OR (upper(?)='CASH' AND asset_class='cash')) LIMIT 1",
+            (row.account_id, row.ticker, row.ticker, row.security_name, row.ticker or ""),
         ).fetchone()
         if existing:
             existing = dict(existing)

@@ -792,3 +792,121 @@ VERSION:102
         assert body["rows"] == []
         assert len(body["errors"]) == 1
         assert "QFX/OFX" in body["errors"][0]["message"]
+
+
+class TestHoldingsSchwabCsvImport:
+    """Schwab "Positions" CSV export import (2026-09-14) -- the
+    brokerage-account counterpart to the QFX importer above. A brand
+    new security defaults to asset_class='unclassified'; the file's own
+    cash row defaults to 'cash' (unambiguous) on a create only, never on
+    an update, so an existing classification is never clobbered."""
+
+    SAMPLE_CSV = (
+        '"Positions for account Sample Account ...999 as of 08:23 PM ET, 2026/09/14"\n'
+        '\n'
+        '"Symbol","Description","Qty (Quantity)","Price","Price Chng $ (Price Change $)",'
+        '"Price Chng % (Price Change %)","Mkt Val (Market Value)","Day Chng $ (Day Change $)",'
+        '"Day Chng % (Day Change %)","Cost Basis","Gain $ (Gain/Loss $)","Gain % (Gain/Loss %)",'
+        '"Ratings","Reinvest?","Reinvest Capital Gains?","% of Acct (% of Account)","Asset Type",\n'
+        '"ABCD","SAMPLE WIDGET CO","100","50.00","0.10","0.2%","$5,000.00","$10.00","0.2%",'
+        '"$4,000.00","$1,000.00","25%","-","No","N/A","80%","Equity",\n'
+        '"EFGH","SAMPLE BOND ETF","10","100.00","0.00","0%","$1,000.00","$0.00","0%",'
+        '"$950.00","$50.00","5.26%","--","No","N/A","16%","ETFs & Closed End Funds",\n'
+        '"Cash & Cash Investments","--","--","--","--","--","$250.00","$0.00","0%","--","--","--",'
+        '"--","--","--","4%","Cash and Money Market",\n'
+        '"Positions Total","","--","--","--","--","$6,250.00","$10.00","0.16%","$4,950.00",'
+        '"$1,300.00","26.26%","--","--","--","--","--",\n'
+    )
+
+    def _preview(self, client, account_id, csv_text=None):
+        return client.post(
+            "/api/holdings/import/schwab-csv/preview",
+            files={"file": ("positions.csv", (csv_text or self.SAMPLE_CSV).encode(), "text/csv")},
+            data={"account_id": account_id},
+        )
+
+    def test_new_positions_default_to_unclassified_and_cash_defaults_to_cash(self, client):
+        acc = _create_account(client)
+        r = self._preview(client, acc["id"])
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["valid_count"] == 3
+        assert body["create_count"] == 3
+        by_ticker = {row["ticker"]: row for row in body["rows"]}
+        assert by_ticker["ABCD"]["asset_class"] == "unclassified"
+        assert by_ticker["ABCD"]["cost_basis"] == 4000.0
+        assert by_ticker["CASH"]["asset_class"] == "cash"
+        assert by_ticker["CASH"]["account_id"] == acc["id"]
+
+    def test_account_balance_and_label_pass_through(self, client):
+        acc = _create_account(client)
+        body = self._preview(client, acc["id"]).json()
+        assert body["account_balance"] == 6250.0
+        assert body["as_of_date"] == "2026-09-14"
+        assert body["account_label"] == "Sample Account ...999"
+
+    def test_matched_cash_position_previews_as_an_update_and_keeps_existing_classification(self, client):
+        acc = _create_account(client)
+        holding = client.post("/api/holdings", json={
+            "account_id": acc["id"], "security_name": "Cash & Cash Investments", "ticker": "CASH",
+            "market_value": 200, "asset_class": "cash",
+        }).json()
+        body = self._preview(client, acc["id"]).json()
+        row = next(r for r in body["rows"] if r["ticker"] == "CASH")
+        assert row["import_action"] == "update"
+        assert row["matching_holding_id"] == holding["id"]
+        assert row["asset_class"] is None  # untouched -- commit will keep "cash"
+
+    def test_cash_row_matches_a_differently_labeled_existing_cash_holding(self, client):
+        """Regression (2026-09-14, real production bug): a manually
+        entered cash holding with no ticker and a different name than
+        this importer's own "CASH"/"Cash & Cash Investments" convention
+        must still be recognized as the same holding -- otherwise every
+        re-import creates a second cash row and silently double-counts
+        the account's cash."""
+        acc = _create_account(client)
+        holding = client.post("/api/holdings", json={
+            "account_id": acc["id"], "security_name": "Cash & Money Market", "ticker": None,
+            "market_value": 200, "asset_class": "cash",
+        }).json()
+        body = self._preview(client, acc["id"]).json()
+        row = next(r for r in body["rows"] if r["ticker"] == "CASH")
+        assert row["import_action"] == "update"
+        assert row["matching_holding_id"] == holding["id"]
+        commit_rows = [{
+            "account_id": r["account_id"], "ticker": r["ticker"], "security_name": r["security_name"],
+            "shares": r["shares"], "market_value": r["market_value"], "cost_basis": r["cost_basis"],
+            "asset_class": r["asset_class"], "value_date": r["value_date"],
+        } for r in body["rows"]]
+        client.post("/api/holdings/import/commit", json=commit_rows)
+        cash_holdings = [h for h in client.get("/api/holdings").json() if h["asset_class"] == "cash"]
+        assert len(cash_holdings) == 1  # updated in place, never duplicated
+        assert cash_holdings[0]["id"] == holding["id"]
+
+    def test_commit_reuses_the_generic_endpoint_unchanged(self, client):
+        acc = _create_account(client)
+        body = self._preview(client, acc["id"]).json()
+        commit_rows = [{
+            "account_id": r["account_id"], "ticker": r["ticker"], "security_name": r["security_name"],
+            "shares": r["shares"], "market_value": r["market_value"], "cost_basis": r["cost_basis"],
+            "asset_class": r["asset_class"], "value_date": r["value_date"],
+        } for r in body["rows"]]
+        r = client.post("/api/holdings/import/commit", json=commit_rows)
+        assert r.status_code == 200, r.text
+        assert r.json()["created"] == 3
+        holdings = client.get("/api/holdings").json()
+        assert {h["ticker"] for h in holdings} == {"ABCD", "EFGH", "CASH"}
+        assert round(sum(h["market_value"] for h in holdings), 2) == 6250.0
+
+    def test_unknown_account_id_returns_404(self, client):
+        r = self._preview(client, 999999)
+        assert r.status_code == 404
+
+    def test_file_with_no_symbol_header_reports_a_clear_error(self, client):
+        acc = _create_account(client)
+        r = self._preview(client, acc["id"], csv_text="not,a,schwab,export\n1,2,3,4\n")
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["rows"] == []
+        assert len(body["errors"]) == 1
+        assert "Positions export" in body["errors"][0]["message"]

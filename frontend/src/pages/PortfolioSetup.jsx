@@ -272,6 +272,12 @@ function HoldingsTab({ accounts, excludedAccounts, onEditPolicy }) {
   const [qfxUpdateBalance, setQfxUpdateBalance] = useState(true)
   const [qfxNotice, setQfxNotice] = useState(null)
   const [csvNotice, setCsvNotice] = useState(null)
+  const [schwabAccountId, setSchwabAccountId] = useState('')
+  const [schwabFile, setSchwabFile] = useState(null)
+  const [schwabPreview, setSchwabPreview] = useState(null)
+  const [schwabError, setSchwabError] = useState(null)
+  const [schwabUpdateBalance, setSchwabUpdateBalance] = useState(true)
+  const [schwabNotice, setSchwabNotice] = useState(null)
 
   const load = () => axios.get('/api/holdings/grouped').then(r => setGroups(r.data.groups)).finally(() => setLoading(false))
   const loadOptions = () => axios.get('/api/account-investment-options').then(r => {
@@ -456,6 +462,37 @@ function HoldingsTab({ accounts, excludedAccounts, onEditPolicy }) {
     await load()
   }
 
+  const previewSchwabCsv = async file => {
+    setSchwabFile(file || null)
+    setSchwabPreview(null)
+    setSchwabError(null)
+    setSchwabNotice(null)
+    if (!file || !schwabAccountId) return
+    const body = new FormData()
+    body.append('file', file)
+    body.append('account_id', schwabAccountId)
+    try {
+      const r = await axios.post('/api/holdings/import/schwab-csv/preview', body)
+      setSchwabPreview(r.data)
+    } catch (e) { setSchwabError(e.response?.data?.detail || 'Could not read this Positions export.') }
+  }
+  const commitSchwabCsv = async () => {
+    const valid = (schwabPreview?.rows || []).filter(r => r.valid)
+    await axios.post('/api/holdings/import/commit', valid)
+    let balanceMsg = ''
+    if (schwabUpdateBalance && schwabPreview?.account_balance != null) {
+      const account = accounts.find(a => a.id === Number(schwabAccountId))
+      if (account) {
+        await axios.put(`/api/accounts/${schwabAccountId}`, { ...account, balance: schwabPreview.account_balance })
+        balanceMsg = ` and updated the account balance to $${schwabPreview.account_balance.toLocaleString()}`
+      }
+    }
+    setSchwabNotice(`Imported ${valid.length} holding${valid.length === 1 ? '' : 's'}${balanceMsg}.`)
+    setSchwabPreview(null)
+    setSchwabFile(null)
+    await load()
+  }
+
   if (loading) return <div className="loading">Loading holdings...</div>
 
   return (
@@ -623,6 +660,42 @@ function HoldingsTab({ accounts, excludedAccounts, onEditPolicy }) {
             {(qfxPreview.errors || []).map((e, i) => <div key={i} style={{ color: 'var(--red)' }}>{e.row ? `Row ${e.row}: ` : ''}{e.message}</div>)}
             <button className="btn-primary" disabled={!qfxPreview.valid_count} onClick={commitQfx} style={{ marginTop: 8 }}>
               Import {qfxPreview.valid_count} valid row{qfxPreview.valid_count === 1 ? '' : 's'}
+            </button>
+          </div>
+        )}
+      </details>
+
+      <details className="card" style={{ marginBottom: 20 }}>
+        <summary>Import a Schwab Positions export (CSV)</summary>
+        <p style={{ fontSize: 12, color: 'var(--muted)' }}>For Schwab accounts (Abby's Roth, Cooper's Roth, Cooper's custodial, Abby's custodial, the Creative Planning brokerage account) -- download "Positions" as a CSV from Schwab's site and upload it here. It carries every position plus the account's own cash balance and total, so this keeps holdings and balance in sync the same way the statement import above does. A matched position updates shares/value/cost basis only; a new position defaults to "unclassified" (the file's own cash row defaults to "cash" instead, since that one is unambiguous).</p>
+        <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center' }}>
+          <label>Account<select className="input" value={schwabAccountId} onChange={e => { setSchwabAccountId(e.target.value); setSchwabPreview(null); setSchwabNotice(null); if (schwabFile) previewSchwabCsv(schwabFile) }} style={{ minWidth: 160 }}>
+            <option value="">Account…</option>
+            {accounts.filter(a => showExcluded || !excludedAccounts.includes(a.id)).map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
+          </select></label>
+          <input aria-label="Schwab Positions CSV" type="file" accept=".csv,text/csv" disabled={!schwabAccountId} onChange={e => previewSchwabCsv(e.target.files?.[0])} />
+        </div>
+        {schwabError && <div style={{ color: 'var(--red)', fontSize: 12, marginTop: 6 }}>{schwabError}</div>}
+        {schwabNotice && <div role="status" style={{ color: 'var(--green)', fontSize: 12, marginTop: 6 }}>✓ {schwabNotice}</div>}
+        {schwabPreview && (
+          <div style={{ marginTop: 10, fontSize: 12 }}>
+            <div>{schwabPreview.valid_count} valid · {schwabPreview.invalid_count} need attention · {schwabPreview.update_count || 0} will update · {schwabPreview.create_count || 0} new</div>
+            {schwabPreview.as_of_date && <div style={{ color: 'var(--muted)', marginTop: 4 }}>Positions as of {schwabPreview.as_of_date}{schwabPreview.account_label ? ` · ${schwabPreview.account_label}` : ''}</div>}
+            {schwabPreview.account_balance != null && (
+              <label style={{ display: 'flex', gap: 6, alignItems: 'center', marginTop: 6 }}>
+                <input type="checkbox" checked={schwabUpdateBalance} onChange={e => setSchwabUpdateBalance(e.target.checked)} />
+                Also set this account's balance to ${schwabPreview.account_balance.toLocaleString()} (from the export)
+              </label>
+            )}
+            {(schwabPreview.missing_existing_holdings || []).length > 0 && <div style={{ color: 'var(--amber)', marginTop: 6 }}>Not present in this export: {(schwabPreview.missing_existing_holdings || []).map(h => h.ticker || h.security_name).join(', ')}. They will remain unchanged until you review them.</div>}
+            {(schwabPreview.rows || []).filter(r => r.quote_comparison).map((r, i) => (
+              <div key={i} style={{ color: 'var(--amber)', marginTop: 6 }}>
+                Row {r.row} ({r.security_name}): {r.quote_comparison.message}
+              </div>
+            ))}
+            {(schwabPreview.errors || []).map((e, i) => <div key={i} style={{ color: 'var(--red)' }}>{e.row ? `Row ${e.row}: ` : ''}{e.message}</div>)}
+            <button className="btn-primary" disabled={!schwabPreview.valid_count} onClick={commitSchwabCsv} style={{ marginTop: 8 }}>
+              Import {schwabPreview.valid_count} valid row{schwabPreview.valid_count === 1 ? '' : 's'}
             </button>
           </div>
         )}
