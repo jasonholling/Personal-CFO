@@ -351,9 +351,9 @@ export default function Retirement({ onNavigate }) {
             benefit62={ssAnchors.justin.b62}
             benefit67={ssAnchors.justin.b67}
             benefit70={ssAnchors.justin.b70}
-            benefitType="spousal"
-            checkEarlyAnchor
-            offHint="off = 50% of the toggle's own selected age above"
+            benefitType={ssAnchors.justinBenefitType}
+            checkEarlyAnchor={ssAnchors.justinBenefitType !== 'worker'}
+            offHint={ssAnchors.justinBenefitType === 'worker' ? 'off = use the Take at 62 / Wait until 67 toggle above' : "off = 50% of the toggle's own selected age above"}
             compact
           />
         </div>

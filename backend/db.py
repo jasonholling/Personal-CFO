@@ -271,6 +271,19 @@ def init_db():
         ("jason_ss_70",                "REAL DEFAULT 0"),
         ("justin_ss_early",            "REAL DEFAULT 0"),
         ("justin_ss_70",               "REAL DEFAULT 0"),
+        # 2026-09-14, at the user's request ("the second earner's own SS
+        # record would be interesting... could help others using it") --
+        # justin_ss_claim_age has always applied SSA's SPOUSAL reduction/
+        # credit schedule unconditionally (resolve_ss_benefits hardcoded
+        # benefit_type="spousal"), with no way for a household where
+        # Justin has his own independent work record to use the WORKER
+        # schedule instead. Default 'spousal' preserves every existing
+        # household's behavior exactly; 'worker' opts into the same
+        # ss_benefit_for_claim_age formula Jason's own claim age already
+        # uses. justin_ss_early/justin_social_security/justin_ss_70
+        # (Justin's 62/67/70 dollar anchors) are reused unchanged for
+        # either type -- only which reduction schedule applies changes.
+        ("justin_ss_benefit_type",     "TEXT DEFAULT 'spousal'"),
         # Kids-variable-count (2026-09-09) — set to 1 the first time
         # migrate_legacy_kids below actually runs its conversion (whether
         # it finds signal and creates kids, or finds none and creates

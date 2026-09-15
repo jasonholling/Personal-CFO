@@ -528,6 +528,29 @@ class TestNinthFollowUpReviewFindings:
         assert worker_result == pytest.approx(11500, abs=1)
         assert spousal_result == pytest.approx(11250, abs=1)
 
+    def test_justin_ss_benefit_type_worker_uses_worker_reduction_not_spousal(self):
+        """2026-09-14, at the user's request ("the second earner's own
+        SS record would be interesting"): justin_ss_benefit_type=="worker"
+        must switch Justin's claim age to the WORKER reduction schedule
+        (same one Jason's own claim age always uses), not the spousal one
+        -- reusing the exact figures from the spousal-vs-worker regression
+        test above ($9,750/$15,000/age 64 -> $11,500 worker, $11,250
+        spousal) but keyed to Justin's own fields this time."""
+        from projection_engine import resolve_ss_benefits
+        base_inputs = {"justin_ss_early": 9750, "justin_social_security": 15000, "justin_ss_70": 99999}
+
+        spousal_default = {**base_inputs}  # no justin_ss_benefit_type key at all -- must default to spousal
+        _, _, justin_ss_annual, _ = resolve_ss_benefits(spousal_default, "early", justin_ss_claim_age=64)
+        assert justin_ss_annual == pytest.approx(11250, abs=1)
+
+        explicit_spousal = {**base_inputs, "justin_ss_benefit_type": "spousal"}
+        _, _, justin_ss_annual, _ = resolve_ss_benefits(explicit_spousal, "early", justin_ss_claim_age=64)
+        assert justin_ss_annual == pytest.approx(11250, abs=1)
+
+        worker = {**base_inputs, "justin_ss_benefit_type": "worker"}
+        _, _, justin_ss_annual, _ = resolve_ss_benefits(worker, "early", justin_ss_claim_age=64)
+        assert justin_ss_annual == pytest.approx(11500, abs=1)
+
     def test_guard_out_of_range_claim_age_is_clamped_not_just_the_amount(self):
         """Guard note: an input of 60 must not receive the age-62
         amount while starting at age 60 -- the START AGE itself must

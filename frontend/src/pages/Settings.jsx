@@ -195,6 +195,7 @@ export default function Settings() {
   const roth_pct   = 1 - pretax_pct
   const p1 = form.person1_name || 'Person 1'
   const p2 = form.person2_name || 'Person 2'
+  const isJustinWorker = form.justin_ss_benefit_type === 'worker'
   const kidsLabel = kids.length ? kids.map(k => k.name).join(' + ') : 'kids'
 
   return (
@@ -306,22 +307,26 @@ export default function Settings() {
             reduction/credit schedule (different rates than a worker's
             own record -- CALCULATION_CONTRACT.md section 49, finding
             4) no matter what kind of figure is entered into these
-            fields. The 67 field below still supports a flat,
-            single-age entry for Justin's own independent worker
-            benefit (no formula applied there), but the slider itself
-            does not yet support a worker-type benefit -- restricting
-            the wording here rather than silently computing the wrong
-            reduction for a worker record.
-            2026-09-09: reordered 67/62/70 -> 62/67/70 (age order) --
-            the 67 field predates the other two and was never moved
-            when they were added alongside it. */}
-        <Row label={`${p2} Spousal SS at 62`} hint="Real dollar figure from your SSA statement — only meaningful for a spousal benefit (see note below); used as the anchor for the claim-age slider">
+            fields.
+            2026-09-14, at the user's request ("the second earner's own
+            SS record would be interesting"): the slider now supports
+            BOTH -- this toggle picks which reduction schedule the
+            claim-age slider (and every backend engine, via
+            resolve_ss_benefits) applies. Default 'spousal' preserves
+            every existing household's exact prior behavior. */}
+        <Row label={`${p2}'s SS Benefit Type`} hint={`Spousal = 50% of ${p1}'s FRA benefit, SSA's spousal reduction schedule. Own record = ${p2}'s independent work history, the same reduction schedule ${p1}'s own claim age uses.`}>
+          <select value={form.justin_ss_benefit_type ?? 'spousal'} onChange={e => set('justin_ss_benefit_type', e.target.value)} style={{ fontSize:13 }}>
+            <option value="spousal">Spousal benefit</option>
+            <option value="worker">{p2}'s own record</option>
+          </select>
+        </Row>
+        <Row label={isJustinWorker ? `${p2} SS at 62` : `${p2} Spousal SS at 62`} hint="Real dollar figure from your SSA statement — used as the anchor for the claim-age slider">
           <NumInput value={form.justin_ss_early ?? 0} onChange={v => set('justin_ss_early', v)} prefix="$" suffix="/yr" />
         </Row>
-        <Row label={`${p2} Spousal SS at 67`} hint={`50% of ${p1}'s FRA benefit — or ${p2}'s own independent benefit at a flat single figure, if entered directly`}>
+        <Row label={isJustinWorker ? `${p2} SS at 67` : `${p2} Spousal SS at 67`} hint={isJustinWorker ? `${p2}'s own FRA benefit` : `50% of ${p1}'s FRA benefit — or ${p2}'s own independent benefit at a flat single figure, if entered directly`}>
           <NumInput value={form.justin_social_security ?? 0} onChange={v => set('justin_social_security', v)} prefix="$" suffix="/yr" />
         </Row>
-        <Row label={`${p2} Spousal SS at 70`} hint="Real dollar figure from your SSA statement — only meaningful for a spousal benefit (see note below)">
+        <Row label={isJustinWorker ? `${p2} SS at 70` : `${p2} Spousal SS at 70`} hint="Real dollar figure from your SSA statement">
           <NumInput value={form.justin_ss_70 ?? 0} onChange={v => set('justin_ss_70', v)} prefix="$" suffix="/yr" />
         </Row>
         <ClaimAgeSlider
@@ -331,9 +336,11 @@ export default function Settings() {
           benefit62={form.justin_ss_early}
           benefit67={form.justin_social_security}
           benefit70={form.justin_ss_70}
-          benefitType="spousal"
-          checkEarlyAnchor
-          scopeNote={`This slider only supports ${p2} claiming a SPOUSAL benefit (50% of ${p1}'s FRA figure) — it always applies SSA's spousal reduction schedule, which differs from a worker's own record. If ${p2} has an independent work-record benefit instead, leave this off and use the Early/Delayed toggle on Retirement/Simulation pages, which applies your 67 figure above at face value with no formula.`}
+          benefitType={isJustinWorker ? 'worker' : 'spousal'}
+          checkEarlyAnchor={!isJustinWorker}
+          scopeNote={isJustinWorker
+            ? `Using ${p2}'s own independent work record — same reduction/credit schedule ${p1}'s own claim age uses.`
+            : `This slider applies SSA's spousal reduction schedule (50% of ${p1}'s FRA figure), which differs from a worker's own record. Switch "${p2}'s SS Benefit Type" above to "${p2}'s own record" if ${p2} has an independent work-record benefit instead.`}
         />
         <Row label={`${p2}'s Retirement Age`} hint={`0 = assume ${p2} retires the same year as ${p1} (the old default). Set a specific age for an independent retirement date — e.g. ${p2} keeps working/contributing past, or stops well before, whichever age you're viewing for ${p1}.`}>
           <NumInput value={form.justin_ret_age ?? 0} onChange={v => set('justin_ret_age', Math.max(0, Math.round(v)))} suffix="age" />
@@ -346,10 +353,13 @@ export default function Settings() {
           </div>
         )}
         <div style={{ padding:'10px 12px', background:'var(--bg3)', borderRadius:8, marginTop:8, fontSize:12, color:'var(--text2)' }}>
-          Note: this models {p2}'s own income and contributions building up before retirement. It does not yet
-          model {p2} continuing to earn (offsetting spending) during years where {p1} has already retired but
-          {' '}{p2} hasn't reached the age above — a "one spouse still working" phase isn't represented in the
-          withdrawal-phase numbers.
+          Note: this models {p2}'s own income and contributions building up before retirement, AND (2026-09-08,
+          updated here 2026-09-14 at the user's request — this note previously said otherwise) {p2} continuing to
+          earn and offset spending during years where {p1} has already retired but {p2} hasn't reached the age
+          above — a "second-earner gap income" figure ({p2}'s salary at a flat 65% net-of-tax approximation, not
+          a real payroll-tax model) reduces the withdrawal need for however many years separate the retirement
+          age you're viewing from {p2}'s own Retirement Age. See the note under the results on Retirement
+          Projection/Monte Carlo/Stress Tests/Survivor Scenario for the exact figure in a given scenario.
         </div>
       </Section>
       </>}

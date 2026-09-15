@@ -56,7 +56,7 @@ const ChartTip = ({ active, payload, label }) => {
 // established for Monte Carlo/Historical Stress -- off (the default)
 // keeps this page on its existing single-age ret_age/ssTiming behavior,
 // completely unaffected.
-export default function RothConversion() {
+export default function RothConversion({ onNavigate }) {
   const {
     retAge, ssTiming, setRetAge, setSsTiming,
     jasonSsClaimAge, justinSsClaimAge, setJasonSsClaimAge, setJustinSsClaimAge,
@@ -186,8 +186,8 @@ export default function RothConversion() {
             benefit62={ssAnchors.justin.b62}
             benefit67={ssAnchors.justin.b67}
             benefit70={ssAnchors.justin.b70}
-            benefitType="spousal"
-            checkEarlyAnchor
+            benefitType={ssAnchors.justinBenefitType}
+            checkEarlyAnchor={ssAnchors.justinBenefitType !== 'worker'}
             offHint="off = falls back to your saved Settings claim age if you have one, otherwise the Early/Delayed toggle"
             compact
           />
@@ -329,6 +329,9 @@ export default function RothConversion() {
                 <div style={{ fontSize:18, fontWeight:600, marginTop:4, color:GREEN }}>{fmt(data.pretax_at_rmd_age_with_conversion)}</div>
                 <div style={{ fontSize:11, color:'var(--text3)', marginTop:2 }}>RMD ≈ {fmt(data.estimated_rmd_with_conversions)}/yr</div>
               </div>
+            </div>
+            <div style={{ marginTop:16, paddingTop:16, borderTop:'1px solid var(--border)' }}>
+              <button className="btn-secondary" onClick={() => onNavigate?.('rettools')}>See the full RMD schedule in Retirement Tools →</button>
             </div>
           </div>
 

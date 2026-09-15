@@ -6,6 +6,10 @@ export const SS_ANCHORS_DEFAULTS = {
   justin: { b62: 0, b67: 0, b70: 0 },
   savedJasonClaimAge: null,
   savedJustinClaimAge: null,
+  // 2026-09-14, at the user's request: "spousal" (default, 50% of
+  // Jason's FRA benefit) or "worker" (Justin's own independent SS
+  // record) -- see backend/db.py's identical comment on the column.
+  justinBenefitType: 'spousal',
 }
 
 // Shapes a raw /api/planning-inputs response into the anchors object
@@ -24,6 +28,7 @@ export function ssAnchorsFromPlanningInputs(d) {
     justin: { b62: d.justin_ss_early ?? 0, b67: d.justin_social_security ?? 0, b70: d.justin_ss_70 ?? 0 },
     savedJasonClaimAge: d.jason_ss_claim_age ?? null,
     savedJustinClaimAge: d.justin_ss_claim_age ?? null,
+    justinBenefitType: d.justin_ss_benefit_type || 'spousal',
   }
 }
 

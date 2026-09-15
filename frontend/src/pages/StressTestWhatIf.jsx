@@ -30,7 +30,7 @@ const TABS = [
   { id:'survivor',    label:'Survivor Scenario' },
 ]
 
-function SurvivorScenarioSection({ retAge, jasonSsClaimAge, justinSsClaimAge, setJasonSsClaimAge, setJustinSsClaimAge, ssAnchors }) {
+function SurvivorScenarioSection({ retAge, jasonSsClaimAge, justinSsClaimAge, setJasonSsClaimAge, setJustinSsClaimAge, ssAnchors, onNavigate }) {
   const { person1Name, person2Name } = usePersonNames()
   const [deceased, setDeceased] = useState('jason')
   const [ages, setAges] = useState(null)
@@ -189,8 +189,8 @@ function SurvivorScenarioSection({ retAge, jasonSsClaimAge, justinSsClaimAge, se
             benefit62={ssAnchors.justin.b62}
             benefit67={ssAnchors.justin.b67}
             benefit70={ssAnchors.justin.b70}
-            benefitType="spousal"
-            checkEarlyAnchor
+            benefitType={ssAnchors.justinBenefitType}
+            checkEarlyAnchor={ssAnchors.justinBenefitType !== 'worker'}
             offHint="off = falls back to your saved Settings claim age if you have one, otherwise the Early/Delayed toggle"
             compact
           />
@@ -228,6 +228,11 @@ function SurvivorScenarioSection({ retAge, jasonSsClaimAge, justinSsClaimAge, se
                 </div>
               </div>
             </div>
+            {!result.survives && (
+              <div style={{ marginTop:16, paddingTop:16, borderTop:'1px solid var(--border)' }}>
+                <button className="btn-secondary" onClick={() => onNavigate?.('insurance')}>Review life insurance coverage →</button>
+              </div>
+            )}
           </div>
 
           <div className="card" style={{ marginBottom:24 }}>
@@ -588,8 +593,8 @@ export default function StressTestWhatIf({ onNavigate }) {
               benefit62={ssAnchors.justin.b62}
               benefit67={ssAnchors.justin.b67}
               benefit70={ssAnchors.justin.b70}
-              benefitType="spousal"
-              checkEarlyAnchor
+              benefitType={ssAnchors.justinBenefitType}
+              checkEarlyAnchor={ssAnchors.justinBenefitType !== 'worker'}
               offHint="off = falls back to your saved Settings claim age if you have one, otherwise the Early/Delayed toggle"
               savedAge={savedClaimAges.justin}
               ssMultiplier={whatIfAssumptions?.ss_mult}
@@ -631,20 +636,22 @@ export default function StressTestWhatIf({ onNavigate }) {
                            jasonRetAge={twoAgeMode ? jasonRetAge : null}
                            justinRetAge={twoAgeMode ? justinRetAge : null}
                            jasonSsClaimAge={jasonSsClaimAge} justinSsClaimAge={justinSsClaimAge}
-                           savedJasonClaimAge={savedClaimAges.jason} savedJustinClaimAge={savedClaimAges.justin} />
+                           savedJasonClaimAge={savedClaimAges.jason} savedJustinClaimAge={savedClaimAges.justin}
+                           onNavigate={onNavigate} />
       </div>
       <div hidden={tab !== 'stress'}>
         <StressTestSection retAge={retAge} ssTiming={ssTiming} overrides={whatIfAssumptions}
                            jasonRetAge={twoAgeMode ? jasonRetAge : null}
                            justinRetAge={twoAgeMode ? justinRetAge : null}
                            jasonSsClaimAge={jasonSsClaimAge} justinSsClaimAge={justinSsClaimAge}
-                           savedJasonClaimAge={savedClaimAges.jason} savedJustinClaimAge={savedClaimAges.justin} />
+                           savedJasonClaimAge={savedClaimAges.jason} savedJustinClaimAge={savedClaimAges.justin}
+                           onNavigate={onNavigate} />
       </div>
       {tab === 'survivor' && (
         <SurvivorScenarioSection retAge={retAge}
                            jasonSsClaimAge={jasonSsClaimAge} justinSsClaimAge={justinSsClaimAge}
                            setJasonSsClaimAge={setJasonSsClaimAge} setJustinSsClaimAge={setJustinSsClaimAge}
-                           ssAnchors={ssAnchors} />
+                           ssAnchors={ssAnchors} onNavigate={onNavigate} />
       )}
     </div>
   )

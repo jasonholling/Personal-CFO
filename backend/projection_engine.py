@@ -216,8 +216,15 @@ def resolve_ss_benefits(inputs: Dict, ss_timing: str = "early",
         # anchor fields.
         justin_ss_62 = inputs.get("justin_ss_early") or justin_ss_annual
         justin_ss_70 = inputs.get("justin_ss_70") or justin_ss_annual
+        # 2026-09-14, at the user's request: Justin's claim age used to
+        # ALWAYS apply SSA's spousal reduction/credit schedule -- a
+        # household where Justin has his own independent work record
+        # (justin_ss_benefit_type == "worker") gets the same worker
+        # schedule Jason's own claim age uses instead. Default "spousal"
+        # preserves every existing household's exact prior behavior.
+        justin_benefit_type = inputs.get("justin_ss_benefit_type") or "spousal"
         justin_ss_annual = ss_benefit_for_claim_age(justin_ss_62, justin_ss_annual, justin_ss_70, justin_ss_claim_age,
-                                                      benefit_type="spousal")
+                                                      benefit_type=justin_benefit_type)
         justin_ss_age = _clamp_claim_age(justin_ss_claim_age)
 
     return jason_ss_annual, jason_ss_age, justin_ss_annual, justin_ss_age
