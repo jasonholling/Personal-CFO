@@ -248,6 +248,14 @@ class TestPlanningInputs:
         assert r.json()["person1_name"] == "Alex"
         assert r.json()["w2_salary"] == 150000
 
+    def test_justin_ss_benefit_type_defaults_to_spousal_and_round_trips(self, client, sample_inputs):
+        # Regression (2026-09-14, at the user's request): a fresh install
+        # must default to "spousal" (every existing household's behavior
+        # unchanged), and "worker" must actually persist through a save.
+        assert client.get("/api/planning-inputs").json()["justin_ss_benefit_type"] == "spousal"
+        _seed_planning_inputs(client, {**sample_inputs, "justin_ss_benefit_type": "worker"})
+        assert client.get("/api/planning-inputs").json()["justin_ss_benefit_type"] == "worker"
+
 
 class TestNetWorth:
     def test_empty_accounts_gives_zero_net_worth(self, client):
