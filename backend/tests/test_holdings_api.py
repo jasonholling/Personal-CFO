@@ -488,6 +488,34 @@ class TestHoldingExposuresRoundTrip:
         assert client.get("/api/holdings").json()[0]["exposures"] == exposures
 
 
+class TestPortfolioFeeComparison:
+    def test_no_holdings_reports_no_data(self, client):
+        assert client.get("/api/portfolio/fee-comparison").json() == {"has_data": False}
+
+    def test_reflects_real_holdings_and_defaults_years_to_age_60(self, client, sample_inputs):
+        client.post("/api/planning-inputs", json=sample_inputs)  # jason_age=50 -> default years=10
+        acc = _create_account(client)
+        client.post("/api/holdings", json={
+            "account_id": acc["id"], "security_name": "Vanguard 500 Index", "ticker": "VFIAX",
+            "market_value": 500000, "asset_class": "us_large_cap", "expense_ratio": 0.0004,
+        })
+        body = client.get("/api/portfolio/fee-comparison").json()
+        assert body["has_data"] is True
+        assert body["current_investable_balance"] == 500000
+        assert body["years"] == 10
+        assert body["lifetime_opportunity_cost"] > 0
+
+    def test_years_and_aum_fee_pct_params_are_respected(self, client):
+        acc = _create_account(client)
+        client.post("/api/holdings", json={
+            "account_id": acc["id"], "security_name": "Fund", "market_value": 500000,
+            "asset_class": "us_large_cap", "expense_ratio": 0.0004,
+        })
+        body = client.get("/api/portfolio/fee-comparison?years=30&aum_fee_pct=0.02").json()
+        assert body["years"] == 30
+        assert body["aum_fee_pct"] == 2.0
+
+
 class TestTaxLotsAndQuotePreview:
     def test_tax_lots_are_scoped_to_a_holding_and_can_be_removed(self, client):
         account = _create_account(client)

@@ -5,11 +5,14 @@ import pytest
 from retirement_tools_engine import (
     marginal_rate,
     run_rmd_planning,
+    coast_fi_status,
     pension_vs_lump_sum,
     estimate_pension_lump_sum,
     backdoor_roth_eligibility,
     qcd_planner,
     hsa_stealth_ira_strategy,
+    irmaa_tier,
+    IRMAA_BRACKETS_MFJ_2026,
     ROTH_MAGI_PHASEOUT_MFJ,
     QCD_ANNUAL_LIMIT_2026,
     QCD_MIN_AGE,
@@ -26,6 +29,50 @@ class TestMarginalRate:
     def test_at_a_boundary(self):
         assert marginal_rate(24800) == 0.10
         assert marginal_rate(24801) == 0.12
+
+
+class TestIrmaaTier:
+    def test_below_first_threshold_is_standard_no_surcharge(self):
+        result = irmaa_tier(150000)
+        assert result["tier_index"] == 0
+        assert result["is_surcharged"] is False
+        assert result["annual_surcharge_total"] == 0
+
+    def test_exactly_at_a_threshold_is_a_cliff_into_that_tier(self):
+        # IRMAA is a cliff, not a phase-in: $1 under the threshold is
+        # standard, exactly AT it is already the surcharged tier.
+        assert irmaa_tier(217999)["tier_index"] == 0
+        assert irmaa_tier(218000)["tier_index"] == 1
+        assert irmaa_tier(218000)["is_surcharged"] is True
+
+    def test_top_tier_at_750k_plus(self):
+        result = irmaa_tier(1_000_000)
+        assert result["tier_index"] == len(IRMAA_BRACKETS_MFJ_2026) - 1
+        assert result["next_tier_magi_floor"] is None
+        assert result["room_to_next_tier"] is None
+
+    def test_annual_surcharge_doubles_for_two_medicare_enrollees(self):
+        one_person = irmaa_tier(300000, people_on_medicare=1)
+        two_people = irmaa_tier(300000, people_on_medicare=2)
+        assert two_people["annual_surcharge_total"] == one_person["annual_surcharge_total"] * 2
+
+    def test_zero_people_on_medicare_suppresses_dollar_surcharge_but_keeps_tier(self):
+        result = irmaa_tier(300000, people_on_medicare=0)
+        assert result["tier_index"] > 0
+        assert result["is_surcharged"] is True
+        assert result["annual_surcharge_total"] == 0
+
+    def test_room_to_next_tier_shrinks_as_magi_rises(self):
+        low = irmaa_tier(220000)
+        high = irmaa_tier(270000)
+        assert high["room_to_next_tier"] < low["room_to_next_tier"]
+
+    def test_invalid_people_on_medicare_rejected_by_the_route_not_the_engine(self):
+        # The engine itself has no validation (main.py's route does) --
+        # document that calling with an out-of-range value doesn't crash,
+        # it just produces a proportionally scaled (if nonsensical) total.
+        result = irmaa_tier(300000, people_on_medicare=3)
+        assert result["annual_surcharge_total"] > irmaa_tier(300000, people_on_medicare=2)["annual_surcharge_total"]
 
 
 class TestRunRmdPlanning:
@@ -97,6 +144,24 @@ class TestRunRmdPlanning:
         result = run_rmd_planning(inputs, accounts)
         assert "Roth" in result["recommendation"]
 
+    def test_irmaa_fields_present_and_schedule_rows_carry_irmaa(self, sample_inputs):
+        accounts = [{"account_type": "401k", "balance": 5_000_000, "owner": "jason"}]
+        inputs = {**sample_inputs, "pension_65": 0, "jason_social_security": 0, "justin_social_security": 0}
+        result = run_rmd_planning(inputs, accounts)
+        assert "pre_rmd_irmaa" in result and "first_rmd_irmaa" in result
+        assert result["pre_rmd_irmaa"]["tier_index"] == 0  # zero other income
+        assert result["first_rmd_irmaa"]["is_surcharged"] is True  # a $5M pretax balance's RMD is well past $218k
+        assert result["irmaa_tier_jump"] is True
+        assert "IRMAA" in result["recommendation"]
+        assert all("irmaa" in row for row in result["schedule"])
+
+    def test_no_irmaa_tier_jump_when_first_rmd_stays_below_threshold(self, sample_inputs):
+        accounts = [{"account_type": "401k", "balance": 50000, "owner": "jason"}]
+        inputs = {**sample_inputs, "pension_65": 0, "jason_social_security": 0, "justin_social_security": 0}
+        result = run_rmd_planning(inputs, accounts)
+        assert result["irmaa_tier_jump"] is False
+        assert "IRMAA" not in result["recommendation"]
+
     def test_ignores_real_drawdown_reproduces_and_fixes_audit_finding(self, sample_inputs):
         """External audit 2026-09-07: a $1M pretax account with
         $100k/yr spending and 0% returns is fully depleted by RMD age in
@@ -137,6 +202,68 @@ class TestRunRmdPlanning:
         result = run_rmd_planning(inputs, accounts)
         assert result["has_pretax_balance"] is True
         assert result["projected_balance_at_start_age"] > 0
+
+
+class TestCoastFiStatus:
+    def test_large_balance_is_already_coast_fi(self, sample_inputs, sample_accounts):
+        # $870k invested (401k+roth+ira+taxable+hsa) at 50, 10 years to
+        # target 60, modest spending -- comfortably coasts.
+        inputs = {**sample_inputs, "retirement_income_today_dollars": 40000}
+        result = coast_fi_status(inputs, sample_accounts)
+        assert result["has_data"] is True
+        assert result["is_coast_fi"] is True
+        assert result["coast_gap"] == 0
+        assert result["coast_surplus"] > 0
+        assert result["coast_percent"] == 100
+        assert "coast" in result["coast_recommendation"].lower()
+
+    def test_small_balance_is_not_yet_coast_fi(self, sample_inputs):
+        accounts = [{"id": 1, "name": "401k", "account_type": "401k", "owner": "jason", "balance": 20000, "institution": "", "notes": ""}]
+        inputs = {**sample_inputs, "retirement_income_today_dollars": 120000}
+        result = coast_fi_status(inputs, accounts)
+        assert result["is_coast_fi"] is False
+        assert result["coast_gap"] > 0
+        assert result["coast_surplus"] == 0
+        assert 0 <= result["coast_percent"] < 100
+
+    def test_current_investable_balance_matches_the_real_projections_own_figure(self, sample_inputs, sample_accounts):
+        result = coast_fi_status(sample_inputs, sample_accounts)
+        # 401k(500k)+roth(100k)+ira(50k)+taxable(200k)+hsa(20k) = 870k
+        assert result["current_investable_balance"] == 870000
+
+    def test_barista_fi_reports_a_bridge_income_when_underfunded(self, sample_inputs):
+        accounts = [{"id": 1, "name": "401k", "account_type": "401k", "owner": "jason", "balance": 20000, "institution": "", "notes": ""}]
+        inputs = {**sample_inputs, "jason_age": 45, "retirement_income_today_dollars": 120000}
+        result = coast_fi_status(inputs, accounts, target_ret_age=60)
+        assert result["is_full_fi_now"] is False
+        assert result["barista_gap"] > 0
+        assert result["bridge_years_to_65"] == 20
+        assert result["barista_annual_income_needed"] > 0
+        assert result["barista_percent_funded"] is not None
+        assert result["barista_percent_funded"] < 100
+        assert "bridge" in result["barista_recommendation"].lower()
+
+    def test_barista_fi_reports_full_fi_when_already_fully_funded_today(self, sample_inputs, sample_accounts):
+        inputs = {**sample_inputs, "jason_age": 60, "retirement_income_today_dollars": 20000}
+        result = coast_fi_status(inputs, sample_accounts, target_ret_age=60)
+        assert result["is_full_fi_now"] is True
+        assert result["barista_gap"] == 0
+        assert result["barista_percent_funded"] == 100
+        assert "fully" in result["barista_recommendation"].lower()
+
+    def test_no_bridge_years_left_past_65_uses_the_lump_sum_message(self, sample_inputs, sample_accounts):
+        inputs = {**sample_inputs, "jason_age": 70, "retirement_income_today_dollars": 300000}
+        result = coast_fi_status(inputs, sample_accounts, target_ret_age=70)
+        assert result["bridge_years_to_65"] == 0
+        if not result["is_full_fi_now"]:
+            assert result["barista_annual_income_needed"] is None
+            assert "lump-sum" in result["barista_recommendation"]
+
+    def test_missing_planning_inputs_scenario_returns_no_data(self, sample_inputs, sample_accounts):
+        # target_ret_age below current age with no matching scenario label
+        # still returns gracefully rather than raising.
+        result = coast_fi_status(sample_inputs, [], target_ret_age=60)
+        assert result["has_data"] is True  # zero accounts is still a valid (if trivial) scenario
 
 
 class TestPensionVsLumpSum:

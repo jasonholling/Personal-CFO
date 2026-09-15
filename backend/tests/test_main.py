@@ -311,6 +311,39 @@ class TestCfoBriefing:
         assert body["data_health"]["account_count"] == len(sample_accounts)
 
 
+class TestPillarsSummary:
+    def test_available_with_a_fresh_install(self, client):
+        r = client.get("/api/pillars-summary")
+        assert r.status_code == 200
+        body = r.json()
+        assert {p["key"] for p in body["pillars"]} == {"tax", "estate", "risk", "investment"}
+        assert body["overall_status"] == "attention"  # nothing set up yet
+
+    def test_reflects_estate_documents_and_beneficiaries(self, client, sample_inputs, sample_accounts):
+        _seed_planning_inputs(client, sample_inputs)
+        _seed_accounts(client, sample_accounts)
+        for doc_type in ("trust", "wills", "fpoa", "hcpoa", "freeze"):
+            client.put(f"/api/estate-documents/{doc_type}", json={"document_type": doc_type, "status": "executed"})
+        client.put("/api/estate-beneficiaries/401k", json={
+            "account_key": "401k", "primary_beneficiary": "Spouse", "contingent_beneficiary": "Kids",
+        })
+        body = client.get("/api/pillars-summary").json()
+        estate = next(p for p in body["pillars"] if p["key"] == "estate")
+        assert estate["status"] == "good"
+
+    def test_reflects_insurance_policies(self, client, sample_inputs, sample_accounts):
+        _seed_planning_inputs(client, sample_inputs)
+        _seed_accounts(client, sample_accounts)
+        client.post("/api/insurance-policies", json={
+            "who": "jason", "policy_type": "term", "benefit": "500000", "premium": "50", "notes": "", "sort_order": 0,
+        })
+        client.post("/api/property-policies", json={"item": "home", "coverage": "400000", "renewal": "", "sort_order": 0})
+        body = client.get("/api/pillars-summary").json()
+        risk = next(p for p in body["pillars"] if p["key"] == "risk")
+        assert "no insurance policies" not in risk["detail"]
+        assert "no property/umbrella" not in risk["detail"]
+
+
 class TestCashFlow:
     def test_create_list_update_and_delete_cash_flow_item(self, client):
         created = client.post("/api/cash-flow", json={
@@ -1617,6 +1650,57 @@ class TestRetirementToolsEndpoints:
         data = r.json()
         assert data["has_pretax_balance"] is True
         assert data["first_rmd_amount"] > 0
+
+    def test_irmaa_endpoint_below_threshold(self, client):
+        r = client.get("/api/retirement-tools/irmaa?magi=150000")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["is_surcharged"] is False
+        assert data["annual_surcharge_total"] == 0
+
+    def test_irmaa_endpoint_above_threshold_defaults_to_two_people(self, client):
+        r = client.get("/api/retirement-tools/irmaa?magi=300000")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["is_surcharged"] is True
+        assert data["annual_surcharge_total"] > 0
+
+    def test_irmaa_endpoint_respects_people_on_medicare_param(self, client):
+        one = client.get("/api/retirement-tools/irmaa?magi=300000&people_on_medicare=1").json()
+        two = client.get("/api/retirement-tools/irmaa?magi=300000&people_on_medicare=2").json()
+        assert two["annual_surcharge_total"] == one["annual_surcharge_total"] * 2
+
+    def test_irmaa_endpoint_rejects_invalid_people_on_medicare(self, client):
+        r = client.get("/api/retirement-tools/irmaa?magi=300000&people_on_medicare=5")
+        assert r.status_code == 400
+
+    def test_coast_fi_endpoint_not_yet_coast(self, client, sample_inputs):
+        _seed_planning_inputs(client, {**sample_inputs, "retirement_income_today_dollars": 120000})
+        client.post("/api/accounts", json={
+            "name": "Small 401k", "account_type": "401k", "owner": "jason",
+            "institution": "", "balance": 20000, "notes": None,
+        })
+        r = client.get("/api/retirement-tools/coast-fi")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["has_data"] is True
+        assert data["is_coast_fi"] is False
+        assert data["coast_gap"] > 0
+
+    def test_coast_fi_endpoint_works_with_default_fresh_install_inputs(self, client):
+        # planning_inputs always has a default row (id=1) from db.py's
+        # init, unlike accounts -- so this is a "zero accounts" case, not
+        # a missing-inputs 400 like rmd-planning's own fresh-install test.
+        r = client.get("/api/retirement-tools/coast-fi")
+        assert r.status_code == 200
+        assert r.json()["has_data"] is True
+
+    def test_coast_fi_endpoint_respects_target_ret_age_param(self, client, sample_inputs, sample_accounts):
+        _seed_planning_inputs(client, sample_inputs)
+        _seed_accounts(client, sample_accounts)
+        r = client.get("/api/retirement-tools/coast-fi?target_ret_age=65")
+        assert r.status_code == 200
+        assert r.json()["target_ret_age"] == 65
 
     def test_pension_vs_lump_sum_endpoint(self, client):
         r = client.post("/api/retirement-tools/pension-vs-lump-sum", json={

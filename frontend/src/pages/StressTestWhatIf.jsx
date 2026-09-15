@@ -28,7 +28,134 @@ const TABS = [
   { id:'monte_carlo', label:'Monte Carlo' },
   { id:'stress',      label:'Historical Stress' },
   { id:'survivor',    label:'Survivor Scenario' },
+  { id:'coastfi',     label:'Coast FI' },
 ]
+
+// Coast FI / Barista FI (2026-09-15): moved here from Retirement Tools
+// at the user's request -- it's really another pressure-test of the
+// plan ("does my CURRENT balance alone, with zero more contributions,
+// still get me there?"), same family as Monte Carlo/Historical Stress/
+// Survivor, not a standalone decision tool like RMD/pension/Roth/QCD/
+// HSA. Shares this page's own retAge/ssTiming controls instead of
+// hardcoding target_ret_age=60 the way the Retirement Tools version did.
+function CoastFiSection({ retAge, ssTiming }) {
+  const [coastFi, setCoastFi] = useState(null)
+  const genRef = useRef(0)
+
+  useEffect(() => {
+    const version = ++genRef.current
+    setCoastFi(null)
+    axios.get('/api/retirement-tools/coast-fi', { params: { target_ret_age: retAge, ss_timing: ssTiming } })
+      .then(r => { if (version === genRef.current) setCoastFi(r.data) })
+      .catch(err => {
+        if (version === genRef.current) {
+          setCoastFi({ has_data: false, fetch_error: err.response?.data?.detail || err.message || 'Request failed' })
+        }
+      })
+  }, [retAge, ssTiming])
+
+  if (coastFi?.fetch_error) {
+    return <div className="card" style={{ marginBottom:24 }}><div style={{ fontSize:13, color:RED }}>Couldn't load Coast FI: {coastFi.fetch_error}</div></div>
+  }
+  if (!coastFi?.has_data) {
+    return <div className="card" style={{ marginBottom:24 }}><div style={{ fontSize:13, color:'var(--text2)' }}>Add your accounts and retirement inputs in Settings to see your Coast FI status.</div></div>
+  }
+
+  return (
+    <>
+      <div className="grid-2" style={{ marginBottom:24, gap:20 }}>
+        <MilestoneGauge
+          icon="🏖️" eyebrow="COAST FI" title={`Balance alone reaching your goal by ${coastFi.target_ret_age}`}
+          percent={coastFi.coast_percent} achieved={coastFi.is_coast_fi}
+          achievedLabel="✓ Coast FI reached" pendingLabel={`${fmt(coastFi.coast_gap)} to go`}
+        >
+          <StatRow label="Current invested balance" value={fmt(coastFi.current_investable_balance)} />
+          <StatRow label={`Coast number (today's $)`} value={fmt(coastFi.coast_number_today)} />
+          {coastFi.is_coast_fi && <StatRow label="Surplus above coast number" value={fmt(coastFi.coast_surplus)} accent={GREEN} />}
+        </MilestoneGauge>
+
+        <MilestoneGauge
+          icon="☕" eyebrow="BARISTA FI" title="Fully funded if you stopped working today"
+          percent={coastFi.barista_percent_funded ?? 0} achieved={coastFi.is_full_fi_now}
+          achievedLabel="✓ Fully funded now" pendingLabel={`${fmt(coastFi.barista_gap)} gap`}
+        >
+          <StatRow label="Funding gap if retiring now" value={fmt(coastFi.barista_gap)} />
+          <StatRow label="Bridge income needed (to 65)"
+                   value={coastFi.barista_annual_income_needed ? `${fmt(coastFi.barista_annual_income_needed)}/yr` : '—'}
+                   accent={coastFi.barista_annual_income_needed ? '#fbbf24' : null} />
+        </MilestoneGauge>
+      </div>
+
+      <div className="grid-2" style={{ gap:20 }}>
+        <div style={{
+          padding:'14px 16px', borderRadius:8, fontSize:13, lineHeight:1.6,
+          background: coastFi.is_coast_fi ? 'rgba(52,211,153,0.08)' : 'rgba(251,191,36,0.08)',
+          border: `1px solid ${coastFi.is_coast_fi ? 'rgba(52,211,153,0.25)' : 'rgba(251,191,36,0.25)'}`,
+        }}>
+          {coastFi.coast_recommendation}
+        </div>
+        <div style={{
+          padding:'14px 16px', borderRadius:8, fontSize:13, lineHeight:1.6,
+          background: coastFi.is_full_fi_now ? 'rgba(52,211,153,0.08)' : 'rgba(251,191,36,0.08)',
+          border: `1px solid ${coastFi.is_full_fi_now ? 'rgba(52,211,153,0.25)' : 'rgba(251,191,36,0.25)'}`,
+        }}>
+          {coastFi.barista_recommendation}
+        </div>
+      </div>
+    </>
+  )
+}
+
+function StatRow({ label, value, accent }) {
+  return (
+    <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', padding:'7px 0', borderTop:'1px solid var(--border)', fontSize:13 }}>
+      <span style={{ color:'var(--text2)' }}>{label}</span>
+      <span style={{ fontWeight:650, color: accent || 'var(--text)' }}>{value}</span>
+    </div>
+  )
+}
+
+// A big colored ring + progress bar for a single milestone (Coast FI /
+// Barista FI) -- same red/amber/green vocabulary as the rest of the app
+// (GoalsFunding's progress-bar-track/fill), just given more visual
+// weight since this page is specifically about "how are we doing"
+// rather than a data table.
+function MilestoneGauge({ icon, eyebrow, title, percent, achieved, achievedLabel, pendingLabel, children }) {
+  const pct = Math.max(0, Math.min(100, percent ?? 0))
+  const color = achieved ? GREEN : pct >= 75 ? '#fbbf24' : pct >= 40 ? '#fb923c' : RED
+  const ringBg = `conic-gradient(${color} ${pct * 3.6}deg, var(--bg3) 0deg)`
+  return (
+    <div className="card" style={{ borderTop:`3px solid ${color}` }}>
+      <div style={{ display:'flex', alignItems:'center', gap:16, marginBottom:14 }}>
+        <div style={{
+          width:64, height:64, borderRadius:'50%', flexShrink:0,
+          background:ringBg, display:'grid', placeItems:'center',
+        }}>
+          <div style={{
+            width:50, height:50, borderRadius:'50%', background:'var(--bg2)',
+            display:'grid', placeItems:'center', fontSize:16, fontWeight:800, color,
+          }}>
+            {pct}%
+          </div>
+        </div>
+        <div style={{ flex:1, minWidth:0 }}>
+          <div style={{ display:'flex', alignItems:'center', gap:6 }}>
+            <span style={{ fontSize:16 }}>{icon}</span>
+            <span className="label" style={{ color }}>{eyebrow}</span>
+          </div>
+          <div style={{ fontSize:13, color:'var(--text2)', marginTop:2, lineHeight:1.35 }}>{title}</div>
+        </div>
+      </div>
+      <div className="progress-bar-track" style={{ height:8, marginBottom:8 }}>
+        <div className="progress-bar-fill" style={{ width:`${pct}%`, background:`linear-gradient(90deg, ${color}99, ${color})` }} />
+      </div>
+      <div style={{ fontSize:13, fontWeight:700, color, marginBottom:10 }}>
+        {achieved ? achievedLabel : pendingLabel}
+      </div>
+      {children}
+    </div>
+  )
+}
 
 function SurvivorScenarioSection({ retAge, jasonSsClaimAge, justinSsClaimAge, setJasonSsClaimAge, setJustinSsClaimAge, ssAnchors, onNavigate }) {
   const { person1Name, person2Name } = usePersonNames()
@@ -653,6 +780,7 @@ export default function StressTestWhatIf({ onNavigate }) {
                            setJasonSsClaimAge={setJasonSsClaimAge} setJustinSsClaimAge={setJustinSsClaimAge}
                            ssAnchors={ssAnchors} onNavigate={onNavigate} />
       )}
+      {tab === 'coastfi' && <CoastFiSection retAge={retAge} ssTiming={ssTiming} />}
     </div>
   )
 }

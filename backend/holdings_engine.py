@@ -1522,3 +1522,48 @@ def blended_expense_ratio(household_holdings: List[Dict]) -> Optional[Dict]:
     annual_fee = sum((h.get("market_value", 0) or 0) * h["expense_ratio"] for h in rated)
     return {"blended_expense_ratio_pct": round(weighted_ratio * 100, 3), "annual_fee_dollars": round(annual_fee, 2),
             "holdings_with_expense_ratio": len(rated), "holdings_total": len(household_holdings)}
+
+
+def aum_fee_opportunity_cost(household_holdings: List[Dict], years: int = 20,
+                              aum_fee_pct: float = 0.01, expected_return: float = 0.07) -> Optional[Dict]:
+    """What a traditional AUM advisor (the standard fee model firms like
+    Creative Planning charge -- commonly ~1%/yr of assets under
+    management) would cost relative to doing it yourself, compounded
+    over `years`.
+
+    Modeled as an ADDITIONAL drag on top of whatever fund-level expense
+    ratio this household already pays (blended_expense_ratio above) --
+    not a replacement for it. That's the conservative framing (a real
+    AUM advisor may negotiate access to lower-cost institutional share
+    classes that partly offset their own fee), but it isolates exactly
+    the cost of the advisory relationship itself, which is what this
+    calculator is answering. `aum_fee_pct`/`expected_return`/`years` are
+    all parameters, not hardcoded facts -- the caller can size the
+    comparison to a specific advisor quote or a longer/shorter horizon.
+
+    Returns None if there's no investable balance to compound (nothing
+    to compare), mirroring blended_expense_ratio's own contract."""
+    total_value = sum(h.get("market_value", 0) or 0 for h in household_holdings)
+    if total_value <= 0 or years <= 0:
+        return None
+    blended = blended_expense_ratio(household_holdings)
+    diy_expense_ratio = (blended["blended_expense_ratio_pct"] / 100) if blended else 0.0
+
+    diy_net_return = expected_return - diy_expense_ratio
+    aum_net_return = diy_net_return - aum_fee_pct
+
+    diy_future_value = total_value * (1 + diy_net_return) ** years
+    aum_future_value = total_value * (1 + max(-0.99, aum_net_return)) ** years
+    lifetime_opportunity_cost = round(diy_future_value - aum_future_value)
+
+    return {
+        "current_investable_balance": round(total_value),
+        "diy_expense_ratio_pct": round(diy_expense_ratio * 100, 3),
+        "aum_fee_pct": round(aum_fee_pct * 100, 3),
+        "years": years,
+        "expected_return_pct": round(expected_return * 100, 3),
+        "first_year_aum_fee_dollars": round(total_value * aum_fee_pct),
+        "diy_future_value": round(diy_future_value),
+        "aum_future_value": round(aum_future_value),
+        "lifetime_opportunity_cost": lifetime_opportunity_cost,
+    }

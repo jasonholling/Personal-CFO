@@ -213,6 +213,7 @@ export default function PortfolioCoach({ onNavigate }) {
   const [reviewSummary, setReviewSummary] = useState(null)
   const [annualReview, setAnnualReview] = useState(null)
   const [showAnnualReview, setShowAnnualReview] = useState(false)
+  const [feeComparison, setFeeComparison] = useState(null)
 
   const load = (pending = 0) => {
     setLoading(true)
@@ -223,12 +224,14 @@ export default function PortfolioCoach({ onNavigate }) {
       axios.get('/api/accounts').catch(() => ({ data: [] })),
       axios.get('/api/recommendations/review-summary').catch(() => ({ data: null })),
       axios.get('/api/portfolio/annual-review').catch(() => ({ data: null })),
-    ]).then(([rec, alloc, accountResponse, summary, annual]) => {
+      axios.get('/api/portfolio/fee-comparison').catch(() => ({ data: { has_data: false } })),
+    ]).then(([rec, alloc, accountResponse, summary, annual, feeComp]) => {
       setData(rec.data)
       setAllocation(alloc.data)
       setAccounts(Array.isArray(accountResponse.data) ? accountResponse.data : [])
       setReviewSummary(summary.data)
       setAnnualReview(annual.data)
+      setFeeComparison(feeComp.data)
     }).catch(() => setLoadError(true)).finally(() => setLoading(false))
   }
 
@@ -439,6 +442,24 @@ export default function PortfolioCoach({ onNavigate }) {
           )}
           <div style={{ color: 'var(--muted)', marginTop: 5 }}>{allocation.health?.high_fee_count || 0} fee review{allocation.health?.high_fee_count === 1 ? '' : 's'} · {allocation.health?.concentration_count || 0} concentration flag{allocation.health?.concentration_count === 1 ? '' : 's'} · {allocation.health?.unclassified_count || 0} unclassified holding{allocation.health?.unclassified_count === 1 ? '' : 's'}</div>
         </div>
+        {feeComparison?.has_data && (
+          <div className="card" style={{ marginBottom: 24, fontSize: 13 }}>
+            <div className="label">What you'd give up to a 1%/yr advisor</div>
+            <div style={{ marginTop: 8, color: 'var(--muted)' }}>
+              You currently pay about <strong>{feeComparison.diy_expense_ratio_pct}%/yr</strong> in fund expense ratios
+              on {fmt(feeComparison.current_investable_balance)} invested. A traditional {feeComparison.aum_fee_pct}%/yr
+              AUM advisor (the fee model firms like Creative Planning use) would add about{' '}
+              <strong>{fmt(feeComparison.first_year_aum_fee_dollars)}</strong> this year alone.
+            </div>
+            <div style={{ marginTop: 8, fontSize: 20, fontWeight: 700, color: 'var(--amber)' }}>
+              {fmt(feeComparison.lifetime_opportunity_cost)}
+            </div>
+            <div style={{ color: 'var(--muted)', marginTop: 4 }}>
+              projected cost over {feeComparison.years} years at {feeComparison.expected_return_pct}%/yr growth, compounded —
+              the gap between {fmt(feeComparison.diy_future_value)} (current path) and {fmt(feeComparison.aum_future_value)} (with the added advisor fee).
+            </div>
+          </div>
+        )}
         </>
       )}
       {allocation?.glide_path?.active && <details className="card" style={{ marginBottom: 24 }}><summary>Active glide path — age {allocation.glide_path.current_age}</summary><p style={{ fontSize: 12, color: 'var(--muted)' }}>Coach is using the age-specific targets below.</p>{(allocation.glide_path.preview || []).map(row => <div key={row.age} style={{ fontSize: 12, padding: '4px 0', borderTop: '1px solid var(--border)' }}><strong>Age {row.age}</strong> · {Object.entries(row.targets).filter(([, value]) => value).map(([key, value]) => `${key.replace('target_', '').replace('_pct', '').replace(/_/g, ' ')} ${value}%`).join(' · ')}</div>)}</details>}

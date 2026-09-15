@@ -58,7 +58,7 @@ const NAV = [
 
   { group:'PLAN' },
   { id:'retirement', label:'Retirement Projection', icon:'◎' },
-  { id:'stresstest',  label:'Monte Carlo / Stress Tests / SWR', icon:'⊘' },
+  { id:'stresstest',  label:'Stress Tests', icon:'⊘' },
   { id:'roth',       label:'Roth Conversion', icon:'⟳' },
   { id:'tax',        label:'Tax Planning',   icon:'⊛' },
   { id:'rettools',   label:'Retirement Tools', icon:'⊚' },

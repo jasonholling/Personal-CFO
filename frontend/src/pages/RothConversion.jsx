@@ -357,7 +357,7 @@ export default function RothConversion({ onNavigate }) {
             <div style={{ overflowX:'auto' }}>
               <table style={{ width:'100%', borderCollapse:'collapse', fontSize:11 }}>
                 <thead><tr style={{ borderBottom:'2px solid var(--border)' }}>
-                  {['Age','Taxable Income','Room in 22%','Convert','Tax Cost','Rate','Pre-tax Bal'].map(h=>(
+                  {['Age','Taxable Income','Room in 22%','Convert','Tax Cost','Rate','Pre-tax Bal','IRMAA'].map(h=>(
                     <th key={h} style={{ padding:'5px 7px', textAlign:'right', color:'var(--text3)', fontWeight:600, fontSize:10, textTransform:'uppercase' }}>{h}</th>
                   ))}
                 </tr></thead>
@@ -373,6 +373,9 @@ export default function RothConversion({ onNavigate }) {
                         <td style={{ padding:'5px 7px', textAlign:'right', color:AMBER }}>{fmt(r.tax_cost)}</td>
                         <td style={{ padding:'5px 7px', textAlign:'right', color: rate <= 22 ? GREEN : AMBER }}>{rate.toFixed(1)}%</td>
                         <td style={{ padding:'5px 7px', textAlign:'right' }}>{fmtK(r.pretax_balance)}</td>
+                        <td style={{ padding:'5px 7px', textAlign:'right', color: r.irmaa?.is_surcharged ? AMBER : 'var(--text3)' }}>
+                          {r.irmaa?.is_surcharged ? `T${r.irmaa.tier_index}` : '—'}
+                        </td>
                       </tr>
                     )
                   })}

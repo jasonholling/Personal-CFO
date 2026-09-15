@@ -30,7 +30,7 @@ from annual_inputs import build_annual_income_inputs
 # as a lazy import matching projection_engine.py's own pattern. No import
 # cycle here (retirement_tools_engine imports FROM projection_engine, not
 # from this module), so there's no reason for it to be lazy in this file.
-from retirement_tools_engine import marginal_rate as _marginal_rate, STD_DEDUCTION_MFJ_2026 as _STD_DEDUCTION
+from retirement_tools_engine import marginal_rate as _marginal_rate, STD_DEDUCTION_MFJ_2026 as _STD_DEDUCTION, irmaa_tier as _irmaa_tier
 
 # Historical return parameters (annual, nominal)
 EQUITY_MEAN   = 0.09    # ~9% long-run US equity (conservative)
@@ -2937,6 +2937,11 @@ def _run_roth_conversion_analysis_two_age(inputs: Dict, accounts: List[Dict], ja
             "taxable_after":       round(taxable_after),
             "unmet_need":          round(base_result.unmet_need),
             "still_working_spouse_income": round(still_working_income_this_year),
+            # MAGI approx = the year's taxable income before the standard
+            # deduction (base_taxable already subtracted it) PLUS the
+            # conversion itself, since a Roth conversion is ordinary
+            # taxable income and counts toward IRMAA's MAGI test.
+            "irmaa": _irmaa_tier(base_taxable + STD_DEDUCTION + optimal_conversion),
         })
 
         pretax, roth, taxable = pretax_after, roth_after, taxable_after
@@ -3352,6 +3357,10 @@ def run_roth_conversion_analysis(inputs: Dict, accounts: List[Dict], ret_age: in
             # field, same name as run_retirement_projection's own
             # yearly_detail.
             "justin_gap_income":  round(income.justin_gap_income),
+            # See the two-age schedule's identical comment: MAGI approx =
+            # pre-standard-deduction taxable income + the conversion
+            # itself (ordinary income, counts toward IRMAA's MAGI test).
+            "irmaa": _irmaa_tier(base_taxable + STD_DEDUCTION + optimal_conversion),
         })
 
         pretax  = pretax_after

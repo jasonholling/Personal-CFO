@@ -37,6 +37,7 @@ export default function Dashboard({ onNavigate }) {
   const [emergencyFund, setEmergencyFund] = useState(null)
   const [briefing, setBriefing] = useState(null)
   const [confidence, setConfidence] = useState(null)
+  const [pillars, setPillars] = useState(null)
 
   useEffect(() => {
     axios.get('/api/net-worth').then(r => setNw(r.data)).catch(() => {})
@@ -44,6 +45,7 @@ export default function Dashboard({ onNavigate }) {
     axios.get('/api/emergency-fund').then(r => setEmergencyFund(r.data)).catch(() => {})
     axios.get('/api/cfo-briefing').then(r => setBriefing(r.data)).catch(() => {})
     axios.get('/api/plan-confidence').then(r => setConfidence(r.data)).catch(() => {})
+    axios.get('/api/pillars-summary').then(r => setPillars(r.data)).catch(() => {})
   }, [])
 
   const takeSnapshot = async () => {
@@ -138,6 +140,30 @@ export default function Dashboard({ onNavigate }) {
                 const destination = check.key === 'balances' ? 'accounts' : check.key === 'cash_flow' ? 'cashflow' : check.key === 'holdings_freshness' ? 'portfoliosetup' : 'settings'
                 return check.status === 'attention' ? <button key={check.key} className="btn-secondary" onClick={() => onNavigate(destination)} style={{ textAlign:'left', padding:'9px 12px' }}><span style={{ color:'var(--amber)', fontWeight:700 }}>! </span><span style={{ fontWeight:650 }}>{check.label}</span><span style={{ display:'block', fontSize:11, color:'var(--text2)', marginTop:3 }}>{check.detail} →</span></button> : <span key={check.key} style={{ fontSize:12, padding:'8px 10px', borderRadius:6, background:check.status === 'ready' ? 'rgba(52,211,153,0.10)' : 'rgba(79,156,249,0.10)', color:check.status === 'ready' ? 'var(--green)' : 'var(--accent)' }}>{check.status === 'ready' ? '✓' : 'i'} {check.label}</span>
               })}</div>
+            </div>
+          )}
+          {pillars && (
+            <div className="card" style={{ marginBottom:24 }}>
+              <div className="label" style={{ marginBottom:14 }}>THE 4 PILLARS</div>
+              <div className="grid-4">
+                {pillars.pillars.map(p => {
+                  const color = p.status === 'good' ? 'var(--green)' : p.status === 'attention' ? 'var(--amber)' : 'var(--red)'
+                  const dot = p.status === 'good' ? '✓' : p.status === 'attention' ? '!' : '⚠'
+                  return (
+                    <button key={p.key} onClick={() => onNavigate(p.destination)} style={{
+                      textAlign:'left', padding:'12px 14px', borderRadius:8, cursor:'pointer',
+                      background:'var(--bg2)', border:`1px solid ${color}33`,
+                    }}>
+                      <div style={{ display:'flex', alignItems:'center', gap:8, marginBottom:6 }}>
+                        <span style={{ color, fontWeight:700, fontSize:13 }}>{dot}</span>
+                        <span style={{ fontSize:12, fontWeight:650, color:'var(--text2)', textTransform:'uppercase', letterSpacing:'0.04em' }}>{p.label}</span>
+                      </div>
+                      <div style={{ fontSize:13, fontWeight:600, marginBottom:4 }}>{p.headline}</div>
+                      <div style={{ fontSize:11, color:'var(--text3)', lineHeight:1.4 }}>{p.detail}</div>
+                    </button>
+                  )
+                })}
+              </div>
             </div>
           )}
           {/* Top KPIs */}

@@ -20,7 +20,7 @@ from holdings_engine import (
     recommend_multi_account_contribution_destination,
     recommend_rebalance_actions,
     concentration_flags, expense_ratio_flags, duplicate_exposure_flags, unclassified_flags,
-    parse_holdings_csv, blended_expected_return, blended_expense_ratio, ASSET_CLASSES,
+    parse_holdings_csv, blended_expected_return, blended_expense_ratio, aum_fee_opportunity_cost, ASSET_CLASSES,
     is_closed_menu_account, eligible_options_for_account, is_option_actionable,
     CLOSED_MENU_TYPES, OPEN_UNIVERSE_TYPES, propose_account_option_mix,
     policy_included_holdings, blended_portfolio_volatility,
@@ -990,6 +990,39 @@ class TestBlendedExpenseRatio:
 
     def test_no_data_returns_none(self):
         assert blended_expense_ratio([holding(1, 1, market_value=50000, expense_ratio=None)]) is None
+
+
+class TestAumFeeOpportunityCost:
+    def test_no_holdings_returns_none(self):
+        assert aum_fee_opportunity_cost([]) is None
+
+    def test_zero_balance_returns_none(self):
+        assert aum_fee_opportunity_cost([holding(1, 1, market_value=0, expense_ratio=0.0005)]) is None
+
+    def test_opportunity_cost_is_positive_and_grows_with_the_fee_rate(self):
+        household = [holding(1, 1, market_value=500000, expense_ratio=0.0005)]
+        low = aum_fee_opportunity_cost(household, years=20, aum_fee_pct=0.005)
+        high = aum_fee_opportunity_cost(household, years=20, aum_fee_pct=0.01)
+        assert low["lifetime_opportunity_cost"] > 0
+        assert high["lifetime_opportunity_cost"] > low["lifetime_opportunity_cost"]
+
+    def test_first_year_fee_is_a_simple_percentage_of_balance(self):
+        result = aum_fee_opportunity_cost([holding(1, 1, market_value=1_000_000, expense_ratio=0.0)], aum_fee_pct=0.01)
+        assert result["first_year_aum_fee_dollars"] == 10000
+
+    def test_longer_horizon_compounds_to_a_larger_opportunity_cost(self):
+        household = [holding(1, 1, market_value=500000, expense_ratio=0.0004)]
+        short = aum_fee_opportunity_cost(household, years=5)
+        long = aum_fee_opportunity_cost(household, years=30)
+        assert long["lifetime_opportunity_cost"] > short["lifetime_opportunity_cost"]
+
+    def test_falls_back_to_zero_diy_expense_ratio_when_no_holdings_are_rated(self):
+        result = aum_fee_opportunity_cost([holding(1, 1, market_value=500000, expense_ratio=None)], years=10)
+        assert result is not None
+        assert result["diy_expense_ratio_pct"] == 0.0
+
+    def test_zero_years_returns_none(self):
+        assert aum_fee_opportunity_cost([holding(1, 1, market_value=500000, expense_ratio=0.001)], years=0) is None
 
 
 class TestAccountInvestmentOptionEligibility:

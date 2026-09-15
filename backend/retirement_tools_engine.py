@@ -50,6 +50,68 @@ def marginal_rate(taxable_income: float) -> float:
     return ORDINARY_BRACKETS_MFJ_2026[-1][0]
 
 
+# IRMAA (Medicare Part B/D income-related monthly adjustment amount),
+# married filing jointly, 2026. Source: CMS's 2026 Medicare Parts A & B
+# premium announcement (thefinancebuff.com / ustax.tools cross-checked,
+# 2026-09-15). IRMAA is a genuine CLIFF, not a phase-in -- $1 of MAGI over
+# a threshold moves the household into the entire next tier, and the
+# surcharge is billed PER Medicare-enrolled person, not per household (a
+# couple both on Medicare each pay their own copy of it). Update this
+# table annually -- verify against the current CMS release before relying
+# on it for a real Medicare enrollment or Roth-conversion decision.
+#
+# Real-world lookback caveat (surfaced in irmaa_tier's return, not hidden):
+# a given year's IRMAA is actually billed off MAGI from TWO YEARS earlier
+# (2026 premiums use 2024 MAGI), so "this year's MAGI -> this year's
+# IRMAA tier" is a planning simplification, not the literal billing rule
+# -- the same simplification every consumer retirement tool (Boldin
+# included) makes, since nobody is modeling a return two years hence.
+#
+# (magi_floor, part_b_monthly_total_per_person, part_b_surcharge_monthly_per_person, part_d_surcharge_monthly_per_person)
+IRMAA_BRACKETS_MFJ_2026 = [
+    (0,       202.90, 0.00,   0.00),
+    (218000,  284.10, 81.20,  14.50),
+    (274000,  405.80, 202.90, 37.50),
+    (342000,  527.50, 324.60, 60.40),
+    (410000,  649.20, 446.30, 83.30),
+    (750000,  689.90, 487.00, 91.00),
+]
+
+
+def irmaa_tier(magi: float, people_on_medicare: int = 2) -> Dict:
+    """Which 2026 IRMAA tier a given MAGI falls into, and the resulting
+    annual Part B + Part D surcharge.
+
+    people_on_medicare defaults to 2 (both spouses billed separately at
+    the same household-MAGI tier) -- pass 1 if only one spouse is
+    Medicare-enrolled, or 0 to suppress the dollar surcharge (e.g. neither
+    spouse has reached 65 yet) while still reporting which tier the MAGI
+    falls in.
+    """
+    floor, part_b_total, part_b_surcharge, part_d_surcharge = IRMAA_BRACKETS_MFJ_2026[0]
+    tier_index = 0
+    for i, (f, b_total, b_sur, d_sur) in enumerate(IRMAA_BRACKETS_MFJ_2026):
+        if magi >= f:
+            floor, part_b_total, part_b_surcharge, part_d_surcharge = f, b_total, b_sur, d_sur
+            tier_index = i
+        else:
+            break
+    next_tier = IRMAA_BRACKETS_MFJ_2026[tier_index + 1] if tier_index + 1 < len(IRMAA_BRACKETS_MFJ_2026) else None
+    monthly_surcharge_per_person = part_b_surcharge + part_d_surcharge
+    return {
+        "magi": round(magi),
+        "tier_index": tier_index,
+        "is_surcharged": tier_index > 0,
+        "part_b_monthly_total_per_person": part_b_total,
+        "part_b_surcharge_monthly_per_person": part_b_surcharge,
+        "part_d_surcharge_monthly_per_person": part_d_surcharge,
+        "annual_surcharge_total": round(monthly_surcharge_per_person * 12 * people_on_medicare),
+        "next_tier_magi_floor": next_tier[0] if next_tier else None,
+        "room_to_next_tier": round(next_tier[0] - magi) if next_tier else None,
+        "lookback_note": "Uses this year's MAGI as a planning approximation; real IRMAA billing uses MAGI from 2 years earlier.",
+    }
+
+
 def run_rmd_planning(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_timing: str = "early",
                       life_events: List[Dict] = None, surplus_allocations: List[Dict] = None) -> Dict:
     """Projects your pretax (401k/IRA) balance to your RMD start age, then
@@ -150,6 +212,11 @@ def run_rmd_planning(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_t
             "starting_balance": round(bal),
             "rmd_amount": round(rmd),
             "marginal_rate": marginal_rate(taxable_income_this_year),
+            # taxable_income_this_year is a MAGI approximation (gross
+            # ordinary income, no standard-deduction subtraction) -- the
+            # right base for IRMAA, which is a MAGI test, unlike the
+            # marginal_rate line above which needs actual taxable income.
+            "irmaa": irmaa_tier(taxable_income_this_year),
         })
         cumulative_rmd += rmd
         bal = max(0, (bal - rmd) * (1 + post_ret))
@@ -158,6 +225,10 @@ def run_rmd_planning(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_t
     first_rmd_amount = first_rmd["rmd_amount"] if first_rmd else 0
     first_rmd_bracket = first_rmd["marginal_rate"] if first_rmd else pre_rmd_bracket
     bracket_jump = first_rmd_bracket > pre_rmd_bracket
+
+    pre_rmd_irmaa = irmaa_tier(other_income)
+    first_rmd_irmaa = first_rmd["irmaa"] if first_rmd else pre_rmd_irmaa
+    irmaa_tier_jump = first_rmd_irmaa["tier_index"] > pre_rmd_irmaa["tier_index"]
 
     if bracket_jump:
         recommendation = (
@@ -171,6 +242,14 @@ def run_rmd_planning(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_t
             f"Your first RMD at {start_age} adds about ${first_rmd_amount:,.0f}/yr of forced taxable income, but "
             f"doesn't push you into a higher bracket ({first_rmd_bracket*100:.0f}%) given your other income. "
             f"No urgency to Roth-convert purely to avoid RMD bracket creep."
+        )
+
+    if irmaa_tier_jump:
+        recommendation += (
+            f" It also pushes projected MAGI into IRMAA tier {first_rmd_irmaa['tier_index']}, adding about "
+            f"${first_rmd_irmaa['annual_surcharge_total']:,.0f}/yr in Medicare Part B/D surcharges (both spouses) "
+            f"that your current income doesn't trigger — another reason to review pre-RMD Roth conversions, but "
+            f"watch that conversions themselves can push MAGI into a surcharge tier too."
         )
 
     return {
@@ -195,8 +274,143 @@ def run_rmd_planning(inputs: Dict, accounts: List[Dict], ret_age: int = 60, ss_t
         "bracket_jump": bracket_jump,
         "pre_rmd_bracket": pre_rmd_bracket,
         "first_rmd_bracket": first_rmd_bracket,
+        "pre_rmd_irmaa": pre_rmd_irmaa,
+        "first_rmd_irmaa": first_rmd_irmaa,
+        "irmaa_tier_jump": irmaa_tier_jump,
         "recommendation": recommendation,
         "schedule": schedule[::2],  # every other year keeps the response small
+    }
+
+
+# 65 -- not a Medicare-specific constant here, just the same "bridge to
+# guaranteed income" cutoff projection_engine.py's own bridge_income_55/
+# bridge_years_55 mechanism already uses (see run_retirement_projection).
+# Reused as the horizon over which a Barista FI income gap gets spread.
+BARISTA_BRIDGE_END_AGE = 65
+
+
+def coast_fi_status(inputs: Dict, accounts: List[Dict], target_ret_age: int = 60, ss_timing: str = "early",
+                     life_events: List[Dict] = None, surplus_allocations: List[Dict] = None) -> Dict:
+    """Coast FI: would your CURRENT invested balance alone, compounding
+    untouched with zero further contributions, reach the portfolio value
+    your real retirement plan actually needs by target_ret_age? Barista
+    FI (a looser milestone): if you stopped working entirely TODAY
+    instead, how big is the shortfall, and what would it take spread as
+    a part-time "bridge" income between now and age 65 to close it?
+
+    Deliberately does NOT re-run the projection with every contribution
+    field zeroed out (401k/HSA/RSU/bonus/second-earner variants are
+    numerous and easy to miss one of, which would silently overstate
+    "coast" status -- a wrong-direction bug specifically worth avoiding
+    here). Instead it reuses the SAME real projection's own
+    capitalized_needed_from_assets (the dollar value already required
+    at retirement, independent of how it gets funded) and discounts that
+    back to today at the household's own pre-retirement growth rate --
+    the textbook Coast FI formula, computed from real numbers instead of
+    a generic 25x-expenses rule. For Barista FI, setting ret_age to the
+    household's CURRENT age collapses the accumulation phase to zero
+    years automatically (there's no time left to contribute anything),
+    so it gets the same "no more contributions" property for free,
+    without touching a single contribution input."""
+    jason_age = inputs["jason_age"]
+    pre_ret = inputs["expected_return_pre_retirement"]
+
+    proj = run_retirement_projection(inputs, accounts, ret_ages=[target_ret_age],
+                                      life_events=life_events, surplus_allocations=surplus_allocations)
+    target_scenario = next((s for s in proj["scenarios"] if s["label"] == f"age_{target_ret_age}_{ss_timing}"), None)
+    if target_scenario is None:
+        return {"has_data": False}
+
+    current_investable_balance = target_scenario["current_investable_assets"]
+    years_to_target = max(0, target_ret_age - jason_age)
+    coast_number_today = target_scenario["capitalized_needed_from_assets"] / ((1 + pre_ret) ** years_to_target) \
+        if years_to_target > 0 else target_scenario["capitalized_needed_from_assets"]
+    is_coast_fi = current_investable_balance >= coast_number_today
+    coast_gap = max(0, round(coast_number_today - current_investable_balance))
+    coast_surplus = max(0, round(current_investable_balance - coast_number_today))
+
+    if is_coast_fi:
+        coast_recommendation = (
+            f"Your current invested balance (${current_investable_balance:,.0f}) already exceeds the "
+            f"${round(coast_number_today):,.0f} 'coast number' needed today -- growth alone, with zero further "
+            f"contributions, is projected to reach what your plan needs by age {target_ret_age}. That doesn't mean "
+            f"stop contributing (more savings still shortens the timeline or raises your spending ceiling), just "
+            f"that you're no longer DEPENDENT on new contributions to hit this specific target."
+        )
+    else:
+        coast_recommendation = (
+            f"You're about ${coast_gap:,.0f} short of your 'coast number' today (${round(coast_number_today):,.0f}) -- "
+            f"at your current balance, you're still relying on new contributions (or investment growth beating "
+            f"{pre_ret*100:.1f}%/yr) to reach what your plan needs by age {target_ret_age}."
+        )
+
+    # Barista FI: retiring literally today (ret_age = current age)
+    # collapses the accumulation phase, so this scenario's own numbers
+    # already reflect "no more contributions, no more years of growth
+    # before the money has to start working."
+    retire_now_age = int(jason_age)
+    barista_gap, barista_annual_income_needed, is_full_fi_now = 0, None, False
+    bridge_years = max(0, BARISTA_BRIDGE_END_AGE - retire_now_age)
+    if retire_now_age != target_ret_age:
+        now_proj = run_retirement_projection(inputs, accounts, ret_ages=[retire_now_age],
+                                              life_events=life_events, surplus_allocations=surplus_allocations)
+        now_scenario = next((s for s in now_proj["scenarios"] if s["label"] == f"age_{retire_now_age}_{ss_timing}"), None)
+    else:
+        now_scenario = target_scenario
+    barista_percent_funded = None
+    if now_scenario is not None:
+        barista_percent_funded = now_scenario["percent_funded"]
+        is_full_fi_now = now_scenario["percent_funded"] >= 100
+        if not is_full_fi_now:
+            barista_gap = max(0, -now_scenario["projected_surplus"])
+            if bridge_years > 0:
+                # Straight-line amortization of the shortfall across the
+                # bridge years -- a simplification (no compounding/
+                # sequence-risk modeling of the bridge income itself),
+                # flagged explicitly rather than presented as a precise
+                # simulation.
+                barista_annual_income_needed = round(barista_gap / bridge_years)
+
+    if is_full_fi_now:
+        barista_recommendation = (
+            f"Your current balance alone is already projected to fully fund retirement starting TODAY, with zero "
+            f"further contributions -- you're not just Coast FI for age {target_ret_age}, you're fully there now."
+        )
+    elif barista_annual_income_needed:
+        barista_recommendation = (
+            f"Stopping full-time work entirely today would leave roughly a ${round(barista_gap):,.0f} funding gap. "
+            f"Spread evenly, about ${barista_annual_income_needed:,.0f}/yr of part-time 'bridge' income between now "
+            f"and age {BARISTA_BRIDGE_END_AGE} (a simplification -- not a full simulation of sequence risk during "
+            f"the bridge) would close it. This app already has a bridge-income input (Settings) for exactly this."
+        )
+    else:
+        barista_recommendation = (
+            f"Retiring today would leave a funding gap with no bridge years left before age "
+            f"{BARISTA_BRIDGE_END_AGE} to spread part-time income across -- reaching full retirement funding would "
+            f"need either a lump-sum gap closed some other way, or working longer."
+        )
+
+    return {
+        "has_data": True,
+        "target_ret_age": target_ret_age,
+        "current_investable_balance": round(current_investable_balance),
+        "coast_number_today": round(coast_number_today),
+        "is_coast_fi": is_coast_fi,
+        "coast_gap": coast_gap,
+        "coast_surplus": coast_surplus,
+        # Capped the same way the rest of the app caps percent_funded
+        # (0-100) -- a genuine surplus can push the raw ratio well past
+        # 100%, which is real information for the recommendation text
+        # above but would make a percent-funded progress bar overflow.
+        "coast_percent": round(max(0, min(100, (current_investable_balance / coast_number_today * 100) if coast_number_today > 0 else 100))),
+        "coast_recommendation": coast_recommendation,
+        "current_age": jason_age,
+        "is_full_fi_now": is_full_fi_now,
+        "barista_gap": round(barista_gap),
+        "barista_percent_funded": barista_percent_funded,
+        "bridge_years_to_65": bridge_years,
+        "barista_annual_income_needed": barista_annual_income_needed,
+        "barista_recommendation": barista_recommendation,
     }
 
 

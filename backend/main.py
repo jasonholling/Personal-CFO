@@ -1874,6 +1874,34 @@ def get_portfolio_allocation():
     result["comparison"] = compare_to_target(current, active_policy)
     return result
 
+@app.get("/api/portfolio/fee-comparison")
+def get_portfolio_fee_comparison(years: int = None, aum_fee_pct: float = 0.01):
+    """What you actually pay today in fund-level expense ratios
+    (holdings_engine.blended_expense_ratio) vs. what a traditional AUM
+    advisor -- the fee model firms like Creative Planning use -- would
+    cost, compounded over `years`. `years` defaults to years until age 60
+    (the same "headline scenario" retirement-age convention every other
+    retirement-tools calculator in this app defaults to), or 20 if
+    planning inputs aren't set yet."""
+    conn = get_db()
+    accounts, holdings, policy = _load_portfolio_context(conn)
+    inputs_row = conn.execute("SELECT * FROM planning_inputs WHERE id=1").fetchone()
+    conn.close()
+    if not holdings:
+        return {"has_data": False}
+    inputs = dict(inputs_row) if inputs_row else {}
+    if years is None:
+        years = max(1, 60 - int(inputs["jason_age"])) if inputs.get("jason_age") else 20
+    from holdings_engine import aum_fee_opportunity_cost
+    result = aum_fee_opportunity_cost(
+        holdings, years=years, aum_fee_pct=aum_fee_pct,
+        expected_return=inputs.get("expected_return_pre_retirement", 0.07),
+    )
+    if result is None:
+        return {"has_data": False}
+    result["has_data"] = True
+    return result
+
 @app.post("/api/portfolio/contribution-destination")
 def portfolio_contribution_destination(req: PortfolioContributionRequest):
     """"Where should my next contribution go?" — the Available Funds
@@ -3235,6 +3263,35 @@ def get_rmd_planning(ret_age: int = 60, ss_timing: str = "early"):
     return run_rmd_planning(dict(inputs_row), accounts, ret_age, ss_timing,
                              life_events=life_events, surplus_allocations=surplus_allocations)
 
+@app.get("/api/retirement-tools/irmaa")
+def get_irmaa(magi: float, people_on_medicare: int = 2):
+    """Ad-hoc IRMAA lookup for any MAGI figure -- e.g. checking what a
+    candidate Roth conversion amount would do to next year's Medicare
+    premiums before committing to it on the Roth Conversion page, or
+    sanity-checking the current year's actual MAGI against 2026 tiers.
+    people_on_medicare defaults to 2 (both spouses); pass 1 if only one
+    spouse is Medicare-enrolled, or 0 if neither is yet."""
+    from retirement_tools_engine import irmaa_tier
+    if people_on_medicare not in (0, 1, 2):
+        raise HTTPException(status_code=400, detail="people_on_medicare must be 0, 1, or 2")
+    return irmaa_tier(magi, people_on_medicare)
+
+@app.get("/api/retirement-tools/coast-fi")
+def get_coast_fi(target_ret_age: int = 60, ss_timing: str = "early"):
+    """Coast FI / Barista FI milestones -- see retirement_tools_engine.
+    coast_fi_status's own docstring for the methodology."""
+    conn = get_db()
+    inputs_row = conn.execute("SELECT * FROM planning_inputs WHERE id=1").fetchone()
+    accounts = [dict(r) for r in conn.execute("SELECT * FROM accounts").fetchall()]
+    life_events = _get_active_life_events(conn)
+    surplus_allocations = _get_relevant_surplus_allocations(conn)
+    conn.close()
+    if not inputs_row:
+        raise HTTPException(status_code=400, detail="Planning inputs not set yet")
+    from retirement_tools_engine import coast_fi_status
+    return coast_fi_status(dict(inputs_row), accounts, target_ret_age, ss_timing,
+                            life_events=life_events, surplus_allocations=surplus_allocations)
+
 class PensionVsLumpSumRequest(BaseModel):
     monthly_pension: float
     lump_sum: float
@@ -3669,6 +3726,62 @@ def get_cfo_briefing():
     return build_cfo_briefing(
         accounts, inputs, snapshots, tasks, retirement, education,
         summarize_cash_flow(cash_flow_items), portfolio_recommendations,
+    )
+
+@app.get("/api/pillars-summary")
+def get_pillars_summary():
+    """One-glance traffic-lighted status across the 4 pillars of
+    comprehensive wealth management (tax/estate/risk/investment) — see
+    pillars_engine.py's module docstring. Reuses the same underlying
+    calculations every other page already shows; this route only
+    gathers and classifies them."""
+    conn = get_db()
+    inputs_row = conn.execute("SELECT * FROM planning_inputs WHERE id=1").fetchone()
+    accounts = [dict(r) for r in conn.execute("SELECT * FROM accounts").fetchall()]
+    estate_documents = [dict(r) for r in conn.execute("SELECT * FROM estate_documents ORDER BY document_type").fetchall()]
+    estate_beneficiaries = [dict(r) for r in conn.execute("SELECT * FROM estate_beneficiaries ORDER BY account_key").fetchall()]
+    insurance_policies = [dict(r) for r in conn.execute("SELECT * FROM insurance_policies ORDER BY sort_order, id").fetchall()]
+    property_policies = [dict(r) for r in conn.execute("SELECT * FROM property_policies ORDER BY sort_order, id").fetchall()]
+    kids = _get_kids(conn)
+    try:
+        portfolio_recommendations, _ = _refresh_recommendation_queue(conn)
+    except (KeyError, TypeError, ValueError, ZeroDivisionError):
+        portfolio_recommendations = []
+    conn.close()
+
+    inputs = dict(inputs_row) if inputs_row else {}
+    tax_inputs_ready = bool(inputs.get("retirement_income_today_dollars") and inputs.get("jason_age"))
+
+    rmd_result, estate_tax_exposure_result, insurance_analysis = None, None, None
+    if inputs:
+        try:
+            from retirement_tools_engine import run_rmd_planning
+            rmd_result = run_rmd_planning(inputs, accounts)
+        except (KeyError, ValueError, ZeroDivisionError):
+            rmd_result = None
+        try:
+            from net_worth_engine import compute_net_worth
+            from estate_engine import estate_tax_exposure
+            nw = compute_net_worth(accounts)
+            life_insurance_total = (
+                inputs.get("jason_life_basic", 0) + inputs.get("jason_life_supplemental", 0) + inputs.get("jason_life_term", 0)
+                + inputs.get("justin_life_ul", 0) + inputs.get("justin_life_whole", 0) + inputs.get("person2_life_employer", 0)
+                + inputs.get("justin_life_term", 0) + inputs.get("justin_life_kids", 0)
+            )
+            estate_tax_exposure_result = estate_tax_exposure(nw["net_worth"], life_insurance_total, True)
+        except (KeyError, ValueError, ZeroDivisionError):
+            estate_tax_exposure_result = None
+        try:
+            from projection_engine import run_insurance_analysis
+            insurance_analysis = run_insurance_analysis(inputs, accounts, kids=kids)
+        except (KeyError, ValueError, ZeroDivisionError):
+            insurance_analysis = None
+
+    from pillars_engine import build_pillars_summary
+    return build_pillars_summary(
+        portfolio_recommendations, rmd_result, tax_inputs_ready,
+        estate_documents, estate_beneficiaries, estate_tax_exposure_result,
+        insurance_policies, property_policies, insurance_analysis,
     )
 
 @app.get("/api/rental/analysis")

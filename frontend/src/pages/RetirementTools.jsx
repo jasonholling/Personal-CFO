@@ -206,6 +206,24 @@ export default function RetirementTools({ onNavigate }) {
                 <div style={{ fontSize:14, marginTop:4, color: rmd.bracket_jump ? RED : GREEN, fontWeight:600 }}>{fpct(rmd.first_rmd_bracket)}</div>
               </div>
             </div>
+            {rmd.first_rmd_irmaa && (
+              <div className="grid-2" style={{ marginBottom:16 }}>
+                <div>
+                  <div className="label">IRMAA Tier Before RMDs</div>
+                  <div style={{ fontSize:14, marginTop:4 }}>
+                    {rmd.pre_rmd_irmaa.is_surcharged ? `Tier ${rmd.pre_rmd_irmaa.tier_index}` : 'Standard (no surcharge)'}
+                  </div>
+                </div>
+                <div>
+                  <div className="label">IRMAA Tier at First RMD</div>
+                  <div style={{ fontSize:14, marginTop:4, color: rmd.irmaa_tier_jump ? RED : 'var(--text)', fontWeight: rmd.irmaa_tier_jump ? 600 : 400 }}>
+                    {rmd.first_rmd_irmaa.is_surcharged
+                      ? `Tier ${rmd.first_rmd_irmaa.tier_index} — +${fmt(rmd.first_rmd_irmaa.annual_surcharge_total)}/yr Medicare surcharge`
+                      : 'Standard (no surcharge)'}
+                  </div>
+                </div>
+              </div>
+            )}
             <div className="label" style={{ marginBottom:8 }}>Lifetime RMD Total (through age {rmd.last_rmd_age})</div>
             <div style={{ fontSize:16, fontWeight:600, marginBottom:16 }}>{fmt(rmd.lifetime_rmd_total)}</div>
             {rmd.schedule?.length > 0 && (
@@ -213,7 +231,7 @@ export default function RetirementTools({ onNavigate }) {
                 <table style={{ width:'100%', borderCollapse:'collapse' }}>
                   <thead>
                     <tr style={{ borderBottom:'1px solid var(--border)' }}>
-                      {['Age','Starting Balance','RMD Amount','Bracket'].map(h => (
+                      {['Age','Starting Balance','RMD Amount','Bracket','IRMAA'].map(h => (
                         <th key={h} style={{ padding:'8px 12px', textAlign:'left', fontSize:11, fontWeight:600, letterSpacing:'0.05em', textTransform:'uppercase', color:'var(--text3)' }}>{h}</th>
                       ))}
                     </tr>
@@ -225,6 +243,9 @@ export default function RetirementTools({ onNavigate }) {
                         <td style={{ padding:'8px 12px', fontSize:13 }}>{fmt(s.starting_balance)}</td>
                         <td style={{ padding:'8px 12px', fontSize:13 }}>{fmt(s.rmd_amount)}</td>
                         <td style={{ padding:'8px 12px', fontSize:13 }}>{fpct(s.marginal_rate)}</td>
+                        <td style={{ padding:'8px 12px', fontSize:13, color: s.irmaa?.is_surcharged ? AMBER : 'var(--text2)' }}>
+                          {s.irmaa?.is_surcharged ? `Tier ${s.irmaa.tier_index}` : '—'}
+                        </td>
                       </tr>
                     ))}
                   </tbody>
