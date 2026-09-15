@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, UploadFile, File, Request, Response
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response as FastAPIResponse
 from pydantic import BaseModel, field_validator, model_validator
@@ -817,6 +817,10 @@ class PlanningInputs(BaseModel):
     jason_ss_70: float = 0
     justin_ss_early: float = 0
     justin_ss_70: float = 0
+    # 2026-09-14: "spousal" (default, 50% of Jason's FRA benefit) or
+    # "worker" (Justin's own independent SS record) -- see db.py's
+    # identical comment and resolve_ss_benefits' use of this field.
+    justin_ss_benefit_type: str = "spousal"
 
 class SnapshotNote(BaseModel):
     note: str
@@ -1344,30 +1348,24 @@ def compare_account_investment_options(req: OptionMixRequest):
 MATERIAL_QUOTE_DEVIATION_PCT = 5.0  # documented review threshold, item 2
 
 
-@app.post("/api/holdings/import/preview")
-async def preview_holdings_import(file: UploadFile = File(...)):
-    """Item 2: a row that MATCHES an existing holding is a value/date
-    refresh -- it never requires asset_class (missing/blank means "keep
-    the existing classification"). A row that would CREATE a brand-new
-    holding still needs one; there's nothing to fall back to. Also
-    flags, without deciding which number is right, when a matched
-    holding's imported value differs materially from a quote already
-    checked earlier in this session (never fetches a fresh quote here
-    -- see security_provider.peek_cached_quote)."""
-    content = await file.read()
-    try:
-        text = content.decode("utf-8-sig")
-    except Exception:
-        text = content.decode("latin-1")
-    conn = get_db()
-    valid_account_ids = {r[0] for r in conn.execute("SELECT id FROM accounts").fetchall()}
-    existing = [dict(r) for r in conn.execute(
-        "SELECT id, account_id, ticker, security_name, market_value, shares, provider_identifier FROM holdings"
-    ).fetchall()]
-    conn.close()
-    from holdings_engine import parse_holdings_csv
+def _finalize_holdings_import_preview(preview: Dict, existing: List[Dict], default_new_asset_class: Optional[str] = None) -> Dict:
+    """Shared by the CSV and QFX preview endpoints: matches each parsed
+    row against an existing holding (same account_id + ticker or
+    security_name), flags a material quote-vs-imported-value deviation
+    on a match, and requires asset_class only for a row that would
+    CREATE a brand-new holding (a matched row is a value/date refresh --
+    it never needs one; see commit_holdings_import's identical
+    convention).
+
+    default_new_asset_class (2026-09-14, QFX import): a custodian
+    statement never carries asset_class at all -- rather than blocking
+    every new position on a required field the file simply can't supply,
+    the QFX preview defaults a CREATE row to this (typically
+    "unclassified", a real, already-supported ASSET_CLASSES value the
+    household can reclassify later, same as any other unclassified
+    holding). None (the CSV preview's own behavior, unchanged) still
+    requires the file to supply it."""
     from security_provider import peek_cached_quote
-    preview = parse_holdings_csv(text, valid_account_ids)
     for row in preview["rows"]:
         match = next((h for h in existing if h["account_id"] == row.get("account_id") and ((row.get("ticker") and h.get("ticker") and row["ticker"].upper() == h["ticker"].upper()) or row.get("security_name", "").lower() == h.get("security_name", "").lower())), None)
         row["import_action"] = "update" if match else "create"
@@ -1393,9 +1391,12 @@ async def preview_holdings_import(file: UploadFile = File(...)):
                                                f"{deviation_pct}%. Review both before importing -- this does not decide which is correct.",
                                 }
         elif not row.get("asset_class"):
-            row["valid"] = False
-            row["errors"] = row.get("errors", []) + ["asset_class is required for a new holding (no existing holding to keep it from)"]
-            preview["errors"].append({"row": row["row"], "message": row["errors"][-1]})
+            if default_new_asset_class:
+                row["asset_class"] = default_new_asset_class
+            else:
+                row["valid"] = False
+                row["errors"] = row.get("errors", []) + ["asset_class is required for a new holding (no existing holding to keep it from)"]
+                preview["errors"].append({"row": row["row"], "message": row["errors"][-1]})
     preview["valid_count"] = sum(1 for r in preview["rows"] if r["valid"])
     preview["invalid_count"] = sum(1 for r in preview["rows"] if not r["valid"])
     preview["update_count"] = sum(row.get("import_action") == "update" for row in preview["rows"] if row.get("valid"))
@@ -1408,6 +1409,89 @@ async def preview_holdings_import(file: UploadFile = File(...)):
         for h in existing if h["account_id"] in imported_account_ids and h["id"] not in matched_ids
     ]
     return preview
+
+
+@app.post("/api/holdings/import/preview")
+async def preview_holdings_import(file: UploadFile = File(...)):
+    """Item 2: a row that MATCHES an existing holding is a value/date
+    refresh -- it never requires asset_class (missing/blank means "keep
+    the existing classification"). A row that would CREATE a brand-new
+    holding still needs one; there's nothing to fall back to. Also
+    flags, without deciding which number is right, when a matched
+    holding's imported value differs materially from a quote already
+    checked earlier in this session (never fetches a fresh quote here
+    -- see security_provider.peek_cached_quote)."""
+    content = await file.read()
+    try:
+        text = content.decode("utf-8-sig")
+    except Exception:
+        text = content.decode("latin-1")
+    conn = get_db()
+    valid_account_ids = {r[0] for r in conn.execute("SELECT id FROM accounts").fetchall()}
+    existing = [dict(r) for r in conn.execute(
+        "SELECT id, account_id, ticker, security_name, market_value, shares, provider_identifier FROM holdings"
+    ).fetchall()]
+    conn.close()
+    from holdings_engine import parse_holdings_csv
+    preview = parse_holdings_csv(text, valid_account_ids)
+    return _finalize_holdings_import_preview(preview, existing)
+
+
+@app.post("/api/holdings/import/qfx/preview")
+async def preview_qfx_import(file: UploadFile = File(...), account_id: int = Form(...)):
+    """QFX/OFX statement import (2026-09-14) -- keeps one custodian
+    account's holdings AND balance in sync from a single downloaded
+    file instead of two hand-typed numbers drifting apart. Every parsed
+    position is assigned to the account_id the household picked (the
+    file's own <ACCTID> is custodian-internal and doesn't match this
+    app's account ids, so it's surfaced only as account_id_in_file for
+    the household to sanity-check, never auto-matched). Reuses the same
+    match/finalize logic as the CSV preview, with one difference: a
+    statement never carries asset_class, so a brand-new position
+    defaults to "unclassified" (a real, reclassify-later value) rather
+    than being rejected -- an update/refresh row is untouched, exactly
+    like the CSV path, so an existing classification is never
+    clobbered. account_balance/as_of_date/account_id_in_file pass
+    through for the frontend to offer as an account-balance update
+    alongside the holdings commit (no separate balance-sync endpoint --
+    the frontend calls the existing PUT /api/accounts/{id})."""
+    content = await file.read()
+    try:
+        text = content.decode("utf-8-sig")
+    except Exception:
+        text = content.decode("latin-1")
+    conn = get_db()
+    valid_account_ids = {r[0] for r in conn.execute("SELECT id FROM accounts").fetchall()}
+    if account_id not in valid_account_ids:
+        conn.close()
+        raise HTTPException(status_code=404, detail=f"account_id {account_id} does not exist")
+    existing = [dict(r) for r in conn.execute(
+        "SELECT id, account_id, ticker, security_name, market_value, shares, provider_identifier FROM holdings"
+    ).fetchall()]
+    conn.close()
+    from qfx_importer import parse_qfx_positions
+    parsed = parse_qfx_positions(text)
+    rows = []
+    for i, pos in enumerate(parsed["positions"]):
+        rows.append({
+            "row": i + 1,
+            "account_id": account_id,
+            "ticker": pos["ticker"],
+            "security_name": pos["security_name"],
+            "shares": pos["shares"],
+            "market_value": pos["market_value"],
+            "value_date": pos["as_of_date"],
+            "asset_class": None,
+            "valid": True,
+            "errors": [],
+        })
+    preview = {"rows": rows, "errors": [{"row": None, "message": e} for e in parsed["errors"]]}
+    preview = _finalize_holdings_import_preview(preview, existing, default_new_asset_class="unclassified")
+    preview["account_balance"] = parsed["account_balance"]
+    preview["as_of_date"] = parsed["as_of_date"]
+    preview["account_id_in_file"] = parsed["account_id_in_file"]
+    return preview
+
 
 @app.post("/api/holdings/import/commit")
 def commit_holdings_import(rows: List[HoldingImportRow]):

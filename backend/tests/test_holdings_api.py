@@ -645,3 +645,150 @@ class TestTaxLotsAndQuotePreview:
         })
         assert r.status_code == 422
         assert client.get("/api/holdings").json()[0]["market_value"] == 1000
+
+
+class TestHoldingsQfxImport:
+    """QFX/OFX statement import (2026-09-14) -- keeps one custodian
+    account's holdings and balance in sync from a single downloaded
+    file. New positions default to asset_class='unclassified' (a
+    statement never carries one); a matched/refresh row is untouched,
+    exactly like the CSV import path."""
+
+    SAMPLE_QFX = """OFXHEADER:100
+DATA:OFXSGML
+VERSION:102
+
+<OFX>
+  <INVSTMTMSGSRSV1>
+    <INVSTMTTRNRS>
+      <INVSTMTRS>
+        <DTASOF>20260911120000.000</DTASOF>
+        <INVACCTFROM>
+          <ACCTID>10596750.583014-01</ACCTID>
+        </INVACCTFROM>
+        <INVPOSLIST>
+          <POSMF>
+            <INVPOS>
+              <SECID>
+                <UNIQUEID>20602V101</UNIQUEID>
+                <UNIQUEIDTYPE>CUSIP</UNIQUEIDTYPE>
+              </SECID>
+              <UNITS>1900.474034</UNITS>
+              <UNITPRICE>197.36</UNITPRICE>
+              <MKTVAL>375077.55</MKTVAL>
+              <DTPRICEASOF>20260911000000.000</DTPRICEASOF>
+            </INVPOS>
+          </POSMF>
+          <POSMF>
+            <INVPOS>
+              <SECID>
+                <UNIQUEID>09258N802</UNIQUEID>
+                <UNIQUEIDTYPE>CUSIP</UNIQUEIDTYPE>
+              </SECID>
+              <UNITS>2971.541261</UNITS>
+              <UNITPRICE>23.18</UNITPRICE>
+              <MKTVAL>68880.33</MKTVAL>
+              <DTPRICEASOF>20260911000000.000</DTPRICEASOF>
+            </INVPOS>
+          </POSMF>
+        </INVPOSLIST>
+        <INV401KBAL>
+          <TOTAL>443957.88</TOTAL>
+        </INV401KBAL>
+      </INVSTMTRS>
+    </INVSTMTTRNRS>
+  </INVSTMTMSGSRSV1>
+  <SECLISTMSGSRSV1>
+    <SECLIST>
+      <MFINFO>
+        <SECINFO>
+          <SECID>
+            <UNIQUEID>20602V101</UNIQUEID>
+            <UNIQUEIDTYPE>CUSIP</UNIQUEIDTYPE>
+          </SECID>
+          <SECNAME>Vanguard Institutional 500 Index Trust</SECNAME>
+          <TICKER>20602V101</TICKER>
+        </SECINFO>
+      </MFINFO>
+      <MFINFO>
+        <SECINFO>
+          <SECID>
+            <UNIQUEID>09258N802</UNIQUEID>
+            <UNIQUEIDTYPE>CUSIP</UNIQUEIDTYPE>
+          </SECID>
+          <SECNAME>BlackRock Advantage Small Cap Core K</SECNAME>
+          <TICKER>BDSKX</TICKER>
+        </SECINFO>
+      </MFINFO>
+    </SECLIST>
+  </SECLISTMSGSRSV1>
+</OFX>
+"""
+
+    def _preview(self, client, account_id, qfx_text=None):
+        return client.post(
+            "/api/holdings/import/qfx/preview",
+            files={"file": ("statement.qfx", (qfx_text or self.SAMPLE_QFX).encode(), "application/octet-stream")},
+            data={"account_id": account_id},
+        )
+
+    def test_new_positions_default_to_unclassified_and_are_valid(self, client):
+        acc = _create_account(client)
+        r = self._preview(client, acc["id"])
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["valid_count"] == 2
+        assert body["create_count"] == 2
+        assert body["update_count"] == 0
+        for row in body["rows"]:
+            assert row["import_action"] == "create"
+            assert row["asset_class"] == "unclassified"
+            assert row["account_id"] == acc["id"]
+
+    def test_account_balance_as_of_date_and_file_account_id_pass_through(self, client):
+        acc = _create_account(client)
+        body = self._preview(client, acc["id"]).json()
+        assert body["account_balance"] == 443957.88
+        assert body["as_of_date"] == "2026-09-11"
+        assert body["account_id_in_file"] == "10596750.583014-01"
+
+    def test_matched_position_previews_as_an_update_and_keeps_existing_classification(self, client):
+        acc = _create_account(client)
+        holding = client.post("/api/holdings", json={
+            "account_id": acc["id"], "security_name": "BlackRock Advantage Small Cap Core K", "ticker": "BDSKX",
+            "market_value": 60000, "shares": 2900, "asset_class": "us_small_cap",
+        }).json()
+        body = self._preview(client, acc["id"]).json()
+        row = next(r for r in body["rows"] if r["ticker"] == "BDSKX")
+        assert row["import_action"] == "update"
+        assert row["matching_holding_id"] == holding["id"]
+        assert row["asset_class"] is None  # untouched -- commit will keep "us_small_cap"
+
+    def test_commit_reuses_the_generic_endpoint_unchanged(self, client):
+        acc = _create_account(client)
+        body = self._preview(client, acc["id"]).json()
+        commit_rows = [{
+            "account_id": r["account_id"], "ticker": r["ticker"], "security_name": r["security_name"],
+            "shares": r["shares"], "market_value": r["market_value"], "asset_class": r["asset_class"],
+            "value_date": r["value_date"],
+        } for r in body["rows"]]
+        r = client.post("/api/holdings/import/commit", json=commit_rows)
+        assert r.status_code == 200, r.text
+        result = r.json()
+        assert result["created"] == 2
+        holdings = client.get("/api/holdings").json()
+        assert {h["ticker"] for h in holdings} == {"20602V101", "BDSKX"}
+        assert round(sum(h["market_value"] for h in holdings), 2) == 443957.88
+
+    def test_unknown_account_id_returns_404(self, client):
+        r = self._preview(client, 999999)
+        assert r.status_code == 404
+
+    def test_non_ofx_file_reports_a_clear_error_with_no_positions(self, client):
+        acc = _create_account(client)
+        r = self._preview(client, acc["id"], qfx_text="not a QFX file")
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["rows"] == []
+        assert len(body["errors"]) == 1
+        assert "QFX/OFX" in body["errors"][0]["message"]
