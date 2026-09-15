@@ -270,6 +270,8 @@ function HoldingsTab({ accounts, excludedAccounts, onEditPolicy }) {
   const [qfxPreview, setQfxPreview] = useState(null)
   const [qfxError, setQfxError] = useState(null)
   const [qfxUpdateBalance, setQfxUpdateBalance] = useState(true)
+  const [qfxNotice, setQfxNotice] = useState(null)
+  const [csvNotice, setCsvNotice] = useState(null)
 
   const load = () => axios.get('/api/holdings/grouped').then(r => setGroups(r.data.groups)).finally(() => setLoading(false))
   const loadOptions = () => axios.get('/api/account-investment-options').then(r => {
@@ -409,6 +411,7 @@ function HoldingsTab({ accounts, excludedAccounts, onEditPolicy }) {
     const body = new FormData()
     body.append('file', file)
     setImportError(null)
+    setCsvNotice(null)
     try {
       const r = await axios.post('/api/holdings/import/preview', body)
       setImportPreview(r.data)
@@ -417,6 +420,7 @@ function HoldingsTab({ accounts, excludedAccounts, onEditPolicy }) {
   const commitCsv = async () => {
     const valid = (importPreview?.rows || []).filter(r => r.valid)
     await axios.post('/api/holdings/import/commit', valid)
+    setCsvNotice(`Imported ${valid.length} holding${valid.length === 1 ? '' : 's'}.`)
     setImportPreview(null)
     await load()
   }
@@ -425,6 +429,7 @@ function HoldingsTab({ accounts, excludedAccounts, onEditPolicy }) {
     setQfxFile(file || null)
     setQfxPreview(null)
     setQfxError(null)
+    setQfxNotice(null)
     if (!file || !qfxAccountId) return
     const body = new FormData()
     body.append('file', file)
@@ -437,10 +442,15 @@ function HoldingsTab({ accounts, excludedAccounts, onEditPolicy }) {
   const commitQfx = async () => {
     const valid = (qfxPreview?.rows || []).filter(r => r.valid)
     await axios.post('/api/holdings/import/commit', valid)
+    let balanceMsg = ''
     if (qfxUpdateBalance && qfxPreview?.account_balance != null) {
       const account = accounts.find(a => a.id === Number(qfxAccountId))
-      if (account) await axios.put(`/api/accounts/${qfxAccountId}`, { ...account, balance: qfxPreview.account_balance })
+      if (account) {
+        await axios.put(`/api/accounts/${qfxAccountId}`, { ...account, balance: qfxPreview.account_balance })
+        balanceMsg = ` and updated the account balance to $${qfxPreview.account_balance.toLocaleString()}`
+      }
     }
+    setQfxNotice(`Imported ${valid.length} holding${valid.length === 1 ? '' : 's'}${balanceMsg}.`)
     setQfxPreview(null)
     setQfxFile(null)
     await load()
@@ -562,8 +572,9 @@ function HoldingsTab({ accounts, excludedAccounts, onEditPolicy }) {
       <details className="card" style={{ marginBottom: 20 }}>
         <summary>Import holdings from CSV</summary>
         <p style={{ fontSize: 12, color: 'var(--muted)' }}>Preview and validate every row before anything is saved. A row that matches an existing holding (by account + ticker or name) updates shares, value, and value date only -- classification, cost basis, notes, management mode, and tax lots stay as recorded unless the row explicitly supplies a replacement. A row with no match needs an asset class to create a new holding.</p>
-        <input aria-label="Holdings CSV" type="file" accept=".csv,text/csv" onChange={e => previewCsv(e.target.files?.[0])} />
+        <input aria-label="Holdings CSV" type="file" accept=".csv,text/csv" onChange={e => { setCsvNotice(null); previewCsv(e.target.files?.[0]) }} />
         {importError && <div style={{ color: 'var(--red)', fontSize: 12 }}>{importError}</div>}
+        {csvNotice && <div role="status" style={{ color: 'var(--green)', fontSize: 12, marginTop: 6 }}>✓ {csvNotice}</div>}
         {importPreview && (
           <div style={{ marginTop: 10, fontSize: 12 }}>
             <div>{importPreview.valid_count} valid · {importPreview.invalid_count} need attention · {importPreview.update_count || 0} will update · {importPreview.create_count || 0} new</div>
@@ -585,13 +596,14 @@ function HoldingsTab({ accounts, excludedAccounts, onEditPolicy }) {
         <summary>Import a custodian statement (QFX/OFX)</summary>
         <p style={{ fontSize: 12, color: 'var(--muted)' }}>A statement file downloaded from your custodian (Empower, Fidelity, Schwab, etc.) carries both the current positions and the account's own total balance in one snapshot — importing it keeps holdings and balance in sync instead of hand-typing two numbers that can drift apart. A matched position updates shares/value only, exactly like CSV import; a new position defaults to "unclassified" (reclassify it below after import).</p>
         <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center' }}>
-          <label>Account<select className="input" value={qfxAccountId} onChange={e => { setQfxAccountId(e.target.value); setQfxPreview(null); if (qfxFile) previewQfx(qfxFile) }} style={{ minWidth: 160 }}>
+          <label>Account<select className="input" value={qfxAccountId} onChange={e => { setQfxAccountId(e.target.value); setQfxPreview(null); setQfxNotice(null); if (qfxFile) previewQfx(qfxFile) }} style={{ minWidth: 160 }}>
             <option value="">Account…</option>
             {accounts.filter(a => showExcluded || !excludedAccounts.includes(a.id)).map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
           </select></label>
           <input aria-label="Custodian statement file" type="file" accept=".qfx,.ofx" disabled={!qfxAccountId} onChange={e => previewQfx(e.target.files?.[0])} />
         </div>
         {qfxError && <div style={{ color: 'var(--red)', fontSize: 12, marginTop: 6 }}>{qfxError}</div>}
+        {qfxNotice && <div role="status" style={{ color: 'var(--green)', fontSize: 12, marginTop: 6 }}>✓ {qfxNotice}</div>}
         {qfxPreview && (
           <div style={{ marginTop: 10, fontSize: 12 }}>
             <div>{qfxPreview.valid_count} valid · {qfxPreview.invalid_count} need attention · {qfxPreview.update_count || 0} will update · {qfxPreview.create_count || 0} new</div>
