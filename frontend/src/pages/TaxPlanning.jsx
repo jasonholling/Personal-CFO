@@ -64,13 +64,16 @@ export default function TaxPlanning() {
   const [dafBalance, setDafBalance] = useState(0)
 
   // Taxable brokerage positions — read from your real Accounts (type
-  // 'taxable') instead of fictional placeholder tickers. Cost basis isn't
-  // tracked anywhere in the app yet (accounts store a single balance, not
-  // per-lot basis), so that one field still has to be entered here each
-  // visit — everything else (which accounts exist, current balance) is
-  // real and never re-typed.
+  // 'taxable'). `holdingsByAccount` (2026-09-14, at the user's request --
+  // "I don't think I have lot info, I just have the portfolio and capital
+  // gain on ticker") pulls the REAL per-ticker cost basis already recorded
+  // on Portfolio Setup instead of asking you to retype one blended
+  // cost-basis figure per account every visit. Only accounts with no real
+  // holdings recorded fall back to the old manual per-account entry --
+  // see `positions` below, which merges the two into one list.
   const [stocks, setStocks] = useState([])
-  const [basis, setBasis]   = useState({}) // { accountId: costBasisDollars }
+  const [holdingsByAccount, setHoldingsByAccount] = useState({}) // { accountId: [holding, ...] }
+  const [basis, setBasis]   = useState({}) // { positionId: costBasisDollars override }
 
   useEffect(() => {
     axios.get('/api/net-worth').then(r => {
@@ -80,6 +83,14 @@ export default function TaxPlanning() {
       const taxable = r.data.filter(a => a.account_type === 'taxable' && a.balance > 0)
       setStocks(taxable)
     }).catch(() => {})
+    axios.get('/api/holdings').then(r => {
+      const byAccount = {}
+      for (const h of r.data) {
+        if (!(h.market_value > 0)) continue
+        (byAccount[h.account_id] ??= []).push(h)
+      }
+      setHoldingsByAccount(byAccount)
+    }).catch(() => {})
     // Pre-fill W2/RSU from Settings instead of starting at 0 every visit —
     // both already exist in planning_inputs, still editable here.
     axios.get('/api/planning-inputs').then(r => {
@@ -87,6 +98,22 @@ export default function TaxPlanning() {
       if (r.data.annual_rsu_value) setRsu(r.data.annual_rsu_value)
     }).catch(() => {})
   }, [])
+
+  // One "position" per real holding when a taxable account has holdings
+  // recorded (real cost_basis, per ticker — precisely what the harvest
+  // math needs to pick which shares to sell), else one position per
+  // account using the old manual-entry cost basis. costBasis stays
+  // overridable via `basis` either way (real data can drift).
+  const positions = useMemo(() => stocks.flatMap(acct => {
+    const holdings = holdingsByAccount[acct.id]
+    if (holdings?.length) {
+      return holdings.map(h => ({
+        id: `h${h.id}`, label: h.ticker || h.security_name || 'Position', accountName: acct.name,
+        balance: h.market_value, costBasis: h.cost_basis, real: true,
+      }))
+    }
+    return [{ id: `a${acct.id}`, label: acct.name, accountName: null, balance: acct.balance, costBasis: null, real: false }]
+  }), [stocks, holdingsByAccount])
 
   // Income
   const [w2,      setW2]      = useState(0)
@@ -108,19 +135,21 @@ export default function TaxPlanning() {
   const calc = useMemo(() => {
     const grossIncome   = w2 + bonus + rsu + Math.max(0, rental) + vending + Math.min(0, rental)
 
-    // Harvest from sliders — dollar amount to sell from each real taxable
-    // account. gainFraction can go negative (an unrealized loss) — earlier
-    // this was floored at 0, which meant a loss position could never be
-    // represented at all. Gains and losses across all positions net
-    // against each other first (same as the IRS treats it), only the
-    // leftover after netting is capped/carried per the rules below.
-    const harvestDetails = stocks.map(st => {
-      const sellAmount   = sell[st.id] || 0
-      const costBasis    = basis[st.id] || 0
-      const gainFraction = st.balance > 0 ? (1 - costBasis / st.balance) : 0
+    // Harvest from sliders — dollar amount to sell from each real position
+    // (one per ticker where real holdings are recorded, one per account
+    // otherwise — see `positions` above). gainFraction can go negative (an
+    // unrealized loss) — earlier this was floored at 0, which meant a loss
+    // position could never be represented at all. Gains and losses across
+    // all positions net against each other first (same as the IRS treats
+    // it), only the leftover after netting is capped/carried per the
+    // rules below.
+    const harvestDetails = positions.map(pos => {
+      const sellAmount   = sell[pos.id] || 0
+      const costBasis    = basis[pos.id] ?? pos.costBasis ?? 0
+      const gainFraction = pos.balance > 0 ? (1 - costBasis / pos.balance) : 0
       const gain         = sellAmount * gainFraction
       const proceeds     = sellAmount
-      return { ...st, sellAmount, gain, proceeds }
+      return { ...pos, sellAmount, gain, proceeds }
     })
 
     const harvestGainGross = harvestDetails.reduce((s,h) => s + Math.max(0, h.gain), 0)
@@ -211,25 +240,25 @@ export default function TaxPlanning() {
       netProceeds, overBracket, dafOrdSavings, dafGainSavings, totalDafBenefit,
       harvestDetails, verdict,
     }
-  }, [w2, bonus, rsu, rental, vending, depreciation, priorGains, sell, basis, stocks, dafMode, dafAmount])
+  }, [w2, bonus, rsu, rental, vending, depreciation, priorGains, sell, basis, positions, dafMode, dafAmount])
 
-  const fillTo15 = (accountId) => {
-    const st = stocks.find(s => s.id === accountId)
-    if (!st) return
-    const costBasis    = basis[accountId] || 0
-    const gainFraction = st.balance > 0 ? Math.max(0, 1 - costBasis / st.balance) : 0
+  const fillTo15 = (positionId) => {
+    const pos = positions.find(p => p.id === positionId)
+    if (!pos) return
+    const costBasis    = basis[positionId] ?? pos.costBasis ?? 0
+    const gainFraction = pos.balance > 0 ? Math.max(0, 1 - costBasis / pos.balance) : 0
     if (gainFraction <= 0) return
-    const currentHarvest = stocks
-      .filter(s => s.id !== accountId)
-      .reduce((sum, s) => {
-        const sAmt = sell[s.id] || 0
-        const sBasis = basis[s.id] || 0
-        const sFrac = s.balance > 0 ? Math.max(0, 1 - sBasis / s.balance) : 0
+    const currentHarvest = positions
+      .filter(p => p.id !== positionId)
+      .reduce((sum, p) => {
+        const sAmt = sell[p.id] || 0
+        const sBasis = basis[p.id] ?? p.costBasis ?? 0
+        const sFrac = p.balance > 0 ? Math.max(0, 1 - sBasis / p.balance) : 0
         return sum + Math.max(0, sAmt * sFrac)
       }, 0)
     const room = Math.max(0, calc.room20 - currentHarvest - priorGains)
     const maxSellAmount = room / gainFraction
-    setSell(s => ({ ...s, [accountId]: Math.min(maxSellAmount, st.balance) }))
+    setSell(s => ({ ...s, [positionId]: Math.min(maxSellAmount, pos.balance) }))
   }
 
   const verdictBg    = calc.verdict === 'good' || calc.verdict === 'zero' ? 'rgba(52,211,153,0.08)' : calc.verdict === 'over' ? 'rgba(248,113,113,0.08)' : 'var(--bg3)'
@@ -358,25 +387,29 @@ export default function TaxPlanning() {
           <div className="card" style={{ marginBottom:16 }}>
             <div style={{ fontWeight:600, fontSize:14, marginBottom:4 }}>Amount to Sell</div>
             <div style={{ fontSize:12, color:'var(--text2)', marginBottom:16 }}>
-              Your real taxable brokerage accounts — enter each one's cost basis (not tracked elsewhere), then slide to pick how much to harvest this year.
+              Real cost basis per ticker, pulled from Portfolio Setup where you've entered holdings — no lot-level detail needed,
+              just what you've already recorded there. Any taxable account with no holdings entered falls back to one manual
+              cost-basis field for the whole account. Slide to pick how much to harvest this year.
             </div>
 
-            {stocks.length === 0 ? (
+            {positions.length === 0 ? (
               <div style={{ fontSize:13, color:'var(--text2)' }}>
                 No taxable brokerage accounts found in Accounts — add one there to harvest gains from it here.
               </div>
-            ) : stocks.map(st => {
-              const costBasis    = basis[st.id] || 0
-              const gainFraction = st.balance > 0 ? Math.max(0, 1 - costBasis / st.balance) : 0
-              const sellAmount   = sell[st.id] || 0
+            ) : positions.map(pos => {
+              const costBasis    = basis[pos.id] ?? pos.costBasis ?? 0
+              const gainFraction = pos.balance > 0 ? Math.max(0, 1 - costBasis / pos.balance) : 0
+              const sellAmount   = sell[pos.id] || 0
               const gain         = sellAmount * gainFraction
-              const pctSold      = st.balance > 0 ? Math.round(sellAmount / st.balance * 100) : 0
+              const pctSold      = pos.balance > 0 ? Math.round(sellAmount / pos.balance * 100) : 0
               return (
-                <div key={st.id} style={{ marginBottom:20 }}>
+                <div key={pos.id} style={{ marginBottom:20 }}>
                   <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:6 }}>
                     <div>
-                      <span style={{ fontWeight:700, color:'var(--accent)', fontSize:14 }}>{st.name}</span>
-                      <span style={{ fontSize:12, color:'var(--text3)', marginLeft:8 }}>{fmt(st.balance)} balance</span>
+                      <span style={{ fontWeight:700, color:'var(--accent)', fontSize:14 }}>{pos.label}</span>
+                      <span style={{ fontSize:12, color:'var(--text3)', marginLeft:8 }}>
+                        {fmt(pos.balance)} balance{pos.accountName ? ` · ${pos.accountName}` : ''}
+                      </span>
                     </div>
                     <div style={{ textAlign:'right' }}>
                       <div style={{ fontSize:13, fontWeight:600 }}>{fmt(sellAmount)} ({pctSold}%)</div>
@@ -388,22 +421,24 @@ export default function TaxPlanning() {
                     </div>
                   </div>
                   <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:8 }}>
-                    <span style={{ fontSize:12, color:'var(--text2)' }}>Cost basis ($)</span>
-                    <input type="number" value={costBasis} onChange={e => setBasis(b => ({ ...b, [st.id]: parseFloat(e.target.value) || 0 }))}
+                    <span style={{ fontSize:12, color:'var(--text2)' }}>
+                      Cost basis ($){pos.real && <span style={{ color:'var(--text3)' }}> — from Portfolio Setup, editable</span>}
+                    </span>
+                    <input type="number" value={costBasis} onChange={e => setBasis(b => ({ ...b, [pos.id]: parseFloat(e.target.value) || 0 }))}
                       style={{ width:110, textAlign:'right', fontSize:12 }} placeholder="0" />
                   </div>
                   <input
-                    type="range" min={0} max={st.balance} value={sellAmount}
-                    onChange={e => setSell(s => ({ ...s, [st.id]: parseInt(e.target.value) }))}
+                    type="range" min={0} max={pos.balance} value={sellAmount}
+                    onChange={e => setSell(s => ({ ...s, [pos.id]: parseInt(e.target.value) }))}
                     style={{ width:'100%', accentColor:'var(--accent)', cursor:'pointer' }}
                   />
                   <div style={{ display:'flex', justifyContent:'space-between', fontSize:10, color:'var(--text3)', marginTop:2 }}>
                     <span>$0</span>
-                    <button onClick={() => fillTo15(st.id)}
+                    <button onClick={() => fillTo15(pos.id)}
                       style={{ background:'none', border:'none', color:'var(--accent)', fontSize:11, cursor:'pointer', padding:0 }}>
                       Fill to 15% bracket →
                     </button>
-                    <span>All {fmt(st.balance)}</span>
+                    <span>All {fmt(pos.balance)}</span>
                   </div>
                 </div>
               )
