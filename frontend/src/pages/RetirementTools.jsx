@@ -24,7 +24,7 @@ const TOOLS_TABS = [
   { id:'hsa',        label:'HSA' },
 ]
 
-export default function RetirementTools() {
+export default function RetirementTools({ onNavigate }) {
   const { person1Name, person2Name } = usePersonNames()
   const [tab, setTab] = useState('rmd')
   const [rmd, setRmd]           = useState(null)
@@ -231,6 +231,11 @@ export default function RetirementTools() {
                 </table>
               </div>
             )}
+            <div style={{ marginTop:16, paddingTop:16, borderTop:'1px solid var(--border)' }}>
+              <button className="btn-secondary" onClick={() => onNavigate?.('roth')}>
+                {rmd.bracket_jump ? 'See if converting to Roth before RMDs start helps →' : 'Explore Roth Conversion →'}
+              </button>
+            </div>
           </>
         )}
       </div>

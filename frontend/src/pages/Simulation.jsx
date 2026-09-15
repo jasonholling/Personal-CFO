@@ -12,6 +12,26 @@ import { usePersonNames } from '../hooks/usePersonNames'
 import { isPrivacyMode, MASK_CURRENCY } from '../utils/privacy'
 import SecondEarnerNote from '../components/SecondEarnerNote'
 
+// Outbound links from a shortfall result (2026-09-14, at the user's
+// request -- "outbound links on analysis and simulation" was flagged as
+// the single highest-value connectivity gap in the app: Monte Carlo/
+// Stress Test/Survivor Scenario could all show a failing result with no
+// path forward to the tools that could actually help. Deliberately a
+// short, fixed set of the most relevant levers rather than every page in
+// the app -- shown only when the result actually indicates trouble, next
+// to (not instead of) the numbers that triggered it.
+const NextStepsCallout = ({ onNavigate, message }) => (
+  <div style={{ padding:'14px 16px', background:'rgba(251,191,36,0.06)', border:'1px solid rgba(251,191,36,0.2)', borderRadius:8, marginBottom:24 }}>
+    <div style={{ fontSize:13, color:'var(--amber)', fontWeight:600, marginBottom:10 }}>{message}</div>
+    <div style={{ display:'flex', gap:8, flexWrap:'wrap' }}>
+      <button className="btn-secondary" onClick={() => onNavigate?.('surplus')}>Review Assign Surplus →</button>
+      <button className="btn-secondary" onClick={() => onNavigate?.('roth')}>See Roth Conversion →</button>
+      <button className="btn-secondary" onClick={() => onNavigate?.('rettools')}>Explore Retirement Tools →</button>
+      <button className="btn-secondary" onClick={() => onNavigate?.('debt')}>Check Debt Payoff →</button>
+    </div>
+  </div>
+)
+
 const fmt  = (n) => isPrivacyMode() ? MASK_CURRENCY : (n == null ? '—' : new Intl.NumberFormat('en-US', { style:'currency', currency:'USD', maximumFractionDigits:0 }).format(n))
 const fmtK = (n) => {
   if (isPrivacyMode()) return MASK_CURRENCY
@@ -278,7 +298,7 @@ const IncomeSourcesTooltip = ({ active, payload, label, person1Name }) => {
 // previously switching to this tab always discarded whatever the What-If
 // Builder had just been changed to (external audit 2026-09-06). The
 // Companion results receive the same overrides, age, and claiming timing.
-export function MonteCarloSection({ retAge, ssTiming, overrides, jasonRetAge, justinRetAge, jasonSsClaimAge, justinSsClaimAge, savedJasonClaimAge, savedJustinClaimAge }) {
+export function MonteCarloSection({ retAge, ssTiming, overrides, jasonRetAge, justinRetAge, jasonSsClaimAge, justinSsClaimAge, savedJasonClaimAge, savedJustinClaimAge, onNavigate }) {
   const { person1Name, person2Name } = usePersonNames()
   const [data, setData]         = useState(null)
   const [swr, setSwr]           = useState(null)
@@ -564,6 +584,13 @@ export function MonteCarloSection({ retAge, ssTiming, overrides, jasonRetAge, ju
         </div>
       </div>
 
+      {rate < 95 && (
+        <NextStepsCallout onNavigate={onNavigate}
+          message={rate < 85
+            ? `${rate}% success rate — worth exploring what could close the gap:`
+            : `${rate}% success rate is good but not certain — a few levers that could help:`} />
+      )}
+
       {/* Fan chart */}
       <div className="card">
         <div className="label" style={{ marginBottom:4 }}>Portfolio Range Across 1,000 Simulations</div>
@@ -637,7 +664,7 @@ export function MonteCarloSection({ retAge, ssTiming, overrides, jasonRetAge, ju
 // ── Stress tests section ──────────────────────────────────────────────────────
 // `overrides`: see MonteCarloSection's comment above — same What-If
 // Builder wiring, including Roth and contribution comparisons.
-export function StressTestSection({ retAge, ssTiming, overrides, jasonRetAge, justinRetAge, jasonSsClaimAge, justinSsClaimAge, savedJasonClaimAge, savedJustinClaimAge }) {
+export function StressTestSection({ retAge, ssTiming, overrides, jasonRetAge, justinRetAge, jasonSsClaimAge, justinSsClaimAge, savedJasonClaimAge, savedJustinClaimAge, onNavigate }) {
   const { person1Name, person2Name } = usePersonNames()
   const [data, setData]       = useState(null)
   const [roth, setRoth]       = useState(null)
@@ -866,6 +893,11 @@ export function StressTestSection({ retAge, ssTiming, overrides, jasonRetAge, ju
             }
           </div>
         </div>
+      )}
+
+      {current && !current.survived && (
+        <NextStepsCallout onNavigate={onNavigate}
+          message={`"${current.label}" depletes the portfolio at age ${current.depletion_age} — a few levers that could help:`} />
       )}
 
       {/* External audit review, 2026-09-09: Roth Conversion Optimizer

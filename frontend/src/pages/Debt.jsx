@@ -20,7 +20,7 @@ const DEBT_TYPES = [
 
 const EMPTY_DEBT = { name: '', account_type: 'credit_card', owner: 'joint', institution: '', balance: '', interest_rate: '', minimum_payment: '', term_months: '', notes: '' }
 
-export default function Debt() {
+export default function Debt({ onNavigate }) {
   const [debts, setDebts]           = useState([])
   const [rec, setRec]               = useState(null)
   const [extra, setExtra]           = useState(200)
@@ -280,6 +280,9 @@ export default function Debt() {
                 <strong>Next action:</strong> put every extra dollar toward <strong>{rec.focus_first.name}</strong> until it's gone (~{fmtMonths(rec.focus_first.payoff_month)} from now), while paying minimums on everything else.
               </div>
             )}
+            <div style={{ marginTop:16, paddingTop:16, borderTop:'1px solid var(--border)' }}>
+              <button className="btn-secondary" onClick={() => onNavigate?.('surplus')}>Assign monthly surplus toward this →</button>
+            </div>
           </div>
 
           {/* Life-event debt paydowns — distinct from the manual extra_monthly input above */}
